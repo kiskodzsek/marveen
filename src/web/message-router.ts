@@ -20,7 +20,10 @@ import { isQualifiedId } from './federation/address.js'
 import { sendFederatedMessage } from './federation/bridge.js'
 import { getFederationConfig, abandonWindowMsForPeer } from './federation/config.js'
 import { scheduleDeliveryTurnCheck } from './delivery-turn-check.js'
-import { readAgentRemoteHost, readAgentVoiceConfig, readAgentWorksourceChannel, type AgentVoiceConfig } from './agent-config.js'
+import { agentDir, readAgentRemoteHost, readAgentVoiceConfig, readAgentWorksourceChannel, type AgentVoiceConfig } from './agent-config.js'
+import { projectsDirFor } from './active-model.js'
+import { resolveAgentConfigDirForRead } from './claude-plans.js'
+import { readTranscriptProgressAt } from './transcript-progress.js'
 import { enqueueWorksourceItem, worksourceItemId } from './worksource-queue.js'
 import {
   agentSessionName,
@@ -241,16 +244,61 @@ const agentStuckSince = new Map<string, number>()  // agent -> first tick stuck 
 // look either way.
 const BUSY_STUCK_ESCALATE_MS = 30 * 60 * 1000  // busy pane: only after a much longer watchdog
 
+// ROUTERSTUCK1012 (MODSPROBA1004): the long watchdog alone was still wrong
+// every time it was measured. 2026-10-05..10-11, trial agents: 14 busy-STUCK
+// alerts, and in all 14 the agent was working -- pane and mode busy, the
+// transcript moving within 0-5 minutes. So past the busy watchdog the router
+// also asks the transcript: progress within this window means a long turn, not
+// a wedge, and nothing is escalated. A transcript that has not moved for longer
+// (a tool call that hangs with the spinner up) still escalates, and so does a
+// transcript the router cannot read (see transcript-progress.ts).
+export const TRANSCRIPT_PROGRESS_FRESH_MS = 10 * 60 * 1000
+
 /**
  * Pure decision: may a continuously not-ready session escalate now?
  *
  * `paneState` is what the pane showed at the escalation check, or null when it
  * could not be read (remote host down, tmux gone). Unreadable is NOT treated as
  * busy: a pane we cannot see is a reason to look sooner, not later.
+ *
+ * `lastProgressAt` (ms) is the newest progress entry in the agent's transcript,
+ * or null when it could not be read; it only matters for a busy pane past the
+ * long watchdog. Null keeps the decision exactly what it was before.
  */
-export function shouldEscalateStuckSession(paneState: PaneState | null, stuckMs: number): boolean {
-  return stuckMs > (paneState === 'busy' ? BUSY_STUCK_ESCALATE_MS : STUCK_ESCALATE_MS)
+export function shouldEscalateStuckSession(
+  paneState: PaneState | null,
+  stuckMs: number,
+  lastProgressAt: number | null = null,
+  now: number = Date.now(),
+): boolean {
+  if (paneState !== 'busy') return stuckMs > STUCK_ESCALATE_MS
+  if (stuckMs <= BUSY_STUCK_ESCALATE_MS) return false
+  return lastProgressAt == null || now - lastProgressAt > TRANSCRIPT_PROGRESS_FRESH_MS
 }
+
+// The transcript read behind lastProgressAt, for the router tick. A busy pane
+// past the watchdog is re-checked every tick (the stuck timer keeps running on
+// purpose), so the answer is kept for TRANSCRIPT_PROGRESS_RECHECK_MS per agent.
+// A remote agent's transcript is on another machine: null, i.e. today's rule.
+const TRANSCRIPT_PROGRESS_RECHECK_MS = 60 * 1000
+const agentProgressChecked = new Map<string, { at: number; value: number | null }>()
+
+export async function agentTranscriptProgressAt(agent: string, host: string | null | undefined, now: number): Promise<number | null> {
+  if (host) return null
+  const cached = agentProgressChecked.get(agent)
+  if (cached && now - cached.at < TRANSCRIPT_PROGRESS_RECHECK_MS) return cached.value
+  let value: number | null = null
+  try {
+    value = await readTranscriptProgressAt(projectsDirFor(agentDir(agent), resolveAgentConfigDirForRead(agent) ?? undefined))
+  } catch {
+    value = null
+  }
+  agentProgressChecked.set(agent, { at: now, value })
+  return value
+}
+
+/** Test hook: forget the remembered transcript reads. */
+export function resetTranscriptProgressCacheForTests(): void { agentProgressChecked.clear() }
 
 // A quota wall does not change between two escalation windows: the CLI waits
 // for the reset (a five-hour window resets within five hours by definition),
@@ -896,7 +944,12 @@ export async function runMessageRouterTick(): Promise<void> {
           const stuckMs = now - stuckStart
           const pane = capturePane(session, host)
           const paneState = pane != null ? detectPaneState(pane) : null
-          if (shouldEscalateStuckSession(paneState, stuckMs)) {
+          // ROUTERSTUCK1012: the transcript is read only where today's rule
+          // would escalate a busy pane, so the healthy path costs nothing.
+          const lastProgressAt = paneState === 'busy' && stuckMs > BUSY_STUCK_ESCALATE_MS
+            ? await agentTranscriptProgressAt(msg.to_agent, host, now)
+            : null
+          if (shouldEscalateStuckSession(paneState, stuckMs, lastProgressAt, now)) {
             // Session has been continuously stuck past the escalation threshold.
             // Log at warn level so monitoring/revival tooling can act — the
             // stuck-input-watcher and channel-monitor pick these patterns up.
@@ -906,6 +959,7 @@ export async function runMessageRouterTick(): Promise<void> {
               stuckDurationMs: stuckMs,
               pendingMsgCount,
               paneState,
+              lastProgressAgoMs: lastProgressAt != null ? now - lastProgressAt : null,
             }, 'message-router: session STUCK — continuously not-ready past escalation threshold')
             // Card 0a641b52: a log line nobody reads is not an alert. Surface the
             // stall to the main agent's inbox so it can run the delivery-stall
@@ -938,6 +992,7 @@ export async function runMessageRouterTick(): Promise<void> {
             // never ends still reaches BUSY_STUCK_ESCALATE_MS.
             logger.debug({
               to: msg.to_agent, session, stuckDurationMs: stuckMs, paneState,
+              lastProgressAgoMs: lastProgressAt != null ? now - lastProgressAt : null,
             }, 'message-router: not-ready but pane is busy — deferring stuck escalation')
           }
         }

@@ -226,3 +226,39 @@ describe('shouldEscalateStuckSession: a busy pane is work, not a stall', () => {
     expect(shouldEscalateStuckSession(detectPaneState(quoted), 11 * MIN)).toBe(true)
   })
 })
+
+// ROUTERSTUCK1012 (MODSPROBA1004): 2026-10-05..10-11, 14 busy-STUCK alerts on
+// the trial agents and all 14 false -- pane and mode busy, the transcript
+// moving within 0-5 minutes. Past the busy watchdog the transcript decides.
+describe('shouldEscalateStuckSession: past the busy watchdog, the transcript decides (ROUTERSTUCK1012)', () => {
+  const NOW = Date.UTC(2026, 9, 12, 9, 0, 0)
+
+  it('the measured shape: busy pane past 30 min, transcript moved 0-5 min ago -> no alert', () => {
+    for (const agoMin of [0, 1, 3, 5]) {
+      expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 31 * MIN, NOW - agoMin * MIN, NOW)).toBe(false)
+    }
+    // Two hours busy, still moving: still no alert.
+    expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 120 * MIN, NOW - 2 * MIN, NOW)).toBe(false)
+  })
+
+  it('a real wedge still alerts: busy past 30 min, transcript quiet past the fresh window', () => {
+    expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 31 * MIN, NOW - 25 * MIN, NOW)).toBe(true)
+    // The window edge: 10 min is still fresh, a millisecond more is not.
+    expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 31 * MIN, NOW - 10 * MIN, NOW)).toBe(false)
+    expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 31 * MIN, NOW - 10 * MIN - 1, NOW)).toBe(true)
+  })
+
+  it('an unreadable or missing transcript (null) is today\'s rule: busy past 30 min alerts', () => {
+    expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 31 * MIN, null, NOW)).toBe(true)
+    expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 29 * MIN, null, NOW)).toBe(false)
+  })
+
+  it('only the busy branch reads it: a not-busy or unreadable pane alerts on time, fresh transcript or not', () => {
+    expect(shouldEscalateStuckSession(detectPaneState(IDLE_PANE), 11 * MIN, NOW - MIN, NOW)).toBe(true)
+    expect(shouldEscalateStuckSession(null, 11 * MIN, NOW - MIN, NOW)).toBe(true)
+  })
+
+  it('a fresh transcript never makes a busy pane alert before the watchdog', () => {
+    expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 29 * MIN, NOW - 60 * MIN, NOW)).toBe(false)
+  })
+})
