@@ -10515,7 +10515,8 @@ async function loadStatus() {
         }
         const div = document.createElement('div')
         div.className = `status-incident ${inc.status}`
-        const date = new Date(inc.pubDate).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
+        // The viewer's local time, like every other time on the dashboard (ISSUE1895 / #1895).
+        const date = new Date(inc.pubDate).toLocaleString('hu-HU')
         div.innerHTML = `
           <div class="status-incident-header">
             <span class="status-incident-title">${escapeHtml(inc.title)}</span>

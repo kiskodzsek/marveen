@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { PROJECT_ROOT, MAIN_AGENT_ID, TELEGRAM_BOT_TOKEN } from '../../config.js'
+import { PROJECT_ROOT, MAIN_AGENT_ID, TELEGRAM_BOT_TOKEN, APP_TZ } from '../../config.js'
 import {
   consumeApproval,
   createApproval, getApproval, resolveApproval, listApprovals, expireTimedOutApprovals,
@@ -88,7 +88,7 @@ export function isMessageId(v: unknown): v is string {
 // markdown escaping concerns), proper accents: this is outgoing copy.
 export function buildOwnerApprovalText(approval: Approval): string {
   const expires = approval.timeout_at
-    ? new Date(approval.timeout_at * 1000).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
+    ? new Date(approval.timeout_at * 1000).toLocaleString('hu-HU', { timeZone: APP_TZ })
     : 'nincs'
   return [
     `[JÓVÁHAGYÁS KELL] ${approval.agent_id} | ${approval.category}`,

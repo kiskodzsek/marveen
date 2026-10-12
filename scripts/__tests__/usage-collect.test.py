@@ -1013,5 +1013,31 @@ class TestCodexSnapshotFreshness(unittest.TestCase):
         self.assertIn("h old", out)
 
 
+
+class TestInstallZone(unittest.TestCase):
+    """ISSUE1895 (#1895): reset stamps follow the install zone, not a fixed Europe/Budapest."""
+
+    def test_explicit_marveen_tz_wins(self):
+        with patch.dict(os.environ, {"MARVEEN_TZ": "Europe/London"}):
+            self.assertEqual(str(uc._local_tz()), "Europe/London")
+
+    def test_scheduler_tz_from_the_overrides_file(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(uc, "STORE_DIR", d), patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MARVEEN_TZ", None)
+            with open(os.path.join(d, "config-overrides.json"), "w") as f:
+                json.dump({"SCHEDULER_TZ": "America/New_York"}, f)
+            self.assertEqual(str(uc._local_tz()), "America/New_York")
+
+    def test_host_fallback_is_a_named_zone_not_a_fixed_offset(self):
+        # A fixed offset (datetime.now().astimezone().tzinfo) renders a reset on the
+        # other side of a DST switch one hour off; a ZoneInfo keeps the rules.
+        from zoneinfo import ZoneInfo
+        with tempfile.TemporaryDirectory() as d, patch.object(uc, "STORE_DIR", d), patch.object(uc, "ENV_PATH", os.path.join(d, ".env")):
+            env = {k: v for k, v in os.environ.items() if k not in ("MARVEEN_TZ", "TZ")}
+            with patch.dict(os.environ, env, clear=True):
+                if "/zoneinfo/" not in os.path.realpath("/etc/localtime"):
+                    self.skipTest("host has no named zone to fall back to")
+                self.assertIsInstance(uc._local_tz(), ZoneInfo)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

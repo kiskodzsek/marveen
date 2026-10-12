@@ -166,6 +166,8 @@ export interface TemplateIdentity {
   botName: string
   ownerName: string
   webPort: number | string
+  /** IANA zone for {{TIMEZONE}}; the install zone (APP_TZ) when omitted. */
+  timeZone?: string
 }
 
 // Pure substitution of the identity placeholders into a template body. Kept in
@@ -181,6 +183,8 @@ export function substituteTemplatePlaceholders(content: string, id: TemplateIden
     .replaceAll('{{BOT_NAME}}', id.botName)
     .replaceAll('{{OWNER_NAME}}', id.ownerName)
     .replaceAll('{{WEB_PORT}}', String(id.webPort))
+    // ISSUE1895 (#1895): the install zone, not a hardcoded Europe/Budapest.
+    .replaceAll('{{TIMEZONE}}', id.timeZone ?? APP_TZ)
 }
 
 export function resolveTemplatePlaceholders(content: string): string {

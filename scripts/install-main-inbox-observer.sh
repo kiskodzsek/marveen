@@ -61,6 +61,17 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 mkdir -p "$HOME/Library/LaunchAgents"
+# ISSUE1895 (#1895): the job's TZ is the install zone, written only when the
+# operator pinned one (SCHEDULER_TZ); otherwise no TZ key, so the job follows the
+# OS zone like the main dashboard/channels units. It used to be a hardcoded
+# Europe/Budapest, so on any other install its log stamps ran off the dashboard's.
+. "$SCRIPT_DIR/lib/install-tz.sh"
+PINNED_TZ="$(install_tz_pinned "$PROJECT_DIR")"
+TZ_XML=""
+if [ -n "$PINNED_TZ" ]; then
+  TZ_XML="    <key>TZ</key>
+    <string>$PINNED_TZ</string>"
+fi
 retire_legacy_helper_label "$PROJECT_DIR" main-inbox-observer "$LABEL" "$HOME/Library/LaunchAgents"
 cat > "$PLIST" <<PLIST_EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -92,8 +103,7 @@ cat > "$PLIST" <<PLIST_EOF
     <string>$HOME</string>
     <key>USER</key>
     <string>$(id -un)</string>
-    <key>TZ</key>
-    <string>Europe/Budapest</string>
+$TZ_XML
   </dict>
 </dict>
 </plist>
