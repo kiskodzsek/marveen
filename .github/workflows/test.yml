@@ -87,6 +87,9 @@ jobs:
       - run: python3 scripts/__tests__/telegram-reply-guard.test.py
       - run: python3 scripts/__tests__/ledger-replay-reply-tool.test.py
       - run: bash scripts/__tests__/conversation-ledger.test.sh
+      # Copy gate, English homographs (2026-10-12): "all users" must pass, the
+      # accent-stripped Hungarian "nem all le" must still block. Hermetic (temp rules file).
+      - run: python3 scripts/__tests__/outgoing-copy-gate-english-homographs.test.py
       # 723bbb70 (3): the hook-load watcher is a gate instrument -- a watcher whose
       # contract only runs by hand rots like the rest of this list warns. Hermetic:
       # a throwaway install root, stand-in python and node gates, a local stub for
