@@ -223,11 +223,17 @@ describe('router: the transcript is read only where today\'s rule would alert a 
     await runMessageRouterTick()
     for (let m = 5; m <= 30; m += 5) { clock = Date.UTC(2026, 9, 12, 12, m, 0); await runMessageRouterTick() }
     expect(reads()).toBe(0)
-    // Past the watchdog: three ticks within one minute read once.
+    // Past the watchdog, with a transcript that keeps moving (so the router defers
+    // and keeps re-checking instead of alerting and resetting its timer): three
+    // ticks within one minute read once.
+    appendFileSync(f, assistantAt(Date.UTC(2026, 9, 12, 12, 30, 30)))
     clock = Date.UTC(2026, 9, 12, 12, 31, 0); await runMessageRouterTick()
     clock += 20_000; await runMessageRouterTick()
     clock += 20_000; await runMessageRouterTick()
     expect(reads()).toBe(1)
+    // ...and the answer is not kept longer than a minute: 61 s after the read, it reads again.
+    clock = Date.UTC(2026, 9, 12, 12, 32, 1); await runMessageRouterTick()
+    expect(reads()).toBe(2)
   })
 })
 

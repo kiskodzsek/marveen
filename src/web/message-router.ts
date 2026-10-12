@@ -252,7 +252,13 @@ const BUSY_STUCK_ESCALATE_MS = 30 * 60 * 1000  // busy pane: only after a much l
 // a wedge, and nothing is escalated. A transcript that has not moved for longer
 // (a tool call that hangs with the spinner up) still escalates, and so does a
 // transcript the router cannot read (see transcript-progress.ts).
-export const TRANSCRIPT_PROGRESS_FRESH_MS = 10 * 60 * 1000
+// 15 minutes, not 10: while a foreground tool call runs, the newest progress
+// entry is its own tool_use, and a Bash call can legitimately run to its
+// 10-minute ceiling (measured over the same week: 1848 pending-tool rows,
+// p99 9.1 min, max 9.9 min, a cluster at 9.7-9.9 min). A window AT the ceiling
+// would alert on a healthy call in the minute its result lands; a call still
+// pending past the ceiling is wedged by definition and still alerts.
+export const TRANSCRIPT_PROGRESS_FRESH_MS = 15 * 60 * 1000
 
 /**
  * Pure decision: may a continuously not-ready session escalate now?

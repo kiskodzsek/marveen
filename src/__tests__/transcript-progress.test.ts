@@ -49,6 +49,11 @@ describe('lastProgressAtFromTail: what counts as progress', () => {
     expect(lastProgressAtFromTail(text, false)).toBe(T('2026-10-12T08:00:00Z'))
   })
 
+  it('a JSON line that is not an object (null, a number, a string, an array) is skipped, not fatal', () => {
+    const text = ['null', '5', '"x"', '[]', assistant('2026-10-12T08:00:00Z'), 'null'].join('\n')
+    expect(lastProgressAtFromTail(text, false)).toBe(T('2026-10-12T08:00:00Z'))
+  })
+
   it('nothing that counts: null', () => {
     expect(lastProgressAtFromTail([queued('2026-10-12T08:20:00Z'), compactSummary('2026-10-12T08:30:00Z')].join('\n'), false)).toBeNull()
     expect(lastProgressAtFromTail('', false)).toBeNull()

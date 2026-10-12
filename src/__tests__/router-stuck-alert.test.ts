@@ -243,9 +243,14 @@ describe('shouldEscalateStuckSession: past the busy watchdog, the transcript dec
 
   it('a real wedge still alerts: busy past 30 min, transcript quiet past the fresh window', () => {
     expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 31 * MIN, NOW - 25 * MIN, NOW)).toBe(true)
-    // The window edge: 10 min is still fresh, a millisecond more is not.
+  })
+
+  it('the window sits above the 10 min foreground tool ceiling: a call pending up to 15 min is fresh', () => {
+    // A Bash call can run to its 10 min ceiling with its tool_use as the newest
+    // entry (measured max 9.9 min); the window must not end at that edge.
     expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 31 * MIN, NOW - 10 * MIN, NOW)).toBe(false)
-    expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 31 * MIN, NOW - 10 * MIN - 1, NOW)).toBe(true)
+    expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 31 * MIN, NOW - 15 * MIN, NOW)).toBe(false)
+    expect(shouldEscalateStuckSession(detectPaneState(BUSY_PANE), 31 * MIN, NOW - 15 * MIN - 1, NOW)).toBe(true)
   })
 
   it('an unreadable or missing transcript (null) is today\'s rule: busy past 30 min alerts', () => {
