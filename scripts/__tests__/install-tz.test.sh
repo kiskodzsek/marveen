@@ -19,7 +19,17 @@ assert_not_contains() { case "$2" in *"$3"*) fail "$1 (unexpected '$3')" ;; *) p
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 LIB="$REPO/scripts/lib/install-tz.sh"
+# The runner's own TZ must not decide the cases below; the TZ cases set it explicitly.
+unset TZ
 HOST="$(/bin/bash -c ". '$LIB'; host_tz")"
+
+# Stubs for the installer runs: uname says Darwin (the inbox-observer installer
+# refuses anything else, and CI runs on Linux), and the service manager CLI only
+# records, so nothing is ever loaded on the machine running the suite.
+mkdir -p "$TMP/bin"
+printf '#!/bin/bash\necho Darwin\n' > "$TMP/bin/uname"
+printf '#!/bin/bash\necho "$*" >> "%s/svc-calls"\n' "$TMP" > "$TMP/bin/launchctl"
+chmod +x "$TMP/bin/uname" "$TMP/bin/launchctl"
 
 pinned() { /bin/bash -c "set -euo pipefail; . '$LIB'; install_tz_pinned '$1'"; }
 zone() { /bin/bash -c "set -euo pipefail; . '$LIB'; install_tz '$1'"; }
@@ -44,14 +54,28 @@ assert_eq "...and the install zone falls back to the host" "$HOST" "$(zone "$TMP
 printf 'SCHEDULER_TZ=../../etc/passwd\n' > "$TMP/i/.env"; rm -f "$TMP/i/store/config-overrides.json"
 assert_eq "a path is not a zone" "" "$(pinned "$TMP/i")"
 
+echo "1b. host_tz reads TZ first (the same answer as config.ts and usage-collect.py)"
+tzhost() { TZ="$1" /bin/bash -c "set -euo pipefail; . '$LIB'; host_tz"; }
+assert_eq "TZ names the zone" "America/New_York" "$(tzhost America/New_York)"
+assert_eq "a leading colon is dropped" "America/New_York" "$(tzhost :America/New_York)"
+assert_eq "a TZ that is not a zone falls back to the OS lookup" "$HOST" "$(tzhost Not/AZone)"
+assert_eq "a TZ without a slash falls back to the OS lookup" "$HOST" "$(tzhost CET-1)"
+assert_eq "a TZ path is not a zone" "$HOST" "$(tzhost ../../etc/passwd)"
+fresh
+assert_eq "nothing pinned: install_tz follows TZ" "America/New_York" "$(TZ=America/New_York /bin/bash -c ". '$LIB'; install_tz '$TMP/i'")"
+printf 'SCHEDULER_TZ=Europe/London\n' > "$TMP/i/.env"
+assert_eq "a pinned zone still wins over TZ" "Europe/London" "$(TZ=America/New_York /bin/bash -c ". '$LIB'; install_tz '$TMP/i'")"
+
 echo "2. the macOS helper plists"
 for inst in install-channel-keepalive-probe install-stuck-modal-guard install-main-inbox-observer; do
   rm -rf "$TMP/p"; mkdir -p "$TMP/p/store" "$TMP/p/home"; cp -R "$REPO/scripts" "$TMP/p/"
-  HOME="$TMP/p/home" /bin/bash "$TMP/p/scripts/$inst.sh" >/dev/null 2>&1
+  PATH="$TMP/bin:$PATH" HOME="$TMP/p/home" /bin/bash "$TMP/p/scripts/$inst.sh" >/dev/null 2>&1
   P="$(cat "$TMP/p/home/Library/LaunchAgents/"*.plist 2>/dev/null)"
+  assert_contains "$inst: the plist was written" "$P" "</plist>"
   assert_not_contains "$inst: no zone pinned -> no TZ key (the OS zone, like the main units)" "$P" "<key>TZ</key>"
+  assert_eq "$inst: no zone pinned -> no blank line left in the plist" "0" "$(grep -c '^[[:space:]]*$' "$TMP/p/home/Library/LaunchAgents/"*.plist 2>/dev/null)"
   printf '{"SCHEDULER_TZ":"Europe/London"}' > "$TMP/p/store/config-overrides.json"
-  HOME="$TMP/p/home" /bin/bash "$TMP/p/scripts/$inst.sh" >/dev/null 2>&1
+  PATH="$TMP/bin:$PATH" HOME="$TMP/p/home" /bin/bash "$TMP/p/scripts/$inst.sh" >/dev/null 2>&1
   P="$(cat "$TMP/p/home/Library/LaunchAgents/"*.plist 2>/dev/null)"
   assert_contains "$inst: a pinned zone is written" "$P" "<key>TZ</key>
     <string>Europe/London</string>"
@@ -61,6 +85,8 @@ for inst in install-channel-keepalive-probe install-stuck-modal-guard install-ma
   fi
 done
 
+assert_eq "no installer run touched the service manager" "" "$(cat "$TMP/svc-calls" 2>/dev/null)"
+
 echo "3. heartbeat-metrics.sh stamps ts= in the install zone"
 rm -rf "$TMP/h"; mkdir -p "$TMP/h/store"; cp -R "$REPO/scripts" "$TMP/h/"
 printf '{"SCHEDULER_TZ":"Pacific/Kiritimati"}' > "$TMP/h/store/config-overrides.json"
@@ -68,6 +94,13 @@ FIRST="$(CLAW_DASHBOARD_ORIGIN=http://127.0.0.1:9 /bin/bash "$TMP/h/scripts/hear
 assert_eq "the ts= line is Kiritimati time (UTC+14)" "HB_METRICS_V1 ts=$(TZ=Pacific/Kiritimati date +'%Y-%m-%d %H')" "$(printf '%s' "$FIRST" | cut -c1-30)"
 FIRST="$(CLAW_TZ=UTC CLAW_DASHBOARD_ORIGIN=http://127.0.0.1:9 /bin/bash "$TMP/h/scripts/heartbeat-metrics.sh" 2>/dev/null | head -1)"
 assert_eq "CLAW_TZ still overrides it" "HB_METRICS_V1 ts=$(TZ=UTC date +'%Y-%m-%d %H')" "$(printf '%s' "$FIRST" | cut -c1-30)"
+# No zone readable at all: the stamp must be the process's own time, not TZ="" (UTC).
+# The library is replaced by one whose install_tz answers nothing; the process zone
+# is Kiritimati (UTC+14), so a UTC stamp cannot pass for it.
+printf 'install_tz() { printf %%s ""; }\ninstall_tz_pinned() { printf %%s ""; }\nhost_tz() { printf %%s ""; }\n' > "$TMP/h/scripts/lib/install-tz.sh"
+rm -f "$TMP/h/store/config-overrides.json"
+FIRST="$(TZ=Pacific/Kiritimati CLAW_DASHBOARD_ORIGIN=http://127.0.0.1:9 /bin/bash "$TMP/h/scripts/heartbeat-metrics.sh" 2>/dev/null | head -1)"
+assert_eq "an empty install zone stamps the process zone, not UTC" "HB_METRICS_V1 ts=$(TZ=Pacific/Kiritimati date +'%Y-%m-%d %H')" "$(printf '%s' "$FIRST" | cut -c1-30)"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

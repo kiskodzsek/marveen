@@ -62,11 +62,18 @@ class TestFmtReset(unittest.TestCase):
         _, rel = uc.fmt_reset(ts)
         self.assertEqual(rel, "now")
 
-    def test_local_string_has_budapest_offset_marker(self):
+    def test_local_string_has_the_zone_abbreviation(self):
+        # The zone is pinned here: LOCAL_TZ is the install zone, so the runner's
+        # own zone (UTC on CI) must not decide the marker.
+        from zoneinfo import ZoneInfo
         ts = _future_ts(days=1)
-        local_str, _ = uc.fmt_reset(ts)
-        # e.g. "2026-07-23 14:45 CEST" -- must contain a plausible tz abbrev
+        with patch.object(uc, "LOCAL_TZ", ZoneInfo("Europe/Budapest")):
+            local_str, _ = uc.fmt_reset(ts)
+        # e.g. "2026-07-23 14:45 CEST"
         self.assertRegex(local_str, r"CES?T$")
+        with patch.object(uc, "LOCAL_TZ", ZoneInfo("America/New_York")):
+            local_str, _ = uc.fmt_reset(ts)
+        self.assertRegex(local_str, r"E[DS]T$")
 
 
 class TestParseIsoToEpoch(unittest.TestCase):

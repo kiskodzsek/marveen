@@ -59,7 +59,10 @@ mkdir -p "$HOME/Library/LaunchAgents"
 PINNED_TZ="$(install_tz_pinned "$PROJECT_DIR")"
 TZ_XML=""
 if [ -n "$PINNED_TZ" ]; then
-  TZ_XML="    <key>TZ</key>
+  # Leading newline: it is appended to the line above, so an unpinned plist
+  # has no blank line where the key would be.
+  TZ_XML="
+    <key>TZ</key>
     <string>$PINNED_TZ</string>"
 fi
 
@@ -93,8 +96,7 @@ cat > "$PLIST" <<PLIST_EOF
     <key>HOME</key>
     <string>$HOME</string>
     <key>USER</key>
-    <string>$(id -un)</string>
-$TZ_XML
+    <string>$(id -un)</string>$TZ_XML
   </dict>
 </dict>
 </plist>

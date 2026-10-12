@@ -39,9 +39,20 @@ install_tz_pinned() {
   unset _itp_dir _itp_v
 }
 
-# host_tz -- the host's own zone, or nothing when it cannot be read.
+# host_tz -- the process's own zone, or nothing when it cannot be read. The TZ
+# environment comes first, as for config.ts (Intl reads it) and usage-collect.py:
+# a container or a unit with Environment=TZ=... has its zone there, not in /etc.
+# Only a zone name with a "/" that exists under zoneinfo counts (usage-collect.py's
+# test, plus the same existence check install_tz_pinned does); anything else
+# falls through to the OS lookups.
 host_tz() {
-  _ht_v="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  _ht_v="${TZ:-}"
+  _ht_v="${_ht_v#:}"
+  case "$_ht_v" in
+    */*) case "$_ht_v" in *..*|/*) _ht_v="" ;; *) if [ ! -f "/usr/share/zoneinfo/$_ht_v" ]; then _ht_v=""; fi ;; esac ;;
+    *) _ht_v="" ;;
+  esac
+  if [ -z "$_ht_v" ]; then _ht_v="$(timedatectl show -p Timezone --value 2>/dev/null || true)"; fi
   if [ -z "$_ht_v" ] && [ -f /etc/timezone ]; then _ht_v="$(head -1 /etc/timezone 2>/dev/null || true)"; fi
   if [ -z "$_ht_v" ]; then _ht_v="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p' || true)"; fi
   printf '%s' "$_ht_v"
