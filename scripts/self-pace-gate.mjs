@@ -27,7 +27,8 @@
 // writeAgentSettingsFromProfile() (agent-scaffold.ts), guarded by
 // name !== MAIN_AGENT_ID, re-applied on every spawn (respawn-safe).
 
-import { readFileSync, realpathSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { appendFileSync, lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -123,6 +124,102 @@ const SCHEDULER_RX = new RegExp(
 // ...but allow a pure READ-listing of one's own schedule (parity with the store /
 // schedule-API read exemptions): crontab -l, launchctl list/print, atq.
 const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_PREFIX}(crontab\s+-l\b|launchctl\s+(?:list|print|dumpstate|blame|examine)\b|atq\b)`, 'i')
+
+// LAUNCHDOPS1013 (Klodel 2233 B; Viktor 2275/2338): Pulzus runs releases and the
+// outage runbook, which restart a few of OUR launchd jobs. A narrow, exact
+// exception, never a pattern:
+//   - only the agents below, and only when the --agent the scaffold wrote into
+//     the hook command equals the agent named by CLAUDE_CONFIG_DIR, which the
+//     dashboard sets at spawn and a Bash call cannot rewrite in its parent;
+//   - only these three whole-segment shapes, the plain or /bin/ binary, no
+//     prefix (sudo, env, VAR=), no extra argument, and a LITERAL uid equal to
+//     the hook's own (a $(id -u) substitution is refused);
+//   - per-subcommand label sets (M1): kickstart may restart the dashboard, but
+//     bootout only what bootstrap can load back, so a bootout can never leave
+//     the dashboard (and the fleet's message bus) down;
+//   - bootstrap only a plist whose sha256 is approved in code (M2): ~/Library/
+//     LaunchAgents is klodel-owned, so root ownership there would not hold;
+//     a new hash comes only through a PR and Viktor's review;
+//   - every use is logged to store/launchd-ops.log (M4), never silently.
+// Boundary, stated: an agent that rewrites its OWN settings.json hook command
+// can forge both identity checks; this stops a prompt-injected agent issuing
+// commands, not one rewriting its own config (that needs a separate uid).
+export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
+export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog'])
+export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker'])
+export const LAUNCHD_APPROVED_PLIST_SHA256 = {
+  'hu.myshp.szamla.worker': new Set(['8eb792c49613117c0d49de2892d6e400370db1d2b8b662dab4f2cd8541782492']),
+}
+const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
+const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)
+const LAUNCHD_BOOTOUT_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+bootout\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)
+const LAUNCHD_BOOTSTRAP_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+bootstrap\s+gui/(\d{1,10})\s+(\S{1,400})$`)
+
+/** The agent a CLAUDE_CONFIG_DIR belongs to (agents/<name>/.claude-config), or null. */
+export function agentFromConfigDir(dir) {
+  const m = /\/agents\/([a-z0-9][a-z0-9_-]{0,63})\/\.claude-config\/?$/.exec(String(dir ?? ''))
+  return m ? m[1] : null
+}
+
+function sha256OfRegularFile(path) {
+  try {
+    const st = lstatSync(path)
+    if (st.isSymbolicLink() || !st.isFile() || st.size > 1024 * 1024) return null
+    return createHash('sha256').update(readFileSync(path)).digest('hex')
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Is this ONE segment an allowed launchd operation for this caller?
+ * opts: { agent, configDirAgent, uid, home }. Returns { allowed, entry?, mismatch? }.
+ */
+export function launchdOpsDecision(seg, opts = {}) {
+  const s = String(seg ?? '').trim()
+  let sub = null
+  let m = LAUNCHD_KICKSTART_RX.exec(s)
+  if (m) sub = 'kickstart'
+  else if ((m = LAUNCHD_BOOTOUT_RX.exec(s))) sub = 'bootout'
+  else if ((m = LAUNCHD_BOOTSTRAP_RX.exec(s))) sub = 'bootstrap'
+  if (!sub) return { allowed: false }
+  const agent = opts.agent ?? null
+  if (!agent || !LAUNCHD_OPS_AGENTS.has(agent)) return { allowed: false }
+  if (agent !== (opts.configDirAgent ?? null)) return { allowed: false, mismatch: true }
+  if (opts.uid == null || m[1] !== String(opts.uid)) return { allowed: false }
+  if (sub === 'kickstart') {
+    return LAUNCHD_KICKSTART_LABELS.has(m[2]) ? { allowed: true, entry: { sub, label: m[2] } } : { allowed: false }
+  }
+  if (sub === 'bootout') {
+    return LAUNCHD_BOOT_LABELS.has(m[2]) ? { allowed: true, entry: { sub, label: m[2] } } : { allowed: false }
+  }
+  // bootstrap: the plist must be <home>/Library/LaunchAgents/<label>.plist, an
+  // approved label, a regular file (no symlink) with an approved sha256.
+  const home = opts.home ?? homedir()
+  const given = m[2].startsWith('~/') ? join(home, m[2].slice(2)) : m[2]
+  const label = basename(given).replace(/\.plist$/, '')
+  if (!LAUNCHD_BOOT_LABELS.has(label) || given !== join(home, 'Library', 'LaunchAgents', `${label}.plist`)) return { allowed: false }
+  const sha = sha256OfRegularFile(given)
+  if (!sha || !(LAUNCHD_APPROVED_PLIST_SHA256[label]?.has(sha))) return { allowed: false }
+  return { allowed: true, entry: { sub, label, plist_sha256: sha } }
+}
+
+// The payload of `sh|bash|zsh|dash|ksh -c '<cmd>'` and of `eval '<cmd>'`: a real
+// command the quote-aware scheduler scan would otherwise treat as an inert
+// literal (Kernel 2371: `bash -c "<scheduler> bootstrap ..."` passed). Each
+// payload is decided as its own command, recursively, with NO launchd exception.
+const SHELL_C_RX = /(?:^|[\s;&|(`])(?:\S*\/)?(?:ba|z|da|k)?sh\s+(?:-[A-Za-z]*\s+)*-[A-Za-z]*c[A-Za-z]*\s+(['"])([\s\S]*?)\1/g
+const EVAL_RX = /(?:^|[\s;&|(`])eval\s+(['"])([\s\S]*?)\1/g
+export const MAX_WRAP_DEPTH = 3
+export function wrappedPayloads(command) {
+  const out = []
+  for (const rx of [SHELL_C_RX, EVAL_RX]) {
+    rx.lastIndex = 0
+    let m
+    while ((m = rx.exec(String(command ?? '')))) out.push(m[2])
+  }
+  return out
+}
 
 // The Claude self-schedule store. Blocked for WRITE on any route (a Bash write,
 // or the native Write/Edit/NotebookEdit tool); a read/grep is legit diagnostics.
@@ -555,10 +652,26 @@ export function gateDecision(toolName, toolInput, opts = {}) {
     // the only one that gets quote-aware segments. Null (unresolvable quoting)
     // falls back to the naive split, i.e. to scanning strictly more.
     const masked = maskInertLiterals(safeCommand)
+    const launchdOps = []
     for (const seg of (masked == null ? naiveSegs : splitSegments(masked))) {
       // scheduler binaries: deny the exec/submit forms, allow pure read-listing
-      if (SCHEDULER_RX.test(seg) && !SCHEDULER_READ_RX.test(seg)) return { deny: true }
+      if (SCHEDULER_RX.test(seg) && !SCHEDULER_READ_RX.test(seg)) {
+        // LAUNCHDOPS1013: the narrow exception, top level only (depth 0).
+        const d = (opts.depth ?? 0) === 0 ? launchdOpsDecision(seg, opts) : { allowed: false }
+        if (d.allowed) { launchdOps.push(d.entry); continue }
+        return d.mismatch ? { deny: true, reason: 'launchd-agent-mismatch' } : { deny: true }
+      }
     }
+    // A command wrapped in sh -c / eval is decided as a command of its own,
+    // with no exception inside; too deep a nesting is refused (fail-closed).
+    const wrapBase = stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(String(toolInput?.command ?? ''))))
+    for (const payload of wrappedPayloads(wrapBase)) {
+      const depth = (opts.depth ?? 0) + 1
+      if (depth > MAX_WRAP_DEPTH) return { deny: true }
+      const inner = gateDecision('Bash', { command: payload }, { cwd: opts.cwd, allowlistPath: opts.allowlistPath, depth })
+      if (inner.deny) return inner
+    }
+    if (launchdOps.length) return { deny: false, launchdOps }
   }
   return { deny: false }
 }
@@ -606,7 +719,28 @@ if (isInvokedDirectly()) {
   } catch {
     allow() // malformed/empty input must never break the agent's tool calls
   }
-  const { deny: shouldDeny, reason } = gateDecision(payload?.tool_name, payload?.tool_input, { cwd: payload?.cwd })
+  const agentArgAt = process.argv.indexOf('--agent')
+  const opts = {
+    cwd: payload?.cwd,
+    agent: agentArgAt > 1 ? process.argv[agentArgAt + 1] ?? null : null,
+    configDirAgent: agentFromConfigDir(process.env.CLAUDE_CONFIG_DIR),
+    uid: typeof process.getuid === 'function' ? process.getuid() : null,
+    home: homedir(),
+  }
+  const { deny: shouldDeny, reason, launchdOps } = gateDecision(payload?.tool_name, payload?.tool_input, opts)
+  if (reason === 'launchd-agent-mismatch' || (launchdOps && launchdOps.length)) {
+    writeLaunchdOpsLog(opts, reason === 'launchd-agent-mismatch' ? [{ sub: 'MISMATCH', label: '-' }] : launchdOps)
+  }
   if (shouldDeny) deny(reason === 'egress-allowlist' ? ALLOWLIST_GATE_MSG : GATE_MSG)
   allow()
+}
+
+// M4: one line per exception use (and per identity mismatch), append-only.
+function writeLaunchdOpsLog(opts, entries) {
+  try {
+    const path = join(dirname(fileURLToPath(import.meta.url)), '..', 'store', 'launchd-ops.log')
+    const ts = new Date().toISOString()
+    const lines = entries.map((e) => JSON.stringify({ ts, agent: opts.agent, config_dir_agent: opts.configDirAgent, sub: e.sub, label: e.label, plist_sha256: e.plist_sha256 ?? null }) + '\n')
+    appendFileSync(path, lines.join(''), { mode: 0o600 })
+  } catch { /* logging must never break the agent's tool call */ }
 }
