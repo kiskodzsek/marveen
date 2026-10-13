@@ -3565,6 +3565,10 @@ export function buildFleetRulesBody(name: string, sourcePath = FLEETRULES_SOURCE
   // The leading HTML comment is maintainer documentation (and the stamp), not a rule.
   const body = tpl.replace(/^\s*<!--[\s\S]*?-->\s*/, '').trim()
   if (!body) return null
+  // A rules file copied with the root's own generated blocks would put a second
+  // BEGIN of the same marker into the agent's CLAUDE.md, and every other ensure*
+  // edits only the first one (Viktor I3). Render nothing: no block, no exclusion.
+  if (/<!--\s*(BEGIN|END) GENERATED/.test(body)) return null
   return body
     .replaceAll('{{AGENT_ID}}', name)
     .replaceAll('{{PROJECT_ROOT}}', PROJECT_ROOT)

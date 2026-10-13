@@ -126,6 +126,19 @@ describe('fleet-rules: rendering', () => {
     expect(buildFleetRulesBody('agent-b', SRC)).toBeNull()
   })
 
+  it('a body carrying a GENERATED marker renders nothing (Viktor I3)', () => {
+    for (const marker of [
+      '<!-- BEGIN GENERATED: autonomy-wiring -->',
+      '<!-- END GENERATED: fleet-auth -->',
+    ]) {
+      rules(`${SAMPLE_RULES}\n\n${marker}\n`)
+      expect(buildFleetRulesBody('agent-b', SRC), marker).toBeNull()
+    }
+    // NEGATIVE CONTROL: an ordinary HTML comment in the rules text is fine.
+    rules(`${SAMPLE_RULES}\n\n<!-- a note inside the rules -->\n`)
+    expect(buildFleetRulesBody('agent-b', SRC)).not.toBeNull()
+  })
+
   it('reads the stamp from the leading comment only', () => {
     expect(fleetRulesStamp(SRC)).toBe(rootClaudeMdSha256(tmpRoot))
     rules(SAMPLE_RULES, 'none')
