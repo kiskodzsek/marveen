@@ -383,7 +383,9 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     : agentRunState(name) === 'running'
 
   // Only pay for the tmux/transcript probes a decision can actually use.
-  const needPct = state.phase === 'idle' || state.phase === 'await-handoff'
+  // 'cooldown' too (CGGAPS1013): a fresh session can cross the act band
+  // inside the cooldown, and decideGuard needs pct + idleMs to see it.
+  const needPct = state.phase === 'idle' || state.phase === 'await-handoff' || state.phase === 'cooldown'
   const pane = running && needPct ? capturePane(session) : null
   const sessionReady = running && state.phase === 'await-ready'
     ? await isSessionReadyForPrompt(session)
