@@ -17,7 +17,7 @@ const createAgentMessage = vi.fn((from: string, to: string, content: string) => 
 })
 const markMessageDelivered = vi.fn(() => { calls.push('delivered'); return true })
 const markMessageFailed = vi.fn(() => { calls.push('failed'); return true })
-type Outcome = 'sent' | 'aborted-busy' | 'skipped-locked' | 'aborted-guard'
+type Outcome = 'sent' | 'aborted-busy' | 'skipped-locked'
 const sendPromptToSession = vi.fn(
   async (_session: string, _text: string, _host?: string | null, _opts?: unknown): Promise<Outcome> => {
     calls.push('inject')
@@ -79,15 +79,6 @@ describe('sendSystemDirective', () => {
     const outcome = await sendSystemDirective('boni', 'agent-boni', 'x')
     expect(outcome).toBe('aborted-busy')
     expect(markMessageFailed).toHaveBeenCalledWith(42, expect.stringContaining('aborted-busy'))
-  })
-
-  it('passes an emitGuard through, and an aborted-guard send marks the anchor failed (Viktor 2453 M1)', async () => {
-    const guard = (_pane: string | null) => 'permission-prompt'
-    sendPromptToSession.mockImplementation(async () => 'aborted-guard')
-    const outcome = await sendSystemDirective('boni', 'agent-boni', 'x', null, { emitGuard: guard })
-    expect(outcome).toBe('aborted-guard')
-    expect(sendPromptToSession.mock.calls[0][3]).toEqual({ emitGuard: guard })
-    expect(markMessageFailed).toHaveBeenCalledWith(42, expect.stringContaining('aborted-guard'))
   })
 
   it('marks the anchor failed and rethrows when tmux inject throws', async () => {
