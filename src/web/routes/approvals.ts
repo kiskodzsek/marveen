@@ -55,6 +55,8 @@ export function computeTimeoutAt(category: string, timeoutSeconds: unknown, nowM
   return now + DEFAULT_TIMEOUT_MINUTES * 60
 }
 
+export const APPROVAL_IDENT_RE = /^[a-z0-9][a-z0-9_.-]{0,63}$/
+
 // f2c5edb0: the window inside which an approved letter may still be consumed,
 // counted from resolved_at. The SAME variable and default as the gate
 // (EMAIL_APPROVAL_WINDOW_S, 1800 s in scripts/hooks/email-approval-gate.py), so
@@ -343,6 +345,18 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     }
     if (typeof category !== 'string' || !category.trim()) {
       json(res, { error: 'category is required' }, 400)
+      return true
+    }
+    // Both end up in the owner's header and in the main agent's message, next
+    // to the server-set fields. A free string could carry a quote, "id=" or a
+    // forged action_quoted= (Viktor, msg 1526), so only plain identifiers pass.
+    // Agent names are [a-z0-9-] (sanitizeAgentName); category keys are snake_case.
+    if (!APPROVAL_IDENT_RE.test(agent_id)) {
+      json(res, { error: 'agent_id must match ^[a-z0-9][a-z0-9_.-]{0,63}$' }, 400)
+      return true
+    }
+    if (!APPROVAL_IDENT_RE.test(category)) {
+      json(res, { error: 'category must match ^[a-z0-9][a-z0-9_.-]{0,63}$' }, 400)
       return true
     }
     if (typeof action_description !== 'string' || !action_description.trim()) {
