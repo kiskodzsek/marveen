@@ -1,12 +1,54 @@
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { exportFleet, importFleet, MIN_VAULT_PASSWORD_LEN, UserFacingError, type ExportedFleet } from '../fleet-transfer.js'
+import { parseCookies, SESSION_COOKIE_NAME } from '../auth-gate.js'
+import { resolveSession } from '../auth-sessions.js'
+import { logConfigChange } from '../../db.js'
+import { notifySecurityEvent } from '../../notify.js'
 import type { RouteContext } from './types.js'
+
+// FLEETEXPORT1013 (Viktor, HIGH; Klodel 2435): the export returns the whole
+// Vault -- its master key included -- and the import rewrites it. Both were
+// reachable with the fleet's shared Bearer token, i.e. by every agent. They
+// now require the OWNER'S BROWSER SESSION (the mv_session cookie of a logged-in
+// dashboard user), read from the cookie itself: a Bearer header in the same
+// request (the dashboard UI adds one in token mode) wins the general auth
+// gate, but neither grants nor blocks access here. Token, device, operator
+// and federation credentials get 403. Every attempt, allowed or refused,
+// writes an audit row (config_change_log); a refusal also alerts the owner.
+// Residual, stated: a token holder can still break-glass reset a dashboard
+// password (auth.ts) and then log in -- that path alerts the owner on its own.
+export function fleetOwnerSession(req: { headers: { cookie?: string } }): string | null {
+  const cookie = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME]
+  if (!cookie) return null
+  return resolveSession(cookie)?.username ?? null
+}
+
+function callerLabel(auth: RouteContext['auth']): string {
+  if (!auth) return 'none'
+  if (auth.kind === 'token') return `token${auth.agent ? `:${auth.agent}` : ''}`
+  if (auth.kind === 'device') return `device:${auth.device ?? '?'}`
+  if (auth.kind === 'federation') return `federation:${auth.peer ?? '?'}`
+  return `session:${auth.user ?? '?'}`
+}
 
 export async function tryHandleFleet(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
 
   if (path !== '/api/fleet/export' && path !== '/api/fleet/import') return false
+
+  const op = path === '/api/fleet/export' ? 'export' : `import${ctx.url.searchParams.get('apply') === 'true' ? '_apply' : '_dryrun'}`
+  const owner = fleetOwnerSession(req)
+  if (!owner) {
+    const caller = callerLabel(ctx.auth)
+    logConfigChange(`security.fleet_${op}_denied`, null, method, caller)
+    logger.warn({ path, method, caller }, 'fleet: refused -- owner browser session required (FLEETEXPORT1013)')
+    void notifySecurityEvent(`🚨 Flotta-${op} kísérlet a dashboardon, ELUTASÍTVA (${caller}). Ez a teljes Vaultot adná ki vagy írná felül; csak a bejelentkezett tulajdonos böngészője hívhatja. Ha nem te voltál, szólj Viktornak.`)
+    json(res, { error: 'A flotta export/import csak bejelentkezett tulajdonosi böngésző-sessionnel érhető el (a hozzáférési token nem elég).' }, 403)
+    return true
+  }
+  logConfigChange(`security.fleet_${op}`, null, method, `session:${owner}`)
+  logger.warn({ path, method, user: owner }, 'fleet: owner session access (FLEETEXPORT1013)')
 
   // H1: vault password via header, not query string (avoids access-log / proxy-log / browser-history leakage)
   const vaultPassword = req.headers['x-vault-password'] as string | undefined
