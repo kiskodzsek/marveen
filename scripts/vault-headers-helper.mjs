@@ -13,6 +13,7 @@
 //   - The ":::" separator keeps every argument free of spaces so the string is
 //     safe when Claude Code passes headersHelper through a shell.
 // Output: a JSON object {HeaderName: "value", ...} on stdout.
+import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -21,6 +22,19 @@ const projectRoot = join(__dirname, '..')
 
 // Same pattern as vault-resolve.mjs: import the compiled vault module.
 const { getSecret } = await import(join(projectRoot, 'dist', 'web', 'vault.js'))
+
+// APPROVALBOT1013 (Viktor 2384 M2): the approval bot's token is read in-process
+// by the dashboard only; no resolver hands it out (same rule as the vault route).
+function approvalBotVaultId() {
+  try {
+    const m = /^APPROVAL_BOT_VAULT_ID=(.*)$/m.exec(readFileSync(join(projectRoot, '.env'), 'utf8'))
+    const v = (m?.[1] ?? '').trim().replace(/^["']|["']$/g, '')
+    return /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(v) ? v : 'telegram-approval-bot'
+  } catch {
+    return 'telegram-approval-bot'
+  }
+}
+const APPROVAL_BOT_VAULT_ID = approvalBotVaultId()
 
 const headers = {}
 for (const arg of process.argv.slice(2)) {
@@ -34,6 +48,10 @@ for (const arg of process.argv.slice(2)) {
   if (!headerName || !vaultId) continue
   // VAULTSZELES826: an SSH private key never leaves as an HTTP header to a remote server
   // (same rule as isSshPrivateKeyId in vault-acl.ts).
+  if (vaultId.trim() === APPROVAL_BOT_VAULT_ID) {
+    process.stderr.write(`vault-headers-helper: refused, the approval bot token is not sent as a header: "${vaultId}"\n`)
+    continue
+  }
   if (vaultId.trim().startsWith('ssh-key-')) {
     process.stderr.write(`vault-headers-helper: refused, SSH private keys are not sent as headers: "${vaultId}"\n`)
     continue

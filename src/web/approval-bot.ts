@@ -49,6 +49,25 @@ const SEND_TIMEOUT_MS = 10_000
 const POLL_TIMEOUT_S = 25
 const STATE_FILE = 'approval-bot-state.json'
 
+export const BUTTON_APPROVE = '✅ Jóváhagyom'
+export const BUTTON_REJECT = '❌ Elutasítom'
+
+/** The Vault id the bot token lives under. Server-only: routes/connectors.ts
+ *  refuses to serve or bind it (Viktor 2384 M2). */
+export function approvalBotVaultId(env: (keys: string[]) => Record<string, string> = readEnvFile): string {
+  const id = (env(['APPROVAL_BOT_VAULT_ID'])['APPROVAL_BOT_VAULT_ID'] ?? '').trim()
+  return id && VAULT_ID_RE.test(id) ? id : APPROVAL_BOT_DEFAULT_VAULT_ID
+}
+
+/** The exact keyboard the server sends for one request: the callback check
+ *  demands this, byte for byte (Viktor 2384 H1). */
+export function expectedKeyboard(id: string, nonce: string): Array<Array<{ text: string; callback_data: string }>> {
+  return [[
+    { text: BUTTON_APPROVE, callback_data: `a:o:${id}:${nonce}` },
+    { text: BUTTON_REJECT, callback_data: `a:n:${id}:${nonce}` },
+  ]]
+}
+
 export interface ApprovalBotConfig {
   token: string
   ownerId: string
@@ -63,7 +82,7 @@ export interface ConfigDeps {
 export function readApprovalBotConfig(deps: ConfigDeps = {}): ApprovalBotConfig | null {
   const env = (deps.env ?? readEnvFile)(['APPROVAL_BOT_VAULT_ID', 'APPROVAL_OWNER_TELEGRAM_ID'])
   const ownerId = (env['APPROVAL_OWNER_TELEGRAM_ID'] ?? '').trim()
-  const vaultId = (env['APPROVAL_BOT_VAULT_ID'] ?? '').trim() || APPROVAL_BOT_DEFAULT_VAULT_ID
+  const vaultId = (env['APPROVAL_BOT_VAULT_ID'] ?? '').trim() || APPROVAL_BOT_DEFAULT_VAULT_ID   // same rule as approvalBotVaultId
   if (!ownerId) return null
   if (!OWNER_ID_RE.test(ownerId) || !VAULT_ID_RE.test(vaultId)) {
     logger.warn('approval bot: APPROVAL_OWNER_TELEGRAM_ID or APPROVAL_BOT_VAULT_ID malformed, the bot stays off')
@@ -130,14 +149,10 @@ interface SentMessage { message_id: number; chat: { id: number }; text?: string 
  *  the message id, or throws (the caller falls back to the main bot). */
 export async function sendApprovalWithButtons(approval: Approval, text: string, cfg: ApprovalBotConfig, fetchImpl?: FetchLike): Promise<number> {
   const nonce = randomBytes(16).toString('base64url')
-  const data = (k: 'o' | 'n') => `a:${k}:${approval.id}:${nonce}`
   const msg = await tg<SentMessage>(cfg.token, 'sendMessage', {
     chat_id: cfg.ownerId,
     text: markIfTestRun(text),
-    reply_markup: { inline_keyboard: [[
-      { text: '✅ Jóváhagyom', callback_data: data('o') },
-      { text: '❌ Elutasítom', callback_data: data('n') },
-    ]] },
+    reply_markup: { inline_keyboard: expectedKeyboard(approval.id, nonce) },
   }, SEND_TIMEOUT_MS, fetchImpl)
   if (typeof msg?.message_id !== 'number' || typeof msg.text !== 'string') throw new TgError(200, null, 'http')
   // The hash is over the text AS TELEGRAM STORED IT: that is what a callback
@@ -154,13 +169,20 @@ export interface CallbackQuery {
   id: string
   from?: { id?: number }
   data?: string
-  message?: { message_id?: number; text?: string; chat?: { id?: number; type?: string } }
+  message?: {
+    message_id?: number
+    text?: string
+    edit_date?: number
+    chat?: { id?: number; type?: string }
+    reply_markup?: { inline_keyboard?: Array<Array<{ text?: string; callback_data?: string }>> }
+  }
 }
 
 export type CallbackOutcome =
   | { kind: 'ignore' }
   | { kind: 'not_owner' }
-  | { kind: 'mismatch'; reason: 'unknown_request' | 'message' | 'text' | 'nonce' }
+  | { kind: 'not_ready' }
+  | { kind: 'mismatch'; reason: 'unknown_request' | 'message' | 'text' | 'edited' | 'markup' | 'nonce' }
   | { kind: 'closed'; approval: Approval }
   | { kind: 'resolve'; approval: Approval; status: 'approved' | 'rejected'; nonceHash: string }
 
@@ -174,6 +196,8 @@ export function decideCallback(cq: CallbackQuery, cfg: ApprovalBotConfig, lookup
   }
   const [, verb, id, nonce] = m
   const approval = lookup(id!)
+  // Viktor 2384 L1: pressed between the send and the binding write; not an attack.
+  if (approval && approval.status === 'pending' && approval.bot_message_id == null) return { kind: 'not_ready' }
   if (!approval || approval.bot_message_id == null) return { kind: 'mismatch', reason: 'unknown_request' }
   if (cq.message?.message_id !== approval.bot_message_id || String(chat?.id) !== String(approval.bot_chat_id ?? '')) {
     return { kind: 'mismatch', reason: 'message' }
@@ -181,6 +205,17 @@ export function decideCallback(cq: CallbackQuery, cfg: ApprovalBotConfig, lookup
   if (typeof cq.message?.text !== 'string' || !approval.bot_text_hash || !hashEqual(sha256Hex(cq.message.text), approval.bot_text_hash)) {
     return { kind: 'mismatch', reason: 'text' }
   }
+  // Viktor 2384 M1: the server never edits a message before the decision, so an
+  // edit_date means someone else did (e.g. same text, entities that hide a line).
+  if (cq.message?.edit_date != null) return { kind: 'mismatch', reason: 'edited' }
+  // Viktor 2384 H1: the keyboard must be exactly the one sent, with this nonce;
+  // otherwise "Elutasítom" could carry the approve data.
+  const keyboard = cq.message?.reply_markup?.inline_keyboard
+  const want = expectedKeyboard(id!, nonce!)
+  const sameKeyboard = Array.isArray(keyboard) && keyboard.length === want.length && keyboard.every((row, i) =>
+    Array.isArray(row) && row.length === want[i]!.length && row.every((b, j) =>
+      b?.text === want[i]![j]!.text && b?.callback_data === want[i]![j]!.callback_data))
+  if (!sameKeyboard) return { kind: 'mismatch', reason: 'markup' }
   if (approval.status !== 'pending' || (approval.timeout_at != null && approval.timeout_at <= now)) {
     return { kind: 'closed', approval }
   }
@@ -221,6 +256,9 @@ export async function handleCallback(cq: CallbackQuery, cfg: ApprovalBotConfig, 
     case 'ignore':
       await answer()
       break
+    case 'not_ready':
+      await answer('Egy pillanat, próbáld újra.')
+      break
     case 'not_owner': {
       await answer('Nem jogosult.')
       // Counted, so a flood does not become a flood of alerts: the 1st, then every 10th per hour.
@@ -234,7 +272,11 @@ export async function handleCallback(cq: CallbackQuery, cfg: ApprovalBotConfig, 
     }
     case 'mismatch': {
       await answer('Elutasítva: ez a gomb nem érvényes.')
-      const what = { unknown_request: 'ismeretlen kérés', message: 'nem a szerver által küldött üzenet', text: 'az üzenet szövege megváltozott', nonce: 'érvénytelen vagy elhasznált gomb' }[outcome.reason]
+      const what = {
+        unknown_request: 'ismeretlen kérés', message: 'nem a szerver által küldött üzenet',
+        text: 'az üzenet szövege megváltozott', edited: 'az üzenetet utólag szerkesztették',
+        markup: 'a gombok nem azok, amiket a szerver küldött', nonce: 'érvénytelen vagy elhasznált gomb',
+      }[outcome.reason]
       deps.alert(`⚠️ Jóváhagyó bot: gyanús gombnyomás elutasítva (${what}). Ha nem te voltál, vagy a szöveg nem az, amit küldtünk, szólj.`)
       logger.warn({ reason: outcome.reason }, 'approval bot: press refused, binding mismatch')
       break
@@ -263,16 +305,20 @@ export async function handleCallback(cq: CallbackQuery, cfg: ApprovalBotConfig, 
 
 // ---------------------------------------------------------------- polling
 
-interface PollState { offset: number; owner_hash: string | null }
+interface PollState { offset: number; owner_hash: string | null; token_hash?: string | null }
 
 function statePath(): string { return join(STORE_DIR, STATE_FILE) }
 
 export function readPollState(path: string = statePath()): PollState {
   try {
     const d = JSON.parse(readFileSync(path, 'utf8')) as Partial<PollState>
-    return { offset: Number.isInteger(d.offset) ? d.offset! : 0, owner_hash: typeof d.owner_hash === 'string' ? d.owner_hash : null }
+    return {
+      offset: Number.isInteger(d.offset) ? d.offset! : 0,
+      owner_hash: typeof d.owner_hash === 'string' ? d.owner_hash : null,
+      token_hash: typeof d.token_hash === 'string' ? d.token_hash : null,
+    }
   } catch {
-    return { offset: 0, owner_hash: null }
+    return { offset: 0, owner_hash: null, token_hash: null }
   }
 }
 
@@ -305,7 +351,14 @@ export async function preflight(cfg: ApprovalBotConfig, deps: PollDeps): Promise
   if (state.owner_hash && state.owner_hash !== ownerHash) {
     deps.alert('⚠️ Jóváhagyó bot: a tulajdonos Telegram-azonosítója (APPROVAL_OWNER_TELEGRAM_ID) megváltozott. Ha nem te állítottad át, szólj azonnal.')
   }
-  if (state.owner_hash !== ownerHash) writePollState({ ...state, owner_hash: ownerHash }, deps.statePath)
+  // Viktor 2384 M2 (c): a replaced token is loud too. The hash, never the token.
+  const tokenHash = sha256Hex(`approval-bot-token\u0000${cfg.token}`)
+  if (state.token_hash && state.token_hash !== tokenHash) {
+    deps.alert('⚠️ Jóváhagyó bot: a bot tokenje (Vault) megváltozott. Ha nem te cserélted, szólj azonnal.')
+  }
+  if (state.owner_hash !== ownerHash || state.token_hash !== tokenHash) {
+    writePollState({ ...state, owner_hash: ownerHash, token_hash: tokenHash }, deps.statePath)
+  }
   try {
     const info = await tg<{ url?: string }>(cfg.token, 'getWebhookInfo', {}, SEND_TIMEOUT_MS, deps.fetchImpl)
     if (info?.url) alertOnce(deps, 'webhook', '⚠️ Jóváhagyó bot: webhook van beállítva, a gombnyomások máshová mehetnek. A dashboard nem kapja meg őket.')

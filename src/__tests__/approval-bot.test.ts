@@ -30,7 +30,7 @@ vi.mock('../web/telegram.js', () => ({
 import { initDatabase, createApproval, getApproval, resolveApproval, expireTimedOutApprovals } from '../db.js'
 import {
   readApprovalBotConfig, sendApprovalWithButtons, decideCallback, handleCallback, pollOnce, preflight,
-  sha256Hex, CALLBACK_RE, tg, TgError, type ApprovalBotConfig, type CallbackQuery, type FetchLike,
+  sha256Hex, CALLBACK_RE, tg, TgError, expectedKeyboard, readPollState, type ApprovalBotConfig, type CallbackQuery, type FetchLike,
 } from '../web/approval-bot.js'
 import { tryHandleApprovals, buildOwnerApprovalText, buildResolutionAlertText } from '../web/routes/approvals.js'
 import type { RouteContext } from '../web/routes/types.js'
@@ -72,8 +72,11 @@ async function sent(timeoutIn = 3600) {
   return { a: getApproval(a.id)!, msgId, text: send.body.text as string, okData: ok.callback_data as string, noData: no.callback_data as string }
 }
 
-function press(data: string, msgId: number, text: string, from = OWNER, chat = OWNER, type = 'private'): CallbackQuery {
-  return { id: 'cq1', from: { id: Number(from) }, data, message: { message_id: msgId, text, chat: { id: Number(chat), type } } }
+function press(data: string, msgId: number, text: string, from = OWNER, chat = OWNER, type = 'private', extra: Record<string, unknown> = {}): CallbackQuery {
+  // By default the message carries the keyboard the server sent (as Telegram returns it).
+  const m = CALLBACK_RE.exec(data)
+  const reply_markup = m ? { inline_keyboard: expectedKeyboard(m[2]!, m[3]!) } : undefined
+  return { id: 'cq1', from: { id: Number(from) }, data, message: { message_id: msgId, text, chat: { id: Number(chat), type }, reply_markup, ...extra } }
 }
 
 function deps(api = fakeApi()) {
@@ -146,6 +149,31 @@ describe('deciding a press (Viktor 2302)', () => {
     const forged = s.okData.replace(/:[A-Za-z0-9_-]{22}$/, ':' + 'A'.repeat(22))
     expect(decideCallback(press(forged, s.msgId, s.text), cfg, getApproval)).toEqual({ kind: 'mismatch', reason: 'nonce' })
   })
+  it('H1: swapped buttons (approve data under the "Elutasítom" label) are refused', async () => {
+    const s = await sent()
+    const kb = expectedKeyboard(s.a.id, s.okData.split(':')[3]!)
+    const swapped = [[{ ...kb[0]![0]!, callback_data: kb[0]![0]!.callback_data }, { ...kb[0]![1]!, callback_data: kb[0]![0]!.callback_data }]]
+    expect(decideCallback(press(s.okData, s.msgId, s.text, OWNER, OWNER, 'private', { reply_markup: { inline_keyboard: swapped } }), cfg, getApproval))
+      .toEqual({ kind: 'mismatch', reason: 'markup' })
+    const relabeled = [[{ text: '❌ Elutasítom', callback_data: kb[0]![0]!.callback_data }, { text: '✅ Jóváhagyom', callback_data: kb[0]![1]!.callback_data }]]
+    expect(decideCallback(press(s.okData, s.msgId, s.text, OWNER, OWNER, 'private', { reply_markup: { inline_keyboard: relabeled } }), cfg, getApproval))
+      .toEqual({ kind: 'mismatch', reason: 'markup' })
+    expect(decideCallback(press(s.okData, s.msgId, s.text, OWNER, OWNER, 'private', { reply_markup: undefined }), cfg, getApproval))
+      .toEqual({ kind: 'mismatch', reason: 'markup' })
+  })
+  it('M1: an edited message (edit_date set) is refused even with the same text', async () => {
+    const s = await sent()
+    expect(decideCallback(press(s.okData, s.msgId, s.text, OWNER, OWNER, 'private', { edit_date: 1_800_000_000 }), cfg, getApproval))
+      .toEqual({ kind: 'mismatch', reason: 'edited' })
+  })
+  it('L1: a press before the binding is written is not_ready, not an alert', async () => {
+    const a = newApproval()
+    const data = `a:o:${a.id}:${'B'.repeat(22)}`
+    expect(decideCallback(press(data, 1, 'x'), cfg, getApproval).kind).toBe('not_ready')
+    const { alerts, d } = deps()
+    expect(await handleCallback(press(data, 1, 'x'), cfg, d)).toBe('not_ready')
+    expect(alerts).toEqual([])
+  })
   it('an expired or already resolved request is closed, not resolved', async () => {
     const s = await sent(-5)
     expect(decideCallback(press(s.okData, s.msgId, s.text), cfg, getApproval).kind).toBe('closed')
@@ -183,6 +211,15 @@ describe('acting on a press', () => {
     const { d } = deps()
     await handleCallback(press(s.noData, s.msgId, s.text), cfg, d)
     expect(getApproval(s.a.id)!.status).toBe('rejected')
+  })
+  it('H1 end to end: a swapped keyboard alerts and resolves nothing', async () => {
+    const s = await sent()
+    const { alerts, d } = deps()
+    const kb = expectedKeyboard(s.a.id, s.okData.split(':')[3]!)
+    const swapped = [[kb[0]![0]!, { text: kb[0]![1]!.text, callback_data: kb[0]![0]!.callback_data }]]
+    await handleCallback(press(s.okData, s.msgId, s.text, OWNER, OWNER, 'private', { reply_markup: { inline_keyboard: swapped } }), cfg, d)
+    expect(getApproval(s.a.id)!.status).toBe('pending')
+    expect(alerts[0]).toContain('a gombok nem azok')
   })
   it('a mismatch alerts the owner and resolves nothing', async () => {
     const s = await sent()
@@ -236,6 +273,17 @@ describe('the PATCH route (Viktor 2302/2)', () => {
     expect(out.status).toBe(400)
     expect(getApproval(a.id)!.status).toBe('pending')
   })
+  it('I2: the API does not echo the bot hash columns', async () => {
+    const s = await sent()
+    const out: { status: number; body: any } = { status: 0, body: null }
+    const res: any = { writeHead(st: number) { out.status = st; return res }, end(c?: string) { if (c) out.body = JSON.parse(c) } }
+    const url = new URL(`http://localhost:3420/api/approvals/${s.a.id}`)
+    await tryHandleApprovals({ req: {} as any, res, path: url.pathname, method: 'GET', url } as RouteContext)
+    expect(out.status).toBe(200)
+    expect(out.body.bot_text_hash).toBeUndefined()
+    expect(out.body.bot_nonce_hash).toBeUndefined()
+    expect(out.body.bot_message_id).toBe(s.msgId)
+  })
   it('cannot set resolution_channel', async () => {
     const a = newApproval()
     const { ctx } = patch(a.id, { status: 'approved', resolved_by: 'telegram_text', telegram_message_id: 9, resolution_channel: 'approval_bot' })
@@ -267,6 +315,16 @@ describe('polling', () => {
       await pollOnce(cfg, { ...d, statePath: tmpState() })
       expect(alerts.some((t) => t.includes(word))).toBe(true)
     }
+  })
+  it('M2: a replaced bot token alerts; the state keeps only its hash', async () => {
+    const statePath = tmpState()
+    await preflight(cfg, { ...deps(fakeApi()).d, statePath })
+    const st = readPollState(statePath)
+    expect(st.token_hash).toMatch(/^[0-9a-f]{64}$/)
+    expect(JSON.stringify(st)).not.toContain(TOKEN.split(':')[1])
+    const other = deps(fakeApi())
+    await preflight({ ...cfg, token: '987654321:BBotherOTHERotherOTHERotherOTHER1234567' }, { ...other.d, statePath })
+    expect(other.alerts.some((t) => t.includes('tokenje') && t.includes('megváltozott'))).toBe(true)
   })
   it('6: a webhook somebody set alerts; 4: an owner-id change alerts', async () => {
     const statePath = tmpState()

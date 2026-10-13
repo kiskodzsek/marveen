@@ -356,6 +356,12 @@ export function notifyOwnerOfBotResolution(approval: Approval): void {
   alertOwnerMainBot(buildResolutionAlertText(approval, approval.bot_message_id ?? null, []))
 }
 
+// Viktor 2384 I2: the bot hash columns are server-internal; the API does not echo them.
+export function publicApproval<T extends Record<string, unknown>>(a: T): Omit<T, 'bot_text_hash' | 'bot_nonce_hash'> {
+  const { bot_text_hash: _t, bot_nonce_hash: _n, ...rest } = a as T & { bot_text_hash?: unknown; bot_nonce_hash?: unknown }
+  return rest
+}
+
 export function startApprovalBot(): { stop: () => void } {
   return startApprovalBotPoller({ alert: alertOwnerMainBot, onResolved: notifyOwnerOfBotResolution })
 }
@@ -450,7 +456,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     const limit = limitRaw ? Math.min(parseInt(limitRaw, 10) || 100, 500) : 100
 
     const items = listApprovals({ agent_id, category, status, limit })
-    json(res, items)
+    json(res, items.map((a) => publicApproval(a as unknown as Record<string, unknown>)))
     return true
   }
 
@@ -516,7 +522,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'Not found' }, 404)
       return true
     }
-    json(res, approval)
+    json(res, publicApproval(approval as unknown as Record<string, unknown>))
     return true
   }
 
@@ -573,7 +579,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     if (approval && (status === 'approved' || status === 'rejected')) {
       notifyOwnerOfResolution(approval, msgId, target?.telegram_message_id ?? null)
     }
-    json(res, approval)
+    json(res, approval ? publicApproval(approval as unknown as Record<string, unknown>) : approval)
     return true
   }
 
