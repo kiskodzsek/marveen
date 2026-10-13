@@ -235,6 +235,14 @@ describe('LOW (Viktor 2650): the alert window survives a dashboard restart', () 
     expect(alerted).toEqual([0, 10, 20])
   })
 
+  it('a row dated in the future does not silence the caller (Viktor 2680)', async () => {
+    const inAYear = Math.floor(Date.now() / 1000) + 365 * 86400
+    getDb().prepare('INSERT INTO config_change_log (key, old_value, new_value, actor, created_at) VALUES (?, NULL, NULL, ?, ?)')
+      .run(FLEET_DENIED_ALERT_KEY, 'token:dave', inAYear)
+    await call('GET', '/api/fleet/export', { auth: { kind: 'token', agent: 'dave' } })
+    expect(notify).toHaveBeenCalledTimes(1)
+  })
+
   it('the window is per caller', () => {
     expect(shouldAlertFleetDenial('a', 0)).toBe(true)
     expect(shouldAlertFleetDenial('b', 60_000)).toBe(true)
