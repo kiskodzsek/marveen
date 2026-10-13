@@ -64,6 +64,20 @@ describe('allowed: the three exact shapes, for pulzus only', () => {
   })
 })
 
+describe('the incident checker (Pulzus 2369)', () => {
+  const INC = 'hu.myshp.marabel-incident-passziv'
+  const incPlist = join(agentsDir, `${INC}.plist`)
+  it('kickstart passes; bootstrap only with the approved plist; a changed plist is refused', () => {
+    expect(gateDecision('Bash', { command: `${L} kickstart -k gui/${UID}/${INC}` }, pulzus).deny).toBe(false)
+    writeFileSync(incPlist, readFileSync(join(__dirname, 'fixtures', `${INC}.plist`)))
+    const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${incPlist}` }, pulzus)
+    expect(ok.deny).toBe(false)
+    expect(ok.launchdOps[0].plist_sha256).toBe('606b9bd893a2681054d38ca49f4ccb607c5994df073b96f8a2aadf74739aa9c1')
+    writeFileSync(incPlist, '<plist>other program</plist>')
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${incPlist}` }, pulzus).deny).toBe(true)
+  })
+})
+
 describe('refused (Viktor 2338)', () => {
   const deny = (command: string, opts: Record<string, unknown> = pulzus) => gateDecision('Bash', { command }, opts).deny
   it('M1: the dashboard cannot be booted out (it could not be loaded back)', () => {
