@@ -91,6 +91,7 @@ import { tryHandleApprovals, startApprovalTimeoutSweeper } from './web/routes/ap
 import { tryHandleDesktopLock, sweepExpiredDesktopLock } from './web/routes/desktop-lock.js'
 import { tryHandleTokenUsage } from './web/routes/token-usage.js'
 import { tryHandleCosts, startCostsSyncTask } from './web/routes/costs.js'
+import { tryHandleFinance } from './web/routes/finance.js'
 import { tryHandleIdeas } from './web/routes/ideas.js'
 import { tryHandleVideoReview } from './web/routes/video-review.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
@@ -251,6 +252,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleDesktopLock(routeCtx)) return
       if (await tryHandleTokenUsage(routeCtx)) return
       if (await tryHandleCosts(routeCtx)) return
+      if (await tryHandleFinance(routeCtx)) return
       if (await tryHandleIdeas(routeCtx)) return
       if (await tryHandleVideoReview(routeCtx, WEB_DIR)) return
       if (await tryHandleSpans(routeCtx)) return

@@ -7902,3 +7902,9 @@ body {
   color: var(--text, inherit);
 }
 .mem-search-label code { font-size: 11px; opacity: .85; }
+
+/* FINANCETAB1013: the finance view. It is a sandboxed iframe (no script, no
+   same-origin), so it cannot report its own height: give it the viewport. */
+.finance-frame { width: 100%; height: calc(100vh - 180px); min-height: 520px; border: 1px solid var(--border, #d0d7de); border-radius: 8px; background: transparent; }
+.finance-state { padding: 24px; color: var(--text-secondary, #888); }
+.finance-state p { margin: 0 0 12px; }

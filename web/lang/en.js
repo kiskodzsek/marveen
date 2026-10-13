@@ -658,6 +658,15 @@ window._i18n.en = {
   'status.comp.maintenance':     'under maintenance',
 
   // --- Costs (CostOps v0.1, PR #524) ---
+  'finance.nav':                 'Finance',
+  'finance.page_title':          'Finance',
+  'finance.page_subtitle':       'Monthly result, forecast and bank balance per company, read only',
+  'finance.loading':             'Loading...',
+  'finance.login_needed':        'The finance view opens only with a password login. The shared access token is not enough, because every agent in the fleet knows it.',
+  'finance.login_btn':           'Sign in',
+  'finance.disabled':            'The finance folder is not configured (FINANCE_DIR).',
+  'finance.not_allowed':         'Your user is not on the finance view list (FINANCE_USERS).',
+  'finance.load_failed':         'Could not load the finance view.',
   'costs.page_title':            'Costs',
   'costs.page_subtitle':         'Monthly cost summary from the local config',
   'costs.loading':               'Loading...',
