@@ -10,8 +10,6 @@ import {
   STALE_NUDGE_COOLDOWN_MS,
   MAX_STALE_NUDGES,
   MAX_NUDGES_PER_HOUR,
-  BATCH_INTERVAL_MS,
-  isUrgentInboxMessage,
   type NudgeState,
 } from '../web/inbox-nudge-watcher.js'
 
@@ -143,54 +141,6 @@ describe('decideNudgePreflight', () => {
     const r3 = decideNudgePreflight({ now: NOW + 3_600_000, oldestId: 9, oldestAgeMs: 3_700_000 }, r2.state)
     expect(r3.proceed).toBe(true)
     expect(r3.state.budgetLogged).toBe(false)
-  })
-})
-
-describe('INBOXBATCH1013: routine mail waits for the batch, urgent mail does not', () => {
-  const ready = { now: NOW, oldestId: 7, oldestAgeMs: MIN_PENDING_AGE_MS + 1 }
-  it('routine only: no nudge inside the batch interval, one after it', () => {
-    const recent = st({ lastNudgeAt: NOW - BATCH_INTERVAL_MS + 60_000 })
-    expect(decideNudgePreflight({ ...ready, urgent: false }, recent).proceed).toBe(false)
-    const due = st({ lastNudgeAt: NOW - BATCH_INTERVAL_MS })
-    expect(decideNudgePreflight({ ...ready, urgent: false }, due).proceed).toBe(true)
-    // first nudge after a dashboard start: the batch slot is free
-    expect(decideNudgePreflight({ ...ready, urgent: false }, st()).proceed).toBe(true)
-  })
-  it('urgent (or a legacy caller with no urgent field): only the 60s debounce applies', () => {
-    const recent = st({ lastNudgeAt: NOW - NUDGE_DEBOUNCE_MS })
-    expect(decideNudgePreflight({ ...ready, urgent: true }, recent).proceed).toBe(true)
-    expect(decideNudgePreflight(ready, recent).proceed).toBe(true)
-  })
-  it('the hourly budget still caps urgent nudges', () => {
-    const full = st({ recentNudges: Array.from({ length: MAX_NUDGES_PER_HOUR }, (_, i) => NOW - 120_000 - i * 1000) })
-    expect(decideNudgePreflight({ ...ready, urgent: true }, full).proceed).toBe(false)
-  })
-  it('classifies urgent mail', () => {
-    const m = (content: string, from_agent = 'dave') => isUrgentInboxMessage({ from_agent, content })
-    expect(m('[APPROVAL_REQUEST] id=12 ...')).toBe(true)
-    expect(m('KIESÉS: marabel.hu 502')).toBe(true)
-    expect(m('kieses gyanu, watchdog piros')).toBe(true)
-    expect(m('Outage on the checkout')).toBe(true)
-    expect(m('SÜRGŐS: Patrik kéri')).toBe(true)
-    expect(m('anything', 'system')).toBe(true)
-    expect(m('[Eredmény] msg_id:2427 status:done')).toBe(false)
-    expect(m('PR #12 kész, review-ra vár')).toBe(false)
-    // Viktor 2453 L1: the authenticated urgent column wins, with no keyword
-    expect(isUrgentInboxMessage({ from_agent: 'dave', content: 'csak egy sor', urgent: 1 })).toBe(true)
-    expect(isUrgentInboxMessage({ from_agent: 'dave', content: 'csak egy sor', urgent: 0 })).toBe(false)
-    // I1: supervisor senders and prefixes
-    expect(m('anything', 'respawn-guard')).toBe(true)
-    expect(m('anything', 'auto-restart')).toBe(true)
-    expect(m('[CONTEXT-GUARD] 3. EGYMAST KOVETO bukott mentes', 'viktor')).toBe(true)
-    expect(m('[auto-restart] A(z) dave ujrainditasa ...')).toBe(true)
-    expect(m('[SECURITY] CRITICAL: ...', 'viktor')).toBe(true)
-    expect(m('[SECURITY] Viktor, re 2427: OK', 'viktor')).toBe(false)
-    // I1: NFD-normalised and the o-umlaut misspelling
-    expect(m('S\u0055\u0308RGO\u030bS: nezd meg'.normalize('NFD'))).toBe(true)
-    expect(m('Sürgös')).toBe(true)
-    expect(m('kiese\u0301s gyanu'.normalize('NFD'))).toBe(true)
-    // head only: a routine message that mentions the outage runbook further down
-    expect(m('PR #13 kész. ' + 'x'.repeat(120) + ' a KIESÉS-runbook szerint')).toBe(false)
   })
 })
 

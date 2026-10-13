@@ -27,7 +27,7 @@ function makeUser(name: string) {
 beforeEach(() => {
   vi.useRealTimers()
   initDatabase(DB_PATH)
-  getDb().exec(`DELETE FROM auth_sessions; DELETE FROM dashboard_users; DELETE FROM sqlite_sequence WHERE name = 'dashboard_users'`)
+  getDb().exec('DELETE FROM auth_sessions; DELETE FROM dashboard_users')
   _clearSessionCacheForTest()
 })
 

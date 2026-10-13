@@ -156,7 +156,3 @@ transcripts/
 #   supabase/.temp/  -> ignores a real directory, MISSES the symlink (it shows in
 #                       `git status`, so the next CLI run commits it again)
 supabase/.temp
-
-# Local fleet ops and shared workspace (not part of the product; keeps update.sh from stashing them)
-/ops/
-/shared/

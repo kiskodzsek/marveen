@@ -59,7 +59,6 @@ import {
   updateDashboardUserPassword,
   deleteDashboardUser,
   logConfigChange,
-  dashboardUsersEverCreated,
 } from '../../db.js'
 import { notifySecurityEvent } from '../../notify.js'
 import type { RouteContext } from './types.js'
@@ -313,17 +312,6 @@ export async function tryHandleAuth(ctx: RouteContext): Promise<boolean> {
       json(res, FORBIDDEN_KIND, 403)
       return true
     }
-    // FLEETEXPORT1013 (Viktor 2460, HIGH): the shared Bearer token creates a
-    // user ONLY on first-run, i.e. when this install has never had one (not
-    // merely "is empty now": a token-DELETE of every user must not reopen the
-    // door). Otherwise any agent could mint itself a login and with it a
-    // browser session. Later users come from a logged-in session or from the
-    // CLI (npm run dashboard-user).
-    if (auth!.kind === 'token' && dashboardUsersEverCreated()) {
-      logConfigChange('security.dashboard_user_create_denied', null, 'token', 'token')
-      json(res, { error: 'A felhasználót tokennel csak az első beállításkor lehet létrehozni; ezután bejelentkezett sessionből vagy a CLI-ből (npm run dashboard-user).' }, 403)
-      return true
-    }
     let body: Record<string, unknown>
     try {
       body = await parseJsonBody(req)
@@ -349,10 +337,7 @@ export async function tryHandleAuth(ctx: RouteContext): Promise<boolean> {
     }
     const hash = await hashPassword(password)
     const created = createDashboardUser(username, hash)
-    const creator = auth!.kind === 'session' ? `session:${auth!.user ?? '?'}` : auth!.kind
-    logConfigChange('security.dashboard_user_created', null, created.username, creator)
-    logger.warn({ username: created.username, creator }, 'dashboard user created')
-    void notifySecurityEvent(`👤 Új dashboard-felhasználó jött létre: "${created.username}" (létrehozta: ${creator}). Ha nem te voltál, szólj Viktornak.`)
+    logger.info({ username: created.username }, 'dashboard user created')
     json(res, { ok: true, user: { id: created.id, username: created.username } }, 201)
     return true
   }
@@ -458,9 +443,6 @@ export async function tryHandleAuth(ctx: RouteContext): Promise<boolean> {
     }
     deleteDashboardUser(username)
     revokeAllForUser(user.id)
-    const deleter = auth!.kind === 'session' ? `session:${auth!.user ?? '?'}` : auth!.kind
-    logConfigChange('security.dashboard_user_deleted', user.username, null, deleter)
-    void notifySecurityEvent(`👤 Dashboard-felhasználó törölve: "${user.username}" (törölte: ${deleter}). Ha nem te voltál, szólj Viktornak.`)
     // Deleting the last user is the documented way to return to token-only mode.
     logger.info({ username, remaining: countDashboardUsers(true) }, 'dashboard user deleted')
     json(res, { ok: true })

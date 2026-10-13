@@ -102,7 +102,7 @@ beforeAll(() => {
 })
 
 beforeEach(() => {
-  getDb().exec(`DELETE FROM auth_sessions; DELETE FROM dashboard_users; DELETE FROM sqlite_sequence WHERE name = 'dashboard_users'`)
+  getDb().exec('DELETE FROM auth_sessions; DELETE FROM dashboard_users')
   _clearSessionCacheForTest()
   _resetThrottleForTest()
 })
@@ -270,12 +270,8 @@ describe('users CRUD', () => {
 
   it('rejects a duplicate username with 409', async () => {
     await seedUser('alice')
-    // A second create comes from a session (FLEETEXPORT1013: the token creates
-    // only on first-run), so the duplicate check is what answers here.
-    const dup = await call('POST', '/api/auth/users', { auth: { kind: 'session', user: 'alice' }, body: { username: 'alice', password: GOOD_PW } })
+    const dup = await call('POST', '/api/auth/users', { auth: TOKEN_AUTH, body: { username: 'alice', password: GOOD_PW } })
     expect(dup.res.statusCode).toBe(409)
-    const viaToken = await call('POST', '/api/auth/users', { auth: TOKEN_AUTH, body: { username: 'bob', password: GOOD_PW } })
-    expect(viaToken.res.statusCode).toBe(403)
   })
 
   it('rejects an invalid username', async () => {

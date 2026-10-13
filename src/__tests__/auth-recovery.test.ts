@@ -85,7 +85,6 @@ beforeEach(() => {
   db.prepare('DELETE FROM device_keys').run()
   db.prepare('DELETE FROM auth_sessions').run()
   db.prepare('DELETE FROM dashboard_users').run()
-  db.prepare("DELETE FROM sqlite_sequence WHERE name = 'dashboard_users'").run()
   db.prepare('DELETE FROM config_change_log').run()
 })
 
