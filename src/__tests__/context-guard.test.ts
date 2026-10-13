@@ -201,11 +201,21 @@ describe('decideGuard: idle', () => {
     expect(d.nextState.deadlineMs).toBe(NOW + CFG.handoffTimeoutMinutes * 60_000)
   })
 
-  it('defers the idle-phase hard-tier restart while the agent is mid-turn', () => {
+  it('never restarts mid-turn at hardPct, but asks for the handoff instead of deferring silently (CGGAPS1013)', () => {
     const d = decideGuard(INITIAL_GUARD_STATE, inputs({ pct: 0.99, paneBusy: true, paneIdle: false }), CFG)
-    expect(d.action).toBe('none')
-    expect(d.reason).toContain('deferring')
-    expect(d.nextState.phase).toBe('idle')
+    expect(d.action).toBe('request-handoff')
+    expect(d.reason).toContain('mid-turn')
+    expect(d.nextState.phase).toBe('await-handoff')
+  })
+
+  it('CGGAPS1013 end to end: busy past hardPct -> handoff request -> still busy: defer -> written and idle: restart', () => {
+    const busy = { pct: 3.2, paneBusy: true, paneIdle: false }
+    const asked = decideGuard(INITIAL_GUARD_STATE, inputs({ ...busy, handoffMtime: 100 }), CFG)
+    expect(asked.action).toBe('request-handoff')
+    const stillBusy = decideGuard(asked.nextState, inputs({ ...busy, nowMs: NOW + 300_000, handoffMtime: 100 }), CFG)
+    expect(stillBusy.action).toBe('none')
+    const done = decideGuard(asked.nextState, inputs({ pct: 3.3, nowMs: NOW + 600_000, handoffMtime: 200 }), CFG)
+    expect(done.action).toBe('restart')
   })
 
   it('skips straight to restart at hardPct', () => {
@@ -590,8 +600,16 @@ describe('decideGuard: await-ready', () => {
     expect(d.nextState.phase).toBe('await-ready')
   })
 
-  it('gives up into cooldown on ready-timeout', () => {
+  it('on ready-timeout still injects the resume prompt (queued behind a busy pane), then cools down (CGGAPS1013)', () => {
     const d = decideGuard(awaitingReady, inputs({ nowMs: NOW + 61_000 }), CFG)
+    expect(d.action).toBe('inject-resume')
+    expect(d.reason).toContain('ready timeout')
+    expect(d.nextState.phase).toBe('cooldown')
+    expect(d.nextState.cooldownUntilMs).toBe(NOW + 61_000 + CFG.cooldownMinutes * 60_000)
+  })
+
+  it('on ready-timeout with the session not running: cooldown, no injection', () => {
+    const d = decideGuard(awaitingReady, inputs({ nowMs: NOW + 61_000, running: false }), CFG)
     expect(d.action).toBe('none')
     expect(d.nextState.phase).toBe('cooldown')
   })
@@ -612,6 +630,29 @@ describe('decideGuard: cooldown', () => {
     const d = decideGuard(cooling, inputs({ pct: 1.2 }), CFG)
     expect(d.action).toBe('none')
     expect(d.nextState.phase).toBe('cooldown')
+  })
+
+  // CGGAPS1013: the cooldown began at cooldownUntilMs - cooldownMinutes.
+  const START = NOW + 60_000 - CFG.cooldownMinutes * 60_000
+
+  it('ends early when the NEW session (transcript written after the cooldown began) crosses actPct', () => {
+    // idleMs 1s: the transcript was written 1s ago, well after START
+    const act = decideGuard(cooling, inputs({ pct: 0.92, idleMs: 1_000 }), CFG)
+    expect(act.action).toBe('request-handoff')
+    expect(act.nextState.phase).toBe('await-handoff')
+    const hardIdle = decideGuard(cooling, inputs({ pct: 1.2, idleMs: 1_000 }), CFG)
+    expect(hardIdle.action).toBe('restart')
+    const hardBusy = decideGuard(cooling, inputs({ pct: 1.2, idleMs: 1_000, paneBusy: true, paneIdle: false }), CFG)
+    expect(hardBusy.action).toBe('request-handoff')
+  })
+
+  it('does NOT end early on the OLD transcript (last written before the cooldown began), below actPct, or unmeasured', () => {
+    expect(decideGuard(cooling, inputs({ pct: 1.2, idleMs: NOW - START + 1_000 }), CFG).action).toBe('none')
+    expect(decideGuard(cooling, inputs({ pct: 1.2, idleMs: NOW - START }), CFG).action).toBe('none')
+    expect(decideGuard(cooling, inputs({ pct: 0.5, idleMs: 1_000 }), CFG).nextState.phase).toBe('cooldown')
+    expect(decideGuard(cooling, inputs({ pct: 1.2, idleMs: null }), CFG).action).toBe('none')
+    expect(decideGuard(cooling, inputs({ pct: 1.2, idleMs: 1_000 }), { ...CFG, enabled: false }).action).toBe('none')
+    expect(decideGuard(cooling, inputs({ pct: 1.2, idleMs: 1_000, running: false }), CFG).action).toBe('none')
   })
 
   it('re-arms after cooldown', () => {
