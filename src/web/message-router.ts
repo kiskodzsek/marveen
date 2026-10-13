@@ -31,7 +31,7 @@ import {
   capturePane,
   clearFeedbackModalAndRecheck,
 } from './agent-process.js'
-import { detectPaneState, detectQuotaWall, detectsFirstRunGate, detectsPermissionDialog, permissionPromptSummary, type PaneState, type PermissionPromptSummary, type QuotaWall } from '../pane-state.js'
+import { detectPaneState, detectQuotaWall, detectsBlockingMenu, detectsFirstRunGate, detectsPermissionDialog, permissionPromptSummary, type FirstRunGateKind, type PaneState, type PermissionPromptSummary, type QuotaWall } from '../pane-state.js'
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
 import { composeBatchInjection, batchInjectCapFor } from './batch-inject.js'
@@ -269,6 +269,44 @@ export function quotaWallEscalation(
     if (prev.key === key && since < QUOTA_WALL_SILENCE_MS) return { kind: 'silent', key }
   }
   return { kind: 'alert', key }
+}
+
+// ---- the last look before a guarded send (71263d15 C) -----------------------------
+// Backported from #1809 (only the emit-guard primitive, not its STOP path or restart
+// wake): the context guard's directives use it. A pane parked on a permission prompt,
+// a first-run gate or the plan usage limit is not "busy", it is asking a question:
+// text + Enter typed into a permission prompt APPROVES the pending tool call, and the
+// message is lost (reproduced live on Claude Code 2.1.294). Escape is no way out
+// either, it answers "no" on the asker's behalf. So such a pane gets no keystroke.
+
+export type UrgentPaneHold =
+  | { kind: 'permission-prompt'; ask: PermissionPromptSummary | null }
+  | { kind: 'first-run'; gate: FirstRunGateKind }
+  | { kind: 'quota-wall'; wall: QuotaWall }
+
+/** Pure: is the pane asking something that only a person (or the reset) can answer? null = no such surface seen. */
+export function detectUrgentPaneHold(pane: string | null): UrgentPaneHold | null {
+  if (pane == null || !pane.trim()) return null
+  if (detectsPermissionDialog(pane)) return { kind: 'permission-prompt', ask: permissionPromptSummary(pane) }
+  const gate = detectsFirstRunGate(pane)
+  if (gate) return { kind: 'first-run', gate }
+  const wall = detectQuotaWall(pane)
+  if (wall) return { kind: 'quota-wall', wall }
+  return null
+}
+
+/**
+ * Pure: the last look at the pane inside the send lane, right before the first key
+ * (sendPromptToSession's emitGuard). Stricter than detectUrgentPaneHold: any blocking
+ * menu, and a pane that cannot be read, refuse too -- here no later step could undo an
+ * Enter that landed in the wrong place. null = type.
+ */
+export function urgentEmitRefusal(pane: string | null): string | null {
+  if (pane == null || !pane.trim()) return 'pane unreadable'
+  const hold = detectUrgentPaneHold(pane)
+  if (hold) return hold.kind
+  if (detectsBlockingMenu(pane)) return 'blocking-menu'
+  return null
 }
 
 // ---- reconnect-backlog batching (card 2922e380 thread b) --------------------

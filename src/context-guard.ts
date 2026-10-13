@@ -686,6 +686,21 @@ export function decideGuard(
   switch (state.phase) {
     case 'cooldown': {
       if (nowMs >= state.cooldownUntilMs) return none('cooldown elapsed', INITIAL_GUARD_STATE)
+      // CGGAPS1013: the cooldown was blind, and a fresh session that went
+      // straight to work crossed the act band unseen (Dave, 2026-10-13: past
+      // 270k inside one 15-minute cooldown, first measured at ~117%). A
+      // measured pct at or above actPct ends it early -- but only once the
+      // transcript has been written SINCE the cooldown began, so the old
+      // session's transcript (still the newest file until the new one writes)
+      // can never trigger a second handoff right after a restart.
+      const cooldownStartMs = state.cooldownUntilMs - cfg.cooldownMinutes * 60_000
+      if (
+        cfg.enabled && inputs.running && inputs.pct !== null && inputs.pct >= cfg.actPct &&
+        inputs.idleMs !== null && nowMs - inputs.idleMs > cooldownStartMs
+      ) {
+        const tier = decideWedgeTiers(nowMs, inputs, cfg, INITIAL_GUARD_STATE, none)
+        if (tier) return tier
+      }
       return none('cooling down')
     }
 
@@ -842,7 +857,17 @@ export function decideGuard(
         }
       }
       if (nowMs >= state.deadlineMs) {
-        return cooldown(nowMs, cfg, 'ready timeout -- giving up on resume injection')
+        // CGGAPS1013: giving up here meant the fresh session was never told to
+        // read its HANDOFF.md. The usual cause is a BUSY pane, not a broken one
+        // (Dave and Viktor, 2026-10-13: the new session was already working its
+        // inbox). sendSystemDirective falls through to a queued send after its
+        // idle wait, so inject anyway; only a stopped session gets nothing.
+        if (!inputs.running) return cooldown(nowMs, cfg, 'ready timeout, session not running -- no resume injection')
+        return {
+          action: 'inject-resume',
+          reason: 'ready timeout -- injecting resume anyway (queued behind the live turn)',
+          nextState: cooldown(nowMs, cfg, '').nextState,
+        }
       }
       return none('waiting for restarted session')
     }
@@ -870,7 +895,16 @@ function decideWedgeTiers(
     // a turn that tips into saturation is caught by the saturation net,
     // which deliberately ignores the busy signal.
     if (inputs.paneBusy) {
-      return none(`hard threshold (${Math.round(pct * 100)}%) but agent mid-turn -- deferring restart`, cleared)
+      // CGGAPS1013: deferring with no request left a busy agent growing with
+      // nobody asking it to stop (Dave, 2026-10-13: from ~117% to ~320% of a
+      // 300k limit, every sweep found it mid-turn). Ask for the handoff now:
+      // the directive queues behind the live turn, and await-handoff restarts
+      // only once the handoff is written and the pane is idle, so a live turn
+      // is still never cut.
+      return handoffRequest(
+        nowMs, inputs, cfg,
+        `hard threshold (${Math.round(pct * 100)}%) but agent mid-turn -- requesting handoff, restart after the turn`,
+      )
     }
     return restartDecision(
       nowMs,

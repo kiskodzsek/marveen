@@ -70,6 +70,40 @@ export const MAX_STALE_NUDGES = 3
 // Claude turn). Exhaustion degrades to the baseline drain cadence (next
 // human/scheduled prompt), never to message loss.
 export const MAX_NUDGES_PER_HOUR = 10
+// INBOXBATCH1013 (Patrik, Telegram 1703; Klodel 2420): each nudge is a full
+// main-agent turn, and the hourly budget ran full all day. An inbox holding
+// only routine mail now waits for one batch at most every BATCH_INTERVAL_MS
+// (the drain claims ALL pending rows, so one nudge = one batch). Urgent mail
+// keeps the immediate path. Nothing is lost by waiting: a human or scheduled
+// prompt drains the inbox in between anyway (inbox-drain.py runs on every
+// main-agent prompt). The clock is lastNudgeAt, in memory: a dashboard
+// restart allows one early batch, never a missed one.
+export const BATCH_INTERVAL_MS = 30 * 60_000
+// Urgent = may not wait for the batch. In order (Viktor 2453):
+//  1. the AUTHENTICATED urgent column (Card 795d1f48: only an in-process writer
+//     or a listed device key can set it; the shared token gets 403);
+//  2. a supervisor sender: system, respawn-guard (isolation lost),
+//     auto-restart (a restart that failed);
+//  3. a supervisory prefix: [APPROVAL_REQUEST], [CONTEXT-GUARD] (a failed
+//     rescue / a forced restart, sent under the agent's own name),
+//     [auto-restart], [SECURITY] CRITICAL;
+//  4. KIESES/OUTAGE/SURGOS/URGENT in the message HEAD, NFC-normalised (an NFD
+//     "surgos" and the o-umlaut misspelling match too). Head only: on
+//     2026-10-13 (15:15-17:35, 92 rows to the main agent) a whole-text match
+//     also caught routine mail that merely discussed the outage runbook.
+// 2-4 are text an agent can write: a forged marker only buys an early nudge,
+// still under the 60 s debounce and the hourly budget. A false positive costs
+// one early turn, a false negative up to BATCH_INTERVAL_MS.
+const URGENT_SENDERS = new Set(['system', 'respawn-guard', 'auto-restart'])
+const URGENT_PREFIX_RX = /^\s*(?:\[APPROVAL_REQUEST\]|\[CONTEXT-GUARD\]|\[auto-restart\]|\[SECURITY\]\s*CRITICAL)/i
+const URGENT_HEAD_RX = /KIES[EÉ]S|OUTAGE|S[UÜ]RG[OŐÖ]S|URGENT/i
+const URGENT_HEAD_CHARS = 100
+export function isUrgentInboxMessage(m: { from_agent: string; content: string; urgent?: number }): boolean {
+  if (m.urgent === 1) return true
+  if (URGENT_SENDERS.has(m.from_agent)) return true
+  const text = m.content.normalize('NFC')
+  return URGENT_PREFIX_RX.test(text) || URGENT_HEAD_RX.test(text.slice(0, URGENT_HEAD_CHARS))
+}
 const NUDGE_BUDGET_WINDOW_MS = 60 * 60_000
 // Rate limit for the "pending mail is waiting but the session stays busy"
 // visibility log -- distinguishes a long busy spell from a dead watcher.
@@ -119,10 +153,12 @@ export type NudgePreflight =
  *  BEFORE any tmux IO. Returns the next state; the shell only touches tmux
  *  when proceed is true. */
 export function decideNudgePreflight(
-  input: { now: number; oldestId: number | null; oldestAgeMs: number },
+  // urgent: does ANY pending row need the immediate path? undefined = no
+  // batching (the pre-INBOXBATCH1013 behaviour, kept for direct callers).
+  input: { now: number; oldestId: number | null; oldestAgeMs: number; urgent?: boolean },
   state: NudgeState,
 ): NudgePreflight {
-  const { now, oldestId, oldestAgeMs } = input
+  const { now, oldestId, oldestAgeMs, urgent } = input
   if (oldestId === null) {
     // Inbox empty: end the spell. lastNudgeAt and the budget window survive
     // (global debounce floor); spell-scoped fields reset.
@@ -137,6 +173,8 @@ export function decideNudgePreflight(
   }
   if (oldestAgeMs < MIN_PENDING_AGE_MS) return { proceed: false, state }
   if (now - state.lastNudgeAt < NUDGE_DEBOUNCE_MS) return { proceed: false, state }
+  // Routine mail only: wait for the batch slot.
+  if (urgent === false && now - state.lastNudgeAt < BATCH_INTERVAL_MS) return { proceed: false, state }
 
   // Stale spell: the previous nudge targeted this same oldest message and it
   // is STILL pending -> the drain did not claim it.
@@ -200,7 +238,7 @@ async function tick(): Promise<void> {
     const pending = getPendingMessages(MAIN_AGENT_ID)
     const oldest = pending[0]
     const pre = decideNudgePreflight(
-      { now, oldestId: oldest ? oldest.id : null, oldestAgeMs: oldest ? now - oldest.created_at * 1000 : 0 },
+      { now, oldestId: oldest ? oldest.id : null, oldestAgeMs: oldest ? now - oldest.created_at * 1000 : 0, urgent: pending.some(isUrgentInboxMessage) },
       state,
     )
     state = pre.state
