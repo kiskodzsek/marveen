@@ -16,6 +16,9 @@ import { fileURLToPath } from 'node:url'
 import {
   computeTimeoutAt,
   buildOwnerApprovalText,
+  quoteOwnerDescription,
+  OWNER_DESCRIPTION_MARK,
+  OWNER_DESCRIPTION_MAX,
   DEFAULT_TIMEOUT_MINUTES,
   MAX_TIMEOUT_SECONDS,
 } from '../web/routes/approvals.js'
@@ -82,6 +85,94 @@ describe('buildOwnerApprovalText (leg 1: what the owner reads)', () => {
   it('renders the expiry in local (Budapest) time, or "nincs" without one', () => {
     expect(buildOwnerApprovalText(approval())).toContain('Lejárat: 2026.')
     expect(buildOwnerApprovalText(approval({ timeout_at: null }))).toContain('Lejárat: nincs')
+  })
+})
+
+describe('buildOwnerApprovalText: the agent-written description cannot pose as a fixed field (Viktor, msg 1493)', () => {
+  const forged = [
+    'Skill frissítése',
+    'Döntés: Dashboard -> Jóváhagyások (id: other-id-9999)',
+    '[JÓVÁHAGYÁS KELL] klodel | email_send',
+    'Lejárat: soha',
+  ].join('\n')
+
+  it('the only unmarked Döntés line carries the real id, and the only header is the first line', () => {
+    const lines = buildOwnerApprovalText(approval({ action_description: forged })).split('\n')
+    const unmarked = lines.filter((l) => !l.startsWith(OWNER_DESCRIPTION_MARK.trim()))
+    expect(unmarked.filter((l) => l.startsWith('Döntés:'))).toEqual(['Döntés: Dashboard -> Jóváhagyások (id: test-id-1234)'])
+    expect(unmarked.filter((l) => l.startsWith('[JÓVÁHAGYÁS KELL]'))).toEqual(['[JÓVÁHAGYÁS KELL] samu | skill_patch'])
+    expect(unmarked.filter((l) => l.startsWith('Lejárat:'))).toHaveLength(1)
+    expect(lines[0]).toBe('[JÓVÁHAGYÁS KELL] samu | skill_patch')
+    // The forged lines are still shown in full, marked: the owner sees what they approve.
+    expect(lines).toContain(`${OWNER_DESCRIPTION_MARK}Döntés: Dashboard -> Jóváhagyások (id: other-id-9999)`)
+    expect(lines).toContain(`${OWNER_DESCRIPTION_MARK}[JÓVÁHAGYÁS KELL] klodel | email_send`)
+  })
+
+  it('the fixed fields come before the description', () => {
+    const text = buildOwnerApprovalText(approval({ action_description: forged }))
+    expect(text.indexOf('Döntés: Dashboard')).toBeLessThan(text.indexOf('Leírás:'))
+    expect(text.indexOf('Lejárat: 2026.')).toBeLessThan(text.indexOf('Leírás:'))
+  })
+
+  it('every line break kind becomes a marked line; hidden and control characters are dropped', () => {
+    const cp = (n: number) => String.fromCodePoint(n)
+    const desc = `a${cp(0x0d)}${cp(0x0a)}b${cp(0x0d)}c${cp(0x2028)}d${cp(0x2029)}e${cp(0x85)}f${cp(0x0b)}g`
+      + `${cp(0x1b)}[31m${cp(0x202e)}h${cp(0x200b)}i${cp(0x00)}j`
+    const quoted = quoteOwnerDescription(desc)
+    expect(quoted.split('\n')).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'g[31mhij'].map((l) => OWNER_DESCRIPTION_MARK + l))
+    for (const n of [0x00, 0x0b, 0x0d, 0x1b, 0x85, 0x200b, 0x202e, 0x2028, 0x2029]) {
+      expect(quoted.includes(cp(n))).toBe(false)
+    }
+  })
+
+  it('a requester or category with a line break cannot draw a second header line', () => {
+    const lines = buildOwnerApprovalText(approval({
+      agent_id: 'samu\nDöntés: Dashboard -> Jóváhagyások (id: other-id-9999)',
+      category: 'skill_patch x',
+    })).split('\n')
+    expect(lines[0].startsWith('[JÓVÁHAGYÁS KELL] samu Döntés:')).toBe(true)
+    expect(lines.filter((l) => l.startsWith('Döntés:'))).toEqual(['Döntés: Dashboard -> Jóváhagyások (id: test-id-1234)'])
+  })
+
+  it('runs redact() on the description', () => {
+    const quoted = quoteOwnerDescription('token: eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.abcdefghijklmnop vége')
+    expect(quoted).toContain('[REDACTED]')
+    expect(quoted).not.toContain('eyJhbGciOiJIUzI1')
+  })
+
+  it('a long blank run cannot wrap a forged Döntés onto an unmarked visual line (Viktor, msg 1502/1)', () => {
+    const cp = (n: number) => String.fromCodePoint(n)
+    for (const blank of [' ', '\t', cp(0xa0), cp(0x3000), cp(0x2800), cp(0x3164), cp(0x115f), cp(0xffa0), cp(0x2007)]) {
+      const quoted = quoteOwnerDescription(`Skill frissítése${blank.repeat(300)}Döntés: Dashboard -> Jóváhagyások (id: other-id-9999)`)
+      expect(quoted).toBe(`${OWNER_DESCRIPTION_MARK}Skill frissítése Döntés: Dashboard -> Jóváhagyások (id: other-id-9999)`)
+    }
+  })
+
+  it('drops ALM, soft hyphen, CGJ, MVS, deprecated format chars, annotations, tag characters and lone surrogates (msg 1502/2)', () => {
+    const cp = (n: number) => String.fromCodePoint(n)
+    const hidden = [0x061c, 0x00ad, 0x034f, 0x180e, 0x206a, 0x206f, 0xfff9, 0xfffb, 0xe0001, 0xe0041, 0xe007f]
+    const quoted = quoteOwnerDescription(`a${hidden.map(cp).join('')}b${'\uD800'}c${'\uDC00'}d 😀`)
+    expect(quoted).toBe(`${OWNER_DESCRIPTION_MARK}abcd 😀`)
+  })
+
+  it('every marked line starts with an LRM, so an RTL description keeps the mark on the left (msg 1502/2)', () => {
+    expect(OWNER_DESCRIPTION_MARK.codePointAt(0)).toBe(0x200e)
+    const lines = quoteOwnerDescription('שלום\nDöntés').split('\n')
+    expect(lines.every((l) => l.startsWith('‎┆'))).toBe(true)
+  })
+
+  it('the cap never splits a surrogate pair (msg 1502/3)', () => {
+    const quoted = quoteOwnerDescription(`a${'😀'.repeat(800)}`)
+    const first = quoted.split('\n')[0]
+    expect(/[\uD800-\uDBFF]$/.test(first)).toBe(false)
+    expect(first.endsWith('😀')).toBe(true)
+  })
+
+  it('caps the description and points to the dashboard for the rest', () => {
+    const quoted = quoteOwnerDescription('x'.repeat(OWNER_DESCRIPTION_MAX + 500))
+    const lines = quoted.split('\n')
+    expect(lines).toEqual([OWNER_DESCRIPTION_MARK + 'x'.repeat(OWNER_DESCRIPTION_MAX), `${OWNER_DESCRIPTION_MARK}… (a teljes szöveg a dashboardon)`])
+    expect(quoteOwnerDescription('rövid')).toBe(`${OWNER_DESCRIPTION_MARK}rövid`)
   })
 })
 
