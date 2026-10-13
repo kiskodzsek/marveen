@@ -58,6 +58,22 @@ export function isReservedSender(raw: string): boolean {
   return senderKey(raw) === SYSTEM_SENDER
 }
 
+/**
+ * True when `raw`, trimmed, is already in the router's id alphabet
+ * (`[A-Za-z0-9_-]`, see sanitizeAgentIdent).
+ *
+ * The look-alike map above is a denylist, and a denylist only covers the
+ * scripts someone thought of: Latin small capitals ('ꜱʏꜱᴛᴇᴍ') and Cherokee
+ * ('Ꮪystem') both slipped past it (Viktor, 2026-10-13, L1). Routes that take a
+ * sender from the request therefore also hold it to this positive rule, so
+ * nothing outside the alphabet reaches from_agent, whatever it renders as. The
+ * map stays as the second layer for in-process writers.
+ */
+export function isPlainSenderId(raw: string): boolean {
+  const t = String(raw ?? '').trim()
+  return t !== '' && sanitizeAgentIdent(t) === t
+}
+
 export class ReservedSenderError extends Error {
   constructor(from: string) {
     super(`sender '${String(from).trim()}' is reserved for in-process system messages -- use createSystemMessage()`)

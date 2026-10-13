@@ -17,7 +17,7 @@ import {
   SCHEDULED_TASKS_DIR, MAX_SCHEDULED_TASK_PROMPT_LEN,
   listScheduledTasks, writeScheduledTask, markDefaultTaskRemoved, readScheduledTask,
 } from '../scheduled-tasks-io.js'
-import { validateScheduleUpdate, scheduleCreateRefusal } from '../schedule-api-fields.js'
+import { validateScheduleUpdate, scheduleCreateRefusal, COMMAND_TASK_API_REFUSAL } from '../schedule-api-fields.js'
 import { runScheduledTaskNow } from '../schedule-runner.js'
 import type { RouteContext } from './types.js'
 
@@ -254,6 +254,12 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     // JSONCLOBBER926: a corrupt task-config.json is refused, not reset to {enabled}.
     config = readJsonObjectForWrite(configPath)
     const newEnabled = !(config.enabled !== false)
+    // Viktor L2: the toggle is the other way to flip `enabled`, so the same
+    // rule as the PUT -- a command task can be switched off here, never on.
+    if (config.type === 'command' && newEnabled) {
+      json(res, { error: COMMAND_TASK_API_REFUSAL }, 400)
+      return true
+    }
     config.enabled = newEnabled
     atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
     logger.info({ name, enabled: newEnabled }, 'Scheduled task toggled')
