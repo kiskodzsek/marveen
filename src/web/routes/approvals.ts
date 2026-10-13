@@ -85,6 +85,47 @@ export function isMessageId(v: unknown): v is string {
   return typeof v === 'string' && v.length <= 250 && /^<[^<>\s@]+@[^<>\s@]+>$/.test(v)
 }
 
+// The description is agent-written, and it is what the owner approves. A line
+// in it such as "Döntés: Dashboard -> Jóváhagyások (id: <another id>)" or a
+// second "[JÓVÁHAGYÁS KELL] ..." header could steer the owner to approve a
+// different request (Viktor, msg 1493). So the fixed fields come first, and
+// every description line starts with a visible mark: no line of it can look
+// like a header or the decision line. It is not cut to one line, because the
+// owner has to see what they approve; past the cap the dashboard has the rest.
+// The leading LRM keeps every marked line left-to-right, so an RTL character
+// in the description cannot move the mark to the far end of its line.
+export const OWNER_DESCRIPTION_MARK = '\u200e┆ '
+export const OWNER_DESCRIPTION_MAX = 1500
+// Line breaks of every kind become \n, so each one gets its mark. Built from
+// code points so the source carries no raw control characters.
+const LINE_BREAKS = new RegExp('\\r\\n|[\\r\\u000b\\u000c\\u0085\\u2028\\u2029]', 'g')
+// Control characters other than \n, plus the invisible ones that reorder or
+// hide text: bidi marks, overrides and isolates (ALM included), zero-width and
+// joiner-like marks, soft hyphen, interlinear annotation, BOM, tag characters,
+// and lone surrogates (with the u flag the surrogate range matches only those).
+// A tab is left to BLANK_RUNS, so it becomes a space.
+const HIDDEN_CHARS = new RegExp('[\\u0000-\\u0008\\u000e-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u061c\\u180e\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u206f\\ufeff\\ufff9-\\ufffb\\u{e0000}-\\u{e007f}\\ud800-\\udfff]', 'gu')
+// A long run of blank-looking characters would make Telegram wrap a forged
+// "Döntés: ..." onto an unmarked visual line, so every such run becomes one
+// space: ordinary and wide spaces plus the fillers that render blank (braille
+// blank, Hangul fillers).
+const BLANK_RUNS = new RegExp('[ \\t\\u00a0\\u1680\\u2000-\\u200a\\u202f\\u205f\\u3000\\u2800\\u115f\\u1160\\u3164\\uffa0]+', 'g')
+
+// Agent-written header fields (requester, category): one line, nothing hidden.
+function headerField(value: string): string {
+  return value.replace(LINE_BREAKS, ' ').replace(HIDDEN_CHARS, '').replace(BLANK_RUNS, ' ').replace(/\s+/g, ' ').trim().slice(0, 80)
+}
+
+export function quoteOwnerDescription(description: string): string {
+  let text = redact(description.replace(LINE_BREAKS, '\n').replace(HIDDEN_CHARS, '').replace(BLANK_RUNS, ' ')).trim()
+  if (text.length > OWNER_DESCRIPTION_MAX) {
+    // A cut through a surrogate pair would leave a lone high surrogate.
+    const head = text.slice(0, OWNER_DESCRIPTION_MAX).replace(/[\uD800-\uDBFF]$/, '')
+    text = `${head.trimEnd()}\n… (a teljes szöveg a dashboardon)`
+  }
+  return text.split('\n').map(line => `${OWNER_DESCRIPTION_MARK}${line}`.trimEnd()).join('\n')
+}
+
 // Owner-facing Telegram text. Pure + exported for tests. Plain text (no
 // markdown escaping concerns), proper accents: this is outgoing copy.
 export function buildOwnerApprovalText(approval: Approval): string {
@@ -92,10 +133,11 @@ export function buildOwnerApprovalText(approval: Approval): string {
     ? new Date(approval.timeout_at * 1000).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
     : 'nincs'
   return [
-    `[JÓVÁHAGYÁS KELL] ${approval.agent_id} | ${approval.category}`,
-    approval.action_description,
+    `[JÓVÁHAGYÁS KELL] ${headerField(approval.agent_id)} | ${headerField(approval.category)}`,
     `Lejárat: ${expires}`,
     `Döntés: Dashboard -> Jóváhagyások (id: ${approval.id})`,
+    'Leírás:',
+    quoteOwnerDescription(approval.action_description),
   ].join('\n')
 }
 
