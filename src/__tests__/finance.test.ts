@@ -79,7 +79,7 @@ vi.mock('../logger.js', () => {
 
 const {
   parseCsv, readCapped, readMeta, listCompanies, loadCompany, loadAll, monthlyPnl, categoryTotals, forecastTable,
-  bankLines, bankScenarios, summarizeLine, renderFinancePage, resolveFinanceRoot, TOTAL_ACCOUNT, FINANCE_DOC_CSP,
+  bankLines, bankScenarios, summarizeLine, productCostTable, renderFinancePage, resolveFinanceRoot, TOTAL_ACCOUNT, FINANCE_DOC_CSP,
 } = await import('../web/finance.js')
 const { tryHandleFinance } = await import('../web/routes/finance.js')
 type RouteContext = import('../web/routes/types.js').RouteContext
@@ -202,6 +202,21 @@ describe('validation and aggregation', () => {
     expect(huf.firstNegative?.date).toBe('2026-10-31')
     expect(summarizeLine(lines.find((l) => l.account === TOTAL_ACCOUNT && l.scenario === 'rossz')!).firstNegative?.date).toBe('2026-11-30')
     expect(summarizeLine(lines.find((l) => l.account === TOTAL_ACCOUNT && l.scenario === 'alap')!).firstNegative).toBeNull()
+  })
+  it('product cost: product x item x scenario in file order, estimate without a jeloles column, no sum', () => {
+    writeFileSync(join(root, 'beta', 'marabel_termek_koltseg.csv'),
+      'termek,tetel,osszeg_huf_per_egyseg,forgatokonyv\n' +
+      'Konyv,netto_bevetel,10000,normal\nKonyv,valtozo_osszesen,4000,normal\nKonyv,fedezet,6000,normal\n' +
+      'Konyv,netto_bevetel,10000,worst\nKonyv,valtozo_osszesen,12000,worst\nKonyv,fedezet,-2000,worst\n')
+    const rows = loadCompany(root, 'beta').productCost.rows
+    const t = productCostTable(rows)
+    expect(t.products).toEqual([{ product: 'Konyv', items: ['netto_bevetel', 'valtozo_osszesen', 'fedezet'] }])
+    expect(t.scenarios).toEqual(['normal', 'worst'])
+    expect(t.cells.get('Konyv\u0000fedezet\u0000worst')).toEqual({ amount: -2000, estimate: true })
+    const html = renderFinancePage([loadCompany(root, 'beta')], { lang: 'hu', theme: 'light' })
+    expect(html).toContain('Fedezet')
+    expect(html).toContain('<td class="num neg est">~-2')
+    expect(html).not.toContain('Konyv: Összesen')
   })
   it('a missing required column is reported, no rows taken', () => {
     writeFileSync(join(root, 'beta', 'bank_projekcio.csv'), 'datum,egyenleg_huf\n2026-10-01,1\n')

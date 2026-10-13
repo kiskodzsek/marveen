@@ -54,7 +54,7 @@ export type Kind = 'bevetel' | 'koltseg' | 'nem_eredmeny'
 export interface PnlRow { month: string; category: string; amount: number; kind: Kind; estimate: boolean; source: string }
 export interface ForecastRow { month: string; category: string; amount: number; scenario: string; kind: Kind | null; estimate: boolean }
 export interface BankRow { date: string; account: string; balance: number; actual: boolean; scenario: string; event: string }
-export interface ProductCostRow { product: string; item: string; amount: number; scenario: string }
+export interface ProductCostRow { product: string; item: string; amount: number; scenario: string; estimate: boolean }
 export interface Meta {
   name: string | null
   generated: string | null
@@ -275,8 +275,10 @@ const mapBank: RowMapper<BankRow> = (c, line, errors) => {
 
 const mapProductCost: RowMapper<ProductCostRow> = (c, line, errors) => {
   const amt = amount(c['osszeg_huf_per_egyseg']!, 'osszeg_huf_per_egyseg', line, errors)
-  if (amt === null) return null
-  return { product: cap(c['termek']!) || '?', item: cap(c['tetel']!), amount: amt, scenario: cap(c['forgatokonyv']!) || 'worst' }
+  // A unit-cost model is an estimate unless a jeloles column says otherwise.
+  const estimate = c['jeloles'] === undefined ? true : estimateOf(c['jeloles'], line, errors)
+  if (amt === null || estimate === undefined) return null
+  return { product: cap(c['termek']!) || '?', item: cap(c['tetel']!), amount: amt, scenario: cap(c['forgatokonyv']!) || 'worst', estimate }
 }
 
 const EMPTY_META: Meta = {
@@ -498,6 +500,31 @@ export function summarizeLine(line: BankLine): BankSummary {
   return { account: line.account, scenario: line.scenario, min, firstNegative }
 }
 
+export interface ProductCostTable {
+  products: Array<{ product: string; items: string[] }>
+  scenarios: string[]
+  cells: Map<string, { amount: number; estimate: boolean }>
+}
+
+/** Products and their items in file order; scenarios in file order; one cell per (product, item, scenario), summed if repeated. */
+export function productCostTable(rows: ProductCostRow[]): ProductCostTable {
+  const products: Array<{ product: string; items: string[] }> = []
+  const scenarios: string[] = []
+  const cells = new Map<string, { amount: number; estimate: boolean }>()
+  for (const r of rows) {
+    let p = products.find((x) => x.product === r.product)
+    if (!p) { p = { product: r.product, items: [] }; products.push(p) }
+    if (!p.items.includes(r.item)) p.items.push(r.item)
+    if (!scenarios.includes(r.scenario)) scenarios.push(r.scenario)
+    const key = `${r.product}\u0000${r.item}\u0000${r.scenario}`
+    const c = cells.get(key) ?? { amount: 0, estimate: false }
+    c.amount += r.amount
+    c.estimate = c.estimate || r.estimate
+    cells.set(key, c)
+  }
+  return { products, scenarios, cells }
+}
+
 // ------------------------------------------------------------------ rendering
 
 const L: Record<Lang, Record<string, string>> = {
@@ -509,8 +536,8 @@ const L: Record<Lang, Record<string, string>> = {
     categories: 'Kategóriák', kind: 'Típus', forecast: 'Előrejelzés (nettó)', scenario: 'Forgatókönyv',
     method: 'Az előrejelzés módszere', bank: 'Bankegyenleg-projekció', account: 'Számla', allAccounts: 'Összes számla',
     lowest: 'Legalacsonyabb pont', balance: 'Egyenleg', firstNeg: 'Először mínuszban', never: 'nem megy mínuszba', actual: 'tényleges',
-    projected: 'előrejelzett', events: 'Egyszeri tételek', product: 'Termékenkénti költség (worst case)',
-    productCol: 'Termék', item: 'Tétel', perUnit: 'Ft / egység', errors: 'Hibák (a hibás sorok kimaradtak)',
+    projected: 'előrejelzett', events: 'Egyszeri tételek', product: 'Termékenkénti egységköltség és fedezet (Ft / rendelés)',
+    item: 'Tétel', errors: 'Hibák (a hibás sorok kimaradtak)',
     estimateNote: '~ és dőlt: tipp (vetítés vagy bizonytalan besorolás), a többi tény (kivonatból).',
     overrides: 'Kézi alapszint (tipp)', notIncluded: 'Nem szerepel benne', unclassified: 'Besorolatlan tételek',
     warnings: 'Figyelmeztetés',
@@ -523,8 +550,8 @@ const L: Record<Lang, Record<string, string>> = {
     categories: 'Categories', kind: 'Type', forecast: 'Forecast (net)', scenario: 'Scenario',
     method: 'Forecast method', bank: 'Bank balance projection', account: 'Account', allAccounts: 'All accounts',
     lowest: 'Lowest point', balance: 'Balance', firstNeg: 'First below zero', never: 'stays above zero', actual: 'actual',
-    projected: 'projected', events: 'One-off items', product: 'Cost per product (worst case)',
-    productCol: 'Product', item: 'Item', perUnit: 'HUF / unit', errors: 'Problems (invalid rows skipped)',
+    projected: 'projected', events: 'One-off items', product: 'Unit cost and margin per product (HUF / order)',
+    item: 'Item', errors: 'Problems (invalid rows skipped)',
     estimateNote: '~ and italic: estimate (projection or uncertain classification), the rest is fact (from statements).',
     overrides: 'Manual baseline (estimate)', notIncluded: 'Not included', unclassified: 'Unclassified items',
     warnings: 'Warning',
@@ -541,6 +568,25 @@ const CATEGORY: Record<Lang, Record<string, string>> = {
     bevetel: 'Income', ber_jarulek: 'Payroll and contributions', adok: 'Taxes', infra_saas: 'Infrastructure and SaaS', auto: 'Car',
     konyvelo: 'Accountant', bank_dij: 'Bank fees', egyeb_koltseg: 'Other costs', nem_eredmeny: 'Non-result',
   },
+}
+
+/** Unit-cost item slugs (Juró, msg 1906). An unknown slug is shown as is. */
+const ITEM: Record<Lang, Record<string, string>> = {
+  hu: {
+    netto_bevetel: 'Nettó bevétel', ai: 'AI', leirat: 'Leirat', sms: 'SMS', gyartas: 'Gyártás', posta: 'Posta',
+    stripe: 'Stripe-díj', valtozo_osszesen: 'Változó költség összesen', fedezet: 'Fedezet',
+    havi_10_rendeles: 'Havi 10 rendelésnél', havi_50_rendeles: 'Havi 50 rendelésnél', havi_200_rendeles: 'Havi 200 rendelésnél',
+  },
+  en: {
+    netto_bevetel: 'Net revenue', ai: 'AI', leirat: 'Transcription', sms: 'SMS', gyartas: 'Production', posta: 'Postage',
+    stripe: 'Stripe fee', valtozo_osszesen: 'Variable cost total', fedezet: 'Margin',
+    havi_10_rendeles: 'At 10 orders a month', havi_50_rendeles: 'At 50 orders a month', havi_200_rendeles: 'At 200 orders a month',
+  },
+}
+const MARGIN_ITEMS = new Set(['valtozo_osszesen', 'fedezet'])
+
+function itemLabel(slug: string, lang: Lang): string {
+  return ITEM[lang][slug] ?? slug
 }
 
 export function escapeHtml(s: string): string {
@@ -724,14 +770,22 @@ function renderCompany(c: CompanyData, t: Record<string, string>, lang: Lang): s
   }
 
   if (c.productCost.present) {
-    const byProduct = new Map<string, ProductCostRow[]>()
-    for (const r of c.productCost.rows) byProduct.set(r.product, [...(byProduct.get(r.product) ?? []), r])
+    // Product x item rows, one column per scenario. The values are shown as
+    // given (no sum: the file already carries its own subtotal and margin
+    // items, so adding them up would double count); a negative margin is red.
+    const pc = productCostTable(c.productCost.rows)
     parts.push(`<h3>${escapeHtml(t.product!)}</h3>`)
-    if (byProduct.size) {
-      parts.push(`<table><thead><tr><th>${escapeHtml(t.productCol!)}</th><th>${escapeHtml(t.item!)}</th><th>${escapeHtml(t.scenario!)}</th><th class="num">${escapeHtml(t.perUnit!)}</th></tr></thead><tbody>${
-        [...byProduct.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([p, items]) =>
-          items.map((r) => `<tr><td>${escapeHtml(p)}</td><td>${escapeHtml(r.item)}</td><td>${escapeHtml(r.scenario)}</td>${numCell(r.amount)}</tr>`).join('') +
-          `<tr class="sub"><th colspan="3">${escapeHtml(p)}: ${escapeHtml(t.total!)}</th>${numCell(items.reduce((a, r) => a + r.amount, 0))}</tr>`,
+    if (pc.products.length) {
+      parts.push(`<table><thead><tr><th>${escapeHtml(t.item!)}</th>${
+        pc.scenarios.map((s) => `<th class="num">${escapeHtml(s)}</th>`).join('')
+      }</tr></thead><tbody>${
+        pc.products.map((p) => `<tr class="prod"><th colspan="${pc.scenarios.length + 1}">${escapeHtml(p.product)}</th></tr>` +
+          p.items.map((it) => `<tr${MARGIN_ITEMS.has(it) ? ' class="sub"' : ''}><td>${escapeHtml(itemLabel(it, lang))}</td>${
+            pc.scenarios.map((s) => {
+              const cell = pc.cells.get(`${p.product}\u0000${it}\u0000${s}`)
+              return cell ? numCell(cell.amount, cell.estimate) : '<td class="num">-</td>'
+            }).join('')
+          }</tr>`).join(''),
         ).join('')
       }</tbody></table>`)
     }
@@ -765,7 +819,7 @@ table{border-collapse:collapse;width:100%;max-width:820px;margin:4px 0}
 th,td{border-bottom:1px solid var(--line);padding:4px 8px;text-align:left}
 .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.neg{color:var(--neg)}
 .est{font-style:italic}tr.gap td{color:var(--muted)}.gaptxt{text-align:center;font-style:italic}
-tr.sub th,tr.sub td,tfoot th{font-weight:600}
+tr.sub th,tr.sub td,tfoot th{font-weight:600}tr.prod th{padding-top:12px;border-bottom:2px solid var(--line)}
 .chart{width:100%;max-width:820px;height:auto;display:block}
 .chart .base,.chart .zero{stroke:var(--line);stroke-width:1}.chart .zero{stroke-dasharray:2 3}
 .chart .ax{fill:var(--muted);font-size:10px}.chart .gap{font-style:italic}
