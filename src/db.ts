@@ -1571,6 +1571,25 @@ export function listDashboardUsers(): DashboardUserPublic[] {
     .all() as DashboardUserPublic[]
 }
 
+// FLEETEXPORT1013 (Viktor 2460): has this install EVER had a dashboard user?
+// AUTOINCREMENT keeps the high-water id in sqlite_sequence even after every
+// user is deleted, so "empty now" and "never had one" stay distinguishable.
+export function dashboardUsersEverCreated(): boolean {
+  const row = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'dashboard_users'").get() as { seq: number } | undefined
+  return (row?.seq ?? 0) > 0 || countDashboardUsers(true) > 0
+}
+
+// The OWNER is the first dashboard user this install ever created: with
+// AUTOINCREMENT that is id 1, and an id is never reused, so a user created
+// later -- by anyone -- can never become the owner, not even after the first
+// one is deleted. Owner deleted or disabled -> undefined (callers fail closed).
+export const OWNER_DASHBOARD_USER_ID = 1
+export function getOwnerDashboardUser(): { id: number; username: string } | undefined {
+  const row = db.prepare('SELECT id, username, disabled FROM dashboard_users WHERE id = ?').get(OWNER_DASHBOARD_USER_ID) as
+    { id: number; username: string; disabled: number } | undefined
+  return row && !row.disabled ? { id: row.id, username: row.username } : undefined
+}
+
 // enabled-only count feeds `login_available`; total count feeds `setup_required`.
 export function countDashboardUsers(includeDisabled = false): number {
   const sql = includeDisabled

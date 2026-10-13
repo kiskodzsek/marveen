@@ -765,7 +765,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsEmailGate(name)) {
     injectEmailSendGate(existing, hasThreadReplyCapability(name, readAgentCapabilities(name)))
   }
-  if (agentGetsGovernanceGates(name)) injectSelfPaceGate(existing)
+  if (agentGetsGovernanceGates(name)) injectSelfPaceGate(existing, name)
   if (agentGetsKanbanWriteGate(name)) {
     injectKanbanWriteGate(existing)
     injectDigestProvenanceGate(existing)
@@ -1141,11 +1141,22 @@ export function agentGetsGovernanceGates(name: string): boolean {
 // Idempotently wire the self-pace-gate PreToolUse hook (blocks ScheduleWakeup /
 // Cron* / RemoteTrigger + the Bash self-injection routes). Same shape + dedupe
 // discipline as injectEmailSendGate.
-export function injectSelfPaceGate(existing: Record<string, unknown>): void {
+// LAUNCHDOPS1013: the agents the self-pace gate's narrow launchd exception may
+// apply to. Must equal LAUNCHD_OPS_AGENTS in scripts/self-pace-gate.mjs (a test
+// pins it). Only THEIR hook command carries --agent <name>; the gate then also
+// requires CLAUDE_CONFIG_DIR to name the same agent. Every other agent's command
+// stays byte-identical.
+export const SELF_PACE_LAUNCHD_AGENTS: readonly string[] = ['pulzus']
+
+export function selfPaceGateArgs(name?: string): string[] {
+  return name && SELF_PACE_LAUNCHD_AGENTS.includes(name) ? ['--agent', name] : []
+}
+
+export function injectSelfPaceGate(existing: Record<string, unknown>, name?: string): void {
   const hooks = (existing.hooks && typeof existing.hooks === 'object'
     ? existing.hooks
     : (existing.hooks = {})) as Record<string, unknown>
-  const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'self-pace-gate.mjs'))
+  const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'self-pace-gate.mjs'), selfPaceGateArgs(name))
   // Registration guard: a /tmp or missing path must never enter shared settings.
   if (isUnsafeHookCommand(command)) return
   const entry = {
@@ -1743,7 +1754,7 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
   let settings: Record<string, unknown> = {}
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
   const emailCmd = hookCommand(join(PROJECT_ROOT, 'scripts', 'email-send-gate.mjs'))
-  const paceCmd = hookCommand(join(PROJECT_ROOT, 'scripts', 'self-pace-gate.mjs'))
+  const paceCmd = hookCommand(join(PROJECT_ROOT, 'scripts', 'self-pace-gate.mjs'), selfPaceGateArgs(name))
   const destructiveCmd = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'destructive-gate.py'))
   const hooks = (settings.hooks && typeof settings.hooks === 'object')
     ? settings.hooks as Record<string, unknown>
@@ -1776,7 +1787,7 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
   // The injectors dedupe by script basename, so a stale bare-`node` entry is
   // replaced in place rather than accumulated.
   if (needEmail) injectEmailSendGate(settings, threadReply)
-  if (needPace) injectSelfPaceGate(settings)
+  if (needPace) injectSelfPaceGate(settings, name)
   if (needDestructive) injectDestructiveGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true

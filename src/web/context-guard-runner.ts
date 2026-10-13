@@ -16,6 +16,7 @@ import {
   clearSaturationBannerOverride,
 } from './agent-process.js'
 import { sendSystemDirective } from './system-directive.js'
+import { urgentEmitRefusal } from './message-router.js'
 import { notifyChannel } from '../notify.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectPaneState, paneShowsContextSaturation, paneShowsContextSaturationHardError } from '../pane-state.js'
@@ -68,6 +69,10 @@ const SATURATION_OVERRIDE_TTL_MS = 3 * INTERVAL_MS
 // agent at 'idle', which is safe -- the worst case is a repeated handoff
 // request, and cooldown prevents restart loops within a run.
 const guardStates = new Map<string, GuardState>()
+// CGGAPS1013 / Viktor 2453 L2: early cooldown exits in the current chain, per
+// agent (reset when a cooldown runs out normally). In memory, like guardStates.
+const earlyCooldownExits = new Map<string, number>()
+const earlyBlockLogged = new Set<string>()
 
 // agent name -> when the daily-handoff tier last fired (ms). Seeded on first
 // sight WITHOUT firing, so a slot that already passed before the dashboard
@@ -371,7 +376,9 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     : agentRunState(name) === 'running'
 
   // Only pay for the tmux/transcript probes a decision can actually use.
-  const needPct = state.phase === 'idle' || state.phase === 'await-handoff'
+  // 'cooldown' too (CGGAPS1013): a fresh session can cross the act band
+  // inside the cooldown, and decideGuard needs pct + idleMs to see it.
+  const needPct = state.phase === 'idle' || state.phase === 'await-handoff' || state.phase === 'cooldown'
   const pane = running && needPct ? capturePane(session) : null
   const sessionReady = running && state.phase === 'await-ready'
     ? await isSessionReadyForPrompt(session)
@@ -467,7 +474,25 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     dailyHandoffDue: applyDailyHandoffSweep(lastDailyHandoff, name, cfg, running && state.phase === 'idle', localMidnightMs(nowMs), nowMs),
   }
 
-  const decision = decideGuard(state, inputs, cfg)
+  // L2 (Viktor 2453): a cooldown may end early (CGGAPS1013), but never twice
+  // in a row. A fresh session whose BASE context already sits above actPct (a
+  // limit set too low) would otherwise loop restart -> early exit -> restart
+  // every few minutes; the second cooldown in such a chain runs its full
+  // length, and the chain is logged loudly.
+  const earlyBlocked = state.phase === 'cooldown' && (earlyCooldownExits.get(name) ?? 0) >= 1
+  const decision = decideGuard(state, earlyBlocked ? { ...inputs, pct: null } : inputs, cfg)
+  if (state.phase === 'cooldown') {
+    if (decision.action !== 'none') {
+      earlyCooldownExits.set(name, (earlyCooldownExits.get(name) ?? 0) + 1)
+      logger.warn({ name, reason: decision.reason, pct: inputs.pct }, 'context-guard: cooldown ended early (the next cooldown in this chain will run its full length)')
+    } else if (decision.nextState.phase !== 'cooldown') {
+      earlyCooldownExits.delete(name)
+    } else if (earlyBlocked && inputs.pct !== null && inputs.pct >= cfg.actPct && !earlyBlockLogged.has(name)) {
+      earlyBlockLogged.add(name)
+      logger.warn({ name, pct: inputs.pct, limitTokens: cfg.limitTokens }, 'context-guard: second early cooldown exit in a row refused -- is limitTokens below this agent\'s base context?')
+    }
+    if (decision.nextState.phase !== 'cooldown') earlyBlockLogged.delete(name)
+  }
 
   // Mark the slot served at DECISION time, not after the prompt lands. If the
   // directive fails to send, the machine is already in await-handoff and its
@@ -539,7 +564,13 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
         // bare sendPromptToSession -- this text asks the agent to drop work
         // and STOP, which without a queue anchor is indistinguishable from a
         // prompt injection (measured 2026-09-03: Boni correctly refused it).
-        await sendSystemDirective(
+        // M1 (Viktor 2453): emitGuard -- never type into a permission prompt,
+        // first-run gate, blocking menu or unreadable pane (text + Enter would
+        // answer the prompt with its preselected "Yes"). The busy-pane request
+        // (hard+busy) is exactly the case where one can open during the idle
+        // wait. Nothing typed -> the anchor row is marked failed and the
+        // await-handoff timeout stays the fallback.
+        const handoffOutcome = await sendSystemDirective(
           name,
           session,
           decision.reason.startsWith(STALE_REFRESH_REASON_PREFIX)
@@ -557,7 +588,12 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
                 // critical" at 04:00 to a session that is perfectly healthy.
                 ? dailyHandoffPrompt(cfg.dailyHandoffTime ?? '', handoffPathFor(name))
                 : handoffPrompt(pctRound ?? 0, handoffPathFor(name)),
+          null,
+          { emitGuard: urgentEmitRefusal },
         )
+        if (handoffOutcome === 'aborted-guard') {
+          logger.warn({ name, reason: decision.reason }, 'context-guard: handoff request NOT typed -- the pane holds a prompt/menu or is unreadable (emit guard)')
+        }
         break
       case 'restart': {
         // A forced restart must never be silent: the supervisor has to know
@@ -667,11 +703,23 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
         // measuring now would be meaningless (the old session is gone).
         // GUARDHITELES903: anchored like the handoff request -- the resume
         // prompt steers a fresh session's entire first turn.
-        await sendSystemDirective(
+        // M1 (Viktor 2453): same emit guard. After a ready timeout nothing
+        // else gates this send, and a fresh session that went straight to
+        // work may be sitting on a permission prompt (e.g. a write to its own
+        // ~/.claude). Nothing typed -> stay in await-ready: its deadline has
+        // passed, so the next sweep tries again; the guard never cools down
+        // on a resume that did not land.
+        const resumeOutcome = await sendSystemDirective(
           name,
           session,
           resumePrompt(name, handoffPathFor(name), hadHandoff, state.handoffStaleMinutes),
+          null,
+          { emitGuard: urgentEmitRefusal },
         )
+        if (resumeOutcome === 'aborted-guard') {
+          guardStates.set(name, state)
+          logger.warn({ name }, 'context-guard: resume NOT typed -- the pane holds a prompt/menu or is unreadable (emit guard); retrying next sweep')
+        }
         break
       }
     }
