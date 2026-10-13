@@ -934,6 +934,15 @@ window._i18n.hu = {
   'status.comp.maintenance':     'karbantartás',
 
   // --- Costs (CostOps v0.1, PR #524) ---
+  'finance.nav':                 'Pénzügy',
+  'finance.page_title':          'Pénzügy',
+  'finance.page_subtitle':       'Havi eredmény, előrejelzés és bankegyenleg cégenként, csak olvasható',
+  'finance.loading':             'Betöltés...',
+  'finance.login_needed':        'A pénzügyi nézet csak jelszavas bejelentkezéssel nyílik meg. A közös hozzáférési token ehhez nem elég, mert azt a flotta minden ágense ismeri.',
+  'finance.login_btn':           'Bejelentkezés',
+  'finance.disabled':            'A pénzügyi mappa nincs beállítva (FINANCE_DIR).',
+  'finance.not_allowed':         'A felhasználód nincs a pénzügyi nézet listáján (FINANCE_USERS).',
+  'finance.load_failed':         'Nem sikerült betölteni a pénzügyi nézetet.',
   'costs.page_title':            'Költségek',
   'costs.page_subtitle':         'Havi költség-összefoglaló a helyi konfigurációból',
   'costs.loading':               'Betöltés...',
