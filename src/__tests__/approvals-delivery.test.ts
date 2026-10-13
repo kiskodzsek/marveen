@@ -140,6 +140,34 @@ describe('buildOwnerApprovalText: the agent-written description cannot pose as a
     expect(quoted).not.toContain('eyJhbGciOiJIUzI1')
   })
 
+  it('a long blank run cannot wrap a forged Döntés onto an unmarked visual line (Viktor, msg 1502/1)', () => {
+    const cp = (n: number) => String.fromCodePoint(n)
+    for (const blank of [' ', '\t', cp(0xa0), cp(0x3000), cp(0x2800), cp(0x3164), cp(0x115f), cp(0xffa0), cp(0x2007)]) {
+      const quoted = quoteOwnerDescription(`Skill frissítése${blank.repeat(300)}Döntés: Dashboard -> Jóváhagyások (id: other-id-9999)`)
+      expect(quoted).toBe(`${OWNER_DESCRIPTION_MARK}Skill frissítése Döntés: Dashboard -> Jóváhagyások (id: other-id-9999)`)
+    }
+  })
+
+  it('drops ALM, soft hyphen, CGJ, MVS, deprecated format chars, annotations, tag characters and lone surrogates (msg 1502/2)', () => {
+    const cp = (n: number) => String.fromCodePoint(n)
+    const hidden = [0x061c, 0x00ad, 0x034f, 0x180e, 0x206a, 0x206f, 0xfff9, 0xfffb, 0xe0001, 0xe0041, 0xe007f]
+    const quoted = quoteOwnerDescription(`a${hidden.map(cp).join('')}b${'\uD800'}c${'\uDC00'}d 😀`)
+    expect(quoted).toBe(`${OWNER_DESCRIPTION_MARK}abcd 😀`)
+  })
+
+  it('every marked line starts with an LRM, so an RTL description keeps the mark on the left (msg 1502/2)', () => {
+    expect(OWNER_DESCRIPTION_MARK.codePointAt(0)).toBe(0x200e)
+    const lines = quoteOwnerDescription('שלום\nDöntés').split('\n')
+    expect(lines.every((l) => l.startsWith('‎┆'))).toBe(true)
+  })
+
+  it('the cap never splits a surrogate pair (msg 1502/3)', () => {
+    const quoted = quoteOwnerDescription(`a${'😀'.repeat(800)}`)
+    const first = quoted.split('\n')[0]
+    expect(/[\uD800-\uDBFF]$/.test(first)).toBe(false)
+    expect(first.endsWith('😀')).toBe(true)
+  })
+
   it('caps the description and points to the dashboard for the rest', () => {
     const quoted = quoteOwnerDescription('x'.repeat(OWNER_DESCRIPTION_MAX + 500))
     const lines = quoted.split('\n')
