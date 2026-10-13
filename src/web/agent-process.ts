@@ -43,6 +43,7 @@ import { readClaudePlansState } from './claude-plans-state.js'
 import { provisionMemoryBoundaryDir } from './memory-boundary.js'
 import { renameSharedCredentialsIfSafe } from './claude-credentials-guard.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { resolveOwnClaudeJsonPath, takeClaudeJsonSnapshot, restoreClaudeJsonAfterStop, waitForPidExit, describeShape, type ClaudeJsonSnapshot } from './claude-json-guard.js'
 import { paneOneLine } from './pane-text.js'
 import { withSessionSendLock, tryAcquireSessionSendLane, type SendLockMode } from './session-send-lock.js'
 import {
@@ -2765,6 +2766,19 @@ export async function stopAgentProcess(name: string): Promise<{ ok: boolean; err
   const target = agentTmuxTarget(name)
   const host = target.host
 
+  // CLAUDEJSON1014: the exiting claude can truncate its isolated .claude.json
+  // (see claude-json-guard.ts). Snapshot it in memory before the kill, together
+  // with the PID whose exit the restore has to wait for. Local agents running
+  // as the router's own user only: a remote agent's file is not on this host,
+  // and a per-user agent's pane PID lives on another tmux server.
+  let cjSnapshot: ClaudeJsonSnapshot | null = null
+  let cjOldPid: number | null = null
+  if (!host && !target.runAsUser) {
+    const cjPath = resolveOwnClaudeJsonPath(agentDir(name))
+    cjSnapshot = cjPath ? takeClaudeJsonSnapshot(cjPath) : null
+    cjOldPid = cjSnapshot ? getClaudePidForSession(session) : null
+  }
+
   try {
     runTmux(target, ['kill-session', '-t', exactTmuxTarget(session)], { timeout: 5000 })
     // A LAUNCH-TITKOK NEM ELIK TUL A LEALLITAST. Enelkul egy rotalt kulcs REGI erteke a lemezen
@@ -2786,6 +2800,22 @@ export async function stopAgentProcess(name: string): Promise<{ ok: boolean; err
         }
       } catch (err) {
         logger.warn({ err, name }, 'post-stop channel-poller reap failed')
+      }
+    }
+    if (cjSnapshot) {
+      if (cjOldPid === null) {
+        logger.warn({ name }, 'claude-json-guard: no claude PID in the pane before the stop; exit cannot be confirmed, restore skipped')
+      } else {
+        const oldPid = cjOldPid
+        const r = await restoreClaudeJsonAfterStop(cjSnapshot, {
+          waitForExit: () => waitForPidExit(oldPid),
+          resolveTarget: () => resolveOwnClaudeJsonPath(agentDir(name)),
+        })
+        if (r.outcome === 'restored') {
+          logger.warn({ name, reason: r.reason, lost: r.lost, before: r.before, after: r.after }, 'claude-json-guard: exiting claude truncated .claude.json; pre-stop keys restored')
+        } else if (r.outcome === 'skipped') {
+          logger.warn({ name, reason: r.reason, snapshot: describeShape(cjSnapshot.bytes, cjSnapshot.data, cjSnapshot.sha) }, 'claude-json-guard: restore skipped')
+        }
       }
     }
     logger.info({ name, session, host }, 'Agent tmux session stopped')
