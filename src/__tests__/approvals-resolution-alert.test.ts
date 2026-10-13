@@ -98,11 +98,13 @@ describe('approval resolution alert (9a2925a7)', () => {
   })
 
   it('the warning matrix', () => {
-    expect(OWNER_RESOLUTION_SOURCES).toEqual(['telegram_text', 'telegram_button'])
+    // APPROVALBOT1013 (Viktor 2302/2): telegram_button is server-only now; a PATCH
+    // cannot claim it (400), so on this path it is no longer an owner source.
+    expect(OWNER_RESOLUTION_SOURCES).toEqual(['telegram_text'])
     const w = (resolvedBy: string, resolverMessageId: number | null, requestMessageId: number | null) =>
       approvalResolutionWarnings({ resolvedBy, resolverMessageId, requestMessageId })
     expect(w('telegram_text', 101, 100)).toEqual([])
-    expect(w('telegram_button', 101, 100)).toEqual([])
+    expect(w('telegram_button', 101, 100)).toEqual(['nem Telegram-forrás: telegram_button'])
     expect(w('dashboard', 101, 100)).toEqual(['nem Telegram-forrás: dashboard'])
     expect(w('telegram_text', null, 100)).toEqual(['nincs tg-msg'])
     expect(w('telegram_text', 100, 100)).toEqual(['a tg-msg (100) nem újabb a kérésénél (100)'])
