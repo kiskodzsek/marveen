@@ -79,19 +79,30 @@ export const MAX_NUDGES_PER_HOUR = 10
 // main-agent prompt). The clock is lastNudgeAt, in memory: a dashboard
 // restart allows one early batch, never a missed one.
 export const BATCH_INTERVAL_MS = 30 * 60_000
-// Urgent = may not wait for the batch: an approval request, an outage or an
-// explicit urgent marker in the message HEAD, or the supervisor itself
-// (session-stuck, egress-allowlist change). Head only: on 2026-10-13
-// (15:15-17:35, 92 rows to the main agent) a whole-text match also caught
-// routine mail that merely discussed the outage runbook. A false positive
-// costs one early turn, a false negative up to BATCH_INTERVAL_MS.
-const URGENT_PREFIX_RX = /^\s*\[APPROVAL_REQUEST\]/
-const URGENT_HEAD_RX = /KIES[EÉ]S|OUTAGE|S[UÜ]RG[OŐ]S|URGENT/i
+// Urgent = may not wait for the batch. In order (Viktor 2453):
+//  1. the AUTHENTICATED urgent column (Card 795d1f48: only an in-process writer
+//     or a listed device key can set it; the shared token gets 403);
+//  2. a supervisor sender: system, respawn-guard (isolation lost),
+//     auto-restart (a restart that failed);
+//  3. a supervisory prefix: [APPROVAL_REQUEST], [CONTEXT-GUARD] (a failed
+//     rescue / a forced restart, sent under the agent's own name),
+//     [auto-restart], [SECURITY] CRITICAL;
+//  4. KIESES/OUTAGE/SURGOS/URGENT in the message HEAD, NFC-normalised (an NFD
+//     "surgos" and the o-umlaut misspelling match too). Head only: on
+//     2026-10-13 (15:15-17:35, 92 rows to the main agent) a whole-text match
+//     also caught routine mail that merely discussed the outage runbook.
+// 2-4 are text an agent can write: a forged marker only buys an early nudge,
+// still under the 60 s debounce and the hourly budget. A false positive costs
+// one early turn, a false negative up to BATCH_INTERVAL_MS.
+const URGENT_SENDERS = new Set(['system', 'respawn-guard', 'auto-restart'])
+const URGENT_PREFIX_RX = /^\s*(?:\[APPROVAL_REQUEST\]|\[CONTEXT-GUARD\]|\[auto-restart\]|\[SECURITY\]\s*CRITICAL)/i
+const URGENT_HEAD_RX = /KIES[EÉ]S|OUTAGE|S[UÜ]RG[OŐÖ]S|URGENT/i
 const URGENT_HEAD_CHARS = 100
-export function isUrgentInboxMessage(m: { from_agent: string; content: string }): boolean {
-  return m.from_agent === 'system'
-    || URGENT_PREFIX_RX.test(m.content)
-    || URGENT_HEAD_RX.test(m.content.slice(0, URGENT_HEAD_CHARS))
+export function isUrgentInboxMessage(m: { from_agent: string; content: string; urgent?: number }): boolean {
+  if (m.urgent === 1) return true
+  if (URGENT_SENDERS.has(m.from_agent)) return true
+  const text = m.content.normalize('NFC')
+  return URGENT_PREFIX_RX.test(text) || URGENT_HEAD_RX.test(text.slice(0, URGENT_HEAD_CHARS))
 }
 const NUDGE_BUDGET_WINDOW_MS = 60 * 60_000
 // Rate limit for the "pending mail is waiting but the session stays busy"
