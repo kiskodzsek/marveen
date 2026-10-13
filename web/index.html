@@ -153,6 +153,10 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
             <span class="sb-label">Költségek</span>
           </a>
+          <a href="#" class="sb-link" data-page="finance" id="sbFinance" hidden>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>
+            <span class="sb-label" data-i18n="finance.nav">Pénzügy</span>
+          </a>
           <a href="#" class="sb-link" data-page="tokenUsage">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
             <span class="sb-label">Token Monitor</span>
@@ -1943,6 +1947,27 @@
       </div>
 
       <div id="costsContent"></div>
+    </div>
+
+    <!-- Finance page (FINANCETAB1013): the view is server-rendered HTML in a
+         sandboxed iframe, loaded with the login session only (see loadFinance). -->
+    <div class="page" id="financePage" hidden>
+      <div class="page-header">
+        <div class="page-header-row">
+          <div>
+            <h1 data-i18n="finance.page_title">Pénzügy</h1>
+            <p class="subtitle" data-i18n="finance.page_subtitle">Havi eredmény, előrejelzés és bankegyenleg cégenként, csak olvasható</p>
+          </div>
+          <button class="btn-secondary btn-compact" id="refreshFinanceBtn" data-i18n="common.btn.refresh">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+            </svg>
+            Frissítés
+          </button>
+        </div>
+      </div>
+
+      <div id="financeContent"></div>
     </div>
 
     <!-- Naplo page -->

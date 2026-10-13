@@ -185,6 +185,8 @@ function mainAgentId() {
 
   // Full-screen username+password login overlay. Posts to /api/auth/login; on
   // success the browser has the mv_session cookie and we reload authenticated.
+  // FINANCETAB1013: the finance page offers the login form when it has no session.
+  window.__marveenShowLogin = () => showLoginOverlay()
   function showLoginOverlay() {
     if (document.getElementById('mv-login-overlay')) return
     const tr = (k, fallback) => (typeof window.t === 'function' ? window.t(k) : fallback) || fallback
@@ -386,6 +388,7 @@ function switchPage(pageId) {
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'costs') loadCosts()
+  if (pageId === 'finance') loadFinance()
   if (pageId === 'ideas') loadIdeasPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
@@ -432,7 +435,7 @@ const SIDEBAR_GROUPS = [
   // "Aktivitás" card mode, so it has no page, no nav entry and no URL.
   { key: 'team',        labelKey: 'nav.group.team',        pages: ['agents', 'messages', 'tasks', 'bgTasks'] },
   { key: 'knowledge',   labelKey: 'nav.group.knowledge',   pages: ['memories', 'skills', 'research', 'ideas'] },
-  { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs', 'tokenUsage'] },
+  { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs', 'finance', 'tokenUsage'] },
   { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'settings', 'vault'] },
   { key: 'connections', labelKey: 'nav.group.connections', pages: ['connectors', 'federation', 'migrate'] },
 ]
@@ -554,6 +557,7 @@ const PAGE_HEADER_I18N = {
   updatesPage:    { title: 'updates.page_title',     sub: null },
   naploPage:      { title: 'naplo.page_title',       sub: 'naplo.page_subtitle' },
   costsPage:      { title: 'costs.page_title',       sub: 'costs.page_subtitle' },
+  financePage:    { title: 'finance.page_title',     sub: 'finance.page_subtitle' },
   federationPage: { title: 'federation.page_title',  sub: 'federation.page_subtitle' },
   approvalsPage:  { title: 'approvals.page_title',   sub: 'approvals.page_subtitle' },
 }
@@ -18737,6 +18741,63 @@ async function openResearchDoc(agent, name) {
   window._initGanttViewSwitcher = initGanttViewSwitcher
   window.renderGantt = renderGantt
 })()
+
+// FINANCETAB1013: the finance view. Reveal the sidebar link only when the
+// install has FINANCE_DIR configured (an older backend or an error leaves it
+// hidden). The view itself is readable by a LOGGED-IN session only: the server
+// refuses the shared fleet token. So it is fetched with XMLHttpRequest, which
+// the fetch wrapper at the top of this file does not touch: no bearer header
+// rides along, only the mv_session cookie. (Through the wrapper the stored
+// token would be attached, and a bearer beats the cookie in the auth gate.)
+// The HTML goes into an iframe with an EMPTY sandbox: no script, no
+// same-origin, so even a broken escape in the view could not reach this page.
+fetch('/api/finance/config')
+  .then((r) => (r.ok ? r.json() : null))
+  .then((cfg) => {
+    const link = document.getElementById('sbFinance')
+    if (link && cfg && cfg.enabled) link.hidden = false
+  })
+  .catch(() => {})
+
+document.getElementById('refreshFinanceBtn')?.addEventListener('click', () => loadFinance())
+
+function loadFinance() {
+  const box = document.getElementById('financeContent')
+  if (!box) return
+  box.innerHTML = `<div class="finance-state">${escapeHtml(t('finance.loading'))}</div>`
+  const theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light'
+  const lang = (window._lang || 'hu') === 'en' ? 'en' : 'hu'
+  const xhr = new XMLHttpRequest()
+  xhr.open('GET', `/api/finance/view?lang=${lang}&theme=${theme}`)
+  xhr.withCredentials = true
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      const frame = document.createElement('iframe')
+      frame.setAttribute('sandbox', '')
+      frame.setAttribute('referrerpolicy', 'no-referrer')
+      frame.className = 'finance-frame'
+      frame.title = t('finance.page_title')
+      frame.srcdoc = xhr.responseText
+      box.replaceChildren(frame)
+      return
+    }
+    if (xhr.status === 403 && /this user/.test(xhr.responseText || '')) {
+      box.innerHTML = `<div class="finance-state">${escapeHtml(t('finance.not_allowed'))}</div>`
+      return
+    }
+    if (xhr.status === 401 || xhr.status === 403) {
+      box.innerHTML = `<div class="finance-state"><p>${escapeHtml(t('finance.login_needed'))}</p>` +
+        `<button class="btn-primary btn-compact" id="financeLoginBtn">${escapeHtml(t('finance.login_btn'))}</button></div>`
+      document.getElementById('financeLoginBtn')?.addEventListener('click', () => {
+        if (typeof window.__marveenShowLogin === 'function') window.__marveenShowLogin()
+      })
+      return
+    }
+    box.innerHTML = `<div class="finance-state">${escapeHtml(t(xhr.status === 404 ? 'finance.disabled' : 'finance.load_failed'))}</div>`
+  }
+  xhr.onerror = () => { box.innerHTML = `<div class="finance-state">${escapeHtml(t('finance.load_failed'))}</div>` }
+  xhr.send()
+}
 
 // VIDEOREVIEW1002: reveal the sidebar link to the review page only when the
 // install has a video root configured. Failure-proof like the other optional
