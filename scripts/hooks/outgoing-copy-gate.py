@@ -887,11 +887,61 @@ def _at_sentence_start(text: str, idx: int) -> bool:
     return False
 
 
+# ANGOL HOMOGRAFOK (2026-10-12, Klodel: ket nap alatt ketszer blokkolta a
+# Telegram-valaszt az "all users" -- "all" -> "áll"). Patrik szabalya: a
+# technikai kifejezesek angolul maradnak, a mondat magyar. Az "all" es a
+# "level" tehat egyszerre gyakori angol szo es egy ekezetes magyar szo
+# ekezetlen alakja. A szotarbol NEM vesszuk ki oket, mert a magyar "nem all le"
+# tovabbra is hiba; a token CSAK angol kornyezetben esik ki:
+#   - a kozvetlen szomszedja (szokoz, vesszo, perjel valasztja el) egy
+#     egyertelmuen angol szo az alabbi listarol (toldalekkal is: "users-re"), vagy
+#   - idezojelben all ("all", 'level', „all”).
+# A lista szandekosan szuk, es nincs benne olyan szo, ami magyarul is gyakori
+# (is, be, a, el, le, meg, ki, at, to, on, in): a "nem all be" tovabbra is bukik.
+ENGLISH_HOMOGRAPHS = frozenset(("all", "level"))
+ENGLISH_CONTEXT = frozenset((
+    "users", "user", "agents", "agent", "files", "tests", "checks", "tools",
+    "items", "rows", "records", "tokens", "keys", "ports", "jobs", "steps",
+    "members", "permissions", "rights", "access", "admin", "admins", "read",
+    "write", "logs", "log", "debug", "info", "warn", "warning", "error",
+    "errors", "top", "high", "low", "the", "of", "and", "or", "for", "with",
+    "from", "by", "set", "done", "good", "green", "pass", "passed", "fail",
+    "failed", "time", "systems", "services", "repos", "branches", "commits",
+    "deploys", "deploy", "events", "channels", "messages", "zoom", "risk",
+    "security", "trust", "privilege", "service", "api",
+))
+_QUOTES_OPEN = "\"'„“‘«`"
+_QUOTES_CLOSE = "\"'”“’»`"
+_CONTEXT_GAP = re.compile(r"[ \t,/&+]*")
+
+
+def _english_homograph(prose: str, words, i: int) -> bool:
+    """Igaz, ha a words[i] angol homograf, ES angol kornyezetben all."""
+    m = words[i]
+    if m.group(0).lower() not in ENGLISH_HOMOGRAPHS:
+        return False
+    start, end = m.start(), m.end()
+    if start > 0 and end < len(prose) and prose[start - 1] in _QUOTES_OPEN and prose[end] in _QUOTES_CLOSE:
+        return True
+    for j in (i - 1, i + 1):
+        if not 0 <= j < len(words):
+            continue
+        other = words[j]
+        gap = prose[other.end():start] if j < i else prose[end:other.start()]
+        # A magyar toldalek kotojellel kapcsolodik ("users-re"): a to szamit.
+        if _CONTEXT_GAP.fullmatch(gap) and other.group(0).split("-")[0].lower() in ENGLISH_CONTEXT:
+            return True
+    return False
+
+
 def accent_check_tokens(prose: str):
     """(lowercase alak, kezdo-pozicio) parok az ekezet-vizsgalathoz."""
     out = []
-    for m in HYPHEN_WORD.finditer(prose):
+    words = list(HYPHEN_WORD.finditer(prose))
+    for i, m in enumerate(words):
         tok = m.group(0)
+        if _english_homograph(prose, words, i):
+            continue
         # DIGIT-HYPHEN SUFFIX (429-es, 403-as, 2026-os, 3420-as). HYPHEN_WORD only
         # admits LETTERS around the hyphen, so a Hungarian suffix attached to a
         # NUMBER is seen as a standalone word -- and "es" is then read as the
