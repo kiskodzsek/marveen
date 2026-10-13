@@ -10,6 +10,7 @@ import {
 } from '../desktop-lock.js'
 import { readBody, json } from '../http-helpers.js'
 import { isChannelInboundSender } from '../agent-message-wrap.js'
+import { isReservedSender } from '../../reserved-sender.js'
 import type { RouteContext } from './types.js'
 
 // Sender label for lock traffic. Deliberately NOT the main agent's id: an
@@ -124,6 +125,12 @@ export type LockBody = {
  * file. Returns the refusal reason, or null when the owner is acceptable.
  */
 export function lockOwnerRefusal(owner: string): string | null {
+  // RESERVEDSENDER1013 (Viktor M1): the same reasoning one level up. `system`
+  // is the sender agents authenticate supervisory directives by; a lock owned
+  // by it would broadcast a from=system row with the caller's note to the fleet.
+  if (isReservedSender(owner)) {
+    return `owner '${owner.trim()}' is reserved for in-process system messages. Use your own agent id.`
+  }
   if (!isChannelInboundSender(owner)) return null
   return `owner '${owner.trim()}' is a channel identity -- it would frame this broadcast as an inbound owner message. Use your own agent id.`
 }

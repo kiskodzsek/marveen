@@ -5,7 +5,7 @@ import {
   deleteKanbanCard, moveKanbanCard, archiveKanbanCard, unarchiveKanbanCard,
   getKanbanComments, addKanbanComment, getKanbanCardEvents, getKanbanCardFieldEvents, listKanbanProjects,
   getKanbanCard, getChildCards, getDb,
-  createAgentMessage, markKanbanCardDispatched,
+  createAgentMessage, createSystemMessage, markKanbanCardDispatched,
   getKanbanSeqByIdPrefix,
   listLabels, getLabel, createLabel, updateLabel, deleteLabel,
   addLabelToCard, removeLabelFromCard, getLabelsForAllCards, getLabelsForCard,
@@ -260,8 +260,7 @@ function reportUndeliveredDispatch(id: string, unreachable: string): void {
     logger.warn({ err, id }, 'Undelivered-dispatch card comment failed')
   }
   try {
-    createAgentMessage(
-      'system',
+    createSystemMessage(
       MAIN_AGENT_ID,
       `[kanban-dispatch] A(z) ${DISPATCH_SAFE_CARD_ID_RE.test(id) ? '#' + id : '(nem szabványos azonosítójú)'} kártya in_progress lett, de a kiosztott ügynök (${unreachable}) NEM kapott üzenetet. ` +
       'A tábla futónak mutatja, közben senki nem dolgozik rajta. Tedd vissza planned-re, vagy indítsd el az ügynököt és aktiváld újra.',

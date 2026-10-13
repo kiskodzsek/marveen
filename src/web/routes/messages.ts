@@ -1,5 +1,5 @@
 import {
-  createAgentMessage, getPendingMessages, listAgentMessages, getRecipientQueueState,
+  createAgentMessage, createSystemMessage, getPendingMessages, listAgentMessages, getRecipientQueueState,
   getAgentConversation, getAgentConversationThreads,
   getKanbanSeqByIdPrefix,
   markMessageDone, markMessageFailed, getAgentMessage,
@@ -25,6 +25,7 @@ import { verifyHeartbeatKanban, HEARTBEAT_KANBAN_WINDOW_SEC } from '../heartbeat
 import { buildFreshnessInfo, type MessageFreshness } from '../agent-message-wrap.js'
 import { parseQualifiedId, formatQualifiedId, isQualifiedId } from '../federation/address.js'
 import { getFederationConfig } from '../federation/config.js'
+import { isReservedSender } from '../../reserved-sender.js'
 import type { RouteContext } from './types.js'
 
 // Should closing a message produce a reverse "[Eredmény]" notification to its sender?
@@ -132,7 +133,7 @@ function noteHeartbeatRefusal(problems: string[], nowMs: number = Date.now()): v
   if (nowMs - lastHeartbeatRefusalNoteMs < HEARTBEAT_REFUSAL_NOTE_GAP_MS) return
   lastHeartbeatRefusalNoteMs = nowMs
   try {
-    createAgentMessage('system', MAIN_AGENT_ID,
+    createSystemMessage(MAIN_AGENT_ID,
       '[HB-KAPU] A heartbeat digestjét a szerver elutasította (422, HBFABRIC1003): a Kanban-sorai nem egyeztek az élő táblával, '
       + 'ezért ebben a körben NEM érkezik digest. Eltérések: ' + problems.join('; ')
       + '. Tájékoztatás, teendőt nem kér; ha a digest kell, a GET /api/kanban/heartbeat-summary adja az élő számokat.')
@@ -226,7 +227,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     // schedule-runner, context-guard-runner, agents), never over HTTP.
     // The other SYSTEM_SENDER_IDS entries are untouched -- they name external
     // notifiers, and none of them is the fleet's authentication base.
-    if (sanitizeAgentIdent(from) === SYSTEM_DIRECTIVE_SENDER) {
+    // isReservedSender also folds case and look-alike letters ('System', 'ѕystem').
+    if (isReservedSender(from)) {
       logger.warn({ from: from.trim(), to: to.trim(), authKind: ctx.auth?.kind ?? 'none' }, 'Rejected /api/messages POST forging the system directive sender')
       json(res, { error: `from '${SYSTEM_DIRECTIVE_SENDER}' is reserved for in-process system directives and can never be POSTed` }, 403)
       return true
@@ -572,7 +574,10 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       // Only `notify: true` sends it (the default is off, see above), and it does NOT
       // override shouldNotifyDelegator, whose guards stop undeliverable and ping-pong acks,
       // not merely expensive ones.
-      if (done && notify === true && shouldNotifyDelegator(done.from_agent, done.to_agent, done.content)) {
+      // A row addressed to a reserved id (none should exist: POST rejects an
+      // unknown `to`) must not turn its closing into a from=system receipt.
+      if (done && notify === true && !isReservedSender(done.to_agent)
+        && shouldNotifyDelegator(done.from_agent, done.to_agent, done.content)) {
         // A vagas NE legyen nema, ES legyen KOVETHETO: lasd resultSummary().
         const summary = resultSummary(id, result)
         createAgentMessage(

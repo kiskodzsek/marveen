@@ -23,7 +23,7 @@ import { getHardGuardPhase } from './context-guard-runner.js'
 import { readGateConfig, readGateRunState, writeGateRunState } from './context-restart-gate-store.js'
 import {
   getDispatchedPendingStats,
-  createAgentMessage,
+  createAgentMessage, createSystemMessage,
   GATE_ALERT_ORIGIN_NOTE,
 } from '../db.js'
 import {
@@ -936,8 +936,7 @@ export async function checkAgent(name: string, nowMs: number): Promise<void> {
           // purpose: one prefix for two senders and two meanings (act on this
           // vs. read this) forced the reader to tell them apart from the
           // sentence rather than from the envelope.
-          createAgentMessage(
-            'system',
+          createSystemMessage(
             MAIN_AGENT_ID,
             `[CONTEXT-RESTART-GATE-RIASZTAS] A(z) "${name}" agens kapuja ${blockedSinceMin} perce folyamatosan blokkolt. Ok: ${decision.reason}.${childInfo} A(z) ${Math.round(cfg.thresholdTokens / 1000)}k tokenes kuszob ele ert, de a kapu nem enged -- ellenorizd hogy nincs-e elakadt munka.${escalation} (Tajekoztatas, nem muveletkeres.)`,
             GATE_ALERT_ORIGIN_NOTE,

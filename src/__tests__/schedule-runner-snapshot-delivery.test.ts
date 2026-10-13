@@ -159,7 +159,7 @@ describe('size-guard routing (#1396 review: no owner-channel send)', () => {
 
   it('both tiers notify the main agent as an inter-agent message', () => {
     expect(start).toBeGreaterThan(0)
-    expect(body.match(/createAgentMessage\('system', MAIN_AGENT_ID,/g)?.length).toBe(2)
+    expect(body.match(/createSystemMessage\(MAIN_AGENT_ID,/g)?.length).toBe(2)
   })
 
   it('never sends to the owner channel', () => {

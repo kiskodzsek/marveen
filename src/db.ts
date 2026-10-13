@@ -6,6 +6,7 @@ import { getEffectiveSettingValue } from './settings-store.js'
 import { logger } from './logger.js'
 import { TOOL_TIMEOUTS } from './tool-timeouts.js'
 import { triggerLikeClause } from './homoglyph.js'
+import { isReservedSender, ReservedSenderError, SYSTEM_SENDER } from './reserved-sender.js'
 import type { LiveKanban } from './web/heartbeat-kanban-verify.js'
 
 let db: Database.Database
@@ -3458,7 +3459,33 @@ export interface AgentMessage {
   parent_span_id: string | null
 }
 
+// RESERVEDSENDER1013: a caller-supplied sender can never be the reserved
+// `system` id (see src/reserved-sender.ts). Throws ReservedSenderError; routes
+// validate first and answer 4xx, this is the backstop for the next one that
+// forgets.
 export function createAgentMessage(
+  from: string,
+  to: string,
+  content: string,
+  originNote?: string | null,
+  traceCtx?: { trace_id: string; span_id: string; parent_span_id: string | null } | null,
+): AgentMessage {
+  if (isReservedSender(from)) throw new ReservedSenderError(from)
+  return insertAgentMessage(from, to, content, originNote, traceCtx)
+}
+
+// The only writer of from_agent='system' rows. In-process callers only: it takes
+// no sender argument, so request data cannot pick the sender through it.
+export function createSystemMessage(
+  to: string,
+  content: string,
+  originNote?: string | null,
+  traceCtx?: { trace_id: string; span_id: string; parent_span_id: string | null } | null,
+): AgentMessage {
+  return insertAgentMessage(SYSTEM_SENDER, to, content, originNote, traceCtx)
+}
+
+function insertAgentMessage(
   from: string,
   to: string,
   content: string,

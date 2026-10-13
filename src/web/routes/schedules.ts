@@ -15,10 +15,16 @@ import { listAgentNames } from '../agent-config.js'
 import { readFileOr, readJsonObjectForWrite } from '../agent-config.js'
 import {
   SCHEDULED_TASKS_DIR, MAX_SCHEDULED_TASK_PROMPT_LEN,
-  listScheduledTasks, writeScheduledTask, markDefaultTaskRemoved,
+  listScheduledTasks, writeScheduledTask, markDefaultTaskRemoved, readScheduledTask,
 } from '../scheduled-tasks-io.js'
+import { validateScheduleUpdate, scheduleCreateRefusal } from '../schedule-api-fields.js'
 import { runScheduledTaskNow } from '../schedule-runner.js'
 import type { RouteContext } from './types.js'
+
+// The `agent` values the API accepts: exactly what GET /api/schedules/agents offers.
+function scheduleAgentIds(): Set<string> {
+  return new Set([MAIN_AGENT_ID, ...listAgentNames()])
+}
 
 // Resolve a URL-supplied schedule name to an on-disk dir, blocking path
 // traversal. sanitizeScheduleName strips everything outside [a-z0-9-] (so no
@@ -156,6 +162,9 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     }
     if (!data.schedule?.trim()) { json(res, { error: 'Schedule is required' }, 400); return true }
     if (!isValidCronShape(data.schedule)) { json(res, { error: 'Invalid cron expression' }, 400); return true }
+    // RESERVEDSENDER1013: who runs it and as what -- see schedule-api-fields.ts.
+    const createRefusal = scheduleCreateRefusal(data.agent, data.type, scheduleAgentIds())
+    if (createRefusal) { json(res, { error: createRefusal }, 400); return true }
 
     const dir = join(SCHEDULED_TASKS_DIR, name)
     if (existsSync(dir)) { json(res, { error: 'Schedule already exists' }, 409); return true }
@@ -193,9 +202,15 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       }
       throw err
     }
-    const data = JSON.parse(body.toString()) as {
-      description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string
-    }
+    // RESERVEDSENDER1013 (Viktor M2): only the allowlisted fields reach
+    // writeScheduledTask -- see schedule-api-fields.ts for what stays out and why.
+    const verdict = validateScheduleUpdate(
+      JSON.parse(body.toString()),
+      readScheduledTask(name)?.type,
+      scheduleAgentIds(),
+    )
+    if (!verdict.ok) { json(res, { error: verdict.error }, 400); return true }
+    const data = verdict.update
     if (data.prompt !== undefined && data.prompt.length > MAX_SCHEDULED_TASK_PROMPT_LEN) {
       json(res, {
         error: `Prompt too large (${data.prompt.length} chars, max ${MAX_SCHEDULED_TASK_PROMPT_LEN})`,
