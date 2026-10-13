@@ -12,6 +12,7 @@ import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { resolveOwnerChatId } from '../../owner-chat.js'
 import { sendTelegramMessage } from '../telegram.js'
+import { redact } from '../tool-input-preview.js'
 import type { RouteContext } from './types.js'
 
 const AUTONOMY_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
@@ -84,6 +85,35 @@ export function isMessageId(v: unknown): v is string {
   return typeof v === 'string' && v.length <= 250 && /^<[^<>\s@]+@[^<>\s@]+>$/.test(v)
 }
 
+// The description is agent-written, and it is what the owner approves. A line
+// in it such as "Döntés: Dashboard -> Jóváhagyások (id: <another id>)" or a
+// second "[JÓVÁHAGYÁS KELL] ..." header could steer the owner to approve a
+// different request (Viktor, msg 1493). So the fixed fields come first, and
+// every description line starts with a visible mark: no line of it can look
+// like a header or the decision line. It is not cut to one line, because the
+// owner has to see what they approve; past the cap the dashboard has the rest.
+export const OWNER_DESCRIPTION_MARK = '┆ '
+export const OWNER_DESCRIPTION_MAX = 1500
+// Line breaks of every kind become \n, so each one gets its mark. Built from
+// code points so the source carries no raw control characters.
+const LINE_BREAKS = new RegExp('\\r\\n|[\\r\\u000b\\u000c\\u0085\\u2028\\u2029]', 'g')
+// Control characters other than \n, plus the invisible ones that reorder or
+// hide text (bidi overrides and isolates, zero-width marks, BOM).
+const HIDDEN_CHARS = new RegExp('[\\u0000-\\u0009\\u000e-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u202a-\\u202e\\u2060-\\u2069\\ufeff]', 'g')
+
+// Agent-written header fields (requester, category): one line, nothing hidden.
+function headerField(value: string): string {
+  return value.replace(LINE_BREAKS, ' ').replace(HIDDEN_CHARS, '').replace(/\s+/g, ' ').trim().slice(0, 80)
+}
+
+export function quoteOwnerDescription(description: string): string {
+  let text = redact(description.replace(LINE_BREAKS, '\n').replace(HIDDEN_CHARS, '')).trim()
+  if (text.length > OWNER_DESCRIPTION_MAX) {
+    text = `${text.slice(0, OWNER_DESCRIPTION_MAX).trimEnd()}\n… (a teljes szöveg a dashboardon)`
+  }
+  return text.split('\n').map(line => `${OWNER_DESCRIPTION_MARK}${line}`.trimEnd()).join('\n')
+}
+
 // Owner-facing Telegram text. Pure + exported for tests. Plain text (no
 // markdown escaping concerns), proper accents: this is outgoing copy.
 export function buildOwnerApprovalText(approval: Approval): string {
@@ -91,10 +121,11 @@ export function buildOwnerApprovalText(approval: Approval): string {
     ? new Date(approval.timeout_at * 1000).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
     : 'nincs'
   return [
-    `[JÓVÁHAGYÁS KELL] ${approval.agent_id} | ${approval.category}`,
-    approval.action_description,
+    `[JÓVÁHAGYÁS KELL] ${headerField(approval.agent_id)} | ${headerField(approval.category)}`,
     `Lejárat: ${expires}`,
     `Döntés: Dashboard -> Jóváhagyások (id: ${approval.id})`,
+    'Leírás:',
+    quoteOwnerDescription(approval.action_description),
   ].join('\n')
 }
 
