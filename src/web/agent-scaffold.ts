@@ -2368,15 +2368,14 @@ export function ensureMcpListChannelSection(name: string): void {
   atomicWriteFileSync(claudeMdPath, updated)
 }
 
-// ---- Message close: notify:false for an incoming report (ACKONCLOSE927) ----
+// ---- Message close: the ack only on notify:true (ACKONCLOSE927, NOTIFYOFF1013) ----
 //
 // Closing a message (PUT /api/messages/:id, status done/failed) sends an
-// '[Eredmény]' ack back to the original sender by default (routes/messages.ts,
-// shouldNotifyDelegator). For a DELEGATED task that ack is the result; for an
-// INCOMING report or notification it only lengthens the sender's queue and costs
-// it a turn. Measured on an external install (2026-09-27): three closes took the
-// sender's pending queue from 1 to 4. The `notify: false` switch (#1207, released)
-// already lets the closer skip it, but no recipe told any agent about it, so the
+// '[Eredmény]' ack back to the original sender ONLY with `notify: true`
+// (routes/messages.ts; the default was on until NOTIFYOFF1013). For a DELEGATED
+// task that ack is the result; for an INCOMING report or notification it only
+// lengthens the sender's queue and costs it a turn (2026-09-27: three closes took
+// the sender's pending queue from 1 to 4; 2026-10-13: 228 acks in one day). The
 // rule ships as a section: the reader is the agent at the moment it closes.
 const MSGCLOSE_BEGIN = '<!-- BEGIN GENERATED: message-close (auto-generated, do not edit by hand) -->'
 const MSGCLOSE_END = '<!-- END GENERATED: message-close -->'
@@ -2386,23 +2385,25 @@ const MSGCLOSE_BLOCK_RE = new RegExp(
 
 export function buildMessageCloseBody(): string {
   return [
-    '## Üzenet lezárása: bejövő riportnál `notify:false`',
+    '## Üzenet lezárása: eredmény csak `notify:true`-val megy vissza',
     '',
     'Egy neked jött inter-agent üzenetet a `PUT /api/messages/<id>` zár le (`"status":"done"` vagy',
-    '`"failed"`). A lezárás ALAPBÓL egy `[Eredmény] msg_id:<id>` nyugtát küld vissza az eredeti feladónak.',
+    '`"failed"`). A lezárás ALAPBÓL NEM küld nyugtát az eredeti feladónak.',
     '',
-    '- DELEGÁLT FELADAT (a feladó az eredményre vár): zárd a szokásos módon, a nyugta maga az',
-    '  eredmény -- a `result` mezőbe írd, mit csináltál.',
-    '- BEJÖVŐ RIPORT vagy ÉRTESÍTÉS (a feladó nem vár választ): zárd `"notify":false`-szal. Itt a nyugta',
-    '  csak a feladó sorát növeli, és nála egy ágens-kört visz el (mérve 2026-09-27: három lezárás a',
-    '  feladó várakozó sorát 1-ről 4-re vitte).',
+    '- DELEGÁLT FELADAT (a feladó az eredményre vár): zárd `"notify":true`-val, és a `result` mezőbe',
+    '  írd, mit csináltál: a feladó ezt `[Eredmény] msg_id:<id>` üzenetként kapja meg. Ha az eredményt',
+    '  már külön üzenetben elküldted neki, a lezárás `notify` nélkül menjen (különben kétszer kap).',
+    '- BEJÖVŐ RIPORT, ÉRTESÍTÉS vagy NYUGTA (a feladó nem vár választ): zárd `notify` nélkül.',
     '',
     '```bash',
     `curl -s -X PUT ${dashboardOrigin}/api/messages/<id> -H "Content-Type: application/json" \\`,
-    `  -H "Authorization: Bearer $(cat ${tokenPath})" --data-binary '{"status":"done","notify":false}'`,
+    `  -H "Authorization: Bearer $(cat ${tokenPath})" --data-binary @- <<'JSON'`,
+    '{"status":"done","notify":true,"result":"AZ EREDMÉNY RÖVIDEN"}',
+    'JSON',
     '```',
-    'A `notify` csak valódi JSON boolean lehet: a `"false"` string 400-at kap, és ilyenkor a lezárás sem',
-    'történik meg. A `system` feladójú üzenet lezárása eleve nem küld nyugtát.',
+    'Riportnál ugyanez `{"status":"done"}` törzzsel. A `notify` csak valódi JSON boolean lehet: a',
+    '`"true"` string 400-at kap, és ilyenkor a lezárás sem történik meg. A `system` feladójú üzenet',
+    'lezárása `notify:true`-val sem küld nyugtát.',
   ].join('\n')
 }
 

@@ -539,7 +539,11 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     //     whose delay made the report late. Measured on a live install: several such acks
     //     sat queued behind an agent whose delivery was already lagging, so closing the
     //     reports made the queue that the reports arrive in longer still.
-    // Absent (or null) keeps today's behavior, so no existing caller changes.
+    // Default is OFF (NOTIFYOFF1013, Patrik, Telegram 1824): only an explicit `notify: true`
+    // sends the ack. Measured 2026-10-13: 228 acks in one day, each one a full agent turn at
+    // the delegator, and many of them repeating an answer the closer had already sent as a
+    // separate message. Absent (or null) now means "no ack"; a closer whose sender is waiting
+    // for the result says so with `notify: true`.
     // Rejected BEFORE the status write, not coerced: a truthy `"false"` string would send
     // exactly the notification the caller asked to skip, and a half-applied close (status
     // written, unwanted ack sent) is worse than an actionable error the caller can retry
@@ -547,7 +551,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     if (notify !== undefined && notify !== null && typeof notify !== 'boolean') {
       json(res, {
         error: 'notify must be a boolean',
-        hint: 'omit it for the default (notify the sender), or send JSON true/false -- not a string',
+        hint: 'omit it for the default (no ack), send JSON true to notify the sender -- not a string',
       }, 400)
       return true
     }
@@ -565,10 +569,10 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       // Notify the delegator: create a reverse message from executor → delegator so
       // they learn the result without polling. See shouldNotifyDelegator for which
       // senders are skipped and why.
-      // `notify: false` suppresses it; `notify: true` is only the default spelled out --
-      // it does NOT override shouldNotifyDelegator, whose guards stop undeliverable and
-      // ping-pong acks, not merely expensive ones.
-      if (done && notify !== false && shouldNotifyDelegator(done.from_agent, done.to_agent, done.content)) {
+      // Only `notify: true` sends it (the default is off, see above), and it does NOT
+      // override shouldNotifyDelegator, whose guards stop undeliverable and ping-pong acks,
+      // not merely expensive ones.
+      if (done && notify === true && shouldNotifyDelegator(done.from_agent, done.to_agent, done.content)) {
         // A vagas NE legyen nema, ES legyen KOVETHETO: lasd resultSummary().
         const summary = resultSummary(id, result)
         createAgentMessage(

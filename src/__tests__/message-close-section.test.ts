@@ -53,20 +53,26 @@ function setup(agent: string, content: string) {
 }
 const read = (agent: string) => readFileSync(join(tmpRoot, 'agents', agent, 'CLAUDE.md'), 'utf-8')
 
-describe('message-close section: what it says (ACKONCLOSE927)', () => {
+describe('message-close section: what it says (ACKONCLOSE927, NOTIFYOFF1013)', () => {
   const body = buildMessageCloseBody()
 
-  it('tells the reader to close an INCOMING report with notify:false', () => {
-    expect(body).toMatch(/BEJÖVŐ RIPORT[\s\S]{0,120}"notify":false/)
+  it('says the close sends NO ack by default', () => {
+    expect(body).toMatch(/ALAPBÓL NEM küld nyugtát/)
   })
 
-  it('keeps the default for a DELEGATED task, where the ack is the result', () => {
-    expect(body).toMatch(/DELEGÁLT FELADAT[\s\S]{0,120}szokásos módon/)
+  it('tells the reader to close a DELEGATED task with notify:true and a result', () => {
+    expect(body).toMatch(/DELEGÁLT FELADAT[\s\S]{0,120}"notify":true[\s\S]{0,80}`result`/)
   })
 
-  it('the example sends a real JSON boolean false, not the string', () => {
-    expect(body).toContain(`'{"status":"done","notify":false}'`)
-    expect(body).not.toContain('"notify":"false"')
+  it('tells the reader to close an INCOMING report without notify', () => {
+    expect(body).toMatch(/BEJÖVŐ RIPORT[\s\S]{0,80}`notify` nélkül/)
+    expect(body).not.toContain('"notify":false')
+  })
+
+  it('the example sends a real JSON boolean true via a quoted heredoc, not the string', () => {
+    expect(body).toContain(`--data-binary @- <<'JSON'`)
+    expect(body).toContain('{"status":"done","notify":true,"result":')
+    expect(body).not.toContain('"notify":"true"')
     expect(body).toMatch(/string 400-at kap/)
   })
 

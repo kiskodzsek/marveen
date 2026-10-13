@@ -3777,9 +3777,10 @@ export interface DispatchedPendingStats {
  * received a result (status pending or delivered), separating live (within
  * staleCutoffMs) from stale (beyond it). Used by the context-restart gate.
  *
- * Completion reports are excluded. Closing an inbound message auto-creates an
- * `[Eredmény] msg_id:<n> status:<s>` message back to the sender (see the PUT
- * /api/messages/:id route, which uses this same prefix to avoid ping-pong).
+ * Completion reports are excluded. Closing an inbound message with `notify: true`
+ * creates an `[Eredmény] msg_id:<n> status:<s>` message back to the sender (see the
+ * PUT /api/messages/:id route, which uses this same prefix to avoid ping-pong; the
+ * ack was on by default until NOTIFYOFF1013).
  * Those are notifications, not dispatched work: nobody is expected to answer
  * them, and they are never marked done, so they accumulate. Counting them made
  * a busy agent permanently ineligible for a soft restart -- on 2026-08-12 the
