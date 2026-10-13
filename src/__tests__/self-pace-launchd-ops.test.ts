@@ -72,7 +72,7 @@ describe('the incident checker (Pulzus 2369)', () => {
     writeFileSync(incPlist, readFileSync(join(__dirname, 'fixtures', `${INC}.plist`)))
     const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${incPlist}` }, pulzus)
     expect(ok.deny).toBe(false)
-    expect(ok.launchdOps[0].plist_sha256).toBe('606b9bd893a2681054d38ca49f4ccb607c5994df073b96f8a2aadf74739aa9c1')
+    expect(ok.launchdOps[0].plist_sha256).toBe('db0ea0696233fcdad1ab701962f872ede30721e8a12db7e17a76831d1ef5d249')
     writeFileSync(incPlist, '<plist>other program</plist>')
     expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${incPlist}` }, pulzus).deny).toBe(true)
   })
@@ -125,12 +125,51 @@ describe('refused (Viktor 2338)', () => {
     expect(deny(`eval "${L} kickstart -k gui/${UID}/com.klodel.dashboard"`)).toBe(true)
     expect(deny(`/bin/zsh -lc '${L} bootout gui/${UID}/hu.myshp.szamla.worker'`)).toBe(true)
   })
+  it('L1 (Viktor 2414): the exception holds only when the whole command is that one segment', () => {
+    writeApprovedPlist()
+    const good = `${L} bootstrap gui/${UID} ${PLIST}`
+    expect(deny(good)).toBe(false)
+    // the hash is read at decision time, before a preceding cp would run
+    expect(deny(`cp /tmp/evil.plist ${PLIST}; ${good}`)).toBe(true)
+    expect(deny(`cp /tmp/evil.plist ${PLIST} && ${good}`)).toBe(true)
+    expect(deny(`${good}\n${L} kickstart -k gui/${UID}/com.klodel.dashboard`)).toBe(true)
+    expect(deny(`true | ${L} kickstart -k gui/${UID}/com.klodel.dashboard`)).toBe(true)
+    expect(deny(`${L} kickstart -k gui/${UID}/com.klodel.dashboard; echo done`)).toBe(true)
+  })
   it('a nesting deeper than the limit is refused', () => {
     // Two quote kinds cannot nest deeper than 2 without escapes, so the guard is
     // exercised directly: a wrapper found at the limit depth is refused.
     expect(gateDecision('Bash', { command: `sh -c 'echo hi'` }, { depth: 3 }).deny).toBe(true)
     expect(gateDecision('Bash', { command: `sh -c 'echo hi'` }, { depth: 2 }).deny).toBe(false)
   })
+})
+
+// KNOWN, NOT COVERED (Viktor 2414, measured on this branch and on develop): the
+// gate matches text, so these forms reach launchd unseen. Pinned here so a
+// change in either direction is visible; the real boundary is a separate uid.
+// If one of these starts to deny, move it into the refused block above.
+describe('known, not covered: text forms the gate does not see', () => {
+  const T = 'kickstart -k gui/0/hu.myshp.evil'
+  const forms: Record<string, string> = {
+    'bash -c $\'...\'': `bash -c $'${L} ${T}'`,
+    'unquoted -c': `sh -c ${L}`,
+    'concatenated quotes': `"l""${L.slice(1)}" ${T}`,
+    'backslash in the word': `l\\${L.slice(1)} ${T}`,
+    'through a variable': `X=${L}; $X ${T}`,
+    'bash <<EOF body': `bash <<EOF\n${L} ${T}\nEOF`,
+    '| sh': `echo '${L} ${T}' | sh`,
+    'a script file': 'bash /tmp/x.sh',
+    'python -c os.system': `python3 -c 'import os; os.system("${L} ${T}")'`,
+    'osascript do shell script': `osascript -e 'do shell script "${L} ${T}"'`,
+    'xargs': `echo ${T} | xargs ${L}`,
+  }
+  for (const [name, command] of Object.entries(forms)) {
+    it(name, () => {
+      expect(gateDecision('Bash', { command }, {}).deny).toBe(false)
+      // and none of them is ever taken for the launchd exception
+      expect(gateDecision('Bash', { command }, pulzus).launchdOps).toBeUndefined()
+    })
+  }
 })
 
 describe('the wrapper scan does not over-block', () => {

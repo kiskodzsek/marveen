@@ -9,7 +9,8 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/Users/klodel/marveen/ops/incident/gyorsellenorzes-a.sh</string>
+		<string>-c</string>
+		<string>T=$(/usr/bin/mktemp -t marabel-passziv) &amp;&amp; /bin/cp /Users/klodel/marveen/ops/incident/gyorsellenorzes-a.sh "$T" &amp;&amp; [ "$(/usr/bin/shasum -a 256 "$T" | /usr/bin/cut -c1-64)" = "d7ac97f7b1a2348489361a22cc149f096552554a2d1de9e94c4f0676bf381c92" ] &amp;&amp; exec /bin/bash "$T"; echo HASH-ELTERES &gt;&amp;2; /bin/rm -f "$T"; exit 3</string>
 	</array>
 	<key>RunAtLoad</key>
 	<false/>
