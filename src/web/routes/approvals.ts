@@ -12,6 +12,7 @@ import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
 import { resolveOwnerChatId } from '../../owner-chat.js'
 import { sendTelegramMessage } from '../telegram.js'
+import { redact } from '../tool-input-preview.js'
 import type { RouteContext } from './types.js'
 
 const AUTONOMY_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
@@ -175,6 +176,91 @@ function notifyMainAgent(approval: Approval): void {
     // Non-fatal: the approval is created regardless; main-agent notification is best-effort
     logger.warn({ err, approvalId: approval.id }, 'Failed to notify main agent of approval request')
   }
+}
+
+// 9a2925a7 (Viktor, msg 603 and 1391; Patrik, D20261013-0800 6.): every fleet
+// agent shares the dashboard token, so PATCH /api/approvals/:id can be called
+// by any agent, and resolved_by / telegram_message_id are self-declared. Step 1
+// is visibility: every approved/rejected resolution is announced to the owner
+// on Telegram by the SERVER, so a closure the owner did not make is noticed.
+// All of them, not only the suspicious ones: a forger fills in exactly the
+// expected fields. The warning marks what the server can tell is off. The
+// sweeper's timeout path is not announced. Step 2 (TOTP, an approval channel
+// isolated from agents) comes later.
+export const OWNER_RESOLUTION_SOURCES: readonly string[] = ['telegram_text', 'telegram_button']
+
+// Agent-written fields (resolved_by, category, agent_id, description) go into
+// the owner's message on one line: control characters and line breaks are
+// replaced, then the value is cut. A "telegram_text\nJóváhagyás lezárva: ..."
+// resolved_by can then not draw a second, clean-looking line (Viktor, msg 1451).
+const CONTROL_CHARS = new RegExp('[\\u0000-\\u001f\\u007f\\u2028\\u2029]+', 'g')
+export function oneLine(value: string, max: number): string {
+  return value.replace(CONTROL_CHARS, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
+// Pure + exported for tests. requestMessageId is the owner request's message
+// (setApprovalTelegramMessageId), read BEFORE the resolution overwrites it.
+export function approvalResolutionWarnings(input: {
+  resolvedBy: string
+  resolverMessageId: number | null
+  requestMessageId: number | null
+}): string[] {
+  const warnings: string[] = []
+  if (!OWNER_RESOLUTION_SOURCES.includes(input.resolvedBy)) {
+    warnings.push(`nem Telegram-forrás: ${oneLine(input.resolvedBy, 60)}`)
+  }
+  if (input.resolverMessageId == null) {
+    warnings.push('nincs tg-msg')
+  } else if (input.requestMessageId == null) {
+    warnings.push('a kérés tg-msg-je ismeretlen, nem összevethető')
+  } else if (input.resolverMessageId <= input.requestMessageId) {
+    warnings.push(`a tg-msg (${input.resolverMessageId}) nem újabb a kérésénél (${input.requestMessageId})`)
+  }
+  return warnings
+}
+
+// Owner-facing, plain text. The description is redacted and cut: it is
+// agent-written and may carry a secret.
+export function buildResolutionAlertText(approval: Approval, resolverMessageId: number | null, warnings: string[]): string {
+  const description = oneLine(redact(approval.action_description.slice(0, 400)), 200)
+  const line = [
+    `Jóváhagyás lezárva: ${approval.status}`,
+    oneLine(approval.category, 60),
+    `kérte: ${oneLine(approval.agent_id, 60)}`,
+    `lezárta: ${oneLine(approval.resolved_by ?? '?', 60)}`,
+    `tg-msg: ${resolverMessageId ?? 'HIÁNYZIK'}`,
+    description,
+  ].join(' | ')
+  return warnings.length > 0 ? `⚠️ ${line}\nGyanús: ${warnings.join('; ')}` : line
+}
+
+function resolutionAlertFailed(approvalId: string, reason: string, err?: unknown): void {
+  logger.warn({ err, approvalId, reason }, 'approval resolution alert NOT sent')
+  try {
+    createAgentMessage('system', MAIN_AGENT_ID, `approval-riasztás nem ment ki: ${approvalId} (${reason})`)
+  } catch (msgErr) {
+    logger.warn({ err: msgErr, approvalId }, 'approval resolution alert fallback message failed too')
+  }
+}
+
+// Fire-and-forget: the PATCH response never waits on, or changes with, the send.
+function notifyOwnerOfResolution(approval: Approval, resolverMessageId: number | null, requestMessageId: number | null): void {
+  void (async () => {
+    const warnings = approvalResolutionWarnings({
+      resolvedBy: approval.resolved_by ?? '',
+      resolverMessageId,
+      requestMessageId,
+    })
+    if (!TELEGRAM_BOT_TOKEN) return resolutionAlertFailed(approval.id, 'no-token')
+    const ownerChat = resolveOwnerChatId()
+    if (!ownerChat) return resolutionAlertFailed(approval.id, 'no-owner-chat')
+    try {
+      await sendTelegramMessage(TELEGRAM_BOT_TOKEN, ownerChat, buildResolutionAlertText(approval, resolverMessageId, warnings))
+      logger.info({ approvalId: approval.id, warnings: warnings.length }, 'approval resolution alert sent')
+    } catch (err) {
+      resolutionAlertFailed(approval.id, 'send-failed', err)
+    }
+  })()
 }
 
 export function startApprovalTimeoutSweeper(): NodeJS.Timeout {
@@ -371,6 +457,9 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
 
     const approval = getApproval(idMatch[1])
     logger.info({ id: idMatch[1], status, resolved_by }, 'Approval resolved')
+    if (approval && (status === 'approved' || status === 'rejected')) {
+      notifyOwnerOfResolution(approval, msgId, target?.telegram_message_id ?? null)
+    }
     json(res, approval)
     return true
   }
