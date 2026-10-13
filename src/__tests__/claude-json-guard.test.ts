@@ -9,6 +9,7 @@ import {
   restoreClaudeJsonAfterStop,
   waitForPidExit,
   shaHex,
+  describeShape,
 } from '../web/claude-json-guard.js'
 
 // Synthetic stand-in for an isolated .claude.json: the measured live loss
@@ -209,6 +210,69 @@ describe('restoreClaudeJsonAfterStop (gates 1-3)', () => {
     const r = await restoreClaudeJsonAfterStop(snapB, deps({ resolveTarget: () => resolveOwnClaudeJsonPath(aDir) }))
     expect(r).toEqual({ outcome: 'skipped', reason: 'target-moved' })
     expect(readFileSync(bFile, 'utf-8')).toBe(truncated)
+  })
+
+  it('caps the restored mode at 0600 even when the live file is wider (viktor L2)', async () => {
+    const snap = takeClaudeJsonSnapshot(aFile)!
+    writeFileSync(aFile, JSON.stringify(truncatedConfig()))
+    chmodSync(aFile, 0o644)
+    const r = await restoreClaudeJsonAfterStop(snap, deps())
+    expect(r.outcome).toBe('restored')
+    expect(statSync(aFile).mode & 0o777).toBe(0o600)
+  })
+
+  it('carries no content or non-schema key name in any outcome (gate 1, viktor L1)', async () => {
+    // Sentinels in every place content could leak from: a top-level key name,
+    // a project path, an mcpServers entry name and its env value.
+    const SENT = 'SENTINEL_c4f1'
+    const withSentinels = {
+      ...fullConfig(),
+      [`${SENT}_topkey`]: `${SENT}_topval`,
+      projects: { ...(fullConfig().projects as object), [`/${SENT}_project`]: { hasTrustDialogAccepted: true } },
+      mcpServers: { [`${SENT}_server`]: { command: 'node', env: { TOKEN: `${SENT}_env` } } },
+    }
+    const truncated = JSON.stringify(truncatedConfig())
+    const forbidden = [SENT, 'numStartups', 'tipsHistory', 'userID', 'migrationVersion', 'cache0', 'hasCompletedOnboarding']
+    const outcomes: unknown[] = []
+    const reset = (content: string) => { writeFileSync(aFile, content); chmodSync(aFile, 0o600) }
+
+    reset(JSON.stringify(withSentinels, null, 2))
+    let snap = takeClaudeJsonSnapshot(aFile)!
+    reset(truncated)
+    outcomes.push(await restoreClaudeJsonAfterStop(snap, deps())) // restored, lost-protected
+
+    reset(JSON.stringify(withSentinels, null, 2))
+    snap = takeClaudeJsonSnapshot(aFile)!
+    reset(JSON.stringify({ projects: withSentinels.projects, mcpServers: withSentinels.mcpServers }))
+    outcomes.push(await restoreClaudeJsonAfterStop(snap, deps())) // restored, lost-top-level
+
+    reset(JSON.stringify(withSentinels, null, 2))
+    snap = takeClaudeJsonSnapshot(aFile)!
+    reset('{"broken')
+    outcomes.push(await restoreClaudeJsonAfterStop(snap, deps())) // restored, unparseable
+
+    reset(JSON.stringify(withSentinels, null, 2))
+    snap = takeClaudeJsonSnapshot(aFile)!
+    reset(truncated)
+    outcomes.push(await restoreClaudeJsonAfterStop(snap, deps({ exited: false })))
+    outcomes.push(await restoreClaudeJsonAfterStop(snap, deps({ resolveTarget: () => null })))
+    outcomes.push(await restoreClaudeJsonAfterStop(snap, deps({ resolveTarget: () => { writeFileSync(aFile, '{}'); return aFile } })))
+
+    reset(JSON.stringify(withSentinels, null, 2))
+    snap = takeClaudeJsonSnapshot(aFile)!
+    reset(JSON.stringify({ ...withSentinels, lastSessionId: 's' }))
+    outcomes.push(await restoreClaudeJsonAfterStop(snap, deps())) // intact
+
+    // the stop path logs the snapshot shape on skip
+    outcomes.push(describeShape(snap.bytes, snap.data, snap.sha))
+
+    expect(outcomes.map((o) => (o as { outcome?: string }).outcome)).toEqual(
+      ['restored', 'restored', 'restored', 'skipped', 'skipped', 'skipped', 'intact', undefined],
+    )
+    for (const o of outcomes) {
+      const text = JSON.stringify(o)
+      for (const f of forbidden) expect(text).not.toContain(f)
+    }
   })
 
   it('reports intact when the exit write kept every key', async () => {

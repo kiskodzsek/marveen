@@ -27,7 +27,8 @@ import { atomicWriteFileSync } from './atomic-write.js'
 //      symlink followed -- never the shared ~/.claude.json or ~/.claude.
 //   3. Conditional swap: only after the old PID has exited, and only while the
 //      live file's sha is still the damaged one that was evaluated. If anything
-//      else wrote in between, nothing is overwritten. tmp + rename, mode kept.
+//      else wrote in between, nothing is overwritten. tmp + rename, mode kept
+//      but capped at 0600.
 //   4. The protected maps are `projects` and `mcpServers`. The restore never
 //      adds an mcpServers entry the pre-stop file did not have (the snapshot
 //      IS the pre-stop file; live-only entries stay as live has them).
@@ -208,7 +209,9 @@ export async function restoreClaudeJsonAfterStop(snapshot: ClaudeJsonSnapshot, d
   try {
     // Compare-and-swap: the bytes must still be the damaged ones we judged.
     if (shaHex(readFileSync(snapshot.path)) !== liveSha) return { outcome: 'skipped', reason: 'live-changed-before-swap' }
-    const mode = statSync(snapshot.path).mode & 0o777
+    // Never wider than 0600, whatever the live file carries: mcpServers entries
+    // can hold credentials in their env blocks (viktor L2).
+    const mode = statSync(snapshot.path).mode & 0o600
     atomicWriteFileSync(snapshot.path, body, { mode })
   } catch {
     return { outcome: 'skipped', reason: 'write-failed' }
