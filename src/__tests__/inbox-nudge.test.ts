@@ -175,6 +175,20 @@ describe('INBOXBATCH1013: routine mail waits for the batch, urgent mail does not
     expect(m('anything', 'system')).toBe(true)
     expect(m('[Eredmény] msg_id:2427 status:done')).toBe(false)
     expect(m('PR #12 kész, review-ra vár')).toBe(false)
+    // Viktor 2453 L1: the authenticated urgent column wins, with no keyword
+    expect(isUrgentInboxMessage({ from_agent: 'dave', content: 'csak egy sor', urgent: 1 })).toBe(true)
+    expect(isUrgentInboxMessage({ from_agent: 'dave', content: 'csak egy sor', urgent: 0 })).toBe(false)
+    // I1: supervisor senders and prefixes
+    expect(m('anything', 'respawn-guard')).toBe(true)
+    expect(m('anything', 'auto-restart')).toBe(true)
+    expect(m('[CONTEXT-GUARD] 3. EGYMAST KOVETO bukott mentes', 'viktor')).toBe(true)
+    expect(m('[auto-restart] A(z) dave ujrainditasa ...')).toBe(true)
+    expect(m('[SECURITY] CRITICAL: ...', 'viktor')).toBe(true)
+    expect(m('[SECURITY] Viktor, re 2427: OK', 'viktor')).toBe(false)
+    // I1: NFD-normalised and the o-umlaut misspelling
+    expect(m('S\u0055\u0308RGO\u030bS: nezd meg'.normalize('NFD'))).toBe(true)
+    expect(m('Sürgös')).toBe(true)
+    expect(m('kiese\u0301s gyanu'.normalize('NFD'))).toBe(true)
     // head only: a routine message that mentions the outage runbook further down
     expect(m('PR #13 kész. ' + 'x'.repeat(120) + ' a KIESÉS-runbook szerint')).toBe(false)
   })
