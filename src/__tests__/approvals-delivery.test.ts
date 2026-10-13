@@ -101,7 +101,7 @@ describe('wiring contracts on the route source', () => {
   it('leg 2: the main-agent notify short-circuits when the requester IS the main agent', () => {
     const fn = ROUTE.slice(ROUTE.indexOf('function notifyMainAgent('))
     const guard = fn.indexOf('approval.agent_id === MAIN_AGENT_ID')
-    const send = fn.indexOf('createAgentMessage')
+    const send = fn.indexOf('createSystemMessage')
     expect(guard).toBeGreaterThan(0)
     expect(send).toBeGreaterThan(guard)
   })
@@ -131,7 +131,7 @@ describe('degraded-delivery fallback (review finding on #1026)', () => {
   it('the fallback is main-requester-only and carries the OWNER_UNREACHED marker', () => {
     const fn = ROUTE.slice(ROUTE.indexOf('function fallbackInBand('), ROUTE.indexOf('function notifyOwner('))
     const guard = fn.indexOf('approval.agent_id !== MAIN_AGENT_ID')
-    const send = fn.indexOf('createAgentMessage')
+    const send = fn.indexOf('createSystemMessage')
     expect(guard).toBeGreaterThan(0)
     expect(send).toBeGreaterThan(guard)
     expect(fn).toContain('[OWNER_UNREACHED')

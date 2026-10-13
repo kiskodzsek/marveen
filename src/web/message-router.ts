@@ -10,7 +10,7 @@ import {
   markMessageFailed,
   markPendingFederatedFailed,
   setMessageResult,
-  createAgentMessage,
+  createSystemMessage,
   countNewerMessagesFromSameSender,
   stampMessageTrace,
   upsertOtelSpan,
@@ -140,7 +140,7 @@ function notifyOrchestratorOfStuckSession(agent: string, session: string, stuckM
   try {
     const alert = formatStuckSessionAlert(agent, MAIN_AGENT_ID, session, stuckMs, pendingCount, paneState, awaitingPermission, permissionAsk, quotaWall)
     if (!alert) return
-    createAgentMessage('system', MAIN_AGENT_ID, alert)
+    createSystemMessage(MAIN_AGENT_ID, alert)
     logger.info({ agent, session, stuckMs, pendingCount, paneState, awaitingPermission, quotaWall: quotaWall != null, resetsAt: quotaWall?.resetsAt ?? null }, 'session-stuck surfaced to orchestrator')
   } catch (err) {
     logger.warn({ err, agent }, 'Failed to enqueue session-stuck notification')
@@ -153,8 +153,7 @@ function notifyOrchestratorOfFailedHandoff(msg: AgentMessage, reason: string): v
     // anyway so we never loop a notification back onto itself.
     if (msg.to_agent === MAIN_AGENT_ID) return
     const preview = (msg.content ?? '').slice(0, 220)
-    createAgentMessage(
-      'system',
+    createSystemMessage(
       MAIN_AGENT_ID,
       `[handoff-failure] Inter-agent message (id ${msg.id}) ${msg.from_agent} -> ${msg.to_agent} could NOT be delivered: ${reason}. Consider re-sending or checking the target agent. Content preview: ${preview}`,
     )
@@ -172,8 +171,7 @@ function notifyOrchestratorOfFailedHandoff(msg: AgentMessage, reason: string): v
 // loop. Fired only once, right after the terminal markMessageFailed.
 function notifyDelegationFailed(msg: AgentMessage, error: string): void {
   try {
-    createAgentMessage(
-      'system',
+    createSystemMessage(
       msg.from_agent,
       `A(z) ${msg.to_agent} címre küldött föderált üzeneted (#${msg.id}) véglegesen meghiúsult: ${error.slice(0, 200)}. ` +
       'Ne delegáld újra automatikusan — jelezd a tulajdonosnak, vagy válaszolj magad a kérőnek.',
@@ -527,7 +525,7 @@ function batchDeliverBacklog(agent: string, agentPending: AgentMessage[], now: n
   }
   // Create ONE new pending message with the summary. It will be picked up by
   // the router on the next tick and delivered normally (or via PULL if main agent).
-  createAgentMessage('system', agent, summaryContent)
+  createSystemMessage(agent, summaryContent)
   logger.info({
     agent,
     batchedCount: old.length,

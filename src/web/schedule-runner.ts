@@ -45,7 +45,7 @@ import {
   markPendingTaskRetryOwnerAlert,
   clearPendingTaskRetryOwnerAlert,
   markScheduledTaskKanbanWaiting,
-  createAgentMessage,
+  createAgentMessage, createSystemMessage,
 } from '../db.js'
 import { toPendingRetryView, classifySendError, OWNER_ESCALATION_EXTRA_MS, type PendingRetryView } from '../pending-retries.js'
 import {
@@ -699,7 +699,7 @@ function maybeSendSizeGuardNotice(taskName: string, bodyChars: number, nowMs: nu
   } else {
     logger.warn({ task: taskName, bodyChars, warnChars: SCHEDULED_TASK_BODY_WARN_CHARS }, 'scheduled task body has grown past the size-guard warn threshold')
     try {
-      createAgentMessage('system', MAIN_AGENT_ID, [
+      createSystemMessage(MAIN_AGENT_ID, [
         `[scheduler] A(z) "${taskName}" ütemezett feladat SKILL.md törzse ${bodyChars} karakter (figyelmeztetési küszöb: ${SCHEDULED_TASK_BODY_WARN_CHARS}).`,
         'A kézbesítés emiatt nem sérülékeny (hivatkozásos küldés), de a méret növekszik. A buktatók references/ alá mozgatása csökkentené.',
       ].join('\n'))
@@ -711,7 +711,7 @@ function maybeSendSizeGuardNotice(taskName: string, bodyChars: number, nowMs: nu
   if (!claimSizeGuardNotice(taskName, 'alert', nowMs)) return
   logger.warn({ task: taskName, bodyChars, alertChars: MAX_SCHEDULED_TASK_PROMPT_LEN }, 'scheduled task body has grown past the size-guard alert threshold')
   try {
-    createAgentMessage('system', MAIN_AGENT_ID, [
+    createSystemMessage(MAIN_AGENT_ID, [
       `[scheduler] RIASZTÁS: a(z) "${taskName}" ütemezett feladat SKILL.md törzse ${bodyChars} karakter (riasztási küszöb: ${MAX_SCHEDULED_TASK_PROMPT_LEN}).`,
       'A kézbesítés emiatt nem sérülékeny (hivatkozásos küldés), de a méret növekszik. A buktatók references/ alá mozgatása csökkentené.',
     ].join('\n'))
@@ -1572,8 +1572,7 @@ async function attemptFireTask(
         logger.error({ task: task.name, agent: agentName, provider: bound.provider, candidates: bound.ambiguousCandidates }, 'scheduled task: delivery target is ambiguous (2+ DM contacts, no pinned chat id) -- skipping the delivery instruction instead of guessing')
         if (!ambiguousTargetAlerted.has(task.name)) {
           ambiguousTargetAlerted.add(task.name)
-          createAgentMessage(
-            'system',
+          createSystemMessage(
             MAIN_AGENT_ID,
             `[FELHIVAS] A(z) "${task.name}" utemezett feladat (agent: ${agentName}) cimzettje bizonytalan -- ${bound.ambiguousCandidates} lehetseges kontakt van az agens allowFrom listajan, es a task-config.json-ban nincs telegramChatId megadva. A kezbesitesi utasitas kimaradt EBBOL A futasbol (nem tippeltunk). Toltsd ki a telegramChatId mezot (konkret chat_id, vagy "none" ha a taskot nem kell csatornara kuldeni) a ~/.claude/scheduled-tasks/${task.name}/task-config.json-ban.`,
           )
@@ -1916,7 +1915,7 @@ export function digestGapGuardDeps(): GapGuardDeps {
     prevOccurrence: (schedule, fromMs, toMs) => cronPrevOccurrence(schedule, fromMs, toMs),
     digestSince: (agent, sinceMs) => hasHeartbeatDigestSince(agent, MAIN_AGENT_ID, sinceMs),
     noteExists: (marker) => hasAgentMessageStartingWith('system', MAIN_AGENT_ID, marker),
-    sendNote: (content) => { createAgentMessage('system', MAIN_AGENT_ID, content) },
+    sendNote: (content) => { createSystemMessage(MAIN_AGENT_ID, content) },
     slotLabel: BUDAPEST_LABEL,
   }
 }
@@ -2163,7 +2162,7 @@ function sendPendingRetryMainAgentNotice(view: PendingRetryView, nowMs: number):
   const text = pendingRetryAlertText(view, '[scheduler]', ageMinutes, firstAttempt) +
     '\nHa nem oldodik meg, az uzemeltető direkt ertesitest kap ha ez tovabb tart.'
   try {
-    createAgentMessage('system', MAIN_AGENT_ID, text)
+    createSystemMessage(MAIN_AGENT_ID, text)
     logger.info({ task: view.taskName, agent: view.agentName, ageMinutes }, 'Pending-retry main-agent notice sent')
   } catch (err) {
     // A failed DB insert here does not block stage-2 escalation -- see
@@ -2241,7 +2240,7 @@ function sendLostRedeliveryGiveUpNotice(entry: TaskInflightEntry, attempts: numb
     'A rendszer NEM küldi újra automatikusan -- ismétlődő újraküldés duplikált memória-írást / skill-patchet okozhat. Ellenőrizd a session állapotát; a dashboard /Ütemezések oldaláról kézzel indítható.',
   ].join('\n')
   try {
-    createAgentMessage('system', MAIN_AGENT_ID, text)
+    createSystemMessage(MAIN_AGENT_ID, text)
     logger.info({ task: entry.taskName, agent: entry.agentName, attempts }, 'lost-redelivery give-up notice sent')
   } catch (err) {
     logger.warn({ err, task: entry.taskName, agent: entry.agentName }, 'lost-redelivery give-up notice failed')
@@ -2298,7 +2297,7 @@ function sendTaskInflightMainAgentNotice(entry: TaskInflightEntry, elapsedMs: nu
     'Ellenőrizd az ágenst; ha nem oldódik meg, az uzemeltető direkt ertesitest kap ha ez tovabb tart.',
   ].join('\n')
   try {
-    createAgentMessage('system', MAIN_AGENT_ID, text)
+    createSystemMessage(MAIN_AGENT_ID, text)
     logger.info({ task: entry.taskName, agent: entry.agentName, ageMinutes }, 'task-timeout main-agent notice sent')
   } catch (err) {
     // A failed DB insert here does not block stage-2 escalation -- that

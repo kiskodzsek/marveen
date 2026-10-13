@@ -32,7 +32,7 @@ import { join } from 'node:path'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { readEnvFile } from '../env.js'
-import { createAgentMessage } from '../db.js'
+import { createSystemMessage } from '../db.js'
 import { agentDir } from './agent-config.js'
 import { configDirFor } from './main-transcript-root.js'
 import { projectsDirFor } from './active-model.js'
@@ -230,7 +230,7 @@ export interface TurnCheckDeps {
 const defaultDeps: TurnCheckDeps = {
   transcriptDir: (agent) => projectsDirFor(agentDir(agent), configDirFor(agent)),
   readEvidence: readTurnEvidence,
-  notify: (text) => { createAgentMessage('system', MAIN_AGENT_ID, text) },
+  notify: (text) => { createSystemMessage(MAIN_AGENT_ID, text) },
   now: () => Date.now(),
 }
 

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { PROJECT_ROOT, MAIN_AGENT_ID, TELEGRAM_BOT_TOKEN } from '../../config.js'
 import {
   createApproval, getApproval, resolveApproval, listApprovals, expireTimedOutApprovals,
-  createAgentMessage, setApprovalTelegramMessageId,
+  createSystemMessage, setApprovalTelegramMessageId,
   type Approval,
 } from '../../db.js'
 import { logger } from '../../logger.js'
@@ -86,7 +86,7 @@ function fallbackInBand(approval: Approval, reason: string): void {
       `action=${approval.action_description}`,
       `timeout_at=${approval.timeout_at ?? 'null'}`,
     ].join(' ')
-    createAgentMessage('system', MAIN_AGENT_ID, content)
+    createSystemMessage(MAIN_AGENT_ID, content)
   } catch (err) {
     logger.warn({ err, approvalId: approval.id }, 'approval in-band fallback failed too -- the request is only visible on the dashboard')
   }
@@ -139,7 +139,7 @@ function notifyMainAgent(approval: Approval): void {
       `action=${approval.action_description}`,
       `timeout_at=${approval.timeout_at ?? 'null'}`,
     ].join(' ')
-    createAgentMessage('system', MAIN_AGENT_ID, content)
+    createSystemMessage(MAIN_AGENT_ID, content)
   } catch (err) {
     // Non-fatal: the approval is created regardless; main-agent notification is best-effort
     logger.warn({ err, approvalId: approval.id }, 'Failed to notify main agent of approval request')

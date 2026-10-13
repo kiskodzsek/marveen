@@ -69,7 +69,11 @@ vi.mock('../web/profiles.js', async (importOriginal) => {
 
 vi.mock('../db.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../db.js')>()
-  return { ...orig, createAgentMessage: h.createAgentMessage }
+  return {
+    ...orig,
+    createAgentMessage: h.createAgentMessage,
+    createSystemMessage: (...a: unknown[]) => h.createAgentMessage('system', ...a),
+  }
 })
 
 const { tryHandleAgents, PERSONALITY_PENDING_SENTINEL } = await import('../web/routes/agents.js')

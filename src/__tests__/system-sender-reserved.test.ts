@@ -103,7 +103,7 @@ describe('the reserved check cannot be undone by configuration', () => {
     // '!isKnownAgent(' -- that substring also occurs in a helper near the top
     // of the file, and anchoring there made this assertion fail against a
     // CORRECT implementation (measured while writing this test).
-    const reserved = ROUTE_SRC.indexOf('=== SYSTEM_DIRECTIVE_SENDER')
+    const reserved = ROUTE_SRC.indexOf('if (isReservedSender(from))')
     const exemption = ROUTE_SRC.indexOf('SYSTEM_SENDERS.has(')
     const knownAgent = ROUTE_SRC.indexOf('!isOwnerSender && !isSystemSender')
     expect(reserved).toBeGreaterThan(-1)

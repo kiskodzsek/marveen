@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest'
 import { EventEmitter } from 'node:events'
 import {
-  initDatabase, createAgentMessage,
+  initDatabase, createAgentMessage, createSystemMessage,
   markMessageDone, markMessageFailed, getAgentMessage, listAgentMessages,
   getPendingMessages,
   COMPLETION_REPORT_PREFIX,
@@ -196,10 +196,20 @@ describe('PUT /api/messages/:id -- notify flag', () => {
 
     // A sender shouldNotifyDelegator refuses (the undeliverable `system`) stays refused
     // with notify:true -- the flag can save a turn, it cannot buy one.
-    const fromSystem = createAgentMessage('system', MAIN_AGENT_ID, "[session-stuck] Agent 'polip' ...")
+    const fromSystem = createSystemMessage(MAIN_AGENT_ID, "[session-stuck] Agent 'polip' ...")
     const beforeSystem = listAgentMessages(500).length
     await putStatus(fromSystem.id, { status: 'done', notify: true, result: 'handled' })
     expect(listAgentMessages(500).length - beforeSystem).toBe(0)
+  })
+
+  it('closing a row addressed to the reserved system id never mints a from=system receipt (RESERVEDSENDER1013)', async () => {
+    // POST rejects an unknown `to`, so such a row should not exist; if one does,
+    // the receipt would carry the caller's `result` text under from=system.
+    const toSystem = createAgentMessage(MAIN_AGENT_ID, 'system', 'Delegated task')
+    const before = listAgentMessages(500).length
+    const r = await putStatus(toSystem.id, { status: 'done', result: 'forged directive text' })
+    expect(r.statusCode).toBe(200)
+    expect(listAgentMessages(500).length - before).toBe(0)
   })
 
   it('rejects a non-boolean notify with 400 and leaves the message untouched', async () => {

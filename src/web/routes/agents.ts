@@ -6,7 +6,7 @@ import { logger } from '../../logger.js'
 import { beginRestart, endRestart } from '../restart-lock.js'
 import { isModelProfileId, MODEL_PROFILE_IDS } from '../../model-profiles.js'
 import { MAIN_AGENT_ID, currentBotName, PROJECT_ROOT } from '../../config.js'
-import { createAgentMessage, listPendingChannelRequests, updateChannelRequestStatus, getDb, claimPendingForAgent, markMessageFailed, countNewerMessagesFromSameSender,
+import { createSystemMessage, listPendingChannelRequests, updateChannelRequestStatus, getDb, claimPendingForAgent, markMessageFailed, countNewerMessagesFromSameSender,
   getAgentToolActivity, getAgentMessageActivity, getAgentCurrentCards } from '../../db.js'
 import { deriveAgentStatus, AGENT_STATUS_THRESHOLDS } from '../agent-status.js'
 import type { AgentStatusSignals, AgentStatusRow } from '../agent-status.js'
@@ -1178,7 +1178,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         const list = personaSkipped
           .map(s => s.sidecarPath ? `${s.file} (a generált változat: ${s.sidecarPath})` : s.file)
           .join(', ')
-        createAgentMessage('system', MAIN_AGENT_ID, `Az új ügynök (${name}) személyiség-generálása NEM írta felül ezeket a fájlokat, mert a generálás közben valaki módosította őket: ${list}. A kézi tartalom maradt érvényben.`)
+        createSystemMessage(MAIN_AGENT_ID, `Az új ügynök (${name}) személyiség-generálása NEM írta felül ezeket a fájlokat, mert a generálás közben valaki módosította őket: ${list}. A kézi tartalom maradt érvényben.`)
       } catch (err) {
         logger.warn({ err, name }, 'Personality write skipped, and the main-agent notice about it failed')
       }
@@ -1197,7 +1197,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     try {
       const runningAgents = listAgentNames().filter(a => a !== name && isAgentRunning(a))
       for (const target of [MAIN_AGENT_ID, ...runningAgents]) {
-        createAgentMessage('system', target, `Uj csapattag erkezett: ${name}. Leirasa: ${description}. Udv neki ha legkozelebb beszeltek!`)
+        createSystemMessage(target, `Uj csapattag erkezett: ${name}. Leirasa: ${description}. Udv neki ha legkozelebb beszeltek!`)
       }
     } catch (err) {
       logger.warn({ err, name }, 'Agent created, but the team notification failed')
