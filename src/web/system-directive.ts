@@ -27,7 +27,7 @@
 // injection, and a failed injection downgrades the row to 'failed' so a
 // wrapper replayed later points at a row that says "never injected".
 import { createAgentMessage, markMessageDelivered, markMessageFailed } from '../db.js'
-import { sendPromptToSession } from './agent-process.js'
+import { sendPromptToSession, type SendEmitGuard } from './agent-process.js'
 import { logger } from '../logger.js'
 
 /** The reserved sender id of directive rows. Never accepted by POST /api/messages. */
@@ -68,22 +68,34 @@ export function systemDirectiveEnvelope(msgId: number): string {
  * fresh row per attempt and an old envelope can never point at a row that
  * claims a delivery that did not happen.
  */
+// With an emitGuard the outcome may also be 'aborted-guard' (nothing typed: a
+// permission prompt, first-run gate, blocking menu or unreadable pane at the
+// last look before the first key); the anchor row is then marked failed too.
+export function sendSystemDirective(
+  toAgent: string, session: string, text: string, host: string | null,
+  opts: SendPromptOpts & { emitGuard: SendEmitGuard },
+): Promise<SendOutcome | 'aborted-guard'>
+export function sendSystemDirective(
+  toAgent: string, session: string, text: string, host?: string | null, opts?: SendPromptOpts,
+): Promise<SendOutcome>
 export async function sendSystemDirective(
   toAgent: string,
   session: string,
   text: string,
   host: string | null = null,
-  opts: SendPromptOpts = {},
-): Promise<SendOutcome> {
+  opts: SendPromptOpts & { emitGuard?: SendEmitGuard } = {},
+): Promise<SendOutcome | 'aborted-guard'> {
   // Anchor first, inject second -- the recipient may verify the instant the
   // prompt lands. No await between the two DB statements (see module header).
   const msg = createAgentMessage(SYSTEM_DIRECTIVE_SENDER, toAgent, text)
   markMessageDelivered(msg.id)
 
   const wrapped = `${systemDirectiveEnvelope(msg.id)}\n${text}`
-  let outcome: SendOutcome
+  let outcome: SendOutcome | 'aborted-guard'
   try {
-    outcome = await sendPromptToSession(session, wrapped, host, opts)
+    outcome = opts.emitGuard
+      ? await sendPromptToSession(session, wrapped, host, { ...opts, emitGuard: opts.emitGuard })
+      : await sendPromptToSession(session, wrapped, host, opts)
   } catch (err) {
     markMessageFailed(msg.id, `system-directive: tmux inject threw: ${String(err).slice(0, 200)}`)
     throw err
