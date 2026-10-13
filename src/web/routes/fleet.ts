@@ -3,7 +3,7 @@ import { readBody, json } from '../http-helpers.js'
 import { exportFleet, importFleet, MIN_VAULT_PASSWORD_LEN, UserFacingError, type ExportedFleet } from '../fleet-transfer.js'
 import { parseCookies, SESSION_COOKIE_NAME } from '../auth-gate.js'
 import { resolveSession } from '../auth-sessions.js'
-import { logConfigChange } from '../../db.js'
+import { logConfigChange, getOwnerDashboardUser } from '../../db.js'
 import { notifySecurityEvent } from '../../notify.js'
 import type { RouteContext } from './types.js'
 
@@ -16,13 +16,34 @@ import type { RouteContext } from './types.js'
 // gate, but neither grants nor blocks access here. Token, device, operator
 // and federation credentials get 403. Every attempt, allowed or refused,
 // writes an audit row (config_change_log); a refusal also alerts the owner.
-// Residual, stated: a token holder can still break-glass reset a dashboard
-// password (auth.ts) and then log in -- that path alerts the owner on its own.
+// Only the OWNER's session counts (Viktor 2460): the first dashboard user this
+// install created (db.ts getOwnerDashboardUser), not any logged-in user.
+// Residual, stated:
+//  - a token holder can still break-glass reset the owner's password
+//    (auth.ts) and then log in -- that path alerts the owner on its own;
+//  - an agent running under the SAME uid can write the SQLite file directly
+//    (an auth_sessions row = a forged owner session). No route check can stop
+//    that; the boundary is a separate uid for the dashboard (H1).
 export function fleetOwnerSession(req: { headers: { cookie?: string } }): string | null {
   const cookie = parseCookies(req.headers.cookie)[SESSION_COOKIE_NAME]
   if (!cookie) return null
-  return resolveSession(cookie)?.username ?? null
+  const session = resolveSession(cookie)
+  const owner = getOwnerDashboardUser()
+  return session && owner && session.userId === owner.id ? session.username : null
 }
+
+// LOW (Viktor 2460): one refusal alert per caller per window, so a looping
+// caller cannot flood the owner's Telegram. Every refusal is still audited.
+const DENIED_ALERT_WINDOW_MS = 10 * 60_000
+const lastDeniedAlert = new Map<string, number>()
+export function shouldAlertFleetDenial(caller: string, nowMs: number): boolean {
+  const last = lastDeniedAlert.get(caller)
+  if (last !== undefined && nowMs - last < DENIED_ALERT_WINDOW_MS) return false
+  lastDeniedAlert.set(caller, nowMs)
+  return true
+}
+/** Test seam. */
+export function _resetFleetDenialAlertsForTest(): void { lastDeniedAlert.clear() }
 
 function callerLabel(auth: RouteContext['auth']): string {
   if (!auth) return 'none'
@@ -43,7 +64,7 @@ export async function tryHandleFleet(ctx: RouteContext): Promise<boolean> {
     const caller = callerLabel(ctx.auth)
     logConfigChange(`security.fleet_${op}_denied`, null, method, caller)
     logger.warn({ path, method, caller }, 'fleet: refused -- owner browser session required (FLEETEXPORT1013)')
-    void notifySecurityEvent(`🚨 Flotta-${op} kísérlet a dashboardon, ELUTASÍTVA (${caller}). Ez a teljes Vaultot adná ki vagy írná felül; csak a bejelentkezett tulajdonos böngészője hívhatja. Ha nem te voltál, szólj Viktornak.`)
+    if (shouldAlertFleetDenial(caller, Date.now())) void notifySecurityEvent(`🚨 Flotta-${op} kísérlet a dashboardon, ELUTASÍTVA (${caller}). Ez a teljes Vaultot adná ki vagy írná felül; csak a bejelentkezett tulajdonos böngészője hívhatja. Ha nem te voltál, szólj Viktornak.`)
     json(res, { error: 'A flotta export/import csak bejelentkezett tulajdonosi böngésző-sessionnel érhető el (a hozzáférési token nem elég).' }, 403)
     return true
   }

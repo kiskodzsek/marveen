@@ -28,7 +28,8 @@ vi.mock('../web/fleet-transfer.js', async (orig) => ({
   importFleet: transfer.importFleet,
 }))
 
-const { tryHandleFleet, fleetOwnerSession } = await import('../web/routes/fleet.js')
+const { tryHandleFleet, fleetOwnerSession, shouldAlertFleetDenial, _resetFleetDenialAlertsForTest } = await import('../web/routes/fleet.js')
+const { tryHandleAuth } = await import('../web/routes/auth.js')
 
 interface MockRes { statusCode: number; body: string; writeHead(s: number, h?: unknown): MockRes; end(d?: unknown): void }
 function mkRes(): MockRes {
@@ -64,9 +65,10 @@ beforeAll(() => {
   initDatabase(':memory:')
 })
 beforeEach(() => {
-  getDb().exec("DELETE FROM auth_sessions; DELETE FROM dashboard_users; DELETE FROM config_change_log WHERE key LIKE 'security.fleet_%'")
+  getDb().exec("DELETE FROM auth_sessions; DELETE FROM dashboard_users; DELETE FROM sqlite_sequence WHERE name = 'dashboard_users'; DELETE FROM config_change_log WHERE key LIKE 'security.fleet_%'")
   _clearSessionCacheForTest()
   notify.mockClear(); transfer.exportFleet.mockClear(); transfer.importFleet.mockClear()
+  _resetFleetDenialAlertsForTest()
   const u = createDashboardUser('patrik', 'not-a-real-hash')
   ownerCookie = createSession({ userId: u.id, username: u.username })
 })
@@ -133,6 +135,68 @@ describe('allowed with the owner session', () => {
     expect(fleetOwnerSession({ headers: { cookie: `${SESSION_COOKIE_NAME}=${ownerCookie}` } })).toBe('patrik')
     expect(fleetOwnerSession({ headers: {} })).toBeNull()
     expect(fleetOwnerSession({ headers: { cookie: `${SESSION_COOKIE_NAME}=nope` } })).toBeNull()
+  })
+})
+
+// Viktor 2460 (HIGH): token -> create a user -> log in -> session -> export.
+describe('only the OWNER session, and no token-minted user', () => {
+  async function authCall(method: string, path: string, auth: RouteContext['auth'], body?: unknown) {
+    const r = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]) as unknown as http.IncomingMessage
+    r.headers = {}
+    const res = mkRes()
+    await tryHandleAuth({ req: r, res: res as unknown as http.ServerResponse, path, method, url: new URL(`http://127.0.0.1:3420${path}`), auth } as RouteContext)
+    return res
+  }
+  it('the token can no longer create a user once the install has one: 403, audited', async () => {
+    const res = await authCall('POST', '/api/auth/users', { kind: 'token' }, { username: 'evil', password: 'long-enough-password-1' })
+    expect(res.statusCode).toBe(403)
+    const rows = getDb().prepare("SELECT key FROM config_change_log WHERE key = 'security.dashboard_user_create_denied'").all()
+    expect(rows).toHaveLength(1)
+  })
+  it('deleting every user does not reopen token creation (the install HAD a user)', async () => {
+    getDb().exec('DELETE FROM dashboard_users')
+    const res = await authCall('POST', '/api/auth/users', { kind: 'token' }, { username: 'evil', password: 'long-enough-password-1' })
+    expect(res.statusCode).toBe(403)
+  })
+  it('first-run (never had a user): the token may still create the first one, audited and alerted', async () => {
+    getDb().exec("DELETE FROM dashboard_users; DELETE FROM sqlite_sequence WHERE name = 'dashboard_users'")
+    const res = await authCall('POST', '/api/auth/users', { kind: 'token' }, { username: 'owner', password: 'long-enough-password-1' })
+    expect(res.statusCode).toBe(201)
+    expect(getDb().prepare("SELECT key FROM config_change_log WHERE key = 'security.dashboard_user_created'").all()).toHaveLength(1)
+    expect(notify).toHaveBeenCalledTimes(1)
+  })
+  it('a second user (created from the owner session) has a valid session but gets 403 on the fleet routes', async () => {
+    const res = await authCall('POST', '/api/auth/users', { kind: 'session', user: 'patrik' }, { username: 'second', password: 'long-enough-password-1' })
+    expect(res.statusCode).toBe(201)
+    expect(notify).toHaveBeenCalledTimes(1)                       // creation alert
+    const second = getDb().prepare("SELECT id, username FROM dashboard_users WHERE username = 'second'").get() as { id: number; username: string }
+    const cookie = createSession({ userId: second.id, username: second.username })
+    for (const [method, full] of ROUTES) {
+      const out = await call(method, full, { cookie, auth: { kind: 'session', user: 'second' } })
+      expect(out.res.statusCode, full).toBe(403)
+    }
+    expect(transfer.exportFleet).not.toHaveBeenCalled()
+    expect(transfer.importFleet).not.toHaveBeenCalled()
+  })
+  it('the owner disabled: nobody passes (fail closed)', async () => {
+    getDb().exec('UPDATE dashboard_users SET disabled = 1 WHERE id = 1')
+    const { res } = await call('GET', '/api/fleet/export', { cookie: ownerCookie })
+    expect(res.statusCode).toBe(403)
+  })
+})
+
+describe('LOW (Viktor 2460): refusal alerts are rate limited per caller, audit rows are not', () => {
+  it('one alert per caller per 10 minutes, every refusal audited', async () => {
+    for (let i = 0; i < 5; i++) await call('GET', '/api/fleet/export', { auth: { kind: 'token', agent: 'dave' } })
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(auditRows()).toHaveLength(5)
+    await call('GET', '/api/fleet/export', { auth: { kind: 'token', agent: 'mira' } })
+    expect(notify).toHaveBeenCalledTimes(2)
+  })
+  it('the window reopens after 10 minutes', () => {
+    expect(shouldAlertFleetDenial('x', 0)).toBe(true)
+    expect(shouldAlertFleetDenial('x', 9 * 60_000)).toBe(false)
+    expect(shouldAlertFleetDenial('x', 10 * 60_000)).toBe(true)
   })
 })
 
