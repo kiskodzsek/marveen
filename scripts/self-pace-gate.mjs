@@ -141,16 +141,27 @@ const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_
 //     LaunchAgents is klodel-owned, so root ownership there would not hold;
 //     a new hash comes only through a PR and Viktor's review;
 //   - every use is logged to store/launchd-ops.log (M4), never silently.
+//   - only when the WHOLE command is that one segment (L1, Viktor 2414): no
+//     `cp ...; <bootstrap>` chaining, since the plist hash is read before a
+//     preceding segment would run.
 // Boundary, stated: an agent that rewrites its OWN settings.json hook command
 // can forge both identity checks; this stops a prompt-injected agent issuing
 // commands, not one rewriting its own config (that needs a separate uid).
+// Boundary, stated (Viktor 2414): the scheduler check matches TEXT. It stops an
+// accidental call, not a deceived agent: these forms still reach launchd
+// unseen, on this branch and on develop alike -- bash -c $'...', an unquoted
+// -c payload, concatenated quotes ("l""aunchctl"), a backslash inside the word,
+// a variable ($X), a `bash <<EOF` body, `... | sh`, a script file run by a
+// shell, python -c os.system, osascript "do shell script", xargs. They are
+// pinned as known-uncovered in self-pace-launchd-ops.test.ts; the real
+// boundary is a separate uid (H1).
 export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
 export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog', 'hu.myshp.marabel-incident-passziv'])
 export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv'])
 export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   'hu.myshp.szamla.worker': new Set(['8eb792c49613117c0d49de2892d6e400370db1d2b8b662dab4f2cd8541782492']),
   // Pulzus 2369 (Patrik 1668): the outage runbook's passive checker, RunAtLoad false.
-  'hu.myshp.marabel-incident-passziv': new Set(['606b9bd893a2681054d38ca49f4ccb607c5994df073b96f8a2aadf74739aa9c1']),
+  'hu.myshp.marabel-incident-passziv': new Set(['db0ea0696233fcdad1ab701962f872ede30721e8a12db7e17a76831d1ef5d249']),
 }
 const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
 const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)
@@ -655,11 +666,16 @@ export function gateDecision(toolName, toolInput, opts = {}) {
     // falls back to the naive split, i.e. to scanning strictly more.
     const masked = maskInertLiterals(safeCommand)
     const launchdOps = []
+    // L1 (Viktor 2414): the exception holds only for a command that is ONE
+    // segment, counted on the raw text (heredoc bodies and quotes included, so
+    // this counts strictly more). Otherwise `cp evil.plist <path>; <bootstrap>`
+    // would pass: the hash is measured at decision time, before the cp runs.
+    const singleSegment = splitSegments(String(toolInput?.command ?? '')).filter(Boolean).length === 1
     for (const seg of (masked == null ? naiveSegs : splitSegments(masked))) {
       // scheduler binaries: deny the exec/submit forms, allow pure read-listing
       if (SCHEDULER_RX.test(seg) && !SCHEDULER_READ_RX.test(seg)) {
         // LAUNCHDOPS1013: the narrow exception, top level only (depth 0).
-        const d = (opts.depth ?? 0) === 0 ? launchdOpsDecision(seg, opts) : { allowed: false }
+        const d = (opts.depth ?? 0) === 0 && singleSegment ? launchdOpsDecision(seg, opts) : { allowed: false }
         if (d.allowed) { launchdOps.push(d.entry); continue }
         return d.mismatch ? { deny: true, reason: 'launchd-agent-mismatch' } : { deny: true }
       }
