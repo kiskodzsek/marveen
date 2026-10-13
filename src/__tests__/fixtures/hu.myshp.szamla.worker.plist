@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>hu.myshp.szamla.worker</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>-I</string>
+		<string>/Users/klodel/marveen/ops/szamla/szamla_worker.py</string>
+		<string>--config</string>
+		<string>/Users/klodel/.config/marveen-szamla/config.json</string>
+		<string>run</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>
+		<dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>30</integer></dict>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/Users/klodel/Library/Logs/marveen-szamla.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/klodel/Library/Logs/marveen-szamla.log</string>
+	<key>Umask</key>
+	<integer>23</integer>
+</dict>
+</plist>
