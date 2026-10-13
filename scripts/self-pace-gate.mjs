@@ -145,10 +145,12 @@ const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_
 // can forge both identity checks; this stops a prompt-injected agent issuing
 // commands, not one rewriting its own config (that needs a separate uid).
 export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
-export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog'])
-export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker'])
+export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog', 'hu.myshp.marabel-incident-passziv'])
+export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv'])
 export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   'hu.myshp.szamla.worker': new Set(['8eb792c49613117c0d49de2892d6e400370db1d2b8b662dab4f2cd8541782492']),
+  // Pulzus 2369 (Patrik 1668): the outage runbook's passive checker, RunAtLoad false.
+  'hu.myshp.marabel-incident-passziv': new Set(['606b9bd893a2681054d38ca49f4ccb607c5994df073b96f8a2aadf74739aa9c1']),
 }
 const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
 const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)
