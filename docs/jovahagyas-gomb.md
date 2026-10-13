@@ -37,6 +37,8 @@ A prompt-injektált, API-n át cselekvő ágens ellen véd: a tokent az API nem 
 
 **Nem véd** ott, ahol egy ágens a dashboard kódját, a `store/` fájljait (a Vault titkosított tárát és a kulcsát), vagy a `.env`-et közvetlenül, fájlszinten olvassa vagy írja ugyanazon a UID-n. A `POST /api/vault` a token felülírását nem tiltja; ezt a csere-riasztás teszi láthatóvá. Ezeket a 9a2925a7 2. lépése (TOTP, izolált jóváhagyás, külön uid) zárja le.
 
+**Nem véd, amíg a fleet export nincs javítva:** a `GET /api/fleet/export` a közös Bearer tokennel elérhető. Viktor mérése szerint a teljes Vaultot kiadja, a mesterkulccsal együtt, tehát a bot tokenjét is: `src/web/routes/fleet.ts`, Viktor riportja: `agents/viktor/reports/2026-10-13-fleet-export-vault-high.md`. Ezért a botot (a lenti Beállítás 1. lépését) csak a fleet export javítása UTÁN kapcsoljuk be. A javítás: csak session, Bearer tokennel 403, audit, teszt.
+
 ## Beállítás
 
 1. **Patrik:**
