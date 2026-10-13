@@ -233,7 +233,7 @@ curl -s -X PUT http://localhost:3420/api/schedules/feladat-neve \
 
 Csak a megadott mezők frissülnek -- a többi változatlan marad.
 
-Az API csak ezeket a mezőket írja: `description`, `prompt`, `schedule`, `agent`, `enabled`, `type`, `skipIfBusy`, `forceSend`, `targetSession`. Minden más mező (pl. `command`, `preCheck`, `injectMetrics`, `sendDigestDirect`, `telegramChatId`) 400-at kap: ezeket csak a telepítő seederei állítják. Az `agent` csak a `GET /api/schedules/agents` listájából lehet, a `type` csak `task` vagy `heartbeat` (egy meglévő `command` task a saját típusát megtarthatja, de API-n át semmi nem válhat `command` taskká). Ugyanez az `agent`/`type` szabály érvényes a létrehozásra (POST) is.
+Az API csak ezeket a mezőket írja: `description`, `prompt`, `schedule`, `agent`, `enabled`, `type`, `skipIfBusy`, `forceSend`, `targetSession`. Minden más mező (pl. `command`, `preCheck`, `injectMetrics`, `sendDigestDirect`, `telegramChatId`) 400-at kap: ezeket csak a telepítő seederei állítják. Az `agent` csak a `GET /api/schedules/agents` listájából lehet, a `type` csak `task` vagy `heartbeat` (API-n át semmi nem válhat `command` taskká). Egy meglévő `command` taskra az API csak a `{"enabled": false}` törzset fogadja el, a `/toggle` is csak kikapcsolni tudja: a bekapcsolás és az átütemezés a telepítő dolga. Ugyanez az `agent`/`type` szabály érvényes a létrehozásra (POST) is.
 
 ### Törlés
 

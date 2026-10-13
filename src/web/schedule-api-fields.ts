@@ -46,9 +46,20 @@ export function scheduleAgentRefusal(agent: string, knownAgents: ReadonlySet<str
 }
 
 /**
+ * A command task (bash in the dashboard process, seeded by the installer) can
+ * only be switched OFF over HTTP. Viktor L2 (2026-10-13): with `enabled` and
+ * `schedule` writable, the shared token could start a disabled seeder command
+ * or run it more often -- harmless for today's two (auto-update, usage-collect),
+ * but the next seeder command would inherit the same door. Switching one back
+ * on is the installer's or the owner's job, not the API's.
+ */
+export const COMMAND_TASK_API_REFUSAL =
+  'command tasks can only be disabled via the API ({"enabled": false}); enabling or editing them is done by the installer'
+
+/**
  * Validate a PUT body against the API allowlist. `existingType` is the stored
- * task's type: a command task may keep its own type in an edit, but nothing can
- * become a command task over HTTP.
+ * task's type: nothing can become a command task over HTTP, and an existing
+ * command task accepts only `{enabled: false}` (see COMMAND_TASK_API_REFUSAL).
  */
 export function validateScheduleUpdate(
   body: unknown,
@@ -59,6 +70,13 @@ export function validateScheduleUpdate(
     return { ok: false, error: 'Body must be a JSON object' }
   }
   const data = body as Record<string, unknown>
+  if (existingType === 'command') {
+    const keys = Object.keys(data)
+    if (keys.length !== 1 || keys[0] !== 'enabled' || data.enabled !== false) {
+      return { ok: false, error: COMMAND_TASK_API_REFUSAL }
+    }
+    return { ok: true, update: { enabled: false } }
+  }
   const allowed = new Set<string>([...SCHEDULE_API_STRING_FIELDS, ...SCHEDULE_API_BOOLEAN_FIELDS])
   const refused = Object.keys(data).filter(k => !allowed.has(k))
   if (refused.length > 0) {
@@ -82,8 +100,7 @@ export function validateScheduleUpdate(
     if (refusal) return { ok: false, error: refusal }
   }
   if (update.type !== undefined) {
-    const keepsOwnType = existingType !== undefined && update.type === existingType
-    if (!keepsOwnType && !SCHEDULE_API_TYPES.includes(update.type)) {
+    if (!SCHEDULE_API_TYPES.includes(update.type)) {
       return { ok: false, error: `type '${update.type}' cannot be set via the API (allowed: ${SCHEDULE_API_TYPES.join(', ')})` }
     }
   }

@@ -140,14 +140,13 @@ describe('schedules API field allowlist (Viktor M2)', () => {
     }
   })
 
-  it('no task becomes a command task over HTTP; a command task may keep its type', () => {
+  it('no task becomes a command task over HTTP', () => {
     expect(validateScheduleUpdate({ type: 'command' }, 'task', agents).ok).toBe(false)
     expect(validateScheduleUpdate({ type: 'command' }, undefined, agents).ok).toBe(false)
     expect(validateScheduleUpdate({ type: 'whatever' }, 'task', agents).ok).toBe(false)
-    expect(validateScheduleUpdate({ type: 'command' }, 'command', agents).ok).toBe(true)
-    for (const t of SCHEDULE_API_TYPES) {
-      expect(validateScheduleUpdate({ type: t }, 'command', agents).ok, t).toBe(true)
-    }
+    // An existing command task is disable-only (Viktor L2): see
+    // reserved-sender-low-findings.test.ts.
+    expect(validateScheduleUpdate({ type: 'command' }, 'command', agents).ok).toBe(false)
     expect(SCHEDULE_API_TYPES).not.toContain('command')
   })
 

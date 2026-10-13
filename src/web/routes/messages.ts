@@ -25,7 +25,7 @@ import { verifyHeartbeatKanban, HEARTBEAT_KANBAN_WINDOW_SEC } from '../heartbeat
 import { buildFreshnessInfo, type MessageFreshness } from '../agent-message-wrap.js'
 import { parseQualifiedId, formatQualifiedId, isQualifiedId } from '../federation/address.js'
 import { getFederationConfig } from '../federation/config.js'
-import { isReservedSender } from '../../reserved-sender.js'
+import { isReservedSender, isPlainSenderId } from '../../reserved-sender.js'
 import type { RouteContext } from './types.js'
 
 // Should closing a message produce a reverse "[Eredmény]" notification to its sender?
@@ -261,6 +261,18 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     if (from.includes('/')) {
       logger.warn({ from: from.trim(), to: to.trim() }, 'Rejected /api/messages POST with qualified from (federation impersonation guard)')
       json(res, { error: 'from must be a local agent id without "/" -- federated senders are only accepted via /api/federation/inbox' }, 403)
+      return true
+    }
+    // Positive sender rule (Viktor L1, RESERVEDSENDER1013): `from` is stored
+    // as written (from.trim()), while every check above and below compares the
+    // sanitized form. So 'kernel' + a zero-width space, or a look-alike the
+    // reserved-sender map does not list, passed as the agent it sanitizes to
+    // and was stored as something else. Only the router's id alphabet may reach
+    // from_agent; the owner's exact configured name (which may carry accents,
+    // the dashboard composes with it) is the one exception.
+    if (!isPlainSenderId(from) && from.trim() !== OWNER_NAME.trim()) {
+      logger.warn({ to: to.trim() }, 'Rejected /api/messages POST with a non-plain from')
+      json(res, { error: 'from must be a plain id ([A-Za-z0-9_-]) -- no spaces, accents or look-alike letters' }, 403)
       return true
     }
     // From-authentication: accept messages only from registered fleet agents.
