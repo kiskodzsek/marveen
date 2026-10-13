@@ -55,6 +55,8 @@ export function computeTimeoutAt(category: string, timeoutSeconds: unknown, nowM
   return now + DEFAULT_TIMEOUT_MINUTES * 60
 }
 
+export const APPROVAL_IDENT_RE = /^[a-z0-9][a-z0-9_.-]{0,63}$/
+
 // f2c5edb0: the window inside which an approved letter may still be consumed,
 // counted from resolved_at. The SAME variable and default as the gate
 // (EMAIL_APPROVAL_WINDOW_S, 1800 s in scripts/hooks/email-approval-gate.py), so
@@ -126,6 +128,29 @@ export function quoteOwnerDescription(description: string): string {
   return text.split('\n').map(line => `${OWNER_DESCRIPTION_MARK}${line}`.trimEnd()).join('\n')
 }
 
+// The [APPROVAL_REQUEST] message to the main agent carries the same
+// agent-written description, and the main agent forwards it to the owner
+// (approval-request-handling skill). A description holding " id=<another id>"
+// or a fake "Válasz: IGEN <another id>" line could steer that forward too
+// (Viktor, msg 1504). So the server-set fields come first, and the description
+// comes LAST, as one JSON string literal: its quotes and line breaks are
+// escaped, so it cannot end early or open a new line, and nothing after it
+// can be taken for a field. Pure + exported for tests.
+export function buildMainAgentApprovalMessage(approval: Approval, ownerUnreachedReason?: string): string {
+  let action = redact(approval.action_description.replace(LINE_BREAKS, '\n').replace(HIDDEN_CHARS, '').replace(BLANK_RUNS, ' ')).trim()
+  if (action.length > OWNER_DESCRIPTION_MAX) {
+    action = `${action.slice(0, OWNER_DESCRIPTION_MAX).replace(/[\uD800-\uDBFF]$/, '').trimEnd()} … (a teljes szöveg a dashboardon)`
+  }
+  return [
+    ownerUnreachedReason ? `[APPROVAL_REQUEST][OWNER_UNREACHED ${ownerUnreachedReason}]` : '[APPROVAL_REQUEST]',
+    `id=${approval.id}`,
+    `agent=${headerField(approval.agent_id)}`,
+    `category=${headerField(approval.category)}`,
+    `timeout_at=${approval.timeout_at ?? 'null'}`,
+    `action_quoted=${JSON.stringify(action)}`,
+  ].join(' ')
+}
+
 // Owner-facing Telegram text. Pure + exported for tests. Plain text (no
 // markdown escaping concerns), proper accents: this is outgoing copy.
 export function buildOwnerApprovalText(approval: Approval): string {
@@ -152,15 +177,7 @@ export function buildOwnerApprovalText(approval: Approval): string {
 function fallbackInBand(approval: Approval, reason: string): void {
   if (approval.agent_id !== MAIN_AGENT_ID) return
   try {
-    const content = [
-      `[APPROVAL_REQUEST][OWNER_UNREACHED ${reason}]`,
-      `id=${approval.id}`,
-      `agent=${approval.agent_id}`,
-      `category=${approval.category}`,
-      `action=${approval.action_description}`,
-      `timeout_at=${approval.timeout_at ?? 'null'}`,
-    ].join(' ')
-    createAgentMessage('system', MAIN_AGENT_ID, content)
+    createAgentMessage('system', MAIN_AGENT_ID, buildMainAgentApprovalMessage(approval, reason))
   } catch (err) {
     logger.warn({ err, approvalId: approval.id }, 'approval in-band fallback failed too -- the request is only visible on the dashboard')
   }
@@ -205,15 +222,7 @@ function notifyMainAgent(approval: Approval): void {
     return
   }
   try {
-    const content = [
-      `[APPROVAL_REQUEST]`,
-      `id=${approval.id}`,
-      `agent=${approval.agent_id}`,
-      `category=${approval.category}`,
-      `action=${approval.action_description}`,
-      `timeout_at=${approval.timeout_at ?? 'null'}`,
-    ].join(' ')
-    createAgentMessage('system', MAIN_AGENT_ID, content)
+    createAgentMessage('system', MAIN_AGENT_ID, buildMainAgentApprovalMessage(approval))
   } catch (err) {
     // Non-fatal: the approval is created regardless; main-agent notification is best-effort
     logger.warn({ err, approvalId: approval.id }, 'Failed to notify main agent of approval request')
@@ -336,6 +345,18 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     }
     if (typeof category !== 'string' || !category.trim()) {
       json(res, { error: 'category is required' }, 400)
+      return true
+    }
+    // Both end up in the owner's header and in the main agent's message, next
+    // to the server-set fields. A free string could carry a quote, "id=" or a
+    // forged action_quoted= (Viktor, msg 1526), so only plain identifiers pass.
+    // Agent names are [a-z0-9-] (sanitizeAgentName); category keys are snake_case.
+    if (!APPROVAL_IDENT_RE.test(agent_id)) {
+      json(res, { error: 'agent_id must match ^[a-z0-9][a-z0-9_.-]{0,63}$' }, 400)
+      return true
+    }
+    if (!APPROVAL_IDENT_RE.test(category)) {
+      json(res, { error: 'category must match ^[a-z0-9][a-z0-9_.-]{0,63}$' }, 400)
       return true
     }
     if (typeof action_description !== 'string' || !action_description.trim()) {
