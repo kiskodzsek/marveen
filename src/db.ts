@@ -5175,6 +5175,23 @@ export function logConfigChange(
   ).run(key, oldValue === null ? null : String(oldValue), newValue === null ? null : String(newValue), actor, now)
 }
 
+// A rate-limit window kept in the audit log itself, so a dashboard restart does
+// not reopen it. Is there a `key` row from `actor` newer than `windowSec` before
+// `nowSec`? If not, write one at `nowSec` and return true (the caller may act).
+// One synchronous transaction, so two calls cannot both claim the same window.
+export function claimConfigChangeWindow(key: string, actor: string, nowSec: number, windowSec: number): boolean {
+  return db.transaction(() => {
+    // created_at <= nowSec: a row dated in the future (only a direct DB write can
+    // make one) must not hold the window shut forever (Viktor 2680).
+    const hit = db.prepare('SELECT 1 FROM config_change_log WHERE key = ? AND actor = ? AND created_at > ? AND created_at <= ? LIMIT 1')
+      .get(key, actor, nowSec - windowSec, nowSec)
+    if (hit) return false
+    db.prepare('INSERT INTO config_change_log (key, old_value, new_value, actor, created_at) VALUES (?, NULL, NULL, ?, ?)')
+      .run(key, actor, nowSec)
+    return true
+  })()
+}
+
 export interface ConfigChangeLogRow {
   id: number
   key: string

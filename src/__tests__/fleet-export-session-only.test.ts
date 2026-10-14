@@ -28,7 +28,7 @@ vi.mock('../web/fleet-transfer.js', async (orig) => ({
   importFleet: transfer.importFleet,
 }))
 
-const { tryHandleFleet, fleetOwnerSession, shouldAlertFleetDenial, _resetFleetDenialAlertsForTest } = await import('../web/routes/fleet.js')
+const { tryHandleFleet, fleetOwnerSession, shouldAlertFleetDenial, FLEET_DENIED_ALERT_KEY } = await import('../web/routes/fleet.js')
 const { tryHandleAuth } = await import('../web/routes/auth.js')
 
 interface MockRes { statusCode: number; body: string; writeHead(s: number, h?: unknown): MockRes; end(d?: unknown): void }
@@ -65,10 +65,9 @@ beforeAll(() => {
   initDatabase(':memory:')
 })
 beforeEach(() => {
-  getDb().exec("DELETE FROM auth_sessions; DELETE FROM dashboard_users; DELETE FROM sqlite_sequence WHERE name = 'dashboard_users'; DELETE FROM config_change_log WHERE key LIKE 'security.fleet_%'")
+  getDb().exec("DELETE FROM auth_sessions; DELETE FROM dashboard_users; DELETE FROM sqlite_sequence WHERE name = 'dashboard_users'; DELETE FROM config_change_log WHERE key LIKE 'security.fleet_%' OR key = 'security.alert.fleet_denied'")
   _clearSessionCacheForTest()
   notify.mockClear(); transfer.exportFleet.mockClear(); transfer.importFleet.mockClear()
-  _resetFleetDenialAlertsForTest()
   const u = createDashboardUser('patrik', 'not-a-real-hash')
   ownerCookie = createSession({ userId: u.id, username: u.username })
 })
@@ -197,6 +196,57 @@ describe('LOW (Viktor 2460): refusal alerts are rate limited per caller, audit r
     expect(shouldAlertFleetDenial('x', 0)).toBe(true)
     expect(shouldAlertFleetDenial('x', 9 * 60_000)).toBe(false)
     expect(shouldAlertFleetDenial('x', 10 * 60_000)).toBe(true)
+  })
+})
+
+describe('LOW (Viktor 2650): the alert window survives a dashboard restart', () => {
+  const alertRows = () => getDb().prepare('SELECT actor, created_at FROM config_change_log WHERE key = ? ORDER BY id').all(FLEET_DENIED_ALERT_KEY) as Array<{ actor: string; created_at: number }>
+
+  it('the window is kept in config_change_log, outside the security.fleet_* audit rows', async () => {
+    await call('GET', '/api/fleet/export', { auth: { kind: 'token', agent: 'dave' } })
+    expect(alertRows().map((r) => r.actor)).toEqual(['token:dave'])
+    expect(auditRows()).toEqual([{ key: 'security.fleet_export_denied', actor: 'token:dave' }])
+  })
+
+  it('after a restart (no process state, only the DB) a second refusal inside the window does NOT alert, and is still audited', async () => {
+    // What survives a restart is the DB alone: an alert row written five minutes ago by the previous process.
+    const fiveMinAgo = Math.floor(Date.now() / 1000) - 5 * 60
+    getDb().prepare('INSERT INTO config_change_log (key, old_value, new_value, actor, created_at) VALUES (?, NULL, NULL, ?, ?)')
+      .run(FLEET_DENIED_ALERT_KEY, 'token:dave', fiveMinAgo)
+    const { res } = await call('GET', '/api/fleet/export', { auth: { kind: 'token', agent: 'dave' } })
+    expect(res.statusCode).toBe(403)
+    expect(notify).not.toHaveBeenCalled()
+    expect(auditRows()).toEqual([{ key: 'security.fleet_export_denied', actor: 'token:dave' }])
+    expect(alertRows()).toHaveLength(1)
+  })
+
+  it('an alert row older than the window does not hold the next alert back', async () => {
+    const elevenMinAgo = Math.floor(Date.now() / 1000) - 11 * 60
+    getDb().prepare('INSERT INTO config_change_log (key, old_value, new_value, actor, created_at) VALUES (?, NULL, NULL, ?, ?)')
+      .run(FLEET_DENIED_ALERT_KEY, 'token:dave', elevenMinAgo)
+    await call('GET', '/api/fleet/export', { auth: { kind: 'token', agent: 'dave' } })
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(alertRows()).toHaveLength(2)
+  })
+
+  it('a caller that keeps trying is reported once per window, not only once', () => {
+    // A refusal every 5 minutes for 30 minutes: alerts at 0, 10 and 20 minutes.
+    const alerted = [0, 5, 10, 15, 20, 25].filter((m) => shouldAlertFleetDenial('loop', m * 60_000))
+    expect(alerted).toEqual([0, 10, 20])
+  })
+
+  it('a row dated in the future does not silence the caller (Viktor 2680)', async () => {
+    const inAYear = Math.floor(Date.now() / 1000) + 365 * 86400
+    getDb().prepare('INSERT INTO config_change_log (key, old_value, new_value, actor, created_at) VALUES (?, NULL, NULL, ?, ?)')
+      .run(FLEET_DENIED_ALERT_KEY, 'token:dave', inAYear)
+    await call('GET', '/api/fleet/export', { auth: { kind: 'token', agent: 'dave' } })
+    expect(notify).toHaveBeenCalledTimes(1)
+  })
+
+  it('the window is per caller', () => {
+    expect(shouldAlertFleetDenial('a', 0)).toBe(true)
+    expect(shouldAlertFleetDenial('b', 60_000)).toBe(true)
+    expect(shouldAlertFleetDenial('a', 60_000)).toBe(false)
   })
 })
 

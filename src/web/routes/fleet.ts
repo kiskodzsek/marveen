@@ -3,7 +3,7 @@ import { readBody, json } from '../http-helpers.js'
 import { exportFleet, importFleet, MIN_VAULT_PASSWORD_LEN, UserFacingError, type ExportedFleet } from '../fleet-transfer.js'
 import { parseCookies, SESSION_COOKIE_NAME } from '../auth-gate.js'
 import { resolveSession } from '../auth-sessions.js'
-import { logConfigChange, getOwnerDashboardUser } from '../../db.js'
+import { logConfigChange, getOwnerDashboardUser, claimConfigChangeWindow } from '../../db.js'
 import { notifySecurityEvent } from '../../notify.js'
 import type { RouteContext } from './types.js'
 
@@ -32,18 +32,26 @@ export function fleetOwnerSession(req: { headers: { cookie?: string } }): string
   return session && owner && session.userId === owner.id ? session.username : null
 }
 
-// LOW (Viktor 2460): one refusal alert per caller per window, so a looping
+// LOW (Viktor 2460, 2650): one refusal alert per caller per window, so a looping
 // caller cannot flood the owner's Telegram. Every refusal is still audited.
-const DENIED_ALERT_WINDOW_MS = 10 * 60_000
-const lastDeniedAlert = new Map<string, number>()
+// The window lives in config_change_log, not in memory: an in-memory window was
+// reopened by a dashboard restart and let a second alert through (2026-10-13
+// 18:41). Each alert writes one FLEET_DENIED_ALERT_KEY row for its caller, and
+// the next alert for that caller needs that row to be older than the window, so
+// a caller that keeps trying is still reported once per window, not only once.
+// The key sits outside the security.fleet_* prefix on purpose: it records an
+// alert, not an access attempt.
+export const FLEET_DENIED_ALERT_KEY = 'security.alert.fleet_denied'
+const DENIED_ALERT_WINDOW_SEC = 10 * 60
 export function shouldAlertFleetDenial(caller: string, nowMs: number): boolean {
-  const last = lastDeniedAlert.get(caller)
-  if (last !== undefined && nowMs - last < DENIED_ALERT_WINDOW_MS) return false
-  lastDeniedAlert.set(caller, nowMs)
-  return true
+  try {
+    return claimConfigChangeWindow(FLEET_DENIED_ALERT_KEY, caller, Math.floor(nowMs / 1000), DENIED_ALERT_WINDOW_SEC)
+  } catch (err) {
+    // An unreadable window must not silence a refusal alert.
+    logger.warn({ err, caller }, 'fleet: refusal alert window unreadable; alerting')
+    return true
+  }
 }
-/** Test seam. */
-export function _resetFleetDenialAlertsForTest(): void { lastDeniedAlert.clear() }
 
 function callerLabel(auth: RouteContext['auth']): string {
   if (!auth) return 'none'
