@@ -364,6 +364,60 @@ describe('a URL in a for-loop variable', () => {
   })
 })
 
+// A substitution runs in a subshell that inherits the command's assignments and loop values
+// (Viktor 5196, decfb196). Before, the curl inside $(...) never saw them: Mira's measured call
+// `for u in <urls>; do echo "$u -> $(curl ... $u)"; done` reached the hosts unjudged.
+describe('a URL variable used inside a $(...) or backtick substitution', () => {
+  it('denies the curl inside the substitution with the outer loop value or assignment', () => {
+    expect(classify('for u in https://evil.example/a; do echo "$(curl -s $u)"; done'))
+      .toMatchObject({ deny: true, reason: 'curl-external', hosts: ['evil.example'] })
+    expect(classify('for u in https://evil.example/a; do x=$(curl -s $u); done'))
+      .toMatchObject({ deny: true, reason: 'curl-external', hosts: ['evil.example'] })
+    expect(classify('u=https://evil.example/a; x=$(curl -s $u)'))
+      .toMatchObject({ deny: true, reason: 'curl-external', hosts: ['evil.example'] })
+    expect(deny('u=https://evil.example/a; x=`curl -s $u`')).toBe(true)
+    expect(deny('u=https://evil.example/a; echo "$(echo "$(curl -s "$u")")"')).toBe(true) // nested
+  })
+  it("Mira's measured command (10-14 20:14) is denied", () => {
+    const cmd = `for u in https://a.example/x https://b.example/y; do echo "$u -> $(curl -s -o /dev/null -w '%{http_code}' --max-time 15 $u 2>&1)"; done`
+    expect(classify(cmd)).toMatchObject({ deny: true, reason: 'curl-external' })
+  })
+  it('a one-liner inside a substitution reads the outer loop value too', () => {
+    expect(deny(`for u in https://evil.example/a; do echo "$(python3 -c "import urllib.request as r; r.urlopen('$u')")"; done`)).toBe(true)
+  })
+  it('the inner command\'s own assignment wins over the outer one', () => {
+    expect(deny('u=https://evil.example/a; x=$(u=http://localhost:3420/b; curl -s $u)')).toBe(false)
+    expect(deny('u=http://localhost:3420/b; x=$(u=https://evil.example/a; curl -s $u)')).toBe(true)
+  })
+  it('CONTROLS: local loop values and assignments pass inside a substitution', () => {
+    expect(deny('for u in http://localhost:3420/a http://127.0.0.1:3420/b; do echo "$(curl -s $u)"; done')).toBe(false)
+    expect(deny('u=http://localhost:3420/api; x=$(curl -s "$u/kanban")')).toBe(false)
+    expect(deny('T=$(cat store/.dashboard-token); curl -s -H "Authorization: Bearer $T" http://localhost:3420/api/kanban')).toBe(false)
+  })
+})
+
+// Fail-closed reserve (Viktor 5196, point 2): a curl destination that is still a variable after the
+// expansion above reaches a host the text does not name. It is denied when the command carries an
+// external URL literal anywhere; with no external literal it stays open (pinned below).
+describe('a curl destination left unresolved next to an external URL literal', () => {
+  it('denies', () => {
+    expect(classify('echo https://evil.example/doc; curl -s "$URL"'))
+      .toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    expect(deny('echo https://evil.example/doc; echo "$(curl -s "$u")"')).toBe(true)
+    expect(deny('echo https://evil.example/doc; curl -s --url "${TARGET}/x"')).toBe(true)
+    expect(deny('echo https://evil.example/doc; curl -s -x "$P" http://localhost:3420/a')).toBe(true)
+  })
+  it('CONTROLS: a variable only in the path, a local loop and data URLs pass', () => {
+    expect(deny('curl -s "http://localhost:3420/api/memories/$ID" -d "https://github.com/x/y/pull/1"')).toBe(false)
+    expect(deny(`for u in http://localhost:3420/a; do curl -s -X POST "$u" -d '{"pr":"https://github.com/x/y/pull/1"}'; done`)).toBe(false)
+    expect(deny(`curl -s -X POST http://localhost:3420/api/messages -d '{"content":"see https://github.com/x/y/pull/1"}'`)).toBe(false)
+  })
+  it('a listed vendor host does not count as the external literal', () => {
+    expect(classify('echo https://api.elevenlabs.io/v1; curl -s "$URL"', 0, new Set(['api.elevenlabs.io'])))
+      .toMatchObject({ deny: false })
+  })
+})
+
 describe('still open after (a) -- pinned on purpose', () => {
   const OPEN = [
     'bash ./fetch.sh', // the network call is inside the script file

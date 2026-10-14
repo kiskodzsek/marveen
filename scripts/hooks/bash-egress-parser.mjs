@@ -10,7 +10,12 @@
 //      cannot cover), and any positional / --url / proxy argument even WITHOUT a scheme;
 //   2. an interpreter one-liner (python/node/perl/ruby/php/deno/bun with -c/-e/-r/--eval) whose code
 //      carries an EXTERNAL URL;
-//   3. either of the above when the URL sits in a variable ASSIGNED IN THE SAME COMMAND.
+//   3. either of the above when the URL sits in a variable ASSIGNED IN THE SAME COMMAND -- also when
+//      the curl / one-liner runs inside a $(...) or backtick substitution of that command: an inner
+//      command sees the outer command's assignments and loop values (Viktor 5196, decfb196; before,
+//      `for u in <url>; do echo "$(curl -s $u)"; done` and `u=<url>; x=$(curl -s $u)` passed).
+//      Fail-closed reserve: a curl whose destination is still a variable after that expansion is
+//      denied when the command carries an external URL literal anywhere.
 // localhost / 127.0.0.1 / [::1] ALWAYS pass: the dashboard's own calls (memory, kanban, message
 // queue, approvals) go over http://localhost and a gate that cut them would silence the fleet.
 // Hosts are cut with a regex, not URL(), so http://localhost:$PORT stays local, while
@@ -393,16 +398,76 @@ export function curlDestinations(args) {
   }
   return dests.filter((h) => !isLocalHost(h))
 }
-export function classify(command, depth = 0, vendorHosts = new Set(), vendorDomains = new Set()) {
+// True when a curl destination (positional or --url / -x value) still holds a shell variable after
+// this command's assignments and loop values were expanded: curl will reach a host the text does
+// not name. Only used together with an external URL literal elsewhere in the command (classify).
+export function curlHasUnresolvedDestination(args) {
+  for (let k = 0; k < args.length; k++) {
+    const w = args[k]
+    if (/^\d*[<>]/.test(w) || w === '&') { if (/^\d*(?:>>?|<)&?$/.test(w)) k++; continue }
+    if (w === '--') continue
+    if (w.startsWith('--')) {
+      const [name, inline] = w.slice(2).split(/=(.*)/s)
+      if (!CURL_LONG_WITH_VALUE.has(name)) continue
+      const v = inline !== undefined ? inline : args[++k]
+      if (CURL_DEST_URL.has(name) && unresolvedHost(v)) return true
+      continue
+    }
+    if (w.startsWith('-') && w.length > 1) {
+      for (let q = 1; q < w.length; q++) {
+        if (!CURL_SHORT_WITH_VALUE.has(w[q])) continue
+        const v = q + 1 < w.length ? w.slice(q + 1) : args[++k]
+        if (CURL_DEST_URL.has(w[q]) && unresolvedHost(v)) return true
+        break
+      }
+      continue
+    }
+    if (unresolvedHost(w)) return true
+  }
+  return false
+}
+// The HOST part (scheme and userinfo dropped, up to the first / ? #) holds a $VAR or ${VAR}.
+// A variable only in the path (`http://localhost:3420/api/$id`) names its host and is not this.
+function unresolvedHost(value) {
+  if (!value) return false
+  const noScheme = String(value).replace(/^[^/?#\s]*:\/\//, '')
+  const host = /^(?:[^@/?#]*@)?([^/?#]*)/.exec(noScheme)?.[1] ?? ''
+  return /\$\{?[A-Za-z_]/.test(host)
+}
+function curlUnresolvedIn(text) {
+  const argv = shellWords(text)
+  const at = argv.findIndex((w) => w.split('/').pop() === 'curl')
+  return at !== -1 && curlHasUnresolvedDestination(argv.slice(at + 1))
+}
+// An external URL literal anywhere in the command text (vendor-listed hosts do not count).
+function hasExternalLiteral(text, vendorHosts, vendorDomains) {
+  for (const m of String(text).matchAll(URL_RE)) {
+    const h = hostOf(m[0])
+    if (h && !isLocalHost(h) && !vendorHosts.has(h) && !hostInDomains(h, vendorDomains)) return true
+  }
+  return false
+}
+// `scope` carries the enclosing command's assignments and loop values into a substitution, and
+// whether the WHOLE command (outermost text) carries an external URL literal.
+export function classify(command, depth = 0, vendorHosts = new Set(), vendorDomains = new Set(), scope = null) {
   const norm = String(command ?? '').replace(/\\\r?\n/g, ' ')
   const { stripped: orig, inners } = liftSubstitutions(norm)
-  if (depth < 4) {
-    for (const inner of inners) { const r = classify(inner, depth + 1, vendorHosts, vendorDomains); if (r.deny) return r }
-  }
+  const outer = scope ?? { env: {}, loops: {}, externalLiteral: hasExternalLiteral(norm, vendorHosts, vendorDomains) }
   const masked = maskInertLiterals(orig)
-  if (masked === null || masked.length !== orig.length) return { deny: false, reason: 'unparseable', hosts: [] }
-  const env = collectAssignments(orig, masked)
-  const loops = collectLoops(orig, masked, env)
+  const parseable = masked !== null && masked.length === orig.length
+  // This command's own assignments and loops override the enclosing ones (a substitution runs in a
+  // subshell that inherits them). Collected before the inner commands are judged, so the curl in
+  // `u=<url>; x=$(curl -s $u)` reads u.
+  const env = { ...outer.env, ...(parseable ? collectAssignments(orig, masked) : {}) }
+  const loops = { ...outer.loops }
+  if (parseable) {
+    for (const [v, vals] of Object.entries(collectLoops(orig, masked, env))) loops[v] = [...(loops[v] ?? []), ...vals]
+  }
+  if (depth < 4) {
+    const inner = { env, loops, externalLiteral: outer.externalLiteral }
+    for (const sub of inners) { const r = classify(sub, depth + 1, vendorHosts, vendorDomains, inner); if (r.deny) return r }
+  }
+  if (!parseable) return { deny: false, reason: 'unparseable', hosts: [] }
   for (const [a, b] of spans(masked)) {
     const mw = words(masked.slice(a, b))
     let i = 0
@@ -435,6 +500,11 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
       if (hosts.length) return { deny: true, reason: `${target}-external`, hosts }
       if (variants === null) return { deny: true, reason: `${target}-loop-unbounded`, hosts: [] }
     }
+    // Fail-closed reserve, judged on the loop-expanded readings only: in the plain reading a loop
+    // variable is still a $NAME, and a loop over local URLs is not an unresolved destination.
+    if (outer.externalLiteral && mw[i].split('/').pop() === 'curl' && (variants ?? []).some(curlUnresolvedIn)) {
+      return { deny: true, reason: 'curl-unresolved-destination', hosts: [] }
+    }
   }
   return { deny: false, reason: null, hosts: [] }
 }
@@ -458,7 +528,7 @@ if (isInvokedDirectly()) {
       mkdirSync(dirname(BLOCK_LOG), { recursive: true })
       appendFileSync(BLOCK_LOG, JSON.stringify({ ts: new Date().toISOString(), cwd: process.cwd(), reason: r.reason, hosts: r.hosts }) + '\n')
     } catch { /* the deny still stands; a log failure must not turn it into an allow */ }
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `${GATE_MSG} (hoszt: ${r.hosts.join(', ')})` } }))
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `${GATE_MSG} (${r.hosts.length ? `hoszt: ${r.hosts.join(', ')}` : `ok: ${r.reason}`})` } }))
   }
   process.exit(0)
 }
