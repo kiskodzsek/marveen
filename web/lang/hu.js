@@ -43,6 +43,7 @@ window._i18n.hu = {
   'overview.quota.seven_day':       'Heti',
   'overview.quota.fable':           'Fable (heti)',
   'overview.quota.resets_in':       'nullázódik {d} múlva',
+  'overview.quota.resets_at':       'Nullázódik: {when}',
   'overview.quota.expired':         'a keret azóta nullázódott',
   'overview.quota.measured':        '{age} régi mérés',
   'overview.quota.stale':           'Ez a mérés régebbi a frissességi határnál, tehát a számok elavultak: a státuszsor nem írt újat.',

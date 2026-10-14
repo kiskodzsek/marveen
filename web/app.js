@@ -12200,6 +12200,32 @@ function weekSegments(resetsAt, nowSec, lang, timeZone) {
   }
 }
 
+// Weekly row: the absolute reset moment, "Nullázódik: péntek 05:00" /
+// "Resets: Friday 05:00" (kanban 32f9b92b, TG 2074). The day row labels each
+// segment with the day it STARTS on, so the last segment reads "Csütörtök" for
+// a Friday 05:00 reset -- and was read as the reset day. This line names the
+// reset itself. Always Europe/Budapest, the one zone the install schedules and
+// displays in (the agents' brake times are quoted in it too), so the label
+// matches what the team says regardless of the viewer's browser zone.
+// formatToParts + hourCycle h23: never "24:00" at midnight, and the weekday is
+// taken in the target zone, so a reset in the small hours after a DST switch
+// gets the right day and hour. No usable resetsAt -> '' (the row shows nothing).
+function quotaResetLabel(resetsAt, lang, timeZone = 'Europe/Budapest') {
+  if (typeof resetsAt !== 'number' || !Number.isFinite(resetsAt)) return ''
+  const locale = lang === 'en' ? 'en-US' : 'hu-HU'
+  const parts = new Intl.DateTimeFormat(locale, {
+    timeZone, weekday: 'long', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(resetsAt * 1000))
+  const part = (type) => (parts.find((p) => p.type === type) || {}).value || ''
+  const day = part('weekday')
+  const hour = part('hour').padStart(2, '0')
+  const minute = part('minute').padStart(2, '0')
+  if (!day || !hour || !minute) return ''
+  // day and time joined by a no-break space: on a phone the line wraps after
+  // "Nullázódik:", never between "péntek" and "05:00".
+  return t('overview.quota.resets_at', { when: `${day}\u00a0${hour}:${minute}` })
+}
+
 // Render the subscription quota strip from /api/overview's `quota` block.
 //
 // The rule this follows: a quota reading is only worth showing while it is
@@ -12243,6 +12269,7 @@ function quotaBarRow(labelKey, w, muted0, ageSecForRow, source, nowSec) {
   const week = labelKey === 'overview.quota.seven_day' && !w.expired
     ? weekSegments(w.resetsAt, nowSec, window._lang)
     : null
+  const resetAt = week ? quotaResetLabel(w.resetsAt, window._lang) : ''
   const track = `<div class="quota-bar-track${week ? ' week' : ''}"><div class="quota-bar-fill ${muted ? '' : quotaLevelClass(pct)}" style="width:${pct}%"></div></div>`
   row.innerHTML = `
     <div class="quota-bar-label">${escapeHtml(t(labelKey))}</div>
@@ -12250,6 +12277,7 @@ function quotaBarRow(labelKey, w, muted0, ageSecForRow, source, nowSec) {
       ${track}
       <div class="quota-bar-now" style="left:${week.nowPct.toFixed(2)}%"></div>
       <div class="quota-bar-days${week.narrowLabels ? '' : ' no-narrow'}">${week.labels.map((d, i) => `<span><span class="day-full">${escapeHtml(d)}</span><span class="day-short">${escapeHtml(week.shortLabels[i])}</span>${week.narrowLabels ? `<span class="day-narrow">${escapeHtml(week.narrowLabels[i])}</span>` : ''}</span>`).join('')}</div>
+      ${resetAt ? `<div class="quota-bar-resets-at">${escapeHtml(resetAt)}</div>` : ''}
     </div>` : track}
     <div class="quota-bar-value">${pct}%<span class="quota-bar-reset">${escapeHtml(tail)}</span></div>
   `
