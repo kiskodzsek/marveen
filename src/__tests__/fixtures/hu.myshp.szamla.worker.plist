@@ -8,6 +8,9 @@
 	<string>Background</string>
 	<key>ProgramArguments</key>
 	<array>
+		<string>/usr/bin/sandbox-exec</string>
+		<string>-p</string>
+		<string>(version 1)(allow default)(deny file-write* (subpath "/Users/klodel/Library/CloudStorage") (literal "/Users/klodel/Library") (literal "/Users/klodel"))</string>
 		<string>/usr/bin/python3</string>
 		<string>-I</string>
 		<string>/Users/klodel/marveen/ops/szamla/szamla_worker.py</string>

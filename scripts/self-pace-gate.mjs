@@ -159,7 +159,11 @@ export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
 export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato'])
 export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.szamla.b5probe'])
 export const LAUNCHD_APPROVED_PLIST_SHA256 = {
-  'hu.myshp.szamla.worker': new Set(['8eb792c49613117c0d49de2892d6e400370db1d2b8b662dab4f2cd8541782492']),
+  // K1 (Viktor 3423, card ad7d3eaa): the worker runs under sandbox-exec denying writes under
+  // ~/Library/CloudStorage, plus the ~/Library and ~ directory nodes so a parent rename cannot
+  // bypass it (M1, Viktor 3466; ops/szamla da507bb). The unwrapped plist and the subpath-only
+  // profile (b3ee60d) are not approved.
+  'hu.myshp.szamla.worker': new Set(['d0e12365783f35abdbffaa1d936610a1999e8d47201e1836fdf2e85d7bce38fc']),
   // Pulzus 2369 (Patrik 1668): the outage runbook's passive checker, RunAtLoad false.
   'hu.myshp.marabel-incident-passziv': new Set(['db0ea0696233fcdad1ab701962f872ede30721e8a12db7e17a76831d1ef5d249']),
   // Kernel/Pulzus 2864 (card daef6926, Viktor 2832): the invoice mover v3, ops/szamla
@@ -167,7 +171,8 @@ export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   'hu.myshp.szamla.mozgato': new Set(['f59a3a05f411075c00370d875b60ddbf7a94682eaa389534c7420102dc223d66']),
   // The one-shot B5 negative probe (Viktor 2746 B5 / 2804 C4), RunAtLoad only, never
   // kickstarted. Remove this entry and its label once the go-live is done.
-  'hu.myshp.szamla.b5probe': new Set(['29f63d1949a7298d0822f68c1f841c29f081051794465e37c8c3d260d602be61']),
+  // K1: the probe carries the worker's sandbox profile, so its re-run proves the sandbox.
+  'hu.myshp.szamla.b5probe': new Set(['6b9b1f571ccab6c0f97858ea3b614e62aebe04d8cbbd282a928bb2c6a1265231']),
 }
 const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
 const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)
