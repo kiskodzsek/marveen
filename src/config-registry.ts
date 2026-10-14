@@ -212,6 +212,58 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     secret: false,
     requiresRestart: false,
   },
+  // --- Kanban PR-autodone (card bf868101; read every pass, so hot-reload) ---
+  // Off by default: it needs a GitHub token the dashboard process does not have
+  // until an operator binds one, and it moves cards on its own once it does.
+  {
+    key: 'KANBAN_AUTODONE_ENABLED',
+    type: 'boolean',
+    default: '0',
+    description: 'Ha be van kapcsolva, a dashboard 10 percenként megnézi a nem done kártyák címében és kommentjeiben hivatkozott GitHub PR-okat, és ha MIND beolvadt, a kártyát done-ra teszi egy automatikus kommenttel. Konzervatív: ha egy hivatkozott PR nyitott, beolvadás nélkül zárt, nem a beállított repókban van, vagy egy "PR #N" nem köthető egyetlen repóhoz, a kártyához nem nyúl. Kell hozzá a KANBAN_AUTODONE_REPOS és a KANBAN_AUTODONE_GITHUB_SECRET_ID. Alapértelmezés: kikapcsolva.',
+    module: 'kanban',
+    secret: false,
+    requiresRestart: false,
+  },
+  {
+    key: 'KANBAN_AUTODONE_REPOS',
+    type: 'string',
+    default: '',
+    description: 'Vesszővel elválasztott owner/repo lista (pl. kiskodzsek/marabel,kiskodzsek/marveen): csak ezek PR-jait nézi a PR-autodone. Más repóra mutató PR-link esetén a kártyához nem nyúl.',
+    module: 'kanban',
+    secret: false,
+    requiresRestart: false,
+    validate: (v) => v.split(/[\s,]+/).filter(Boolean).every((s) => /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/.test(s))
+      ? null
+      : 'owner/repo alakú elemek kellenek, vesszővel elválasztva',
+  },
+  {
+    key: 'KANBAN_AUTODONE_GITHUB_SECRET_ID',
+    type: 'string',
+    default: '',
+    description: 'Annak a Vault-titoknak az azonosítója, amely a PR-állapot lekérdezéséhez használt GitHub-tokent tartalmazza. Ehhez SAJÁT, erre a célra létrehozott fine-grained PAT kell, csak a beállított repókra, Pull requests: Read + Metadata: Read joggal, saját Vault-azonosítóval (pl. github-kanban-autodone-ro). Másik ágens vagy MCP tokenjét ide NE add meg (flotta AUTH-szabály 2.). Üresen a PR-autodone nem fut. Az azonosítónak "github"-bal kell kezdődnie, hogy a beállítás ne irányíthasson más titkot a GitHub felé.',
+    module: 'kanban',
+    secret: false,
+    requiresRestart: false,
+    // Known ids of tokens that belong to someone else (fleet monitor, an MCP server):
+    // refused in code, not only in the description (Viktor 5043).
+    validate: (v) => ['github-fleet-token', 'github-github_personal_access_token'].includes(v)
+      ? 'ez egy másik szolgáltatás tokenje: a PR-autodone saját, csak-olvasó PAT-ot kap'
+      : v === '' || /^github[A-Za-z0-9._-]{0,100}$/.test(v)
+        ? null
+        : 'a Vault-azonosítónak "github"-bal kell kezdődnie (betű, szám, . _ -)',
+  },
+  {
+    key: 'KANBAN_AUTODONE_EXCLUDE_CARDS',
+    type: 'string',
+    default: '30efb0ab',
+    description: 'Vesszővel elválasztott kártya-azonosítók, amelyeket a PR-autodone soha nem tesz done-ra (hosszú életű horgony- és gyűjtőkártyák, amelyek sok PR-t említenek). Alapból a 30efb0ab kiadási horgony.',
+    module: 'kanban',
+    secret: false,
+    requiresRestart: false,
+    validate: (v) => v.split(/[\s,]+/).filter(Boolean).every((s) => /^[A-Za-z0-9._-]{1,64}$/.test(s))
+      ? null
+      : 'kártya-azonosítók kellenek, vesszővel elválasztva',
+  },
   // --- Kanban aging thresholds and colours (hot-reload via settings-store) ---
   {
     key: 'KANBAN_AGING_WARN_H',

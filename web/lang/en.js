@@ -242,6 +242,7 @@ window._i18n.en = {
   'kanban.modal.archive_btn':    'Archive',
   'kanban.modal.delete_btn':     'Delete',
   'kanban.modal.breakdown_btn':  'Auto-breakdown',
+  'kanban.waiting.prompt':       'Who is this card waiting for, and on what? Format: VÁR: <who> - <what> (e.g. VÁR: the owner - approval)',
   'kanban.toast.move_error':     'Error moving card',
   'kanban.toast.save_error':     'Error saving',
   'kanban.toast.comment_error':  'Error saving comment',

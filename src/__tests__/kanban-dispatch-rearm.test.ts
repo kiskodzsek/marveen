@@ -47,7 +47,7 @@ vi.mock('../web/agent-process.js', async (importOriginal) => ({
   isAgentRunning: () => true,
 }))
 
-import { initDatabase, createKanbanCard, getKanbanCard } from '../db.js'
+import { initDatabase, createKanbanCard, getKanbanCard, addKanbanComment } from '../db.js'
 import { tryHandleKanban } from '../web/routes/kanban.js'
 
 /** Drive the real POST /api/kanban/<id>/move route. */
@@ -109,6 +109,8 @@ describe('kanban dispatch re-arm', () => {
     createKanbanCard({ id: 'card-4', title: 'Escalated card', assignee: 'dex' })
 
     await move('card-4', 'in_progress', 'orin')
+    // card bf868101: a move into waiting must name who/what it waits for
+    addKanbanComment('card-4', 'dex', 'VÁR: orin - review')
     await move('card-4', 'waiting', 'dex')
     expect(getKanbanCard('card-4')?.dispatched_at).toBeNull()
 

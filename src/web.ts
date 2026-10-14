@@ -38,6 +38,7 @@ import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { startModelFallbackRunner } from './web/model-fallback-runner.js'
 import { startKanbanArchiveRunner } from './web/kanban-archive-runner.js'
+import { startKanbanPrAutodoneRunner } from './web/kanban-pr-autodone.js'
 import { startContextGuardRunner } from './web/context-guard-runner.js'
 import { startContextRestartGateRunner, setMainSweepHook } from './web/context-restart-gate-runner.js'
 import { collectTokenUsage } from './web/token-usage.js'
@@ -509,6 +510,11 @@ export function startWebServer(port = 3420): http.Server {
   const kanbanArchiveInterval = webOnly ? undefined : startKanbanArchiveRunner()
   if (!webOnly) logger.info('Kanban archive runner started (60min poll, 70s offset)')
 
+  // Card bf868101: a card whose referenced PRs all merged goes to done on its own. Off until
+  // KANBAN_AUTODONE_ENABLED=1 (+ repos + a Vault GitHub token); the flag is read every pass.
+  const kanbanPrAutodoneInterval = webOnly ? undefined : startKanbanPrAutodoneRunner()
+  if (!webOnly) logger.info('Kanban PR-autodone runner started (10min poll, 80s offset; idle while KANBAN_AUTODONE_ENABLED is off)')
+
   const contextGuardInterval = webOnly ? undefined : startContextGuardRunner()
   if (!webOnly) logger.info('Context-guard runner started (5min poll, 4.5min initial delay)')
 
@@ -750,6 +756,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
     clearInterval(autoRestartInterval)
     clearInterval(modelFallbackInterval)
     clearInterval(kanbanArchiveInterval)
+    clearInterval(kanbanPrAutodoneInterval)
     clearInterval(contextGuardInterval)
     clearInterval(approvalTimeoutInterval)
     approvalBot.stop()

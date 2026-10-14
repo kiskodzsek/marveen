@@ -178,6 +178,10 @@ curl -s -X POST http://localhost:{{WEB_PORT}}/api/kanban/KARTYA_ID/comments \
 Archiválás: `POST /api/kanban/KARTYA_ID/archive`, üres törzzsel.
 
 Státuszok: planned, in_progress, waiting, done
+Waiting-be csak úgy mehet kártya, ha kiderül, KIRE és MIRE vár: a mozgatás `"comment"` mezőjében
+vagy a kártya legutóbbi kommentjében legyen egy `VÁR: <ki> - <mire>` sor (pl. `VÁR: {{OWNER_NAME}} - jóváhagyás`),
+különben a tábla 400-zal elutasítja (a `scripts/kartya-es-ertesites.py --status waiting` is: ott a komment-fájlban legyen a sor). Ha a kártya címében vagy kommentjében hivatkozott GitHub PR-ok
+mind beolvadtak, a kártyát a dashboard magától done-ra teheti (ha a gazda bekapcsolta).
 Prioritások: low, normal, high, urgent
 Ha {{OWNER_NAME}} ad feladatot Telegramon, vedd fel a kanban táblára is.
 

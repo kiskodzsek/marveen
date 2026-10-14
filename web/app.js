@@ -1530,6 +1530,35 @@ function createCardEl(card, embeddedChildren = []) {
 // backend dispatches as it always did, never the opposite.
 function kanbanMoveActor() { return window._marveen?.ownerName || undefined }
 
+// Card bf868101: a move INTO waiting must say who the card waits for and on what
+// ("VÁR: <ki> - <mire>"), or the server refuses it with 400. Ask for that line
+// here and send it as the move's `comment`. Returns '' when no line is needed,
+// null when the operator cancelled (the move must not happen), else the line.
+function kanbanWaitingComment(fromStatus, toStatus) {
+  if (toStatus !== 'waiting' || fromStatus === 'waiting') return ''
+  const raw = window.prompt(t('kanban.waiting.prompt'), 'VÁR: ')
+  if (raw === null) return null
+  let line = raw.trim()
+  if (!line || /^v[aá]r\s*:?\s*$/i.test(line)) return null
+  if (!/^v[aá]r\s*:/i.test(line)) line = `VÁR: ${line}`
+  return line
+}
+
+// The move body, with the waiting line when there is one.
+function kanbanMoveBody(status, sortOrder, comment) {
+  const body = { status, sort_order: sortOrder, actor: kanbanMoveActor() }
+  if (comment) body.comment = comment
+  return JSON.stringify(body)
+}
+
+// A refused move names its reason (the waiting rule's 400 is an instruction, not a
+// generic failure), so surface the server's message when it sent one.
+async function kanbanMoveErrorToast(r) {
+  let msg = ''
+  try { msg = (await r.json())?.error || '' } catch { /* not JSON */ }
+  showToast(msg || t('kanban.toast.move_error'))
+}
+
 // === Drag & Drop ===
 // Wires the drag/drop handlers for one column-body element. Used for the
 // 4 static flat-board columns at load time, and again for every swimlane
@@ -1567,12 +1596,17 @@ function wireKanbanColumnDnD(col) {
     const idx = cards.findIndex((c) => c.dataset.id === cardId)
     let sortOrder = idx
 
+    const fromStatus = kanbanCards.find((c) => c.id === cardId)?.status
+    const waitingComment = kanbanWaitingComment(fromStatus, newStatus)
+    if (waitingComment === null) { loadKanban(); return }
+
     try {
-      await fetch(`/api/kanban/${encodeURIComponent(cardId)}/move`, {
+      const r = await fetch(`/api/kanban/${encodeURIComponent(cardId)}/move`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus, sort_order: sortOrder, actor: kanbanMoveActor() }),
+        body: kanbanMoveBody(newStatus, sortOrder, waitingComment),
       })
+      if (!r.ok) await kanbanMoveErrorToast(r)
       loadKanban()
     } catch {
       showToast(t('kanban.toast.move_error'))
@@ -1733,13 +1767,15 @@ async function kanbanTouchEnd(e) {
   // A drop inside a column always posts, even when the status is unchanged --
   // that is a reorder within the column, which is just as valid a move.
   if (!newStatus) return
+  const waitingComment = kanbanWaitingComment(kanbanCards.find((c) => c.id === cardId)?.status, newStatus)
+  if (waitingComment === null) { loadKanban(); return }
   try {
     const r = await fetch(`/api/kanban/${encodeURIComponent(cardId)}/move`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: newStatus, sort_order: sortOrder, actor: kanbanMoveActor() }),
+      body: kanbanMoveBody(newStatus, sortOrder, waitingComment),
     })
-    if (!r.ok) throw new Error('move failed')
+    if (!r.ok) { await kanbanMoveErrorToast(r); loadKanban(); return }
     loadKanban()
   } catch {
     showToast(t('kanban.toast.move_error'))
@@ -2145,13 +2181,15 @@ async function showCardDetail(card) {
     const save = async () => {
       const newVal = sel.value
       if (newVal === current) { restore(current); return }
+      const waitingComment = kanbanWaitingComment(current, newVal)
+      if (waitingComment === null) { restore(current); return }
       try {
         const r = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/move`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: newVal, sort_order: 0, actor: kanbanMoveActor() }),
+          body: kanbanMoveBody(newVal, 0, waitingComment),
         })
-        if (!r.ok) throw new Error('move failed')
+        if (!r.ok) { await kanbanMoveErrorToast(r); restore(current); return }
         card.status = newVal
         restore(newVal)
         showToast(t('kanban.toast.status_updated'))
