@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>hu.myshp.szamla.b5probe</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>-I</string>
+		<string>/Users/klodel/marveen/ops/szamla/deploy/b5_probe.py</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/klodel/Library/Logs/marveen-szamla-b5probe.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/klodel/Library/Logs/marveen-szamla-b5probe.log</string>
+</dict>
+</plist>

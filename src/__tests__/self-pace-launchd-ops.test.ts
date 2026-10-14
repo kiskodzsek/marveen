@@ -78,6 +78,38 @@ describe('the incident checker (Pulzus 2369)', () => {
   })
 })
 
+describe('the invoice mover v3 and its B5 probe (Pulzus 2864, card daef6926)', () => {
+  const MOV = 'hu.myshp.szamla.mozgato'
+  const B5 = 'hu.myshp.szamla.b5probe'
+  it('the mover: kickstart, bootout, bootstrap of the approved plist only', () => {
+    const movPlist = join(agentsDir, `${MOV}.plist`)
+    expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${MOV}` }, pulzus).deny).toBe(false)
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${MOV}` }, pulzus).deny).toBe(false)
+    writeFileSync(movPlist, readFileSync(join(__dirname, 'fixtures', `${MOV}.plist`)))
+    const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${movPlist}` }, pulzus)
+    expect(ok.deny).toBe(false)
+    expect(ok.launchdOps[0].plist_sha256).toBe('f59a3a05f411075c00370d875b60ddbf7a94682eaa389534c7420102dc223d66')
+    writeFileSync(movPlist, '<plist>other program</plist>')
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${movPlist}` }, pulzus).deny).toBe(true)
+  })
+  it('the B5 probe: bootstrap of the approved plist and bootout; never kickstart', () => {
+    const b5Plist = join(agentsDir, `${B5}.plist`)
+    writeFileSync(b5Plist, readFileSync(join(__dirname, 'fixtures', `${B5}.plist`)))
+    const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${b5Plist}` }, pulzus)
+    expect(ok.deny).toBe(false)
+    expect(ok.launchdOps[0].plist_sha256).toBe('29f63d1949a7298d0822f68c1f841c29f081051794465e37c8c3d260d602be61')
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${B5}` }, pulzus).deny).toBe(false)
+    expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${B5}` }, pulzus).deny).toBe(true)
+    writeFileSync(b5Plist, '<plist>other program</plist>')
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${b5Plist}` }, pulzus).deny).toBe(true)
+  })
+  it('the same commands from any other agent are refused', () => {
+    const kernel = { ...pulzus, agent: 'kernel', configDirAgent: 'kernel' }
+    expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${MOV}` }, kernel).deny).toBe(true)
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${B5}` }, kernel).deny).toBe(true)
+  })
+})
+
 describe('refused (Viktor 2338)', () => {
   const deny = (command: string, opts: Record<string, unknown> = pulzus) => gateDecision('Bash', { command }, opts).deny
   it('M1: the dashboard cannot be booted out (it could not be loaded back)', () => {
