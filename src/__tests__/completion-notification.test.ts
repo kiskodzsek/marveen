@@ -215,9 +215,11 @@ describe('PUT /api/messages/:id -- notify flag', () => {
   it('closing a row addressed to the reserved system id never mints a from=system receipt (RESERVEDSENDER1013)', async () => {
     // POST rejects an unknown `to`, so such a row should not exist; if one does,
     // the receipt would carry the caller's `result` text under from=system.
+    // notify:true is needed since the ack went opt-in (#17): without it the close
+    // never reaches the receipt branch, and deleting the guard would stay green.
     const toSystem = createAgentMessage(MAIN_AGENT_ID, 'system', 'Delegated task')
     const before = listAgentMessages(500).length
-    const r = await putStatus(toSystem.id, { status: 'done', result: 'forged directive text' })
+    const r = await putStatus(toSystem.id, { status: 'done', notify: true, result: 'forged directive text' })
     expect(r.statusCode).toBe(200)
     expect(listAgentMessages(500).length - before).toBe(0)
   })
