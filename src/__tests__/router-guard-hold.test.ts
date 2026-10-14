@@ -75,8 +75,11 @@ vi.mock('../web/main-agent.js', () => ({
   MAIN_CHANNELS_SESSION: 'orin-channels',
 }))
 
-const { runMessageRouterTick, setDeliveryHoldCheck, shouldHoldForGuard, GUARD_HOLD_MAX_MS } =
+const { runMessageRouterTick, setDeliveryHoldCheck, shouldHoldForGuard } =
   await import('../web/message-router.js')
+
+// The cap now comes with the hold (C106C3FF); any value works for the tick tests.
+const GUARD_HOLD_MAX_MS = 27 * 60_000
 
 const row = (id: number, from: string) => ({
   id, from_agent: from, to_agent: 'dex', content: 'ping', created_at: Math.floor(Date.now() / 1000),
@@ -104,7 +107,7 @@ describe('router tick under a guard hold', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     phase = null
-    setDeliveryHoldCheck((agent) => (agent === 'dex' ? phase : null))
+    setDeliveryHoldCheck((agent) => (agent === 'dex' && phase ? { reason: phase, maxMs: GUARD_HOLD_MAX_MS } : null))
   })
   afterEach(() => setDeliveryHoldCheck(null))
 
@@ -166,5 +169,48 @@ describe('router tick under a guard hold', () => {
     mockGetPendingMessages.mockReturnValue([row(6, 'pixel')])
     await runMessageRouterTick()
     expect(mockIsReady).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('C106C3FF: the cap rides with the hold', () => {
+  let cap = 10 * 60_000
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setDeliveryHoldCheck((agent) => (agent === 'dex' ? { reason: 'context-guard await-handoff', maxMs: cap } : null))
+  })
+  afterEach(() => setDeliveryHoldCheck(null))
+
+  it('the router fails open at the cap the guard hands it, not at a fixed constant', async () => {
+    const t0 = Date.now()
+    mockGetPendingMessages.mockReturnValue([row(7, 'pixel')])
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(t0)
+      await runMessageRouterTick()
+      vi.setSystemTime(t0 + cap - 1)
+      await runMessageRouterTick()
+      expect(mockIsReady).not.toHaveBeenCalled()
+      vi.setSystemTime(t0 + cap)
+      await runMessageRouterTick()
+      expect(mockIsReady).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a longer cap from the config keeps holding past the old fixed value', async () => {
+    cap = 60 * 60_000
+    const t0 = Date.now()
+    mockGetPendingMessages.mockReturnValue([row(8, 'pixel')])
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(t0)
+      await runMessageRouterTick()
+      vi.setSystemTime(t0 + 45 * 60_000)
+      await runMessageRouterTick()
+      expect(mockIsReady).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

@@ -294,6 +294,16 @@ export interface GuardState {
    *  questions (2026-08-17: a merge-gate verdict on a payment PR was missing
    *  from a 20-minute-old handoff presented as current). */
   handoffStaleMinutes: HandoffStaleness
+  /** C106C3FF: the reason of the last handoff request this await-handoff sent
+   *  (the original, never a resend's), so a resend can repeat the same text. */
+  requestReason?: string | null
+  /** Set by the runner when that request was NOT cleanly delivered: typed
+   *  into a pane still busy after the idle wait (best-effort), or not typed at
+   *  all (emit guard). Measured 2026-10-14 (Mira, 97% -> 114%): a best-effort
+   *  request was answered only three sweeps later. */
+  requestUnconfirmed?: boolean
+  /** Resends already sent in THIS await-handoff (bounded by MAX_HANDOFF_RESENDS). */
+  handoffResendCount?: number
 }
 
 export const INITIAL_GUARD_STATE: GuardState = {
@@ -443,6 +453,21 @@ export const STALE_REFRESH_REASON_PREFIX = 'stale-handoff-refresh'
  * matches this constant to pick the prompt.
  */
 export const DAILY_HANDOFF_REASON_PREFIX = 'daily-handoff'
+
+/**
+ * Reason prefix for the one resend of a handoff request whose delivery was
+ * not clean (see GuardState.requestUnconfirmed). The original reason follows
+ * the prefix, and the runner words the resend exactly like the original.
+ */
+export const HANDOFF_RESEND_REASON_PREFIX = 'handoff-resend'
+
+/**
+ * Resends per await-handoff sequence. One, and only for a request that was
+ * not cleanly delivered (Viktor 2659): a request that did land and is simply
+ * not answered yet must not turn into a stream of STOP orders; the handoff
+ * timeout remains the fallback for that.
+ */
+export const MAX_HANDOFF_RESENDS = 1
 
 /**
  * Whether the daily tier can actually fire for this config.
@@ -804,6 +829,8 @@ export function decideGuard(
               ...state,
               handoffMtimeAtRequest: inputs.handoffMtime,
               staleRefreshCount: state.staleRefreshCount + 1,
+              requestReason: `${STALE_REFRESH_REASON_PREFIX}: handoff written but ~${staleMin}m of work happened after it -- requesting refresh`,
+              requestUnconfirmed: false,
             },
           }
         }
@@ -836,6 +863,25 @@ export function decideGuard(
         // An OLD HANDOFF.md may still exist; measure how far behind it is so
         // the resume prompt does not present it as current.
         return restartDecision(nowMs, 'handoff timeout -- force restart', handoffStaleMinutes(inputs))
+      }
+      // C106C3FF: the request went into a busy pane best-effort (or was not
+      // typed at all), and the agent is now idle without having written the
+      // handoff -- the request was most likely lost. Ask once more, through
+      // the same authenticated directive; idle only, so the resend lands as a
+      // clean prompt instead of another best-effort one.
+      if (
+        !handoffWritten && state.requestUnconfirmed === true && inputs.paneIdle &&
+        (state.handoffResendCount ?? 0) < MAX_HANDOFF_RESENDS
+      ) {
+        return {
+          action: 'request-handoff',
+          reason: `${HANDOFF_RESEND_REASON_PREFIX}: ${state.requestReason ?? 'handoff request'}`,
+          nextState: {
+            ...state,
+            requestUnconfirmed: false,
+            handoffResendCount: (state.handoffResendCount ?? 0) + 1,
+          },
+        }
       }
       return none(handoffWritten ? 'handoff written, waiting for idle pane' : 'waiting for handoff')
     }
@@ -998,6 +1044,11 @@ function handoffRequest(
       // A NEW sequence starts with a fresh refresh budget.
       staleRefreshCount: 0,
       handoffStaleMinutes: null,
+      // ...and a fresh resend budget; the runner sets requestUnconfirmed
+      // once it knows how the send went.
+      requestReason: reason,
+      requestUnconfirmed: false,
+      handoffResendCount: 0,
     },
   }
 }

@@ -31,7 +31,7 @@ describe('M1: both guard directives are sent with the emit guard', () => {
     expect(calls.length).toBe(2)
     for (const c of calls) {
       const body = c.slice(0, c.indexOf('\n        )'))
-      expect(body).toContain('{ emitGuard: urgentEmitRefusal }')
+      expect(body).toMatch(/\{ emitGuard: urgentEmitRefusal[ ,}]/)
     }
   })
   it('an inject-resume the guard refused does not cool down: the await-ready state is kept for a retry', () => {

@@ -87,9 +87,11 @@ vi.mock('../web/batch-inject.js', () => ({
   composeBatchInjection: (items: { prefix: string; wrapped: string }[]) => items.map((i) => i.prefix + i.wrapped).join('\n'),
 }))
 
+const mockSnapshotOffsets = vi.fn((..._a: unknown[]) => new Map([['live.jsonl', 4096]]))
 const mockScheduleTurnCheck = vi.fn((..._a: unknown[]) => undefined)
 vi.mock('../web/delivery-turn-check.js', () => ({
   scheduleDeliveryTurnCheck: (...a: unknown[]) => mockScheduleTurnCheck(...a),
+  snapshotTranscriptOffsets: (...a: unknown[]) => mockSnapshotOffsets(...a),
 }))
 
 vi.mock('../web/telegram-inbox-wake.js', () => ({
@@ -134,6 +136,15 @@ describe('message router -> delivery turn check binding', () => {
     expect(mockMarkDelivered.mock.invocationCallOrder[0]).toBeLessThan(mockScheduleTurnCheck.mock.invocationCallOrder[0])
   })
 
+  it('C106C3FF: the transcript offsets are taken BEFORE the keys go out and ride with the check', async () => {
+    snapshot([row(802)])
+    await runMessageRouterTick()
+    expect(mockSnapshotOffsets).toHaveBeenCalledWith('dex', null)
+    expect(mockSnapshotOffsets.mock.invocationCallOrder[0]).toBeLessThan(mockSendPrompt.mock.invocationCallOrder[0])
+    const arg = mockScheduleTurnCheck.mock.calls[0][0] as { offsets: Map<string, number> }
+    expect(arg.offsets.get('live.jsonl')).toBe(4096)
+  })
+
   it('a multi-envelope batch is checked as one request carrying the head and every mate', async () => {
     batchCap.value = 5
     snapshot([row(811), row(812), row(813)])
@@ -156,5 +167,6 @@ describe('message router -> delivery turn check binding', () => {
     await runMessageRouterTick()
     expect(mockSendPrompt).toHaveBeenCalledTimes(1)
     expect(mockScheduleTurnCheck).not.toHaveBeenCalled()
+    expect(mockSnapshotOffsets).not.toHaveBeenCalled()
   })
 })
