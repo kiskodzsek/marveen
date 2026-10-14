@@ -15,7 +15,9 @@
 //      command sees the outer command's assignments and loop values (Viktor 5196, decfb196; before,
 //      `for u in <url>; do echo "$(curl -s $u)"; done` and `u=<url>; x=$(curl -s $u)` passed).
 //      Fail-closed reserve: a curl whose destination is still a variable after that expansion is
-//      denied when the command carries an external URL literal anywhere.
+//      denied when the command carries an external URL literal anywhere. A ( ... ) subshell and a
+//      <( ... ) / >( ... ) process substitution are inner commands the same way; past the nesting
+//      limit (4) an external URL literal in the command is a deny (subst-too-deep).
 // localhost / 127.0.0.1 / [::1] ALWAYS pass: the dashboard's own calls (memory, kanban, message
 // queue, approvals) go over http://localhost and a gate that cut them would silence the fleet.
 // Hosts are cut with a regex, not URL(), so http://localhost:$PORT stays local, while
@@ -202,8 +204,11 @@ function expand(text, env) {
 // shell would run it (top level, inside "...", inside an unquoted-tag heredoc body). Inside '...',
 // $'...' and a quoted-tag heredoc body it is inert text. Lifting it there turned every HANDOFF.md
 // written with `cat > f <<'EOF'` that mentions a curl in backticks into a false deny.
-function substEnd(text, i) { // text[i..] starts with $( -> index just past the matching )
-  let depth = 1, j = i + 2, q = null
+function substEnd(text, i) { // text[i..] starts with $( (or <( / >() -> index just past the matching )
+  return parenEnd(text, i + 1)
+}
+function parenEnd(text, open) { // text[open] is ( -> index just past the matching )
+  let depth = 1, j = open + 1, q = null
   while (j < text.length && depth > 0) {
     const c = text[j]
     if (q) { if (c === q) q = null; else if (c === '\\' && q === '"') j++ }
@@ -294,6 +299,15 @@ export function liftSubstitutions(text) {
       out += '"'
       if (j >= text.length) { copyLive(i + 1, text.length); i = text.length; continue }
       copyLive(i + 1, j); out += '"'; i = j + 1; continue
+    }
+    // A ( ... ) subshell and a <( ... ) / >( ... ) process substitution run a command of their own
+    // too (Viktor, decfb196 review): `(curl -s http://x)` and `cat <(curl -s http://x)` passed,
+    // because the command word was read as "(curl" or never reached. Lifted like $( ... ), with the
+    // same scope. Only here, at top level: inside "..." and in a heredoc body ( is literal text.
+    if (c === '(' || ((c === '<' || c === '>') && text[i + 1] === '(')) {
+      const open = c === '(' ? i : i + 1
+      const j = parenEnd(text, open)
+      inners.push(text.slice(open + 1, Math.max(open + 1, j - 1))); out += ' '.repeat(j - i); i = j; continue
     }
     const n = lift(i)
     if (n !== -1) { i = n; continue }
@@ -466,6 +480,10 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
   if (depth < 4) {
     const inner = { env, loops, externalLiteral: outer.externalLiteral }
     for (const sub of inners) { const r = classify(sub, depth + 1, vendorHosts, vendorDomains, inner); if (r.deny) return r }
+  } else if (inners.length && outer.externalLiteral) {
+    // Past the depth limit the inner commands are not read. That was a pass (Viktor LOW, decfb196:
+    // five nested $( ... ) around a curl); with an external URL literal in the command it denies.
+    return { deny: true, reason: 'subst-too-deep', hosts: [] }
   }
   if (!parseable) return { deny: false, reason: 'unparseable', hosts: [] }
   for (const [a, b] of spans(masked)) {

