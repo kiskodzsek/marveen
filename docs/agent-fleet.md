@@ -28,10 +28,10 @@ Közös SQLite üzenetsor + API:
 ```
 POST /api/messages   { "from": "<agent>", "to": "<agent>", "content": "..." }
 GET  /api/messages?agent=<agent>      # státusz
-PUT  /api/messages/<id>   { "status": "done"|"failed", "result": "...", "notify": false }
+PUT  /api/messages/<id>   { "status": "done"|"failed", "result": "...", "notify": true }
 ```
 
-A lezárás (`PUT`) alapból egy `[Eredmény] msg_id:<id>` nyugtát küld vissza az eredeti feladónak. Delegált feladatnál ez maga az eredmény; **bejövő riport vagy értesítés** lezárásakor viszont csak a feladó sorát növeli, ezért ott `"notify": false` kell (valódi JSON boolean; a `"false"` string 400-at kap). Ugyanez a szabály minden ügynök `CLAUDE.md`-jében generált szakaszként áll (`message-close`).
+A lezárás (`PUT`) alapból NEM küld nyugtát. **Delegált feladatnál**, ahol a feladó az eredményre vár, `"notify": true` kell: ekkor a feladó `[Eredmény] msg_id:<id>` üzenetként kapja meg a `result`-ot (valódi JSON boolean; a `"true"` string 400-at kap). **Bejövő riport vagy értesítés** lezárásakor a `notify` elmarad, mert a nyugta ott csak a feladó sorát növelné. Ugyanez a szabály minden ügynök `CLAUDE.md`-jében generált szakaszként áll (`message-close`).
 
 A rendszer az üzenetet a célpont ügynök tmux-session-jébe juttatja (`[Uzenet @<felado>-tol]: ...` formátumban), aki feldolgozza és a saját csatornáján válaszol. Csak futó (tmux-session-nel rendelkező) ügynöknek lehet üzenni. Távoli ügynöknél ez azt jelenti, hogy az ssh-kapcsolat és a laptop tmux-szervere elérhető kell legyen a delivery-loop ciklusában; ha nem az, az üzenet a sorban marad és visszakapcsoláskor kézbesül (lásd [Távoli ügynökök](#-távoli-remote-ügynökök)).
 

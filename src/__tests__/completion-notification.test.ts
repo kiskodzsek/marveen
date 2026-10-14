@@ -161,12 +161,27 @@ function ackCount(): number {
 }
 
 describe('PUT /api/messages/:id -- notify flag', () => {
-  it('omitting notify still creates the ack (control probe: the default is unchanged)', async () => {
+  it('omitting notify closes the message but creates NO ack (the default is off, NOTIFYOFF1013)', async () => {
     const msg = createAgentMessage(MAIN_AGENT_ID, 'dex', 'Delegated task')
     const before = ackCount()
+    const beforeTotal = listAgentMessages(500).length
     const r = await putStatus(msg.id, { status: 'done', result: 'PR opened' })
     expect(r.statusCode).toBe(200)
+    expect(getAgentMessage(msg.id)!.status).toBe('done')
+    expect(ackCount() - before).toBe(0)
+    expect(listAgentMessages(500).length - beforeTotal).toBe(0)
+  })
+
+  it('notify:true creates exactly one ack carrying the result (control probe)', async () => {
+    const msg = createAgentMessage(MAIN_AGENT_ID, 'dex', 'Delegated task')
+    const before = ackCount()
+    const r = await putStatus(msg.id, { status: 'done', notify: true, result: 'PR opened' })
+    expect(r.statusCode).toBe(200)
     expect(ackCount() - before).toBe(1)
+    const ack = getPendingMessages(MAIN_AGENT_ID)
+      .filter((m) => m.content.startsWith(COMPLETION_REPORT_PREFIX)).pop()!
+    expect(ack.content).toContain(`msg_id:${msg.id}`)
+    expect(ack.content).toContain('PR opened')
   })
 
   it('notify:false closes the message but creates NO new row', async () => {
@@ -183,16 +198,11 @@ describe('PUT /api/messages/:id -- notify flag', () => {
     expect(listAgentMessages(500).length - beforeTotal).toBe(0)
   })
 
-  it('notify:true is the default spelled out, not an override of the guards', async () => {
-    const implicitBefore = ackCount()
-    const implicit = createAgentMessage(MAIN_AGENT_ID, 'dex', 'Delegated task')
-    await putStatus(implicit.id, { status: 'failed', result: 'Network error' })
-    const implicitDelta = ackCount() - implicitBefore
-
+  it('notify:true is an opt-in, not an override of the guards', async () => {
     const explicitBefore = ackCount()
     const explicit = createAgentMessage(MAIN_AGENT_ID, 'dex', 'Delegated task')
     await putStatus(explicit.id, { status: 'failed', notify: true, result: 'Network error' })
-    expect(ackCount() - explicitBefore).toBe(implicitDelta)
+    expect(ackCount() - explicitBefore).toBe(1)
 
     // A sender shouldNotifyDelegator refuses (the undeliverable `system`) stays refused
     // with notify:true -- the flag can save a turn, it cannot buy one.
@@ -213,11 +223,21 @@ describe('PUT /api/messages/:id -- notify flag', () => {
     expect(ackCount() - before).toBe(0)
   })
 
-  it('notify:null is treated as absent (default), not as false', async () => {
+  it('notify:null is treated as absent (default: no ack), not as true', async () => {
     const msg = createAgentMessage(MAIN_AGENT_ID, 'dex', 'Delegated task')
     const before = ackCount()
     const r = await putStatus(msg.id, { status: 'done', notify: null, result: 'ok' })
     expect(r.statusCode).toBe(200)
-    expect(ackCount() - before).toBe(1)
+    expect(getAgentMessage(msg.id)!.status).toBe('done')
+    expect(ackCount() - before).toBe(0)
+  })
+
+  it('rejects the string "true" too: a truthy string must not buy an ack', async () => {
+    const msg = createAgentMessage(MAIN_AGENT_ID, 'dex', 'Delegated task')
+    const before = ackCount()
+    const r = await putStatus(msg.id, { status: 'done', notify: 'true' })
+    expect(r.statusCode).toBe(400)
+    expect(getAgentMessage(msg.id)!.status).toBe('pending')
+    expect(ackCount() - before).toBe(0)
   })
 })
