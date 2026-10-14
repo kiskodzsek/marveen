@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -193,11 +194,17 @@ export function readFableSnapshot(
  * last turn.complete in the mod's history; with neither (e.g. right after a
  * restart) its age is unknown and the snapshot is stale. ageSec is the OLDEST
  * data time among the chosen windows.
+ *
+ * QUOTAPLAN1014: the "highest percentage wins" rule only holds while every
+ * source draws from the same subscription. An agent on its own seat reports
+ * ITS seat's windows, so `include` narrows the read to the agents of one
+ * subscription (see quotaPlanKey); without it every file counts, as before.
  */
 export function readModQuotaSnapshot(
   dir: string,
   nowSec: number = Math.floor(Date.now() / 1000),
   maxAgeSec: number = DEFAULT_MAX_AGE_SEC,
+  include?: (agent: string) => boolean,
 ): QuotaSnapshot {
   const empty = { ageSec: null, maxAgeSec, fiveHour: null, sevenDay: null, source: 'mod' as const, sourceAgents: [] }
   let names: string[]
@@ -220,8 +227,10 @@ export function readModQuotaSnapshot(
       continue // a half-written file: the next render reads it whole
     }
     if (!d || typeof d !== 'object' || typeof d.alive_at !== 'number') continue
-    sources++
     const agent = typeof d.agent === 'string' && d.agent ? d.agent : name.slice(0, -'.json'.length)
+    // QUOTAPLAN1014: a reading from another subscription says nothing about this one.
+    if (include && !include(agent)) continue
+    sources++
     const dataSec = sourceDataSec(d)
     const limits = Array.isArray(d.usage?.rateLimits) ? d.usage!.rateLimits as unknown[] : []
     for (const raw of limits) {
@@ -293,4 +302,34 @@ export function chooseQuotaSnapshot(statusLine: QuotaSnapshot, mod: QuotaSnapsho
   }
   if (rank(mod) !== rank(tagged)) return rank(mod) > rank(tagged) ? mod : tagged
   return (mod.ageSec ?? Infinity) < (tagged.ageSec ?? Infinity) ? mod : tagged
+}
+
+/**
+ * QUOTAPLAN1014 -- which subscription an agent's rate_limits describe, so the
+ * readings of different seats never mix (Patrik TG 2220/2225: Dave's own
+ * Premium seat is a separate quota with its own brake). 'fleet' is the shared
+ * subscription the fleet token and the host login draw from.
+ *
+ * - authMode own_team: the agent logs in with its own Team seat -> own:<agent>
+ * - a named claudePlan: every agent on that plan shares one login -> plan:<id>
+ * - a raw claudeConfigDir: a login of its own, shared by whoever points at
+ *   the same directory -> dir:<first 8 hex of sha256(path)> (the key goes out
+ *   on /api/overview, and a local path, user name included, has no business
+ *   there -- Viktor L1; the label comes from the agent names anyway)
+ * - anything else (including the main agent) -> fleet
+ *
+ * own_team wins over the other two: it is the explicit "not the fleet's
+ * credential" switch, the plan/dir only say where its config lives.
+ */
+export interface AgentQuotaIdentity {
+  authMode?: string | null
+  claudePlan?: string | null
+  claudeConfigDir?: string | null
+}
+
+export function quotaPlanKey(agent: string, id: AgentQuotaIdentity): string {
+  if (id.authMode === 'own_team') return `own:${agent}`
+  if (id.claudePlan) return `plan:${id.claudePlan}`
+  if (id.claudeConfigDir) return `dir:${createHash('sha256').update(id.claudeConfigDir).digest('hex').slice(0, 8)}`
+  return 'fleet'
 }

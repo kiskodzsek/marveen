@@ -12215,6 +12215,47 @@ function quotaMeasuredText(ageSec) {
   return t('overview.quota.measured', { age: formatRelative(Date.now() - ageSec * 1000) })
 }
 
+// One window's bar. Shared by the fleet strip and the per-seat blocks
+// (QUOTAPLAN1014), so a seat's 5-hour row reads exactly like the fleet's.
+function quotaBarRow(labelKey, w, muted0, ageSecForRow, source, nowSec) {
+  const pct = Math.max(0, Math.min(100, Math.round(w.usedPercentage)))
+  const muted = muted0 || w.expired
+  const row = document.createElement('div')
+  row.className = 'quota-bar' + (muted ? ' muted' : '')
+  let tail = ''
+  if (w.expired) {
+    tail = ' · ' + t('overview.quota.expired')
+  } else if (typeof w.resetsAt === 'number' && w.resetsAt > nowSec) {
+    tail = ' · ' + t('overview.quota.resets_in', { d: formatDurationShort(w.resetsAt - nowSec) })
+  }
+  // This row's own collector age travels with it: the shared age line
+  // below (q.ageSec) only covers the statusLine source, so it says nothing
+  // about a row fed by a different collector -- without this a muted row
+  // reads as "might be old" with no way to tell minutes from days.
+  if (typeof ageSecForRow === 'number') {
+    tail += ' · ' + quotaMeasuredText(ageSecForRow)
+  }
+  // QUOTAMOD1005: with the mod source each window names its own agent -- the
+  // 5-hour and the weekly reading may come from different sessions.
+  if (source === 'mod' && w.sourceAgent) {
+    tail += ' · ' + w.sourceAgent
+  }
+  const week = labelKey === 'overview.quota.seven_day' && !w.expired
+    ? weekSegments(w.resetsAt, nowSec, window._lang)
+    : null
+  const track = `<div class="quota-bar-track${week ? ' week' : ''}"><div class="quota-bar-fill ${muted ? '' : quotaLevelClass(pct)}" style="width:${pct}%"></div></div>`
+  row.innerHTML = `
+    <div class="quota-bar-label">${escapeHtml(t(labelKey))}</div>
+    ${week ? `<div class="quota-bar-col">
+      ${track}
+      <div class="quota-bar-now" style="left:${week.nowPct.toFixed(2)}%"></div>
+      <div class="quota-bar-days${week.narrowLabels ? '' : ' no-narrow'}">${week.labels.map((d, i) => `<span><span class="day-full">${escapeHtml(d)}</span><span class="day-short">${escapeHtml(week.shortLabels[i])}</span>${week.narrowLabels ? `<span class="day-narrow">${escapeHtml(week.narrowLabels[i])}</span>` : ''}</span>`).join('')}</div>
+    </div>` : track}
+    <div class="quota-bar-value">${pct}%<span class="quota-bar-reset">${escapeHtml(tail)}</span></div>
+  `
+  return row
+}
+
 function renderQuotaStrip(q, fable) {
   const strip = document.getElementById('quotaStrip')
   const bars = document.getElementById('quotaBars')
@@ -12249,42 +12290,7 @@ function renderQuotaStrip(q, fable) {
   }
   for (const [labelKey, w, muted0, ageSecForRow] of windows) {
     if (!w) continue
-    const pct = Math.max(0, Math.min(100, Math.round(w.usedPercentage)))
-    const muted = muted0 || w.expired
-    const row = document.createElement('div')
-    row.className = 'quota-bar' + (muted ? ' muted' : '')
-    let tail = ''
-    if (w.expired) {
-      tail = ' · ' + t('overview.quota.expired')
-    } else if (typeof w.resetsAt === 'number' && w.resetsAt > nowSec) {
-      tail = ' · ' + t('overview.quota.resets_in', { d: formatDurationShort(w.resetsAt - nowSec) })
-    }
-    // This row's own collector age travels with it: the shared age line
-    // below (q.ageSec) only covers the statusLine source, so it says nothing
-    // about a row fed by a different collector -- without this a muted row
-    // reads as "might be old" with no way to tell minutes from days.
-    if (typeof ageSecForRow === 'number') {
-      tail += ' · ' + quotaMeasuredText(ageSecForRow)
-    }
-    // QUOTAMOD1005: with the mod source each window names its own agent -- the
-    // 5-hour and the weekly reading may come from different sessions.
-    if (q.source === 'mod' && w.sourceAgent) {
-      tail += ' · ' + w.sourceAgent
-    }
-    const week = labelKey === 'overview.quota.seven_day' && !w.expired
-      ? weekSegments(w.resetsAt, nowSec, window._lang)
-      : null
-    const track = `<div class="quota-bar-track${week ? ' week' : ''}"><div class="quota-bar-fill ${muted ? '' : quotaLevelClass(pct)}" style="width:${pct}%"></div></div>`
-    row.innerHTML = `
-      <div class="quota-bar-label">${escapeHtml(t(labelKey))}</div>
-      ${week ? `<div class="quota-bar-col">
-        ${track}
-        <div class="quota-bar-now" style="left:${week.nowPct.toFixed(2)}%"></div>
-        <div class="quota-bar-days${week.narrowLabels ? '' : ' no-narrow'}">${week.labels.map((d, i) => `<span><span class="day-full">${escapeHtml(d)}</span><span class="day-short">${escapeHtml(week.shortLabels[i])}</span>${week.narrowLabels ? `<span class="day-narrow">${escapeHtml(week.narrowLabels[i])}</span>` : ''}</span>`).join('')}</div>
-      </div>` : track}
-      <div class="quota-bar-value">${pct}%<span class="quota-bar-reset">${escapeHtml(tail)}</span></div>
-    `
-    bars.appendChild(row)
+    bars.appendChild(quotaBarRow(labelKey, w, muted0, ageSecForRow, q.source, nowSec))
   }
 
   if (typeof q.ageSec === 'number') {
@@ -12312,6 +12318,45 @@ function renderQuotaStrip(q, fable) {
   }
 }
 
+// QUOTAPLAN1014: an agent on its own seat (own Team login, a named plan) has
+// its own 5-hour and weekly windows -- and its own brake. Each seat gets a
+// block under the fleet strip, listed even before its first reading, so a
+// seat with no number says so instead of vanishing.
+function renderQuotaSeats(seats) {
+  const box = document.getElementById('quotaSeats')
+  if (!box) return
+  box.innerHTML = ''
+  const list = Array.isArray(seats) ? seats : []
+  box.hidden = list.length === 0
+  const nowSec = Math.floor(Date.now() / 1000)
+  for (const seat of list) {
+    const q = seat.quota || {}
+    const block = document.createElement('div')
+    block.className = 'quota-seat'
+    const head = document.createElement('div')
+    head.className = 'quota-strip-head'
+    let ageText = typeof q.ageSec === 'number' ? quotaMeasuredText(q.ageSec) : ''
+    head.innerHTML = `<span class="quota-strip-title">${escapeHtml(t('overview.quota.seat', { name: seat.label || seat.key }))}</span><span class="quota-strip-age">${escapeHtml(ageText)}</span>`
+    block.appendChild(head)
+    const bars = document.createElement('div')
+    bars.className = 'quota-bars'
+    const stale = q.status === 'stale'
+    for (const [labelKey, w] of [['overview.quota.five_hour', q.fiveHour], ['overview.quota.seven_day', q.sevenDay]]) {
+      if (w) bars.appendChild(quotaBarRow(labelKey, w, stale, null, q.source, nowSec))
+    }
+    block.appendChild(bars)
+    if (q.status === 'missing' || stale) {
+      const note = document.createElement('div')
+      note.className = 'quota-strip-note' + (stale ? ' warn' : '')
+      note.textContent = q.status === 'missing'
+        ? t('overview.quota.seat_none')
+        : t(typeof q.ageSec === 'number' ? 'overview.quota.stale_mod' : 'overview.quota.stale_mod_unknown')
+      block.appendChild(note)
+    }
+    box.appendChild(block)
+  }
+}
+
 async function loadOverview() {
   try {
     const res = await fetch('/api/overview')
@@ -12328,6 +12373,7 @@ async function loadOverview() {
     document.getElementById('statSkills').textContent = d.skills.count
     document.getElementById('statSkillsSub').textContent = d.skills.today > 0 ? t('overview.stat.skills_today', { n: d.skills.today }) : ''
     renderQuotaStrip(d.quota, d.quotaFable)
+    renderQuotaSeats(d.quotaSeats)
     // Team: reuse the hierarchy graph renderer so the overview card shows
     // exactly what the Csapat page does (avatars + reports-to tree).
     try {

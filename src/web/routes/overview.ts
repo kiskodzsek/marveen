@@ -5,11 +5,12 @@ import { PROJECT_ROOT, MAIN_AGENT_ID, currentBotName } from '../../config.js'
 import { getDb, countTaskRunsBetween } from '../../db.js'
 import {
   agentDir, listAgentNames, readAgentDisplayName,
+  readAgentAuthMode, readAgentClaudePlan, readAgentClaudeConfigDir,
 } from '../agent-config.js'
 import { readAgentTeam } from '../agent-team.js'
 import { isAgentRunning } from '../agent-process.js'
 import { json, jsonMaybeGzip } from '../http-helpers.js'
-import { readQuotaSnapshot, DEFAULT_MAX_AGE_SEC, readFableSnapshot, DEFAULT_FABLE_MAX_AGE_SEC, readModQuotaSnapshot, chooseQuotaSnapshot, type QuotaSnapshot } from '../quota.js'
+import { readQuotaSnapshot, DEFAULT_MAX_AGE_SEC, readFableSnapshot, DEFAULT_FABLE_MAX_AGE_SEC, readModQuotaSnapshot, chooseQuotaSnapshot, quotaPlanKey, type QuotaSnapshot } from '../quota.js'
 import { STATE_OBSERVER_STATE_DIR } from '../state-observer.js'
 import type { RouteContext } from './types.js'
 
@@ -66,12 +67,62 @@ function countUserTurns(fromMs: number, toMs: number = Number.POSITIVE_INFINITY)
 // agent-state-observer mod's readings do. The fresher of the two wins, and the
 // snapshot says which one it is. Shared with the operator status
 // (DASHOPERATOR1005), so the two surfaces cannot disagree either.
+//
+// QUOTAPLAN1014: only the agents on the fleet subscription feed this number.
+// An agent on its own seat (authMode own_team, a named plan, its own config
+// dir) reports that seat's windows, and its 95% must not read as the fleet's
+// -- nor brake the fleet. Those seats come back separately, from
+// readSeatQuotas. The statusLine file stays fleet-only: it is written by the
+// host session's statusLine, which runs on the shared login.
 export function readFleetQuota(nowSec: number): QuotaSnapshot {
   const maxAgeSec = Number(process.env.QUOTA_MAX_AGE_SEC) || DEFAULT_MAX_AGE_SEC
+  const keys = agentQuotaKeys()
   return chooseQuotaSnapshot(
     readQuotaSnapshot(join(PROJECT_ROOT, 'store', '.claude-rate-limits.json'), nowSec, maxAgeSec),
-    readModQuotaSnapshot(STATE_OBSERVER_STATE_DIR, nowSec, maxAgeSec),
+    readModQuotaSnapshot(STATE_OBSERVER_STATE_DIR, nowSec, maxAgeSec, (a) => (keys.get(a) ?? 'fleet') === 'fleet'),
   )
+}
+
+export interface SeatQuota {
+  /** quotaPlanKey: own:<agent>, plan:<id> or dir:<hash>. */
+  key: string
+  /** Display names of the agents on this seat, for the strip's label. */
+  label: string
+  agents: string[]
+  quota: QuotaSnapshot
+}
+
+/** Every sub-agent's quota key; an agent missing from the map (the main agent, a stray state file) is fleet. */
+function agentQuotaKeys(): Map<string, string> {
+  const keys = new Map<string, string>()
+  for (const a of listAgentNames()) {
+    keys.set(a, quotaPlanKey(a, {
+      authMode: readAgentAuthMode(a),
+      claudePlan: readAgentClaudePlan(a),
+      claudeConfigDir: readAgentClaudeConfigDir(a),
+    }))
+  }
+  return keys
+}
+
+/**
+ * One snapshot per non-fleet seat, from the observer mod's readings of the
+ * agents on it. A seat is listed even with no reading ('missing'): the strip
+ * then says the number is unknown instead of hiding that the seat exists.
+ */
+export function readSeatQuotas(nowSec: number): SeatQuota[] {
+  const maxAgeSec = Number(process.env.QUOTA_MAX_AGE_SEC) || DEFAULT_MAX_AGE_SEC
+  const seats = new Map<string, string[]>()
+  for (const [agent, key] of agentQuotaKeys()) {
+    if (key === 'fleet') continue
+    seats.set(key, [...(seats.get(key) ?? []), agent])
+  }
+  return [...seats].sort(([a], [b]) => a.localeCompare(b)).map(([key, agents]) => ({
+    key,
+    label: agents.map(readAgentDisplayName).join(', '),
+    agents,
+    quota: readModQuotaSnapshot(STATE_OBSERVER_STATE_DIR, nowSec, maxAgeSec, (a) => agents.includes(a)),
+  }))
 }
 
 export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
@@ -161,6 +212,7 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
       })
     }
     const quota = readFleetQuota(Math.floor(Date.now() / 1000))
+    const quotaSeats = readSeatQuotas(Math.floor(Date.now() / 1000))
     // Separate source (scripts/usage-collect.py), separate freshness rule --
     // see src/web/quota.ts for why this isn't folded into readQuotaSnapshot.
     const fableMaxAgeSec = Number(process.env.QUOTA_FABLE_MAX_AGE_SEC) || DEFAULT_FABLE_MAX_AGE_SEC
@@ -179,6 +231,7 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
       team: agentsForTeam,
       activity: activity.slice(0, 8),
       quota,
+      quotaSeats,
       quotaFable,
     })
     return true

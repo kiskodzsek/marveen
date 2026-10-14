@@ -99,7 +99,7 @@ function render(quota: Record<string, unknown>, lang = 'hu'): string[] {
   const document = { getElementById: (id: string) => els[id], createElement: () => ({ className: '', innerHTML: '' }) }
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
   const fn = new Function('document', 'window', 't', 'escapeHtml', 'formatDurationShort', 'formatRelative',
-    `${extractFn('quotaLevelClass')}; ${extractFn('quotaMeasuredText')}; ${extractFn('weekSegments')}; ${extractFn('renderQuotaStrip')}; return renderQuotaStrip`,
+    `${extractFn('quotaLevelClass')}; ${extractFn('quotaMeasuredText')}; ${extractFn('weekSegments')}; ${extractFn('quotaBarRow')}; ${extractFn('renderQuotaStrip')}; return renderQuotaStrip`,
   )(document, { _lang: lang }, (k: string) => k, (s: string) => String(s), () => '1n', () => 'most')
   fn(quota, null)
   return els.quotaBars.children

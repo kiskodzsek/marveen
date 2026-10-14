@@ -56,6 +56,8 @@ window._i18n.hu = {
   'overview.quota.measured_now':    'friss mérés',
   'overview.quota.stale_mod':       'Ezek a számok régiek: a megfigyelt munkamenetek azóta nem kaptak API-választ, közben egy másik munkamenet már fogyaszthatta a keretet.',
   'overview.quota.stale_mod_unknown': 'Ezeknek a számoknak nem tudjuk a korát (a munkamenet újraindulása óta még nem volt lezárt köre), ezért inkább elavultnak tekintjük őket.',
+  'overview.quota.seat':            '{name} saját keret',
+  'overview.quota.seat_none':       'Erről a saját keretről még nincs mérés. A számokat a megfigyelő mod adja: kapcsold be ezen az ágensen ("stateObserver": true az agent-config.json fájlban), majd indítsd újra.',
   'overview.no_activity':           'Nincs friss esemény.',
   'overview.error':                 'Hiba: {msg}',
   'overview.updates_subtitle':      'verzió ellenőrzés',

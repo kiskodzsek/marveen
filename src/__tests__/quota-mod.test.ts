@@ -178,7 +178,8 @@ describe('the wiring', () => {
     const SRC = readFileSync(join(__dirname, '../web/routes/overview.ts'), 'utf-8')
     // DASHOPERATOR1005: the read lives in readFleetQuota, shared with the operator status.
     expect(SRC).toMatch(/return chooseQuotaSnapshot\(\s*readQuotaSnapshot\(/)
-    expect(SRC).toMatch(/readModQuotaSnapshot\(STATE_OBSERVER_STATE_DIR, nowSec, maxAgeSec\)/)
+    // QUOTAPLAN1014: the fleet read keeps only the agents on the fleet subscription.
+    expect(SRC).toMatch(/readModQuotaSnapshot\(STATE_OBSERVER_STATE_DIR, nowSec, maxAgeSec, \(a\) => \(keys\.get\(a\) \?\? 'fleet'\) === 'fleet'\)/)
     expect(SRC).toMatch(/const quota = readFleetQuota\(Math\.floor\(Date\.now\(\) \/ 1000\)\)/)
   })
 
@@ -186,7 +187,10 @@ describe('the wiring', () => {
     const APP = readFileSync(join(__dirname, '../../web/app.js'), 'utf-8')
     const fn = APP.slice(APP.indexOf('function renderQuotaStrip('), APP.indexOf('async function loadOverview('))
     expect(fn).toMatch(/q\.source === 'mod'\s*\?\s*t\(typeof q\.ageSec === 'number' \? 'overview\.quota\.stale_mod' : 'overview\.quota\.stale_mod_unknown'\)/)
-    expect(fn).toMatch(/q\.source === 'mod' && w\.sourceAgent/)
+    // QUOTAPLAN1014: the row lives in quotaBarRow, which gets the source as an argument.
+    expect(fn).toMatch(/quotaBarRow\(labelKey, w, muted0, ageSecForRow, q\.source, nowSec\)/)
+    const row = APP.slice(APP.indexOf('function quotaBarRow('), APP.indexOf('function renderQuotaStrip('))
+    expect(row).toMatch(/source === 'mod' && w\.sourceAgent/)
     expect(fn).toMatch(/source_mod_many/)
     expect(fn).not.toMatch(/t\('overview\.quota\.measured', \{ age/)
     expect(APP).toMatch(/if \(ageSec < 60\) return t\('overview\.quota\.measured_now'\)/)
