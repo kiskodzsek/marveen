@@ -274,6 +274,8 @@ describe('autodone settings', () => {
     expect(secret.default).toBe('')
     expect(validateSettingValue(secret, secret.default).ok).toBe(true)
     expect(validateSettingValue(secret, 'github-kanban-autodone-ro').ok).toBe(true)
+    expect(validateSettingValue(secret, 'github-fleet-token').ok).toBe(false)
+    expect(validateSettingValue(secret, 'github-github_personal_access_token').ok).toBe(false)
     expect(validateSettingValue(secret, 'SUPABASE_ACCESS_TOKEN_OPS').ok).toBe(false)
     const repos = getSettingDefinition('KANBAN_AUTODONE_REPOS')!
     expect(validateSettingValue(repos, 'kiskodzsek/marabel,kiskodzsek/marveen').ok).toBe(true)

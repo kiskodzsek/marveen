@@ -244,9 +244,13 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     module: 'kanban',
     secret: false,
     requiresRestart: false,
-    validate: (v) => v === '' || /^github[A-Za-z0-9._-]{0,100}$/.test(v)
-      ? null
-      : 'a Vault-azonosítónak "github"-bal kell kezdődnie (betű, szám, . _ -)',
+    // Known ids of tokens that belong to someone else (fleet monitor, an MCP server):
+    // refused in code, not only in the description (Viktor 5043).
+    validate: (v) => ['github-fleet-token', 'github-github_personal_access_token'].includes(v)
+      ? 'ez egy másik szolgáltatás tokenje: a PR-autodone saját, csak-olvasó PAT-ot kap'
+      : v === '' || /^github[A-Za-z0-9._-]{0,100}$/.test(v)
+        ? null
+        : 'a Vault-azonosítónak "github"-bal kell kezdődnie (betű, szám, . _ -)',
   },
   {
     key: 'KANBAN_AUTODONE_EXCLUDE_CARDS',
