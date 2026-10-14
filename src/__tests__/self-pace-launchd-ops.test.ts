@@ -55,6 +55,14 @@ describe('K1: the worker plist must carry the sandbox wrapper (Viktor 3423)', ()
     writeFileSync(PLIST, unwrapped)
     expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${PLIST}` }, pulzus).deny).toBe(true)
   })
+  it('the subpath-only profile (before M1, Viktor 3466) is refused at bootstrap', () => {
+    const subpathOnly = approvedBody.toString().replace(
+      ' (literal "/Users/klodel/Library") (literal "/Users/klodel")', '')
+    expect(subpathOnly).not.toContain('(literal ')
+    expect(subpathOnly).toContain('(subpath "/Users/klodel/Library/CloudStorage")')
+    writeFileSync(PLIST, subpathOnly)
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${PLIST}` }, pulzus).deny).toBe(true)
+  })
 })
 
 describe('allowed: the three exact shapes, for pulzus only', () => {
@@ -111,7 +119,7 @@ describe('the invoice mover v3 and its B5 probe (Pulzus 2864, card daef6926)', (
     writeFileSync(b5Plist, readFileSync(join(__dirname, 'fixtures', `${B5}.plist`)))
     const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${b5Plist}` }, pulzus)
     expect(ok.deny).toBe(false)
-    expect(ok.launchdOps[0].plist_sha256).toBe('315068ee5050988cac2ef7d0787294df6d7aebc784cebd2f712858919dcda0c8')
+    expect(ok.launchdOps[0].plist_sha256).toBe('6b9b1f571ccab6c0f97858ea3b614e62aebe04d8cbbd282a928bb2c6a1265231')
     expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${B5}` }, pulzus).deny).toBe(false)
     expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${B5}` }, pulzus).deny).toBe(true)
     writeFileSync(b5Plist, '<plist>other program</plist>')
