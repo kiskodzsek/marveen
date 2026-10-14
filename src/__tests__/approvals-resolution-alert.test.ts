@@ -127,8 +127,12 @@ describe('approval resolution alert (9a2925a7)', () => {
     expect(out.body.status).toBe('approved')
     expect(getApproval(id)?.status).toBe('approved')
     expect(resolutionAlerts()).toHaveLength(0)
-    const notes = getPendingMessages('agent-a').map((m) => m.content)
-    expect(notes.some((c) => c === `approval-riasztás nem ment ki: ${id} (send-failed)`)).toBe(true)
+    const notes = getPendingMessages('agent-a')
+    const note = notes.find((m) => m.content === `approval-riasztás nem ment ki: ${id} (send-failed)`)
+    expect(note).toBeDefined()
+    // RESERVEDSENDER1013: the fallback is a from=system row, so only the
+    // in-process createSystemMessage may write it (createAgentMessage refuses).
+    expect(note?.from_agent).toBe('system')
   })
 
   it('a timeout resolution is not announced', async () => {

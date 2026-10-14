@@ -309,7 +309,7 @@ export function buildResolutionAlertText(approval: Approval, resolverMessageId: 
 function resolutionAlertFailed(approvalId: string, reason: string, err?: unknown): void {
   logger.warn({ err, approvalId, reason }, 'approval resolution alert NOT sent')
   try {
-    createAgentMessage('system', MAIN_AGENT_ID, `approval-riasztás nem ment ki: ${approvalId} (${reason})`)
+    createSystemMessage(MAIN_AGENT_ID, `approval-riasztás nem ment ki: ${approvalId} (${reason})`)
   } catch (msgErr) {
     logger.warn({ err: msgErr, approvalId }, 'approval resolution alert fallback message failed too')
   }
