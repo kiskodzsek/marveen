@@ -52,8 +52,10 @@ describe('a channel identity may not be a desktop-lock owner', () => {
   it('NEGATIVE CONTROL: ordinary agents and the owner keep the screen', () => {
     // Without this the rule above proves nothing -- a guard that refuses
     // EVERY owner would satisfy it and park the whole fleet out of the screen.
-    for (const ok of ['samu', 'mira', 'marveen', 'szabolcs', 'iris']) {
-      expect(lockOwnerRefusal(ok), `ordinary owner ${ok}`).toBeNull()
+    // The registry is injected: this suite runs without an agents/ directory.
+    const fleet = new Set(['samu', 'mira', 'marveen', 'szabolcs', 'iris'])
+    for (const ok of fleet) {
+      expect(lockOwnerRefusal(ok, (id) => fleet.has(id)), `ordinary owner ${ok}`).toBeNull()
       expect(isChannelInboundSender(ok)).toBe(false)
     }
   })

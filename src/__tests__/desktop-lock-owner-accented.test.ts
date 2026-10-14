@@ -61,10 +61,11 @@ describe('desktop-lock owner exception with an accented OWNER_NAME (Viktor I4)',
     }
   })
 
-  it('the accent-stripped name is decided by the plain-id rule, not by the exception', () => {
-    // 'Patrik' is in the id alphabet, so it passes like any agent id; the owner
-    // exception only ever decides a name OUTSIDE the alphabet. Granting it adds
-    // nothing: the exact accented owner name is accepted by design anyway.
-    expect(lock.lockOwnerRefusal('Patrik')).toBeNull()
+  it('the accent-stripped name is decided by the agent registry, not by the exception', () => {
+    // 'Patrik' is in the id alphabet, so it is judged like any agent id: held
+    // only if an agent of that exact name is registered. The owner exception
+    // never stretches to it -- the exact accented owner name is the only one.
+    expect(lock.lockOwnerRefusal('Patrik', () => false)).toMatch(/not a registered fleet agent/)
+    expect(lock.lockOwnerRefusal('Patrik', (id) => id === 'Patrik')).toBeNull()
   })
 })
