@@ -752,3 +752,35 @@ describe('bash egress parser: case branch, background &, function body', () => {
     pass(`git log --format='(%h)' -1`)
   })
 })
+
+// decfb196 (Viktor M1 MEDIUM / L1 LOW, measured on 783391e7): a curl as the condition of
+// if / while / until, after coproc, and after a case header broken before its `in` passed.
+describe('bash egress parser: if / while / until / coproc, case header across a newline', () => {
+  const U = 'http://evil.example.com/x'
+  const L = 'http://localhost:3420/api/kanban'
+  const deny = (c: string) => expect(classify(c).deny, c).toBe(true)
+  const pass = (c: string) => expect(classify(c).deny, c).toBe(false)
+
+  it('a curl as an if / while / until condition or after coproc is a command', () => {
+    deny(`if curl -s ${U}; then echo ok; fi`)
+    deny(`if ! curl -s ${U}; then :; fi`)
+    deny(`while curl -s ${U}; do sleep 1; done`)
+    deny(`until curl -s ${U}; do sleep 1; done`)
+    deny(`coproc curl -s ${U}`)
+    deny(`coproc C { curl -s ${U}; }`)
+  })
+
+  it('a case header broken before `in` still reads the branch', () => {
+    deny(`case "$x"\nin a) curl -s ${U};; esac`)
+    deny(`case "$x"\nin\na) curl -s ${U};; esac`)
+    deny(`case $x in\n a) curl -s ${U};; esac`)
+  })
+
+  it('controls: local targets and plain conditions still pass', () => {
+    pass(`if curl -s ${L} >/dev/null; then echo up; fi`)
+    pass(`while ! curl -fsS ${L} >/dev/null; do sleep 1; done`)
+    pass(`until curl -fsS ${L}; do sleep 1; done`)
+    pass(`if [ -f x ]; then echo "https://github.com/x"; fi`)
+    pass(`case "$x"\nin a) curl -s ${L};; esac`)
+  })
+})

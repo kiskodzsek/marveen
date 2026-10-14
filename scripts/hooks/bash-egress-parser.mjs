@@ -101,9 +101,11 @@ const INTERPRETER = /^(?:python(?:\d+(?:\.\d+)?)?|node(?:js)?|perl|ruby|php|deno
 const CODE_FLAG = new Set(['-c', '-e', '-E', '-r', '--eval', '-p', '--print', 'eval'])
 // Words that can stand before the real command word of a sub-command. The shell keywords are here
 // because `for p in a b; do curl ...` splits at `;` into a span that starts with `do`, and without
-// them a curl inside a loop or an if/then body was never looked at.
+// them a curl inside a loop or an if/then body was never looked at. `if` / `while` / `until` /
+// `coproc` open a command too: `if curl <url>; then` passed (Viktor M1, decfb196); `coproc NAME {`
+// is stepped over by the function-head rule in commandWordAt().
 const PREFIX_WORDS = new Set(['env', 'sudo', 'command', 'exec', 'time', 'nohup', 'nice',
-  'do', 'then', 'else', 'elif', '{', '(', '!'])
+  'do', 'then', 'else', 'elif', 'if', 'while', 'until', 'coproc', '{', '(', '!'])
 // A one-liner is a DOWNLOADER only when its code uses a network primitive of the language itself.
 // Measured on 7 days of fleet commands: a one-liner that merely CARRIES a URL as data (an
 // inter-agent message built with subprocess + curl to localhost) must not be denied -- that was 4 of
@@ -470,7 +472,9 @@ function hasExternalLiteral(text, vendorHosts, vendorDomains) {
 // steps over the words that open a body without being a command (decfb196, Viktor 2597/2634):
 //   - a case header up to its `in` (`case $x in a) curl ...`), and a case pattern: a leading word
 //     ending in `)` (`a)`, `a|b)`, `*)`; `(a)` is lifted as a subshell before this and leaves blanks);
-//   - a function head: `function NAME [{]`, or `NAME {` (`NAME()` leaves `NAME {` after lifting).
+//   - a function head: `function NAME [{]`, or `NAME {` (`NAME()` leaves `NAME {` after lifting);
+//   - a leading `in`: a case header broken before it (`case $x` NEWLINE `in a) curl ...`) leaves a
+//     span that starts with `in` (Viktor L1, decfb196).
 // Fail-closed direction: a word wrongly stepped over only lets a LATER word be judged as curl.
 function commandWordAt(mw) {
   let i = 0
@@ -478,6 +482,7 @@ function commandWordAt(mw) {
     const w = mw[i]
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || PREFIX_WORDS.has(w)) i++
     else if (w === 'case') { const at = mw.indexOf('in', i + 1); i = at === -1 ? mw.length : at + 1 }
+    else if (w === 'in' && i === 0) i++
     else if (w === 'function') i += mw[i + 2] === '{' ? 3 : 2
     else if (mw[i + 1] === '{' && /^[A-Za-z_][\w.:-]*$/.test(w)) i += 2
     else if (w.endsWith(')') && !w.startsWith('$')) i++
