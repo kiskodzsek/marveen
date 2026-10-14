@@ -82,8 +82,10 @@ describe('desktop-lock owner (Viktor M1)', () => {
   })
 
   it('NEGATIVE CONTROL: agents and the owner keep the screen', () => {
-    for (const ok of ['kernel', 'marveen', 'patrik', 'samu']) {
-      expect(lockOwnerRefusal(ok), ok).toBeNull()
+    // The registry is injected: this suite runs without an agents/ directory.
+    const fleet = new Set(['kernel', 'marveen', 'patrik', 'samu'])
+    for (const ok of fleet) {
+      expect(lockOwnerRefusal(ok, (id) => fleet.has(id)), ok).toBeNull()
     }
   })
 

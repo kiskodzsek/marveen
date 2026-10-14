@@ -3,7 +3,7 @@
 import { MAIN_AGENT_ID, OWNER_NAME } from '../../config.js'
 import { createAgentMessage } from '../../db.js'
 import { logger } from '../../logger.js'
-import { listAgentNames } from '../agent-config.js'
+import { listAgentNames, listAllAgentNames } from '../agent-config.js'
 import {
   readDesktopLock, writeDesktopLock, clearDesktopLock, lockExpiresAt,
   DEFAULT_ESTIMATE_MS, type DesktopLock,
@@ -124,7 +124,10 @@ export type LockBody = {
  * next channel id added there must be covered without anyone remembering this
  * file. Returns the refusal reason, or null when the owner is acceptable.
  */
-export function lockOwnerRefusal(owner: string): string | null {
+export function lockOwnerRefusal(
+  owner: string,
+  isRegisteredAgent: (id: string) => boolean = isRegisteredLockOwner,
+): string | null {
   // RESERVEDSENDER1013 (Viktor M1): the same reasoning one level up. `system`
   // is the sender agents authenticate supervisory directives by; a lock owned
   // by it would broadcast a from=system row with the caller's note to the fleet.
@@ -137,10 +140,28 @@ export function lockOwnerRefusal(owner: string): string | null {
   // Viktor L1: the owner becomes from_agent, so it is held to the router's id
   // alphabet -- a look-alike the check above does not know is refused here.
   // The human owner's exact configured name may carry accents and is allowed.
-  if (!isPlainSenderId(owner) && owner.trim() !== OWNER_NAME.trim()) {
+  if (owner.trim() === OWNER_NAME.trim()) return null
+  if (!isPlainSenderId(owner)) {
     return `owner '${owner.trim()}' must be a plain id ([A-Za-z0-9_-]). Use your own agent id.`
   }
+  // Viktor INFO (3354): a plain id is not yet a sender. /api/messages accepts a
+  // from only if it names a registered agent; without the same rule here, any
+  // token holder could broadcast to the whole fleet as an agent that does not
+  // exist, and the holder of that name could never be asked about the lock.
+  if (!isRegisteredAgent(owner.trim())) {
+    return `owner '${owner.trim()}' is not a registered fleet agent. Use your own agent id.`
+  }
   return null
+}
+
+/** The main agent, or an agents/<id>/ directory under its exact on-disk name.
+ *  Deliberately not isKnownAgent: that stats agents/<name>, and on a
+ *  case-insensitive filesystem (macOS default) 'Kernel' finds agents/kernel --
+ *  the lock would then broadcast as 'Kernel' and broadcastTargets would not
+ *  drop the real 'kernel' from its own announcement. Hidden technical workers
+ *  count, as they do for isKnownAgent. */
+export function isRegisteredLockOwner(id: string): boolean {
+  return id === MAIN_AGENT_ID || listAllAgentNames().includes(id)
 }
 
 export function parseLockBody(data: Record<string, unknown>): LockBody {
