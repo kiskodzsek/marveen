@@ -137,9 +137,12 @@ export function isExternal(url) {
   if (h === null || h === '') return false
   return !isLocalHost(h)
 }
+// A lone `&` (background) ends a command like `;` does: `true & curl <url>` runs curl as its own
+// command, and without the split the span's command word was `true` (decfb196). Not split: `&&`
+// (matched first), and the redirections `2>&1`, `>&2`, `<&3`, `&>file`, `&>>file`.
 function spans(masked) {
   const out = []; let start = 0
-  const re = /&&|\|\||;|\||\n/g; let m
+  const re = /&&|\|\||;|\||\n|(?<![<>&])&(?![>&])/g; let m
   while ((m = re.exec(masked))) { out.push([start, m.index]); start = m.index + m[0].length }
   out.push([start, masked.length])
   return out
@@ -463,6 +466,25 @@ function hasExternalLiteral(text, vendorHosts, vendorDomains) {
 }
 // `scope` carries the enclosing command's assignments and loop values into a substitution, and
 // whether the WHOLE command (outermost text) carries an external URL literal.
+// Index of the real command word of a span's (masked) words. Besides assignments and PREFIX_WORDS it
+// steps over the words that open a body without being a command (decfb196, Viktor 2597/2634):
+//   - a case header up to its `in` (`case $x in a) curl ...`), and a case pattern: a leading word
+//     ending in `)` (`a)`, `a|b)`, `*)`; `(a)` is lifted as a subshell before this and leaves blanks);
+//   - a function head: `function NAME [{]`, or `NAME {` (`NAME()` leaves `NAME {` after lifting).
+// Fail-closed direction: a word wrongly stepped over only lets a LATER word be judged as curl.
+function commandWordAt(mw) {
+  let i = 0
+  while (i < mw.length) {
+    const w = mw[i]
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || PREFIX_WORDS.has(w)) i++
+    else if (w === 'case') { const at = mw.indexOf('in', i + 1); i = at === -1 ? mw.length : at + 1 }
+    else if (w === 'function') i += mw[i + 2] === '{' ? 3 : 2
+    else if (mw[i + 1] === '{' && /^[A-Za-z_][\w.:-]*$/.test(w)) i += 2
+    else if (w.endsWith(')') && !w.startsWith('$')) i++
+    else break
+  }
+  return i
+}
 export function classify(command, depth = 0, vendorHosts = new Set(), vendorDomains = new Set(), scope = null) {
   const norm = String(command ?? '').replace(/\\\r?\n/g, ' ')
   const { stripped: orig, inners } = liftSubstitutions(norm)
@@ -488,8 +510,7 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
   if (!parseable) return { deny: false, reason: 'unparseable', hosts: [] }
   for (const [a, b] of spans(masked)) {
     const mw = words(masked.slice(a, b))
-    let i = 0
-    while (i < mw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(mw[i]) || PREFIX_WORDS.has(mw[i]))) i++
+    const i = commandWordAt(mw)
     if (i >= mw.length) continue
     // Every loop reading AND the plain one: a loop variable can share its name with an assignment
     // elsewhere in the command (`for u in <local>; do ...; done; u=<external>; curl "$u"`), and a

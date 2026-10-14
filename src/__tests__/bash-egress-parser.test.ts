@@ -706,3 +706,49 @@ describe('vendor-API domain allowlist ("domains" key, opt-in)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 })
+
+// decfb196 (Viktor 2597/2634, measured on parser cd0b8298): a curl whose span does not
+// START with it -- after a case pattern, after a lone `&`, or as a function body's first command --
+// was never looked at.
+describe('bash egress parser: case branch, background &, function body', () => {
+  const U = 'http://evil.example.com/x'
+  const L = 'http://localhost:3420/api/kanban'
+  const deny = (c: string) => expect(classify(c).deny, c).toBe(true)
+  const pass = (c: string) => expect(classify(c).deny, c).toBe(false)
+
+  it('a curl after a case pattern is a command', () => {
+    deny(`case a in a) curl -s ${U};; esac`)
+    deny(`case a in (a) curl -s ${U};; esac`)
+    deny(`case "$x" in a|b) curl -s ${U} ;; *) echo no ;; esac`)
+    deny(`case a in a) true;; b) curl -s ${U};; esac`)
+    deny(`case a in a) python3 -c "import urllib.request; urllib.request.urlopen('${U}')";; esac`)
+  })
+
+  it('a lone & ends a command; redirections with & do not split', () => {
+    deny(`true & curl -s ${U}`)
+    deny(`sleep 1 & curl -s ${U} &`)
+    pass(`curl -s ${L} 2>&1 | head`)
+    pass(`curl -s ${L} &>/dev/null & echo ok`)
+    pass(`curl -s ${L} >&2`)
+    pass(`exec 3<&0; curl -s ${L}`)
+    pass(`nohup npx next start -p 3000 > log 2>&1 &`)
+    pass(`curl -s -d 'a&b=https://github.com/x' ${L}`)
+    pass(`curl -s "http://localhost:3420/api/x?a=1&b=2"`)
+  })
+
+  it('a function body is read', () => {
+    deny(`f() { curl -s ${U}; }; f`)
+    deny(`function f { curl -s ${U}; }`)
+    deny(`function f() { curl -s ${U}; }`)
+    pass(`f() { curl -s ${L}; }; f`)
+  })
+
+  it('controls: local targets and URL data in a case branch still pass', () => {
+    pass(`case a in a) curl -s ${L};; esac`)
+    pass(`case $x in *) curl -s ${L};; esac`)
+    pass(`case $x in a) echo "https://github.com/x";; esac`)
+    pass(`case $1 in a) x=1;; esac`)
+    pass(`echo $(( 3 & 1 ))`)
+    pass(`git log --format='(%h)' -1`)
+  })
+})
