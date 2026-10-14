@@ -43,6 +43,7 @@ window._i18n.en = {
   'overview.quota.seven_day':       'Weekly',
   'overview.quota.fable':           'Fable (weekly)',
   'overview.quota.resets_in':       'resets in {d}',
+  'overview.quota.resets_at':       'Resets: {when}',
   'overview.quota.expired':         'window already reset',
   'overview.quota.measured':        'measured {age} ago',
   'overview.quota.stale':           'This reading is older than the freshness limit, so treat the numbers as out of date: the status line has not written a new one.',

@@ -87,6 +87,86 @@ describe('weekSegments', () => {
   })
 })
 
+// t() stub: the key, plus its params when there are any -- enough to see
+// which message and which values a row rendered.
+const tStub = (k: string, p?: Record<string, unknown>) =>
+  p && Object.keys(p).length ? `${k}(${Object.entries(p).map(([a, b]) => `${a}=${b}`).join(',')})` : k
+
+// quotaResetLabel with the REAL lang strings (hu.js / en.js loaded for their
+// window._i18n side effect, the lang-parity idiom) and the same {param}
+// substitution t() does, so the asserted text is what Patrik reads.
+const LANG: Record<string, Record<string, string>> = {}
+function loadLang(lang: 'hu' | 'en'): Record<string, string> {
+  if (!LANG[lang]) {
+    const window = { _i18n: {} as Record<string, Record<string, string>> }
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    new Function('window', readFileSync(join(__dirname, `../../web/lang/${lang}.js`), 'utf-8'))(window)
+    LANG[lang] = window._i18n[lang]
+  }
+  return LANG[lang]
+}
+function resetLabel(resetsAt: unknown, lang: 'hu' | 'en', timeZone?: string): string {
+  const dict = loadLang(lang)
+  const t = (k: string, p: Record<string, string> = {}) =>
+    (dict[k] ?? k).replace(/\{(\w+)\}/g, (_, n: string) => p[n] ?? `{${n}}`)
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const fn = new Function('t', `${extractFn('quotaResetLabel')}; return quotaResetLabel`)(t) as (
+    r: unknown, l: string, tz?: string) => string
+  return timeZone === undefined ? fn(resetsAt, lang) : fn(resetsAt, lang, timeZone)
+}
+
+describe('quotaResetLabel (kanban 32f9b92b: the reset moment, not the last segment start)', () => {
+  // Friday 2026-10-16 05:00 CEST = 03:00 UTC: the weekly reset of TG 2074.
+  const FRI_0500_CEST = Date.UTC(2026, 9, 16, 3, 0) / 1000
+
+  // day and time are joined by a no-break space (\u00a0) so a phone wraps
+  // after "Nullázódik:", not inside "péntek 05:00"
+  it('hu: "Nullázódik: péntek 05:00", en: "Resets: Friday 05:00"', () => {
+    expect(resetLabel(FRI_0500_CEST, 'hu')).toBe('Nullázódik: péntek\u00a005:00')
+    expect(resetLabel(FRI_0500_CEST, 'en')).toBe('Resets: Friday\u00a005:00')
+  })
+
+  it('names the reset day, which is the day AFTER the last segment label', () => {
+    const w = weekSegments(FRI_0500_CEST, FRI_0500_CEST - 86400 * 2, 'hu', TZ)!
+    expect(w.labels[6]).toBe('Csütörtök')
+    expect(resetLabel(FRI_0500_CEST, 'hu')).toBe('Nullázódik: péntek\u00a005:00')
+  })
+
+  it('defaults to Europe/Budapest whatever the process zone is', () => {
+    // the test process may run in any zone; the label must not follow it
+    expect(resetLabel(FRI_0500_CEST, 'hu', undefined)).toBe('Nullázódik: péntek\u00a005:00')
+    expect(resetLabel(FRI_0500_CEST, 'hu', 'UTC')).toBe('Nullázódik: péntek\u00a003:00')
+  })
+
+  it('DST end (2026-10-25 03:00 CEST -> 02:00 CET): the hour follows the switch', () => {
+    // Sunday 2026-10-25 04:00 UTC = 05:00 CET (a fixed +2h would say 06:00)
+    expect(resetLabel(Date.UTC(2026, 9, 25, 4, 0) / 1000, 'hu')).toBe('Nullázódik: vasárnap\u00a005:00')
+    // the week after, still CET: Friday 2026-10-30 04:00 UTC = 05:00 CET
+    expect(resetLabel(Date.UTC(2026, 9, 30, 4, 0) / 1000, 'hu')).toBe('Nullázódik: péntek\u00a005:00')
+    // the same instant one week earlier (03:00 UTC on 10-23) is 05:00 CEST
+    expect(resetLabel(Date.UTC(2026, 9, 23, 3, 0) / 1000, 'en')).toBe('Resets: Friday\u00a005:00')
+  })
+
+  it('DST start (2027-03-28 02:00 CET -> 03:00 CEST)', () => {
+    // Sunday 2027-03-28 03:00 UTC = 05:00 CEST; 00:30 UTC = 01:30 CET
+    expect(resetLabel(Date.UTC(2027, 2, 28, 3, 0) / 1000, 'hu')).toBe('Nullázódik: vasárnap\u00a005:00')
+    expect(resetLabel(Date.UTC(2027, 2, 28, 0, 30) / 1000, 'hu')).toBe('Nullázódik: vasárnap\u00a001:30')
+  })
+
+  it('local midnight is "00:00" on the new day, never "24:00" on the old one', () => {
+    // Saturday 2026-10-17 00:00 CEST = Friday 22:00 UTC
+    expect(resetLabel(Date.UTC(2026, 9, 16, 22, 0) / 1000, 'hu')).toBe('Nullázódik: szombat\u00a000:00')
+    expect(resetLabel(Date.UTC(2026, 9, 16, 22, 0) / 1000, 'en')).toBe('Resets: Saturday\u00a000:00')
+  })
+
+  it('missing or unusable resetsAt -> empty string (show nothing)', () => {
+    for (const bad of [null, undefined, NaN, Infinity, -Infinity, '1791183600', {}]) {
+      expect(resetLabel(bad, 'hu')).toBe('')
+      expect(resetLabel(bad, 'en')).toBe('')
+    }
+  })
+})
+
 // The rendered row, with the DOM and helpers stubbed: the week pieces appear on
 // the weekly row only, and a missing resetsAt leaves the old bar untouched.
 function render(quota: Record<string, unknown>, lang = 'hu'): string[] {
@@ -99,8 +179,8 @@ function render(quota: Record<string, unknown>, lang = 'hu'): string[] {
   const document = { getElementById: (id: string) => els[id], createElement: () => ({ className: '', innerHTML: '' }) }
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
   const fn = new Function('document', 'window', 't', 'escapeHtml', 'formatDurationShort', 'formatRelative',
-    `${extractFn('quotaLevelClass')}; ${extractFn('quotaMeasuredText')}; ${extractFn('weekSegments')}; ${extractFn('quotaBarRow')}; ${extractFn('renderQuotaStrip')}; return renderQuotaStrip`,
-  )(document, { _lang: lang }, (k: string) => k, (s: string) => String(s), () => '1n', () => 'most')
+    `${extractFn('quotaLevelClass')}; ${extractFn('quotaMeasuredText')}; ${extractFn('weekSegments')}; ${extractFn('quotaResetLabel')}; ${extractFn('quotaBarRow')}; ${extractFn('renderQuotaStrip')}; return renderQuotaStrip`,
+  )(document, { _lang: lang }, tStub, (s: string) => String(s), () => '1n', () => 'most')
   fn(quota, null)
   return els.quotaBars.children
 }
@@ -151,6 +231,9 @@ describe('renderQuotaStrip weekly row', () => {
     expect(week).toContain('<span class="day-full">Szerda</span><span class="day-short">Sze</span>')
     expect(five).not.toContain('quota-bar-days')
     expect(five).not.toContain('quota-bar-now')
+    // the absolute reset moment sits under the day row, on the weekly row only
+    expect(week).toMatch(/<div class="quota-bar-resets-at">overview\.quota\.resets_at\(when=[a-zéáíóöőúüű]+\u00a0\d\d:\d\d\)<\/div>/)
+    expect(five).not.toContain('quota-bar-resets-at')
   })
 
   // Szotasz's review of #1703: at 390 px the hu short forms (~140 px) ran
@@ -185,6 +268,8 @@ describe('renderQuotaStrip weekly row', () => {
       expect(week).not.toContain('quota-bar-days')
       expect(week).not.toContain('quota-bar-now')
       expect(week).not.toContain('track week')
+      expect(week).not.toContain('quota-bar-resets-at')
+      expect(week).not.toContain('resets_at')
     }
   })
 
@@ -192,5 +277,6 @@ describe('renderQuotaStrip weekly row', () => {
     const [week] = render({ status: 'ok', ageSec: 5, sevenDay: { usedPercentage: 90, resetsAt: reset, expired: true } })
     expect(week).not.toContain('quota-bar-days')
     expect(week).not.toContain('quota-bar-now')
+    expect(week).not.toContain('quota-bar-resets-at')
   })
 })

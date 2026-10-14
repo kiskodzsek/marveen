@@ -676,6 +676,15 @@ main {
 .quota-bar.muted .quota-bar-value { color: var(--text-muted); }
 .quota-bar-value { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
 .quota-bar-reset { color: var(--text-muted); }
+/* "Nullázódik: péntek 05:00" under the day row, right-aligned to the end of
+   the bar, where the window actually ends (kanban 32f9b92b). It stays on the
+   narrowest widths, where the hu day row hides. */
+.quota-bar-resets-at {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
+}
 .quota-strip-note { margin-top: 8px; font-size: 11px; color: var(--text-muted); }
 .quota-strip-note.warn { color: var(--danger); }
 .quota-seats { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
