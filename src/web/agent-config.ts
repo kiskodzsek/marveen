@@ -773,6 +773,21 @@ export function readAgentToolDeny(name: string): string[] {
   }
 }
 
+// Opt-in (agent-config.json "excludeRootClaudeMd": true, FLEETRULES1013): the agent
+// stops loading the root CLAUDE.md -- the main agent's own file, which a sub-agent
+// otherwise picks up from its cwd's parent on every start -- and carries the
+// fleet-wide rules as a generated section instead (ensureFleetRulesSection).
+// Strictly `true`: a string or a number is not a decision to drop 47 KB of rules.
+export function readAgentExcludeRootClaudeMd(name: string): boolean {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    const config = JSON.parse(readFileOr(configPath, '{}'))
+    return config?.excludeRootClaudeMd === true
+  } catch {
+    return false
+  }
+}
+
 export function writeAgentCapabilities(name: string, capabilities: string[]): void {
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}

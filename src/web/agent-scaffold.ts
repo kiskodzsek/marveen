@@ -1,7 +1,8 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync, rmSync, watchFile, unwatchFile } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync, rmSync, watchFile, unwatchFile, realpathSync } from 'node:fs'
 import { readRemovedDefaultTasks } from './scheduled-tasks-io.js'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { createHash } from 'node:crypto'
 import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, WEB_PORT, OWNER_DRIVE_FOLDER, APP_TZ, DASHBOARD_PUBLIC_URL, AGENT_API_ORIGIN, STORE_DIR } from '../config.js'
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
@@ -9,7 +10,7 @@ import { atomicWriteFileSync } from './atomic-write.js'
 import { findDuplicateJsonKeys } from './json-dup-keys.js'
 import { logger } from '../logger.js'
 import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInherited } from './mcp-inheritance.js'
-import { agentDir, agentConfigRoot, listAgentNames, readAgentCapabilities, readAgentToolDeny } from './agent-config.js'
+import { agentDir, agentConfigRoot, listAgentNames, readAgentCapabilities, readAgentToolDeny, readAgentExcludeRootClaudeMd } from './agent-config.js'
 import { loadProfileTemplate, profileWantsDestructiveGate, resolveProfilePlaceholders,
   type ProfileTemplate } from './profiles.js'
 import { resolveAgentSecurityProfile } from './agent-team.js'
@@ -3511,4 +3512,192 @@ Output ONLY the markdown content, no code fences.`
     cleaned = cleaned.replace(/^```\w*\n?/, '').replace(/\n?```$/, '')
   }
   return cleaned
+}
+
+// ---- Fleet rules + root CLAUDE.md exclusion (FLEETRULES1013) ----
+//
+// A sub-agent's cwd is agents/<name>/, so Claude Code also loads the ROOT
+// CLAUDE.md on every start: the main agent's own file (47 KB measured
+// 2026-10-13), most of it written for the main agent, and 20-34 KB of it
+// repeated paragraph for paragraph in the sub-agent's own file. Measured per
+// agent: 98-118 KB of CLAUDE.md per start, in a fleet that restarted 69 times
+// that day.
+//
+// For an agent that opts in (agent-config.json "excludeRootClaudeMd": true):
+//   1. the rules of the root that a sub-agent needs and does not carry itself
+//      are rendered from the install-local rules file into its CLAUDE.md as a
+//      generated block (one source, edited once -- not hand-copied ten times);
+//   2. ONLY THEN is the root added to `claudeMdExcludes` in its project
+//      .claude/settings.json (Claude Code: picomatch on the absolute path, for
+//      User/Project/Local memory files).
+// The order is the safety property: no rendered block, no exclusion. A missing
+// or empty rules file, a stale one, an opted-out agent, or a root path that
+// would read as a glob all leave (or put back) the root load -- the failure mode
+// is "too many rules loaded", never "rules silently gone".
+//
+// WHERE THE RULES LIVE (Viktor F1, 2026-10-13): store/fleet-rules.md, which is
+// gitignored like the root CLAUDE.md it is copied from. The rules name the
+// owner, his companies, which agent holds which live access and the incident
+// authorizations; a versioned template would ship that map with every push.
+// The repo carries only the mechanism and a content-free example
+// (templates/fleet-rules.example.md).
+//
+// DRIFT GATE (Viktor F2): the root CLAUDE.md gains rules several times a day,
+// and an excluded agent would never see a new one. So the rules file records
+// the sha256 of the root it was synced from (`synced-from-root-sha256=<hex>`
+// in its leading comment; scripts/fleet-rules-stamp.mjs writes it). If the root
+// has changed since, or the stamp is missing, nothing is excluded until someone
+// re-syncs the rules and re-stamps -- the root keeps loading meanwhile.
+const FLEETRULES_BEGIN = '<!-- BEGIN GENERATED: fleet-rules (auto-generated from store/fleet-rules.md, do not edit by hand) -->'
+const FLEETRULES_END = '<!-- END GENERATED: fleet-rules -->'
+// Any BEGIN marker of this block, whatever source it names: the pilot block was
+// written with the earlier "templates/fleet-rules.md" wording, and a marker the
+// regex no longer knew would leave it in place next to a second one.
+const FLEETRULES_BLOCK_RE = new RegExp(
+  `\\n*<!-- BEGIN GENERATED: fleet-rules[^\\n]*?-->[\\s\\S]*?${FLEETRULES_END.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n?`,
+)
+const FLEETRULES_SOURCE = join(STORE_DIR, 'fleet-rules.md')
+const FLEETRULES_STAMP_RE = /synced-from-root-sha256=([0-9a-f]{64})/
+const GLOB_META_RE = /[*?[\]{}()!]/
+
+export function buildFleetRulesBody(name: string, sourcePath = FLEETRULES_SOURCE): string | null {
+  let tpl: string
+  try { tpl = readFileSync(sourcePath, 'utf-8') } catch { return null }
+  // The leading HTML comment is maintainer documentation (and the stamp), not a rule.
+  const body = tpl.replace(/^\s*<!--[\s\S]*?-->\s*/, '').trim()
+  if (!body) return null
+  // A rules file copied with the root's own generated blocks would put a second
+  // BEGIN of the same marker into the agent's CLAUDE.md, and every other ensure*
+  // edits only the first one (Viktor I3). Render nothing: no block, no exclusion.
+  if (/<!--\s*(BEGIN|END) GENERATED/.test(body)) return null
+  return body
+    .replaceAll('{{AGENT_ID}}', name)
+    .replaceAll('{{PROJECT_ROOT}}', PROJECT_ROOT)
+    .replaceAll('{{DASHBOARD_ORIGIN}}', dashboardOrigin)
+}
+
+/** sha256 of the root CLAUDE.md, or null when it cannot be read. */
+export function rootClaudeMdSha256(root = PROJECT_ROOT): string | null {
+  try { return createHash('sha256').update(readFileSync(join(root, 'CLAUDE.md'))).digest('hex') } catch { return null }
+}
+
+/** The root sha256 the rules file was synced from, or null when it carries no stamp. */
+export function fleetRulesStamp(sourcePath = FLEETRULES_SOURCE): string | null {
+  try {
+    const lead = readFileSync(sourcePath, 'utf-8').match(/^\s*<!--[\s\S]*?-->/)
+    return lead?.[0].match(FLEETRULES_STAMP_RE)?.[1] ?? null
+  } catch {
+    return null
+  }
+}
+
+// Every spelling of the root CLAUDE.md path Claude Code may match against: the
+// configured one and, if the root runs through a symlink, the resolved one.
+export function rootClaudeMdExcludePaths(root = PROJECT_ROOT): string[] {
+  const paths = [join(root, 'CLAUDE.md')]
+  try {
+    const real = join(realpathSync(root), 'CLAUDE.md')
+    if (!paths.includes(real)) paths.push(real)
+  } catch { /* root unresolvable: the configured spelling is all we have */ }
+  return paths
+}
+
+export function ensureFleetRulesSection(
+  name: string,
+  sourcePath = FLEETRULES_SOURCE,
+  root = PROJECT_ROOT,
+): void {
+  if (name === MAIN_AGENT_ID) return  // the main agent IS the root CLAUDE.md
+  const claudeMdPath = join(agentDir(name), 'CLAUDE.md')
+  if (!existsSync(claudeMdPath)) return
+  const excludePaths = rootClaudeMdExcludePaths(root)
+
+  let body: string | null = null
+  if (readAgentExcludeRootClaudeMd(name)) {
+    if (excludePaths.some((p) => GLOB_META_RE.test(p))) {
+      logger.warn({ name, excludePaths }, 'fleet-rules: root path contains glob characters, not excluding the root CLAUDE.md')
+    } else {
+      const stamp = fleetRulesStamp(sourcePath)
+      const rootSha = rootClaudeMdSha256(root)
+      if (stamp === null || rootSha === null || stamp !== rootSha) {
+        logger.warn(
+          { name, sourcePath, stamp, rootSha },
+          'fleet-rules: root CLAUDE.md changed since the rules were synced (or no stamp), keeping the root CLAUDE.md load -- re-sync store/fleet-rules.md and run scripts/fleet-rules-stamp.mjs',
+        )
+      } else {
+        body = buildFleetRulesBody(name, sourcePath)
+        if (body === null) logger.warn({ name, sourcePath }, 'fleet-rules: rules file missing or empty, keeping the root CLAUDE.md load')
+      }
+    }
+  }
+
+  // The order keeps "no block, no exclusion" true in every intermediate state:
+  // putting the exclusion in, the block goes first; taking it out (Viktor L1),
+  // the exclusion goes first. A failed first step skips the second.
+  if (body !== null) {
+    if (!writeFleetRulesBlock(name, claudeMdPath, body)) return
+    writeRootClaudeMdExcludes(name, excludePaths, true)
+  } else {
+    if (!writeRootClaudeMdExcludes(name, excludePaths, false)) return
+    writeFleetRulesBlock(name, claudeMdPath, null)
+  }
+}
+
+// The generated block, written (body) or removed (null). False on failure.
+function writeFleetRulesBlock(name: string, claudeMdPath: string, body: string | null): boolean {
+  let existing: string
+  try { existing = readFileSync(claudeMdPath, 'utf-8') } catch { return false }
+  let updated: string
+  if (body !== null) {
+    const block = `${FLEETRULES_BEGIN}\n${body}\n${FLEETRULES_END}`
+    updated = FLEETRULES_BLOCK_RE.test(existing)
+      ? existing.replace(FLEETRULES_BLOCK_RE, () => `\n\n${block}\n`)  // function: no `$` patterns from the rules text
+      : existing.trimEnd() + '\n\n' + block + '\n'
+  } else {
+    // Not excluding: the root is loaded, so the block would only duplicate it.
+    updated = existing.replace(FLEETRULES_BLOCK_RE, '\n')
+  }
+  if (updated === existing) return true
+  try {
+    atomicWriteFileSync(claudeMdPath, updated)
+    return true
+  } catch (err) {
+    logger.warn({ err, name }, 'fleet-rules: CLAUDE.md write failed')
+    return false
+  }
+}
+
+// claudeMdExcludes in the project settings, with our entries in (exclude) or
+// out. Only OUR entries are managed; anything else an operator put there is
+// kept. False when the settings could not be read or written.
+function writeRootClaudeMdExcludes(name: string, excludePaths: string[], exclude: boolean): boolean {
+  const settingsPath = join(agentDir(name), '.claude', 'settings.json')
+  let settings: Record<string, unknown> = {}
+  if (existsSync(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8')) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) settings = parsed as Record<string, unknown>
+      else return false
+    } catch {
+      return false  // unparseable: never rewrite it from scratch here
+    }
+  } else if (!exclude) {
+    return true  // no settings, nothing excluded
+  }
+  const current = Array.isArray(settings.claudeMdExcludes)
+    ? (settings.claudeMdExcludes as unknown[]).filter((x): x is string => typeof x === 'string')
+    : []
+  const others = current.filter((p) => !excludePaths.includes(p))
+  const next = exclude ? [...others, ...excludePaths] : others
+  if (JSON.stringify(next) === JSON.stringify(current) && (next.length > 0 || !('claudeMdExcludes' in settings))) return true
+  if (next.length) settings.claudeMdExcludes = next
+  else delete settings.claudeMdExcludes
+  try {
+    mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
+    atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
+    return true
+  } catch (err) {
+    logger.warn({ err, name }, 'fleet-rules: settings.json write failed')
+    return false
+  }
 }
