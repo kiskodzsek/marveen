@@ -1370,6 +1370,19 @@ export function initDatabase(dbPathOverride?: string): void {
   // the Message-Id the sender generated up front, so the row says which letter
   // used it. Rows consumed by the gate leave both NULL.
   try { db.exec('ALTER TABLE approvals ADD COLUMN consumed_by TEXT') } catch { /* already exists */ }
+  // APPROVALBOT1013 (Patrik, Telegram 1623/1653; Viktor 2302): the dedicated
+  // approval bot's message is bound to the row by columns NO API route writes.
+  // bot_message_id / bot_chat_id: the message the SERVER sent (a callback from
+  // any other message is refused); bot_text_hash: sha256 of the text Telegram
+  // stored, so an editMessageText by a token holder is caught; bot_nonce_hash:
+  // sha256 of the one-time button secret, cleared on first use and on any
+  // resolution; resolution_channel: 'approval_bot' only when the server itself
+  // resolved from a verified button press.
+  try { db.exec('ALTER TABLE approvals ADD COLUMN bot_message_id INTEGER') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE approvals ADD COLUMN bot_chat_id TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE approvals ADD COLUMN bot_text_hash TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE approvals ADD COLUMN bot_nonce_hash TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE approvals ADD COLUMN resolution_channel TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE approvals ADD COLUMN consumed_ref TEXT') } catch { /* already exists */ }
   // Every consume call leaves a row here, the refused ones too: a second send
   // attempt on a used approval is exactly the event worth seeing afterwards.
@@ -5585,6 +5598,12 @@ export interface Approval {
   consumed_ref?: string | null
   content_hash: string | null
   consumed_at: number | null
+  // APPROVALBOT1013: optional in the type for the same reason as consumed_by.
+  bot_message_id?: number | null
+  bot_chat_id?: string | null
+  bot_text_hash?: string | null
+  bot_nonce_hash?: string | null
+  resolution_channel?: string | null
 }
 
 export function createApproval(params: {
@@ -5638,9 +5657,31 @@ export function resolveApproval(id: string, status: 'approved' | 'rejected' | 't
   return db.prepare(`
     UPDATE approvals
     SET status = ?, resolved_at = ?, resolved_by = ?,
-        telegram_message_id = COALESCE(?, telegram_message_id)
+        telegram_message_id = COALESCE(?, telegram_message_id),
+        bot_nonce_hash = NULL
     WHERE id = ? AND status = 'pending'
   `).run(status, now, resolvedBy, telegramMessageId ?? null, id).changes > 0
+}
+
+// APPROVALBOT1013: stamp the approval bot's message onto the row. Server-only.
+export function setApprovalBotMessage(id: string, messageId: number, chatId: string, textHash: string, nonceHash: string): boolean {
+  return db.prepare(`
+    UPDATE approvals SET bot_message_id = ?, bot_chat_id = ?, bot_text_hash = ?, bot_nonce_hash = ?
+    WHERE id = ? AND status = 'pending'
+  `).run(messageId, chatId, textHash, nonceHash, id).changes > 0
+}
+
+// APPROVALBOT1013: the ONLY writer of resolution_channel='approval_bot'. Atomic
+// one-shot: it resolves only a still-pending, not-expired row whose nonce hash
+// is the one the caller verified, and clears the nonce in the same statement.
+export function resolveApprovalByBot(id: string, status: 'approved' | 'rejected', nonceHash: string, now: number = Math.floor(Date.now() / 1000)): boolean {
+  return db.prepare(`
+    UPDATE approvals
+    SET status = ?, resolved_at = ?, resolved_by = 'telegram_button', resolution_channel = 'approval_bot',
+        bot_nonce_hash = NULL
+    WHERE id = ? AND status = 'pending' AND bot_nonce_hash = ?
+      AND (timeout_at IS NULL OR timeout_at > ?)
+  `).run(status, now, id, nonceHash, now).changes > 0
 }
 
 // The CREATE path stamps the owner-notification message id onto the row
@@ -5687,7 +5728,7 @@ export function stampMessageTrace(
 export function expireTimedOutApprovals(): number {
   const now = Math.floor(Date.now() / 1000)
   return db.prepare(`
-    UPDATE approvals SET status = 'timeout', resolved_at = ?
+    UPDATE approvals SET status = 'timeout', resolved_at = ?, bot_nonce_hash = NULL
     WHERE status = 'pending' AND timeout_at IS NOT NULL AND timeout_at <= ?
   `).run(now, now).changes
 }

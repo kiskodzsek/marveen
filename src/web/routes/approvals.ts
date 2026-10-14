@@ -13,6 +13,7 @@ import { readBody, json } from '../http-helpers.js'
 import { resolveOwnerChatId } from '../../owner-chat.js'
 import { sendTelegramMessage } from '../telegram.js'
 import { redact } from '../tool-input-preview.js'
+import { readApprovalBotConfig, sendApprovalWithButtons, startApprovalBotPoller } from '../approval-bot.js'
 import type { RouteContext } from './types.js'
 
 const AUTONOMY_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
@@ -153,14 +154,16 @@ export function buildMainAgentApprovalMessage(approval: Approval, ownerUnreached
 
 // Owner-facing Telegram text. Pure + exported for tests. Plain text (no
 // markdown escaping concerns), proper accents: this is outgoing copy.
-export function buildOwnerApprovalText(approval: Approval): string {
+export function buildOwnerApprovalText(approval: Approval, withButtons = false): string {
   const expires = approval.timeout_at
     ? new Date(approval.timeout_at * 1000).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
     : 'nincs'
   return [
     `[JÓVÁHAGYÁS KELL] ${headerField(approval.agent_id)} | ${headerField(approval.category)}`,
     `Lejárat: ${expires}`,
-    `Döntés: Dashboard -> Jóváhagyások (id: ${approval.id})`,
+    withButtons
+      ? `Döntés: a lenti gombokkal, vagy Dashboard -> Jóváhagyások (id: ${approval.id})`
+      : `Döntés: Dashboard -> Jóváhagyások (id: ${approval.id})`,
     'Leírás:',
     quoteOwnerDescription(approval.action_description),
   ].join('\n')
@@ -190,6 +193,18 @@ function fallbackInBand(approval: Approval, reason: string): void {
 // undelivered approval is exactly the closed loop this fixes.
 function notifyOwner(approval: Approval): void {
   void (async () => {
+    // APPROVALBOT1013: with the dedicated approval bot configured, the request
+    // goes out THERE, with buttons; the main bot is the fallback if that fails.
+    const botCfg = readApprovalBotConfig()
+    if (botCfg) {
+      try {
+        const messageId = await sendApprovalWithButtons(approval, buildOwnerApprovalText(approval, true), botCfg)
+        logger.info({ approvalId: approval.id, messageId }, 'approval owner notification sent by the approval bot')
+        return
+      } catch (err) {
+        logger.warn({ approvalId: approval.id, status: (err as { status?: number })?.status }, 'approval bot send FAILED -- falling back to the main bot')
+      }
+    }
     if (!TELEGRAM_BOT_TOKEN) {
       logger.warn({ approvalId: approval.id }, 'approval owner notification suppressed: no TELEGRAM_BOT_TOKEN')
       fallbackInBand(approval, 'no-token')
@@ -238,7 +253,11 @@ function notifyMainAgent(approval: Approval): void {
 // expected fields. The warning marks what the server can tell is off. The
 // sweeper's timeout path is not announced. Step 2 (TOTP, an approval channel
 // isolated from agents) comes later.
-export const OWNER_RESOLUTION_SOURCES: readonly string[] = ['telegram_text', 'telegram_button']
+// APPROVALBOT1013 (Viktor 2302/2): 'telegram_button' is no longer a value a
+// PATCH may claim -- only the server's approval bot writes it, together with
+// resolution_channel='approval_bot', which no API route can set.
+export const OWNER_RESOLUTION_SOURCES: readonly string[] = ['telegram_text']
+export const SERVER_ONLY_RESOLVED_BY = 'telegram_button'
 
 // Agent-written fields (resolved_by, category, agent_id, description) go into
 // the owner's message on one line: control characters and line breaks are
@@ -278,7 +297,9 @@ export function buildResolutionAlertText(approval: Approval, resolverMessageId: 
     `Jóváhagyás lezárva: ${approval.status}`,
     oneLine(approval.category, 60),
     `kérte: ${oneLine(approval.agent_id, 60)}`,
-    `lezárta: ${oneLine(approval.resolved_by ?? '?', 60)}`,
+    approval.resolution_channel === 'approval_bot'
+      ? 'lezárta: Telegram-gomb (approval_bot, a szerver ellenőrizte)'
+      : `lezárta: ${oneLine(approval.resolved_by ?? '?', 60)}`,
     `tg-msg: ${resolverMessageId ?? 'HIÁNYZIK'}`,
     description,
   ].join(' | ')
@@ -312,6 +333,37 @@ function notifyOwnerOfResolution(approval: Approval, resolverMessageId: number |
       resolutionAlertFailed(approval.id, 'send-failed', err)
     }
   })()
+}
+
+// The main bot to the owner: the approval bot's anomaly alerts go here, the
+// channel the owner already reads for 9a2925a7 resolution alerts.
+function alertOwnerMainBot(text: string): void {
+  void (async () => {
+    const ownerChat = resolveOwnerChatId()
+    if (!TELEGRAM_BOT_TOKEN || !ownerChat) return resolutionAlertFailed('approval-bot', 'no-token-or-chat')
+    try {
+      await sendTelegramMessage(TELEGRAM_BOT_TOKEN, ownerChat, text)
+    } catch (err) {
+      resolutionAlertFailed('approval-bot', 'send-failed', err)
+    }
+  })()
+}
+
+// APPROVALBOT1013: a verified button resolution is announced like any other
+// (9a2925a7), marked with its server-only channel and without the PATCH-path
+// warnings, which do not apply.
+export function notifyOwnerOfBotResolution(approval: Approval): void {
+  alertOwnerMainBot(buildResolutionAlertText(approval, approval.bot_message_id ?? null, []))
+}
+
+// Viktor 2384 I2: the bot hash columns are server-internal; the API does not echo them.
+export function publicApproval<T extends Record<string, unknown>>(a: T): Omit<T, 'bot_text_hash' | 'bot_nonce_hash'> {
+  const { bot_text_hash: _t, bot_nonce_hash: _n, ...rest } = a as T & { bot_text_hash?: unknown; bot_nonce_hash?: unknown }
+  return rest
+}
+
+export function startApprovalBot(): { stop: () => void } {
+  return startApprovalBotPoller({ alert: alertOwnerMainBot, onResolved: notifyOwnerOfBotResolution })
 }
 
 export function startApprovalTimeoutSweeper(): NodeJS.Timeout {
@@ -404,7 +456,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     const limit = limitRaw ? Math.min(parseInt(limitRaw, 10) || 100, 500) : 100
 
     const items = listApprovals({ agent_id, category, status, limit })
-    json(res, items)
+    json(res, items.map((a) => publicApproval(a as unknown as Record<string, unknown>)))
     return true
   }
 
@@ -470,7 +522,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'Not found' }, 404)
       return true
     }
-    json(res, approval)
+    json(res, publicApproval(approval as unknown as Record<string, unknown>))
     return true
   }
 
@@ -491,6 +543,10 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     }
     if (typeof resolved_by !== 'string' || !resolved_by.trim()) {
       json(res, { error: 'resolved_by is required' }, 400)
+      return true
+    }
+    if (resolved_by.trim() === SERVER_ONLY_RESOLVED_BY) {
+      json(res, { error: 'resolved_by "telegram_button" is set only by the server\'s approval bot, never through this route' }, 400)
       return true
     }
     const msgId = typeof telegram_message_id === 'number' ? telegram_message_id : null
@@ -523,7 +579,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     if (approval && (status === 'approved' || status === 'rejected')) {
       notifyOwnerOfResolution(approval, msgId, target?.telegram_message_id ?? null)
     }
-    json(res, approval)
+    json(res, approval ? publicApproval(approval as unknown as Record<string, unknown>) : approval)
     return true
   }
 

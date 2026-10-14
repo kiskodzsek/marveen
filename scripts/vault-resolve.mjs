@@ -19,6 +19,7 @@
 // Resolved lines are still printed even when another line fails, so a
 // multi-secret caller sees every problem in one run.
 import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -27,6 +28,19 @@ const projectRoot = join(__dirname, '..')
 
 // Dynamic import from compiled dist
 const { getSecret } = await import(join(projectRoot, 'dist', 'web', 'vault.js'))
+
+// APPROVALBOT1013 (Viktor 2384 M2): the approval bot's token is read in-process
+// by the dashboard only; no resolver hands it out (same rule as the vault route).
+function approvalBotVaultId() {
+  try {
+    const m = /^APPROVAL_BOT_VAULT_ID=(.*)$/m.exec(readFileSync(join(projectRoot, '.env'), 'utf8'))
+    const v = (m?.[1] ?? '').trim().replace(/^["']|["']$/g, '')
+    return /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(v) ? v : 'telegram-approval-bot'
+  } catch {
+    return 'telegram-approval-bot'
+  }
+}
+const APPROVAL_BOT_VAULT_ID = approvalBotVaultId()
 
 const input = await new Promise(resolve => {
   let data = ''
@@ -52,6 +66,11 @@ for (const line of input.trim().split('\n')) {
   const secretId = line.slice(eq + 1)
   // VAULTSZELES826: SSH private keys are consumed only in-process by the SSH feature;
   // this resolver never hands one out (same rule as isSshPrivateKeyId in vault-acl.ts).
+  if (secretId.trim() === APPROVAL_BOT_VAULT_ID) {
+    process.stderr.write(`vault-resolve: refused, the approval bot token is not resolvable here: ${secretId}\n`)
+    refused++
+    continue
+  }
   if (secretId.trim().startsWith('ssh-key-')) {
     process.stderr.write(`vault-resolve: refused, SSH private keys are not resolvable here: ${secretId}\n`)
     refused++
