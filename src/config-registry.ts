@@ -239,14 +239,26 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
   {
     key: 'KANBAN_AUTODONE_GITHUB_SECRET_ID',
     type: 'string',
-    default: 'github-fleet-token',
-    description: 'Annak a MÁR MEGLÉVŐ Vault-titoknak az azonosítója, amely a PR-állapot lekérdezéséhez használt GitHub-tokent tartalmazza (csak olvasás kell, új credential nem). Alapértelmezés: github-fleet-token, ugyanaz, amit a scripts/github-pr-monitor.sh is használ. Ha ez a telepítésen nincs, a fő ágens GitHub MCP-tokenje is megadható (github-github_personal_access_token). Az azonosítónak "github"-bal kell kezdődnie, hogy a beállítás ne irányíthasson más titkot a GitHub felé.',
+    default: '',
+    description: 'Annak a Vault-titoknak az azonosítója, amely a PR-állapot lekérdezéséhez használt GitHub-tokent tartalmazza. Ehhez SAJÁT, erre a célra létrehozott fine-grained PAT kell, csak a beállított repókra, Pull requests: Read + Metadata: Read joggal, saját Vault-azonosítóval (pl. github-kanban-autodone-ro). Másik ágens vagy MCP tokenjét ide NE add meg (flotta AUTH-szabály 2.). Üresen a PR-autodone nem fut. Az azonosítónak "github"-bal kell kezdődnie, hogy a beállítás ne irányíthasson más titkot a GitHub felé.',
     module: 'kanban',
     secret: false,
     requiresRestart: false,
     validate: (v) => v === '' || /^github[A-Za-z0-9._-]{0,100}$/.test(v)
       ? null
       : 'a Vault-azonosítónak "github"-bal kell kezdődnie (betű, szám, . _ -)',
+  },
+  {
+    key: 'KANBAN_AUTODONE_EXCLUDE_CARDS',
+    type: 'string',
+    default: '30efb0ab',
+    description: 'Vesszővel elválasztott kártya-azonosítók, amelyeket a PR-autodone soha nem tesz done-ra (hosszú életű horgony- és gyűjtőkártyák, amelyek sok PR-t említenek). Alapból a 30efb0ab kiadási horgony.',
+    module: 'kanban',
+    secret: false,
+    requiresRestart: false,
+    validate: (v) => v.split(/[\s,]+/).filter(Boolean).every((s) => /^[A-Za-z0-9._-]{1,64}$/.test(s))
+      ? null
+      : 'kártya-azonosítók kellenek, vesszővel elválasztva',
   },
   // --- Kanban aging thresholds and colours (hot-reload via settings-store) ---
   {

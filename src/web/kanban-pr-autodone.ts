@@ -22,10 +22,12 @@ import { TOOL_TIMEOUTS } from '../tool-timeouts.js'
 //   - a card the automation already closed once and a human reopened is never
 //     touched again (the reopen is the human's verdict)
 //
-// Credentials and cost: no new credential. The token is read in-process from an
-// EXISTING Vault entry (KANBAN_AUTODONE_GITHUB_SECRET_ID, default
-// "github-fleet-token" -- the same id scripts/github-pr-monitor.sh resolves as
-// GH_TOKEN), never logged. Polling runs inside the dashboard process (no GitHub
+// Credentials and cost: the token is read in-process from the Vault entry named by
+// KANBAN_AUTODONE_GITHUB_SECRET_ID (no default: a dedicated fine-grained PAT,
+// Pull requests: Read + Metadata: Read, Viktor 5035), sent only in the
+// Authorization header, never logged. Cards listed in
+// KANBAN_AUTODONE_EXCLUDE_CARDS (default: the 30efb0ab release anchor) are never
+// touched. Polling runs inside the dashboard process (no GitHub
 // Actions minutes): one REST GET per referenced, not-yet-merged PR every 10 min,
 // at most 60 per pass, merged answers cached for good, and open ones re-asked
 // with If-None-Match so an unchanged PR costs a 304 (not counted against the
@@ -145,6 +147,8 @@ export interface AutodoneDeps {
   fetchPr: PrFetcher
   /** upper bound on GitHub lookups per pass; refs beyond it read as unknown this pass */
   maxFetches?: number
+  /** card ids never auto-closed (long-lived anchor cards that mention many PRs) */
+  excludeCards?: string[]
 }
 
 export interface AutodonePassResult { examined: number; fetched: number; closed: Array<{ id: string; comment: string }> }
@@ -157,7 +161,8 @@ export function _resetAutodoneCacheForTests(): void { mergedCache.clear() }
 export async function runKanbanPrAutodonePass(deps: AutodoneDeps): Promise<AutodonePassResult> {
   const maxFetches = deps.maxFetches ?? 60
   const candidates: Array<{ id: string; createdAt: number; parse: PrRefParse }> = []
-  const cards = listKanbanCards().filter((c) => c.status !== 'done')
+  const excluded = new Set(deps.excludeCards ?? [])
+  const cards = listKanbanCards().filter((c) => c.status !== 'done' && !excluded.has(c.id))
   for (const card of cards) {
     const comments = getKanbanComments(card.id)
     if (comments.some((c) => c.author === AUTODONE_AUTHOR)) continue
@@ -272,7 +277,8 @@ async function tick(): Promise<void> {
       return
     }
     lastConfigWarning = ''
-    const result = await runKanbanPrAutodonePass({ repos, fetchPr: createGithubPrFetcher(token) })
+    const excludeCards = setting('KANBAN_AUTODONE_EXCLUDE_CARDS').split(/[\s,]+/).filter(Boolean)
+    const result = await runKanbanPrAutodonePass({ repos, fetchPr: createGithubPrFetcher(token), excludeCards })
     for (const c of result.closed) logger.info({ card: c.id, comment: c.comment }, 'Kanban PR-autodone: card moved to done')
   } catch (err) {
     // Best-effort like the archive sweep: never take the process down, retry next tick.

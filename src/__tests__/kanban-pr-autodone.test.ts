@@ -135,6 +135,19 @@ describe('runKanbanPrAutodonePass (in-memory board, injected fetcher)', () => {
     }
   }
 
+  it('never closes an excluded (anchor) card, even when every PR it names is merged', async () => {
+    createKanbanCard({ id: '30efb0ab', title: 'Kiadási horgony', status: 'in_progress' })
+    addKanbanComment('30efb0ab', 'pulzus', 'PR #465 és PR #455 kint')
+    createKanbanCard({ id: 'normal', title: 'PR #465', status: 'waiting' })
+    const f = fetcher({ 'kiskodzsek/marabel#465': merged('aaaaaaa'), 'kiskodzsek/marabel#455': merged('bbbbbbb') })
+
+    const res = await runKanbanPrAutodonePass({ repos: [MARABEL], fetchPr: f.fetchPr, excludeCards: ['30efb0ab'] })
+
+    expect(res.closed.map((c) => c.id)).toEqual(['normal'])
+    expect(getKanbanCard('30efb0ab')!.status).toBe('in_progress')
+    expect(getKanbanComments('30efb0ab').some((c) => c.author === 'pr-autodone')).toBe(false)
+  })
+
   it('moves an all-merged card to done with ONE automated comment, and leaves the others alone', async () => {
     createKanbanCard({ id: 'ok', title: 'Fix https://github.com/kiskodzsek/marabel/pull/10', status: 'waiting' })
     createKanbanCard({ id: 'half', title: 'Két PR', status: 'in_progress' })
@@ -254,16 +267,17 @@ describe('createGithubPrFetcher conditional requests (rate-limit friendly)', () 
 })
 
 describe('autodone settings', () => {
-  it('ships off, with a github-prefixed Vault id and an owner/repo list', () => {
+  it('ships off, with NO default token id, a github-prefixed Vault id and an owner/repo list', () => {
     expect(getSettingDefinition('KANBAN_AUTODONE_ENABLED')!.default).toBe('0')
     const secret = getSettingDefinition('KANBAN_AUTODONE_GITHUB_SECRET_ID')!
-    // No new credential: the default is the Vault id scripts/github-pr-monitor.sh already resolves.
-    expect(secret.default).toBe('github-fleet-token')
+    // No default: the operator binds a dedicated read-only PAT (Viktor 5035), never a borrowed one.
+    expect(secret.default).toBe('')
     expect(validateSettingValue(secret, secret.default).ok).toBe(true)
-    expect(validateSettingValue(secret, 'github-github_personal_access_token').ok).toBe(true)
+    expect(validateSettingValue(secret, 'github-kanban-autodone-ro').ok).toBe(true)
     expect(validateSettingValue(secret, 'SUPABASE_ACCESS_TOKEN_OPS').ok).toBe(false)
     const repos = getSettingDefinition('KANBAN_AUTODONE_REPOS')!
     expect(validateSettingValue(repos, 'kiskodzsek/marabel,kiskodzsek/marveen').ok).toBe(true)
     expect(validateSettingValue(repos, 'marabel').ok).toBe(false)
+    expect(getSettingDefinition('KANBAN_AUTODONE_EXCLUDE_CARDS')!.default).toBe('30efb0ab')
   })
 })
