@@ -71,3 +71,28 @@ A CSV fejléce kötelező, és lehet `,` vagy `;` elválasztójú. Az összeg eg
 Minden más kulcs kód-módosítás nélkül nem jelenik meg.
 
 Személynév, számlaszám és partneradat ne kerüljön a fájlokba, csak összesítés. Tranzakciószintű bankadathoz új review kell (d651a52b, B6).
+
+## Előfizetések nézet (ELOFIZETES1014)
+
+A fül tetején két gomb van: **Áttekintés** és **Előfizetések**. Ugyanaz a végpont szolgálja ki mindkettőt, a `?view=elofizetesek` választ. Minden más érték, a hiányzó paraméter is, az áttekintés. A kapu, a CSP és a sandbox ugyanaz, mint fent. A napló a `view`-t is rögzíti, de csak a két ismert értéket.
+
+Az adat a `FINANCE_DIR/elofizetesek/` mappából jön. Ezt Juró generálja, az adatszerződés a mappa `README.md`-je. A mappa nem cég, ezért az áttekintés kihagyja. Symlinkelt mappát a nézet nem követ.
+
+| Fájl | Kötelező oszlopok | Mit mutat |
+|---|---|---|
+| `elofizetesek.csv` | szolgaltato, ceg, kategoria, havi_huf, statusz | tétellista cégenként, a megszűnt tételek a csoport végén |
+| `osszesito.csv` | ceg, kategoria, elofizetes_havi_huf | havi összesítő cégenként és kategóriánként, a `kivonat_ÉÉÉÉ_HH_huf` és `valtozas_*_huf` oszlopokat minta alapján találja meg |
+| `havi_terheles.csv` | ceg, honap, kategoria, terheles_huf | a kivonat szerinti havi terhelés grafikonja |
+
+**Hogyan jelöl a nézet:**
+- Az üres `havi_huf` mezőből "ár nem ismert" lesz, soha nem 0 Ft.
+- A "tipp" kezdetű `havi_huf_jeloles` `~` jellel, dőlten és "becslés" címkével jelenik meg.
+- Ha az `ellenorzott` mező nem "igen"-nel kezdődik, a sor "nem ellenőrzött" címkét és piros sávot kap az elején.
+- A `jeloles` értékei címkék. A `duplikalt`, `atfedes`, `kozelgo_megujulas` és `nem_hasznalt_gyanu` kiemelten jelenik meg.
+- Az ismeretlen cégű tétel ("nem ismert") külön csoportba kerül, nem esik ki.
+
+**Mobilon** a tétellista oldalra görget. A szolgáltató oszlopa és a cégcsoport neve ilyenkor helyben marad, a havi díj a második oszlop.
+
+**A `meta.json`-ból csak ezek a kulcsok jelennek meg, szövegként:**
+- `keszult` (vagy `generalva`), `szemlelet`, `havi_osszeg_jelentese`, `valtozas`;
+- `forrasok`, `nem_szerepel`, `figyelmeztetesek`: legfeljebb 20 elemű szöveglista, a figyelmeztetés kiemelve látszik.

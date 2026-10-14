@@ -1956,7 +1956,7 @@
         <div class="page-header-row">
           <div>
             <h1 data-i18n="finance.page_title">Pénzügy</h1>
-            <p class="subtitle" data-i18n="finance.page_subtitle">Havi eredmény, előrejelzés és bankegyenleg cégenként, csak olvasható</p>
+            <p class="subtitle" data-i18n="finance.page_subtitle">Havi eredmény, előrejelzés, bankegyenleg és előfizetések cégenként, csak olvasható</p>
           </div>
           <button class="btn-secondary btn-compact" id="refreshFinanceBtn" data-i18n="common.btn.refresh">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1967,6 +1967,11 @@
         </div>
       </div>
 
+      <!-- ELOFIZETES1014: overview / subscriptions; both are the same server-rendered view, ?view= picks one. -->
+      <nav class="tab-nav finance-tabs" id="financeTabNav">
+        <button class="tab-btn active" data-finance-view="overview" data-i18n="finance.view.overview">Áttekintés</button>
+        <button class="tab-btn" data-finance-view="elofizetesek" data-i18n="finance.view.subscriptions">Előfizetések</button>
+      </nav>
       <div id="financeContent"></div>
     </div>
 

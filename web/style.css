@@ -7837,4 +7837,5 @@ body {
    same-origin), so it cannot report its own height: give it the viewport. */
 .finance-frame { width: 100%; height: calc(100vh - 180px); min-height: 520px; border: 1px solid var(--border, #d0d7de); border-radius: 8px; background: transparent; }
 .finance-state { padding: 24px; color: var(--text-secondary, #888); }
+.finance-tabs { padding: 0; margin-bottom: 12px; }
 .finance-state p { margin: 0 0 12px; }

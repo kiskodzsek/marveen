@@ -349,7 +349,7 @@ describe('the routes: caller gate', () => {
     expect(out.headers['Content-Security-Policy']).toContain("frame-ancestors 'self'")
     expect(out.headers['Content-Security-Policy']).not.toContain('script-src')
     expect(out.body).toContain('Monthly result')
-    expect(logged).toEqual([['info', { user: 'patrik', companies: ['acme', 'beta'] }, 'finance view served']])
+    expect(logged).toEqual([['info', { user: 'patrik', view: 'overview', companies: ['acme', 'beta'] }, 'finance view served']])
   })
 
   it('HEAD answers without a body', async () => {

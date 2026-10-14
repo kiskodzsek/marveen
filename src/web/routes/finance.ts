@@ -2,7 +2,10 @@ import { json, methodNotAllowed } from '../http-helpers.js'
 import { PROJECT_ROOT } from '../../config.js'
 import { readEnvFile } from '../../env.js'
 import { logger } from '../../logger.js'
-import { listCompanies, loadAll, renderFinancePage, resolveFinanceRoot, type Lang, type Theme } from '../finance.js'
+import {
+  companyNames, listCompanies, loadAll, loadSubscriptions, renderFinancePage, renderSubscriptionsPage, resolveFinanceRoot,
+  type Lang, type Theme,
+} from '../finance.js'
 import { kindAllowed, FORBIDDEN_KIND } from './auth.js'
 import type { RouteContext } from './types.js'
 
@@ -78,9 +81,13 @@ export async function tryHandleFinance(ctx: RouteContext): Promise<boolean> {
     if (!cfg.root) { json(res, { error: 'finance_disabled' }, 404); return true }
     const lang: Lang = url.searchParams.get('lang') === 'en' ? 'en' : 'hu'
     const theme: Theme = url.searchParams.get('theme') === 'dark' ? 'dark' : 'light'
-    const html = renderFinancePage(loadAll(cfg.root), { lang, theme })
-    // Who opened which companies, never what it showed (F5).
-    logger.info({ user, companies: listCompanies(cfg.root) }, 'finance view served')
+    // ELOFIZETES1014: ?view=elofizetesek is the subscriptions view, anything else the overview.
+    const view = url.searchParams.get('view') === 'elofizetesek' ? 'elofizetesek' : 'overview'
+    const html = view === 'elofizetesek'
+      ? renderSubscriptionsPage(loadSubscriptions(cfg.root), companyNames(cfg.root), { lang, theme })
+      : renderFinancePage(loadAll(cfg.root), { lang, theme })
+    // Who opened which view and companies, never what it showed (F5).
+    logger.info({ user, view, companies: listCompanies(cfg.root) }, 'finance view served')
     res.writeHead(200, VIEW_HEADERS)
     res.end(method === 'HEAD' ? undefined : html)
     return true
