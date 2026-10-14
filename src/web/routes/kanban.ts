@@ -22,6 +22,7 @@ import {
   type TokenPruneLag,
 } from '../../db.js'
 import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
+import { waitingGateVerdict } from '../kanban-waiting-gate.js'
 import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, STORE_DIR, WEB_HOST, WEB_PORT, KANBAN_LABEL_COLORS, DB_FILENAME } from '../../config.js'
 import { listAgentNames, readAgentDisplayName } from '../agent-config.js'
 import { isAgentRunning } from '../agent-process.js'
@@ -144,7 +145,7 @@ export function kanbanMoveInstructions(id: string, target: string): string {
     `    -d '{"status":"in_progress","actor":"${target}"}'`,
     '',
     `Ha elakadtál / ${escalateTo} döntésére/lépésére vársz: NE csak status="waiting"-et állíts be. HÁROM lépés kell EGYÜTT:`,
-    `  a) Írj egy kommentet ami KÖZVETLENÜL ${escalateTo}-hez szól, egyértelműen megfogalmazva mit kell eldöntenie/megtennie (NE a saját belső elemzésedet írd oda) -- ugyanaz a comments hívás mint fent, "content" mezőben.`,
+    `  a) Írj egy kommentet ami KÖZVETLENÜL ${escalateTo}-hez szól, egyértelműen megfogalmazva mit kell eldöntenie/megtennie (NE a saját belső elemzésedet írd oda) -- ugyanaz a comments hívás mint fent, "content" mezőben. A kommentben KÖTELEZŐ egy ilyen sor: "VÁR: <ki> - <mire>" (pl. "VÁR: ${escalateTo} - döntés a ... ügyében"); enélkül a waiting-mozgatást a tábla 400-zal elutasítja.`,
     `  b) Told át a kártyát ${escalateTo}-re, hogy egyértelmű legyen a felelősség (a te neved NE maradjon rajta, ha nem te vagy a blokkoló):`,
     `     curl -s -X PUT ${cardUrl} \\`,
     `       ${auth} \\`,
@@ -167,6 +168,22 @@ function kanbanWriteActor(actor: unknown, auth: RouteContext['auth']): { error: 
   if (actor !== undefined && actor !== null && typeof actor !== 'string') return { error: 'actor must be a string or null' }
   if (typeof actor === 'string' && actor.trim() !== '') return { actor }
   return { actor: auth?.kind === 'session' && auth.user ? auth.user : undefined }
+}
+
+// Card bf868101: the optional `comment` a move/PUT may carry. Not a string (or
+// blank) is a caller mistake, refused before any write like a bad actor is.
+function moveCommentError(comment: unknown): string | null {
+  if (comment === undefined || comment === null) return null
+  if (typeof comment !== 'string') return 'comment must be a string'
+  if (comment.trim() === '') return 'comment must not be empty'
+  return null
+}
+
+// Stored only after the write succeeded, under the mover's name ("dashboard" when
+// the mover is anonymous), through the same ref normalisation as POST /comments.
+function storeMoveComment(cardId: string, comment: unknown, actor: string | undefined): void {
+  if (typeof comment !== 'string' || comment.trim() === '') return
+  addKanbanComment(cardId, actor ?? 'dashboard', normalizeKanbanRefs(comment, getKanbanSeqByIdPrefix))
 }
 
 // KANBANASSIGNFRAME1008 (SECSZIVEK1007 follow-up): the dispatch goes out in the
@@ -689,12 +706,19 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     // `actor` is metadata for the audit event, not a card column -- keep it out
     // of the field set so it can never be mistaken for one. Same name the /move
     // route already accepts, so callers do not have to learn a second spelling.
-    const { actor, ...data } = JSON.parse(body.toString()) as Record<string, unknown> & { actor?: unknown }
+    // `comment` is move metadata like `actor` (card bf868101): stored as a card comment
+    // when the write succeeds, and the place a move INTO waiting may carry its "VÁR:" line.
+    const { actor, comment, ...data } = JSON.parse(body.toString()) as Record<string, unknown> & { actor?: unknown; comment?: unknown }
     // The actor rule (kanbanWriteActor): a non-string actor is refused BEFORE any write (card f6fba9ec, found in review:
     // `actor: true` changed the card, then the row insert threw, 500).
     const who = kanbanWriteActor(actor, ctx.auth)
     if ('error' in who) {
       json(res, { error: who.error }, 400)
+      return true
+    }
+    const commentErr = moveCommentError(comment)
+    if (commentErr) {
+      json(res, { error: commentErr }, 400)
       return true
     }
     // #1023: reject unknown fields loudly instead of dropping them silently.
@@ -737,7 +761,16 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
         return true
       }
     }
-    if (updateKanbanCard(id, data, who.actor)) { json(res, { ok: true }); return true }
+    const waitingErr = waitingGateVerdict(id, getKanbanCard(id)?.status, data.status, comment)
+    if (waitingErr) {
+      json(res, { error: waitingErr }, 400)
+      return true
+    }
+    if (updateKanbanCard(id, data, who.actor)) {
+      storeMoveComment(id, comment, who.actor)
+      json(res, { ok: true })
+      return true
+    }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }
@@ -754,7 +787,7 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   if (kanbanMoveMatch && method === 'POST') {
     const id = decodeURIComponent(kanbanMoveMatch[1])
     const body = await readBody(req)
-    const { status, sort_order, actor } = JSON.parse(body.toString())
+    const { status, sort_order, actor, comment } = JSON.parse(body.toString())
     // The same actor rule as the PUT (card f6fba9ec, X16): before X16 a boolean actor moved the card, then the event
     // insert threw (500), and the move stayed with no row.
     const who = kanbanWriteActor(actor, ctx.auth)
@@ -762,7 +795,19 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
       json(res, { error: who.error }, 400)
       return true
     }
+    const commentErr = moveCommentError(comment)
+    if (commentErr) {
+      json(res, { error: commentErr }, 400)
+      return true
+    }
+    // Card bf868101: a move INTO waiting must name who/what it waits for ("VÁR: ki - mire").
+    const waitingErr = waitingGateVerdict(id, getKanbanCard(id)?.status, status, comment)
+    if (waitingErr) {
+      json(res, { error: waitingErr }, 400)
+      return true
+    }
     if (moveKanbanCard(id, status, sort_order ?? 0, who.actor)) {
+      storeMoveComment(id, comment, who.actor)
       // Wake the assigned agent once when the card enters in_progress -- unless
       // that agent is the one who moved it (self-pickup needs no wake-up).
       if (status === 'in_progress') fireKanbanDispatch(id, who.actor)

@@ -117,13 +117,25 @@ def main():
 
     # 1. A LELET MAGA: --status komment-modban tenylegesen mozgat.
     seed('MOZGA906', 'planned')
-    p = comment('MOZGA906', 'Kartya MOZGA906: a vevo valaszara var.', ('--status', 'waiting'))
+    p = comment('MOZGA906', 'Kartya MOZGA906: a vevo valaszara var.\nVAR: vevo - valasz', ('--status', 'waiting'))
     check('1 lefutott', p.returncode == 0, p.stdout + p.stderr)
     check('1 a statusz TENYLEG waiting lett', card('MOZGA906')[0] == 'waiting',
           f'kapott: {card("MOZGA906")}')
     check('1 a komment is beirt', any('vevo valaszara var' in c for c in comments('MOZGA906')))
     check('1 a kimenet kimondja a mozgatast', 'MEZOMOZGATAS OK' in p.stdout, p.stdout)
     check('1 nyom-komment a mozgatasrol', any('Mezomozgatas' in c for c in comments('MOZGA906')))
+
+    # 1b. VAR-SOR KAPU (kartya bf868101): waiting-be "VAR: <ki> - <mire>" sor nelkul NEM mehet,
+    #     es a komment SEM irodik be (a kapu az iras elott all).
+    seed('MOZGV906', 'in_progress')
+    p = comment('MOZGV906', 'Kartya MOZGV906: elakadtam, varok.', ('--status', 'waiting'))
+    check('1b megtagadva VAR-sor nelkul', p.returncode != 0, p.stdout + p.stderr)
+    check('1b a hiba megnevezi a VAR-sort', 'VAR: <ki> - <mire>' in p.stderr, p.stderr)
+    check('1b a statusz valtozatlan', card('MOZGV906')[0] == 'in_progress', f'kapott: {card("MOZGV906")}')
+    check('1b a komment sem irodott be', comments('MOZGV906') == [], f'kapott: {comments("MOZGV906")}')
+    p = comment('MOZGV906', 'Kartya MOZGV906: elakadtam.\n- V\u00c1R: Kl\u00f3del - d\u00f6nt\u00e9s', ('--status', 'waiting'))
+    check('1c ekezetes, felsorolasjeles VAR-sorral atmegy', p.returncode == 0, p.stdout + p.stderr)
+    check('1c a statusz waiting lett', card('MOZGV906')[0] == 'waiting', f'kapott: {card("MOZGV906")}')
 
     # 2. --priority ugyanezen az uton, es a ketto egyutt is.
     seed('MOZGB906', 'planned', 'normal')

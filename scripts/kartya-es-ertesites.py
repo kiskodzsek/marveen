@@ -465,6 +465,21 @@ def _ekezet_kapu(szoveg, szandekos, cimke='komment'):
              '  kimondottan: --ekezet-nelkul-szandekos')
 
 
+# VAR-SOR (kartya bf868101): waiting-be csak az a kartya mehet, amelyikrol kiderul,
+# KIRE es MIRE var -- egy "VAR: <ki> - <mire>" sor (ekezettel vagy anelkul). Ugyanaz a
+# szabaly, mint a dashboard POST /move es PUT kapuja (src/web/kanban-waiting-gate.ts);
+# ez az eszkoz kozvetlenul a DB-be ir, tehat a kapu nelkule itt megkerulheto lenne.
+VAR_SOR_RX = re.compile(r'^\s*(?:[-*>]\s*)?v[a\u00e1]r\s*:\s*\S', re.IGNORECASE)
+# Sor kozben csak NAGYBETUVEL es mondatvég utan ("... atadva. VAR: Pulzus - merge"),
+# mint a dashboard kapuja; a proza ("Patrikra var:") nem megy at.
+VAR_SOR_INLINE_RX = re.compile(r'[.!?;]\s+V[A\u00c1]R\s*:\s*\S')
+
+
+def van_var_sor(szoveg):
+    return any(VAR_SOR_RX.match(sor) or VAR_SOR_INLINE_RX.search(sor)
+               for sor in unicodedata.normalize('NFC', szoveg or '').splitlines())
+
+
 def komment_mod(a):
     """Komment egy MEGLEVO kartyara, ertesites nelkul. Kapuk + kotelezo visszaolvasas."""
     # SZERZO-KAPU (KARTYADRYRUN907, 2026-09-08). Boni es Zara egymastol fuggetlenul
@@ -566,6 +581,12 @@ def komment_mod(a):
     if not card:
         sys.exit(f'MEGTAGADVA: a(z) {a.id} kartya NEM LETEZIK -- komment-only mod csak meglevo kartyara ir.\n'
                  f'Uj kartyahoz a letrehozo mod valo (--assignee/--title).')
+    # VAR-SOR KAPU: csak ATMENETNEL (a mar waiting kartyan a no-op ag kimondja magat), az
+    # IRAS ELOTT, a dry-run agon is -- a komment SEM irodik be, ha a mozgatas elbukik.
+    if a.status == 'waiting' and card[1] != 'waiting' and not van_var_sor(text):
+        sys.exit('MEGTAGADVA: waiting-be csak "VAR: <ki> - <mire>" sorral mehet a kartya (pl.\n'
+                 '"VAR: Patrik - mehet a K6a-ra"), hogy kideruljon, KIRE es MIRE var.\n'
+                 'Ird a sort a komment-fajlba, es futtasd ujra. A kartya NEM mozdult, a komment NEM irodott be.')
     # A JEL NEM ESHET LE CSENDBEN: egy #1531 elotti DB-n nincs automated oszlop, es ha a komment
     # megis beirodna, a stuck-meres munka-nyomnak latna -- pont az, amit a kapcsolo megelozne.
     # A kapu az IRAS ELOTT all, a dry-run agon is.

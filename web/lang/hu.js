@@ -241,6 +241,7 @@ window._i18n.hu = {
   'kanban.modal.archive_btn':    'Archiválás',
   'kanban.modal.delete_btn':     'Törlés',
   'kanban.modal.breakdown_btn':  'Auto-bontás',
+  'kanban.waiting.prompt':       'Kire és mire vár a kártya? Formátum: VÁR: <ki> - <mire> (pl. VÁR: a gazda - jóváhagyás)',
   'kanban.toast.move_error':     'Hiba az áthelyezés során',
   'kanban.toast.save_error':     'Hiba a mentésnél',
   'kanban.toast.comment_error':  'Hiba a megjegyzés mentése során',

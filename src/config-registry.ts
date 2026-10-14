@@ -212,6 +212,42 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     secret: false,
     requiresRestart: false,
   },
+  // --- Kanban PR-autodone (card bf868101; read every pass, so hot-reload) ---
+  // Off by default: it needs a GitHub token the dashboard process does not have
+  // until an operator binds one, and it moves cards on its own once it does.
+  {
+    key: 'KANBAN_AUTODONE_ENABLED',
+    type: 'boolean',
+    default: '0',
+    description: 'Ha be van kapcsolva, a dashboard 10 percenként megnézi a nem done kártyák címében és kommentjeiben hivatkozott GitHub PR-okat, és ha MIND beolvadt, a kártyát done-ra teszi egy automatikus kommenttel. Konzervatív: ha egy hivatkozott PR nyitott, beolvadás nélkül zárt, nem a beállított repókban van, vagy egy "PR #N" nem köthető egyetlen repóhoz, a kártyához nem nyúl. Kell hozzá a KANBAN_AUTODONE_REPOS és a KANBAN_AUTODONE_GITHUB_SECRET_ID. Alapértelmezés: kikapcsolva.',
+    module: 'kanban',
+    secret: false,
+    requiresRestart: false,
+  },
+  {
+    key: 'KANBAN_AUTODONE_REPOS',
+    type: 'string',
+    default: '',
+    description: 'Vesszővel elválasztott owner/repo lista (pl. kiskodzsek/marabel,kiskodzsek/marveen): csak ezek PR-jait nézi a PR-autodone. Más repóra mutató PR-link esetén a kártyához nem nyúl.',
+    module: 'kanban',
+    secret: false,
+    requiresRestart: false,
+    validate: (v) => v.split(/[\s,]+/).filter(Boolean).every((s) => /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/.test(s))
+      ? null
+      : 'owner/repo alakú elemek kellenek, vesszővel elválasztva',
+  },
+  {
+    key: 'KANBAN_AUTODONE_GITHUB_SECRET_ID',
+    type: 'string',
+    default: 'github-fleet-token',
+    description: 'Annak a MÁR MEGLÉVŐ Vault-titoknak az azonosítója, amely a PR-állapot lekérdezéséhez használt GitHub-tokent tartalmazza (csak olvasás kell, új credential nem). Alapértelmezés: github-fleet-token, ugyanaz, amit a scripts/github-pr-monitor.sh is használ. Ha ez a telepítésen nincs, a fő ágens GitHub MCP-tokenje is megadható (github-github_personal_access_token). Az azonosítónak "github"-bal kell kezdődnie, hogy a beállítás ne irányíthasson más titkot a GitHub felé.',
+    module: 'kanban',
+    secret: false,
+    requiresRestart: false,
+    validate: (v) => v === '' || /^github[A-Za-z0-9._-]{0,100}$/.test(v)
+      ? null
+      : 'a Vault-azonosítónak "github"-bal kell kezdődnie (betű, szám, . _ -)',
+  },
   // --- Kanban aging thresholds and colours (hot-reload via settings-store) ---
   {
     key: 'KANBAN_AGING_WARN_H',

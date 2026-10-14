@@ -25,6 +25,7 @@ import {
   getKanbanCard,
   getKanbanCardEvents,
   getKanbanCardFieldEvents,
+  addKanbanComment,
   KANBAN_AUDITED_FIELDS,
 } from '../db.js'
 import { tryHandleKanban } from '../web/routes/kanban.js'
@@ -317,6 +318,8 @@ describe('the routes: PUT writes the row, GET /field-events reads it, GET /event
 
   it('POST /move follows the PUT: an actor string names the row; with no actor a session names its user, a token caller stays anonymous', async () => {
     createKanbanCard({ id: 'mv1', title: 'Moved' })
+    // card bf868101: a move into waiting must name who/what it waits for
+    addKanbanComment('mv1', 'dev-a', 'VÁR: admin - review')
     await call('POST', '/api/kanban/mv1/move', { status: 'waiting', sort_order: 0, actor: 'dev-a' }, { kind: 'session', user: 'admin' })
     await call('POST', '/api/kanban/mv1/move', { status: 'planned', sort_order: 0 }, { kind: 'session', user: 'admin' })
     await call('POST', '/api/kanban/mv1/move', { status: 'waiting', sort_order: 0, actor: null }, { kind: 'token' })
@@ -326,6 +329,7 @@ describe('the routes: PUT writes the row, GET /field-events reads it, GET /event
 
   it('X15: an empty or blank actor counts as no actor, on the PUT and on /move', async () => {
     createKanbanCard({ id: 'x15', title: 'Empty actor', priority: 'normal' })
+    addKanbanComment('x15', 'dev-a', 'VÁR: admin - review')
     for (const empty of ['', '   ']) {
       // In a session the session's user is named, as with no actor at all ...
       await call('PUT', '/api/kanban/x15', { priority: empty === '' ? 'high' : 'low', actor: empty }, { kind: 'session', user: 'admin' })
