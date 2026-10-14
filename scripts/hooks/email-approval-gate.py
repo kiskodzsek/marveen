@@ -86,7 +86,8 @@ STANDING_PATH = os.path.join(STORE_DIR, "email-standing-recipients.json")
 WINDOW_S = int(os.environ.get("EMAIL_APPROVAL_WINDOW_S", "1800"))
 
 sys.path.insert(0, _HERE)
-from email_extract import collect_email_envelope  # noqa: E402
+from email_extract import (collect_email_envelope, MS365_SEND_RE,  # noqa: E402
+                           MS365_UNANCHORABLE_RE)
 
 # GMAILCONNECTOR914: the claude.ai Gmail connector's send-shaped tools carry
 # neither word (mcp__claude_ai_Gmail__send_message / reply / forward), so the
@@ -183,29 +184,42 @@ def read_standing():
     the silent failure this gate cannot afford.
 
     Accepted shapes: {"recipients": [...]} or a bare list. Each entry is either
-    an address string or {"address": ..., "note": ...}; the note is for the
-    human reading the file, the gate ignores it."""
+    an address string or {"address": ..., "note": ..., "require_cc": ...}; the
+    note is for the human reading the file, the gate ignores it.
+
+    Returns {address: required_cc_or_None}. MS365SEND1014 (owner's rule, TG
+    1915): some addresses may be written to without a per-letter approval only
+    with the owner in cc. `require_cc` names that ONE address; an entry whose
+    require_cc does not parse to exactly one address grants nothing."""
     if not os.path.exists(STANDING_PATH):
-        return set(), None
+        return {}, None
     try:
         with open(STANDING_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
     except Exception as exc:  # noqa: BLE001 -- unreadable list grants nothing
-        return set(), (f"az allando cimzett-lista nem olvashato ({exc!r}) -> "
+        return {}, (f"az allando cimzett-lista nem olvashato ({exc!r}) -> "
                        "nincs allando jog (fail-closed)")
     raw = data.get("recipients") if isinstance(data, dict) else data
     if not isinstance(raw, list):
-        return set(), ("az allando cimzett-lista alakja nem lista -> nincs "
+        return {}, ("az allando cimzett-lista alakja nem lista -> nincs "
                        "allando jog (fail-closed)")
-    out = set()
+    out = {}
     for item in raw:
         addr = item.get("address") if isinstance(item, dict) else item
         if not isinstance(addr, str):
             continue
         _, parsed = email.utils.parseaddr(addr.strip())
         parsed = parsed.strip().lower()
-        if "@" in parsed:
-            out.add(parsed)
+        if "@" not in parsed:
+            continue
+        req = item.get("require_cc") if isinstance(item, dict) else None
+        if req is not None:
+            ccs = [a.strip().lower() for _, a in email.utils.getaddresses([str(req)])
+                   if a and a.strip()]
+            if len(ccs) != 1 or "@" not in ccs[0]:
+                continue  # an unreadable condition grants nothing
+            req = ccs[0]
+        out[parsed] = req
     return out, None
 
 
@@ -215,7 +229,10 @@ def standing_match(env: dict, standing):
     Deliberately narrow, because this is the one path that authorises without a
     human in the loop for THIS letter:
       - exactly ONE recipient resolves out of `to`, and it is on the list;
-      - cc and bcc are empty.
+      - bcc is empty;
+      - cc is empty, or -- for an entry with require_cc -- cc is EXACTLY that
+        one address (and must be: without it the entry does not match).
+    Returns (address, required_cc_or_None) or None.
     The extractor keeps recipients RAW and does NOT split them, so a single
     `to` entry can carry several comma-joined addresses; getaddresses expands
     that, and the count is taken AFTER expansion. Anything that does not parse
@@ -223,15 +240,21 @@ def standing_match(env: dict, standing):
     an allow."""
     if not standing:
         return None
-    for field in ("cc", "bcc"):
-        if any(str(v).strip() for v in (env.get(field) or [])):
-            return None
-    addrs = [a.strip().lower()
-             for _, a in email.utils.getaddresses([str(v) for v in (env.get("to") or [])])
-             if a and a.strip()]
-    if len(addrs) != 1:
+    if any(str(v).strip() for v in (env.get("bcc") or [])):
         return None
-    return addrs[0] if addrs[0] in standing else None
+
+    def parsed(field):
+        return [a.strip().lower()
+                for _, a in email.utils.getaddresses([str(v) for v in (env.get(field) or [])])
+                if a and a.strip()]
+    addrs = parsed("to")
+    if len(addrs) != 1 or addrs[0] not in standing:
+        return None
+    req = standing[addrs[0]]
+    if req is None:
+        has_cc = any(str(v).strip() for v in (env.get("cc") or []))
+        return None if has_cc else (addrs[0], None)
+    return (addrs[0], req) if parsed("cc") == [req] else None
 
 
 # --- EMAILALLANDOCIMZETT926 / SZAMONKERHETOSEG ----------------------------
@@ -351,20 +374,28 @@ def standing_trace(addr: str, env: dict):
 STANDING_CATEGORY = "email_standing_recipient"
 
 
-def standing_anchor(addr: str) -> str:
+def standing_anchor(addr: str, cc=None) -> str:
     """sha256 over the NORMALISED address, matching read_standing's
     normalisation (parseaddr + lowercase), so the owner's approval and the
-    list entry can never disagree about what was approved."""
-    return hashlib.sha256(addr.strip().lower().encode("utf-8")).hexdigest()
+    list entry can never disagree about what was approved.
+
+    With a required cc the anchor covers "address|cc:<cc>": the condition is
+    part of what the owner approved, so deleting require_cc from the file
+    turns the entry into one the owner never activated, instead of quietly
+    lifting the condition. A cc-less anchor is byte-identical to before."""
+    key = addr.strip().lower()
+    if cc:
+        key += "|cc:" + cc.strip().lower()
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-def standing_authorized(addr: str):
+def standing_authorized(addr: str, cc=None):
     """Return (ok, detail) for THIS address. Raises on any DB problem -- the
     caller turns that into a fail-closed deny, exactly as the per-letter path
     does: "cannot decide" never means "allowed"."""
     if not os.path.exists(DB_PATH):
         raise OSError(f"approvals DB hianyzik ({DB_PATH})")
-    anchor = standing_anchor(addr)
+    anchor = standing_anchor(addr, cc)
     con = sqlite3.connect(DB_PATH, timeout=5)
     try:
         con.execute("PRAGMA busy_timeout=5000")
@@ -494,6 +525,11 @@ def main():
         # a read or a draft is not what email_send levels.
         if _MULTIPLEX_TOOL.search(tool) and not manage_email_is_send(tool_input):
             sys.exit(0)
+    elif MS365_SEND_RE.search(tool) or MS365_UNANCHORABLE_RE.search(tool):
+        # MS365SEND1014: the ms365 Mail.Send tools. send-mail is anchored like
+        # any other letter; the id-addressed ones come back unreadable from the
+        # extractor, so below level 3 they are always denied.
+        pass
     elif tool == "Bash":
         cmd = str(tool_input.get("command") or "")
         if not _load_is_send_invocation()(cmd):
@@ -533,13 +569,14 @@ def main():
     standing, standing_note = read_standing()
     if standing_note:
         prefix = prefix + f"({standing_note})\n"
-    hit = standing_match(env, standing)
-    if hit:
+    match = standing_match(env, standing)
+    if match:
+        hit, hit_cc = match
         # The list makes the address a CANDIDATE; only the owner's one-time
         # approval makes it live. Checked before the trace, because an address
         # that is not live has no approval-free send to record.
         try:
-            live, live_detail = standing_authorized(hit)
+            live, live_detail = standing_authorized(hit, hit_cc)
         except Exception as exc:  # noqa: BLE001 -- unreachable DB is fail-closed
             deny(prefix +
                  f"email_send level 2: {hit} rajta van az allando cimzett-listan, de az "
@@ -551,7 +588,9 @@ def main():
                  f"ELESITVE -- {live_detail}.\n"
                  "Egy cim attol valik elese, hogy a gazda EGYSZER jovahagyta, NEM attol, "
                  "hogy felkerult a listara. A felvetel javaslat, az elesites dontes.\n"
-                 f"Cim-horgony (sha256): {standing_anchor(hit)}\n"
+                 + (f"Feltetel: a level CC-jeben pontosan {hit_cc}; a horgony ezt is fedi.\n"
+                    if hit_cc else "")
+                 + f"Cim-horgony (sha256): {standing_anchor(hit, hit_cc)}\n"
                  "Elesites KERESE: POST /api/approvals a sajat agent_id-ddal, "
                  f'category="{STANDING_CATEGORY}", content_hash=a fenti cim-horgony, '
                  "action_description=melyik cimet es miert. A dontes a gazdae: a sajat "

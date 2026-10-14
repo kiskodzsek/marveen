@@ -196,6 +196,108 @@ def collect_mcp_recipients(tool_input: dict):
 # no "send_email" in the name, so the name-based test above never saw them.
 CONNECTOR_SEND_RE = re.compile(r"gmail__(reply|reply_all|send_message|forward)$", re.I)
 
+# MS365SEND1014: the @softeria/ms-365-mcp-server Mail.Send tools. Only send-mail
+# carries the whole envelope in its input (a Graph message under body.Message);
+# the others address a message by id and the server decides the recipient, so
+# no per-letter approval can be anchored to them and every gate denies them.
+MS365_SEND_RE = re.compile(r"ms-?365.*__send-mail$", re.I)
+MS365_UNANCHORABLE_RE = re.compile(
+    r"ms-?365.*__(send-draft-message|reply-mail-message|reply-all-mail-message"
+    r"|forward-mail-message|send-shared-mailbox-mail)$", re.I)
+
+# The server merges a top-level argument whose name is a body field into the
+# request body, and its message schema is passthrough: any Graph property
+# (replyTo, attachments, headers, extended properties, from) reaches the wire.
+# So the readable shape is an ALLOWLIST, and anything outside it is unreadable.
+_MS365_TOP_KEYS = {"body"}
+_MS365_BODY_KEYS = {"Message", "SaveToSentItems"}
+_MS365_MESSAGE_KEYS = {"subject", "body", "toRecipients", "ccRecipients",
+                       "bccRecipients", "importance"}
+_MS365_RECIPIENT_FIELDS = (("to", "toRecipients"), ("cc", "ccRecipients"),
+                           ("bcc", "bccRecipients"))
+
+
+def _ms365_recipients(raw, field):
+    """(addresses, unreadable_reason) for one Graph recipient list. Each entry
+    must be {"emailAddress": {"address": str, "name"?: str}} and nothing else;
+    the name is kept, because it is in the header the recipient sees."""
+    if raw is None:
+        return [], None
+    if not isinstance(raw, list):
+        return [], f"a {field} nem lista"
+    out = []
+    for item in raw:
+        ea = item.get("emailAddress") if isinstance(item, dict) else None
+        if not isinstance(ea, dict) or set(item) != {"emailAddress"} \
+                or not set(ea) <= {"address", "name"}:
+            return [], f"a {field} egy eleme nem {{emailAddress: {{address, name}}}} alaku"
+        addr, name = ea.get("address"), ea.get("name")
+        if not isinstance(addr, str) or not addr.strip() \
+                or (name is not None and not isinstance(name, str)):
+            return [], f"a {field} egy elemeben nincs olvashato cim"
+        out.append(f"{name} <{addr}>" if name else addr)
+    return out, None
+
+
+def collect_ms365_envelope(tool_input):
+    """Envelope of an ms365 send-mail call, or an unreadable_reason (the caller
+    denies). Same dict as collect_email_envelope; text is subject + body content,
+    the same subject/body pair the copy gate audits."""
+    empty = {"to": [], "cc": [], "bcc": [], "text": ""}
+
+    def bad(reason):
+        return {**empty, "unreadable_reason": "ms365 send-mail: " + reason}
+
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    extra = set(ti) - _MS365_TOP_KEYS
+    if extra:
+        return bad(f"ismeretlen felso szintu mezo ({', '.join(sorted(extra))}); "
+                   "csak a body.Message alak olvashato")
+    body = ti.get("body")
+    if not isinstance(body, dict) or not isinstance(body.get("Message"), dict):
+        return bad("nincs body.Message objektum")
+    extra = set(body) - _MS365_BODY_KEYS
+    if extra:
+        return bad(f"ismeretlen body-mezo ({', '.join(sorted(extra))})")
+    # The server's schema defaults SaveToSentItems to FALSE: a letter sent that
+    # way leaves no copy in Sent Items, i.e. no trace in the mailbox the owner
+    # reads. The flag has to be an explicit true.
+    if body.get("SaveToSentItems") is not True:
+        return bad("a SaveToSentItems nem explicit true (enelkul a level nem "
+                   "kerul az Elkuldott elemek koze)")
+    msg = body["Message"]
+    extra = set(msg) - _MS365_MESSAGE_KEYS
+    if extra:
+        return bad(f"a Message nem engedett mezot tartalmaz ({', '.join(sorted(extra))}); "
+                   "csatolmany, valaszcim, fejlec es felado nem horgonyozhato")
+    env = dict(empty)
+    for key, field in _MS365_RECIPIENT_FIELDS:
+        addrs, reason = _ms365_recipients(msg.get(field), field)
+        if reason:
+            return bad(reason)
+        env[key] = addrs
+    subject = msg.get("subject")
+    if subject is not None and not isinstance(subject, str):
+        return bad("a subject nem szoveg")
+    mbody = msg.get("body")
+    content = ""
+    if mbody is not None:
+        if not isinstance(mbody, dict) or not set(mbody) <= {"contentType", "content"}:
+            return bad("a Message.body nem {contentType, content} alaku")
+        ctype = mbody.get("contentType", "text")
+        if not isinstance(ctype, str) or ctype.lower() not in ("text", "html"):
+            return bad("a contentType csak text vagy html lehet")
+        content = mbody.get("content") or ""
+        if not isinstance(content, str):
+            return bad("a body.content nem szoveg")
+    importance = msg.get("importance")
+    if importance is not None and importance not in ("low", "normal", "high"):
+        return bad("az importance csak low, normal vagy high lehet")
+    # Body first, subject last: the order collect_mcp_body uses.
+    env["text"] = "\n".join(p for p in (content, subject or "") if p)
+    env["unreadable_reason"] = None
+    return env
+
 
 def collect_email_envelope(tool_name: str, tool_input: dict):
     """PR2 entry point: one dict for the recipient+content hash anchor (to/cc/bcc/text), built from the
@@ -213,6 +315,13 @@ def collect_email_envelope(tool_name: str, tool_input: dict):
         # the addresses: an approval for one message cannot answer another.
         if not to and ti.get("messageId"):
             to = [f"messageId:{ti['messageId']}"]
+    elif MS365_SEND_RE.search(tool_name or ""):
+        return collect_ms365_envelope(tool_input)
+    elif MS365_UNANCHORABLE_RE.search(tool_name or ""):
+        return {"to": [], "cc": [], "bcc": [], "text": "",
+                "unreadable_reason": "ms365: ez a kuldo tool uzenet-azonositoval cimez, a "
+                "cimzettet a szerver donti el, ezert levelre szolo jovahagyas nem "
+                "kotheto hozza -- csak a send-mail hasznalhato"}
     elif tool_name == "Bash":
         cmd = str((tool_input or {}).get("command") or "") if isinstance(tool_input, dict) else ""
         text, reason = collect_bash_body(cmd)

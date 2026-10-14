@@ -336,6 +336,9 @@ function ledgerLookup() {
 // (the only path the thread-reply capability below can narrow),
 // 'unverified-recipient' is a draft/manage_email address with no recorded
 // source, and everything else is the sub-agent governance block.
+export const MS365_SEND_TOOL_RE =
+  /ms-?365.*__(send-mail|send-draft-message|reply-mail-message|reply-all-mail-message|forward-mail-message|send-shared-mailbox-mail)$/i
+
 export function gateDecision(toolName, toolInput, isVerified = null) {
   const name = String(toolName ?? '')
   // Lazy: only build the ledger lookup when a call actually carries addresses,
@@ -364,6 +367,10 @@ export function gateDecision(toolName, toolInput, isVerified = null) {
   // entrypoint reads send_email-shaped fields (threadId/to), which a connector
   // reply does not carry, so the connector stays fully gated for every agent.
   if (/gmail__(reply|reply_all|send_message|forward)$/i.test(name)) return { deny: true, kind: 'connector-send' }
+  // MS365SEND1014 (Viktor F5): the @softeria ms365 server's Mail.Send tools.
+  // Sub-agents load the root .mcp.json servers too, so a sub-agent session can
+  // see them; only the main agent may send, through its approval gate.
+  if (MS365_SEND_TOOL_RE.test(name)) return { deny: true, kind: 'connector-send' }
   // Drafting is allowed, but only to an address with a recorded source.
   if (DRAFT_TOOL_RE.test(name)) {
     const bad = unverifiedRecipients(toolInput, verify)

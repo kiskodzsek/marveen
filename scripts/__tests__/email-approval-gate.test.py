@@ -670,6 +670,152 @@ with tempfile.TemporaryDirectory() as td:
     check("kontroll: a pozitiv ag ugyanabban a store-ban tovabbra is atmegy",
           code == 0, f"exit={code}")
 
+    # --- MS365SEND1014: the ms365 send-mail tool (Viktor F2-F4) -------------
+    # The softeria server takes a Graph message under body.Message, and its
+    # schema is passthrough: every case below that adds a field must DENY.
+    NO_DASH = {"WEB_PORT": "1"}  # never reach a real dashboard from a test
+
+    def ms365(to=("a@b.hu",), cc=(), bcc=(), subject="Teszt tárgy",
+              body="Kedves Ügyfelünk! Törzs.", save=True, msg_extra=None,
+              top_extra=None, tool="mcp__ms365__send-mail"):
+        def rcp(xs):
+            return [{"emailAddress": {"address": x}} for x in xs]
+        msg = {"subject": subject, "body": {"contentType": "text", "content": body},
+               "toRecipients": rcp(to)}
+        if cc:
+            msg["ccRecipients"] = rcp(cc)
+        if bcc:
+            msg["bccRecipients"] = rcp(bcc)
+        msg.update(msg_extra or {})
+        b = {"Message": msg}
+        if save is not None:
+            b["SaveToSentItems"] = save
+        ti = {"body": b}
+        ti.update(top_extra or {})
+        return {"tool_name": tool, "tool_input": ti}
+
+    store = make_store(os.path.join(td, "ms1"), level=2)
+    code, _, err = run_gate(store, ms365())
+    anchor = anchor_from_stderr(err)
+    check("ms365: send-mail without approval is DENIED at level 2",
+          code == 2 and "NINCS jovahagyas" in err and anchor, f"exit={code} err={err[:160]!r}")
+    approve(store, anchor)
+    code, out, _ = run_gate(store, ms365())
+    check("ms365: the approved, byte-identical send-mail is ALLOWED",
+          code == 0 and "felhasznalva" in out, f"exit={code}")
+    code, _, err = run_gate(store, ms365())
+    check("ms365: the same send a second time is DENIED (one-shot)",
+          code == 2 and "MAR FEL LETT HASZNALVA" in err, f"exit={code}")
+    for name, payload in (
+            ("a different recipient", ms365(to=("masik@b.hu",))),
+            ("an added bcc", ms365(bcc=("rejtett@b.hu",))),
+            ("an added cc", ms365(cc=("masolat@b.hu",))),
+            ("a changed subject", ms365(subject="Masik targy")),
+            ("a changed body", ms365(body="Kedves Ügyfelünk! Másik törzs."))):
+        approve(store, anchor)
+        code, _, err = run_gate(store, payload)
+        check(f"ms365: an approval does NOT authorize {name}",
+              code == 2 and "NINCS jovahagyas" in err, f"exit={code} err={err[:160]!r}")
+    for name, payload in (
+            ("an attachment", ms365(msg_extra={"attachments": [{"name": "x.pdf"}]})),
+            ("a replyTo", ms365(msg_extra={"replyTo": [{"emailAddress": {"address": "x@y.hu"}}]})),
+            ("a from", ms365(msg_extra={"from": {"emailAddress": {"address": "x@y.hu"}}})),
+            ("custom headers", ms365(msg_extra={"internetMessageHeaders": [{"name": "X-A", "value": "1"}]})),
+            ("a top-level Message merged by the server", ms365(top_extra={"Message": {"bccRecipients": []}})),
+            ("a top-level account switch", ms365(top_extra={"account": "masik@b.hu"})),
+            ("SaveToSentItems missing", ms365(save=None)),
+            ("SaveToSentItems false", ms365(save=False)),
+            ("a recipient with an extra field", ms365(msg_extra={"toRecipients": [
+                {"emailAddress": {"address": "a@b.hu", "x": 1}}]})),
+            ("an unknown contentType", ms365(msg_extra={"body": {"contentType": "mime", "content": "x"}}))):
+        code, _, err = run_gate(store, payload)
+        check(f"ms365: {name} is unreadable -> DENIED",
+              code == 2 and "nem horgonyozhato" in err, f"exit={code} err={err[:160]!r}")
+    for tool in ("mcp__ms365__send-draft-message", "mcp__ms365__reply-mail-message",
+                 "mcp__ms365__reply-all-mail-message", "mcp__ms365__forward-mail-message",
+                 "mcp__ms365__send-shared-mailbox-mail"):
+        code, _, err = run_gate(store, {"tool_name": tool,
+                                        "tool_input": {"message-id": "AAMk1", "body": {"Comment": "ok"}}})
+        check(f"ms365: {tool.split('__')[-1]} (id-addressed) is DENIED at level 2",
+              code == 2 and "uzenet-azonositoval" in err, f"exit={code} err={err[:160]!r}")
+    code, _, _ = run_gate(make_store(os.path.join(td, "ms3"), level=3),
+                          {"tool_name": "mcp__ms365__forward-mail-message", "tool_input": {}})
+    check("ms365: level 3 stays autonomous for the id-addressed tools too", code == 0, f"exit={code}")
+    code, _, err = run_gate(make_store(os.path.join(td, "ms4"), level=1), ms365())
+    check("ms365: level 1 is a hard deny", code == 2 and "szint 1" in err, f"exit={code}")
+    store_l1 = make_store(os.path.join(td, "ms5"), level=1)
+    for tool in ("mcp__ms365__create-reply-draft", "mcp__ms365__create-draft-email",
+                 "mcp__ms365__list-mail-messages"):
+        code, _, _ = run_gate(store_l1, {"tool_name": tool, "tool_input": {"message-id": "AAMk1"}})
+        check(f"ms365: {tool.split('__')[-1]} (no send) passes even at level 1", code == 0, f"exit={code}")
+
+    # F2: the hook only runs if settings.json routes the tool to it. Removing
+    # the matcher must fail here, not silently on the live install.
+    with open(os.path.join(os.path.dirname(os.path.dirname(HERE)), ".claude", "settings.json"),
+              encoding="utf-8") as fh:
+        pre = json.load(fh)["hooks"]["PreToolUse"]
+    for hook in ("email-approval-gate.py", "outgoing-copy-gate.py"):
+        for tool in ("mcp__ms365__send-mail", "mcp__ms365__forward-mail-message",
+                     "mcp__ms365__send-draft-message"):
+            routed = any(re.fullmatch(e.get("matcher", ""), tool)
+                         and any(hook in (h.get("command") or "") for h in e.get("hooks", []))
+                         for e in pre)
+            check(f"settings.json routes {tool.split('__')[-1]} to {hook}", routed)
+
+    # --- MS365SEND1014: standing recipient with a REQUIRED cc (Patrik TG 1915) --
+    def activate_anchor(store, anchor):
+        con = sqlite3.connect(os.path.join(store, "claudeclaw.db"))
+        con.execute(
+            "INSERT INTO approvals (id, agent_id, category, action_description, status,"
+            " requested_at, resolved_at, resolved_by, content_hash, consumed_at)"
+            " VALUES (hex(randomblob(6)), 'marveen', 'email_standing_recipient',"
+            f" 'Allando cimzett CC-vel', 'approved', {NOW_S}-60, {NOW_S}, 'szabi', ?, NULL)",
+            (anchor,))
+        con.commit()
+        con.close()
+
+    def sha(s):
+        return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+    store = make_store(os.path.join(td, "cc1"), level=2)
+    write_standing(store, {"recipients": [
+        {"address": "kolléga@pelda.hu".replace("é", "e"), "require_cc": "Gazda <gazda@pelda.hu>"}]})
+    activate_anchor(store, sha("kollega@pelda.hu|cc:gazda@pelda.hu"))
+    code, out, err = run_gate(store, mcp_send(to="kollega@pelda.hu", cc="gazda@pelda.hu"), NO_DASH)
+    check("standing cc: to the colleague WITH the owner in cc goes without approval",
+          code == 0 and "allando cimzett" in out, f"exit={code} err={err[:160]!r}")
+    code, out, _ = run_gate(store, ms365(to=("kollega@pelda.hu",), cc=("gazda@pelda.hu",)), NO_DASH)
+    check("standing cc: the same through ms365 send-mail", code == 0, f"exit={code}")
+    for name, payload in (
+            ("without the owner in cc", mcp_send(to="kollega@pelda.hu")),
+            ("with another cc", mcp_send(to="kollega@pelda.hu", cc="idegen@pelda.hu")),
+            ("with the owner AND another cc",
+             mcp_send(to="kollega@pelda.hu", cc="gazda@pelda.hu, idegen@pelda.hu")),
+            ("with a bcc", ms365(to=("kollega@pelda.hu",), cc=("gazda@pelda.hu",),
+                                 bcc=("idegen@pelda.hu",))),
+            ("to another address with the owner in cc",
+             mcp_send(to="idegen@pelda.hu", cc="gazda@pelda.hu"))):
+        code, _, err = run_gate(store, payload, NO_DASH)
+        check(f"standing cc: {name} needs a per-letter approval",
+              code == 2 and "NINCS jovahagyas" in err, f"exit={code} err={err[:160]!r}")
+    # The condition is part of what the owner approved: dropping require_cc
+    # from the file must not lift it.
+    write_standing(store, {"recipients": ["kollega@pelda.hu"]})
+    code, _, err = run_gate(store, mcp_send(to="kollega@pelda.hu"), NO_DASH)
+    check("standing cc: deleting require_cc from the file does not make the cc-less send live",
+          code == 2 and "NINCS ELESITVE" in err, f"exit={code} err={err[:160]!r}")
+    # An unreadable condition grants nothing.
+    write_standing(store, {"recipients": [
+        {"address": "kollega@pelda.hu", "require_cc": "a@pelda.hu, b@pelda.hu"}]})
+    code, _, err = run_gate(store, mcp_send(to="kollega@pelda.hu", cc="a@pelda.hu"), NO_DASH)
+    check("standing cc: a require_cc with two addresses grants nothing", code == 2, f"exit={code}")
+    # And the cc-less owner path is unchanged (anchor byte-identical to before).
+    store = make_store(os.path.join(td, "cc2"), level=2)
+    write_standing(store, {"recipients": ["gazda@pelda.hu"]})
+    activate_anchor(store, sha("gazda@pelda.hu"))
+    code, _, _ = run_gate(store, mcp_send(to="gazda@pelda.hu"), NO_DASH)
+    check("standing: the cc-less entry keeps its old anchor", code == 0, f"exit={code}")
+
     # SQLite-version portability, kept as a STATIC check on purpose. The
     # behavioural cases above only catch the bad call on a host whose sqlite is
     # older than 3.38 -- on CI (newer) they stay green while the live install
