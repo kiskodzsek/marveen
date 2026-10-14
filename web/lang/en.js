@@ -56,6 +56,8 @@ window._i18n.en = {
   'overview.quota.measured_now':    'measured just now',
   'overview.quota.stale_mod':       'These numbers are old: the observed sessions have had no API answer since, while another session may already have used the quota.',
   'overview.quota.stale_mod_unknown': 'The age of these numbers is unknown (the session has not completed a turn since it restarted), so they are treated as out of date.',
+  'overview.quota.seat':            '{name} own seat',
+  'overview.quota.seat_none':       'No reading from this seat yet. The numbers come from the observer mod: turn it on for this agent ("stateObserver": true in its agent-config.json), then restart it.',
   'overview.no_activity':           'No recent activity.',
   'overview.error':                 'Error: {msg}',
   'overview.updates_subtitle':      'version check',

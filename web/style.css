@@ -678,6 +678,10 @@ main {
 .quota-bar-reset { color: var(--text-muted); }
 .quota-strip-note { margin-top: 8px; font-size: 11px; color: var(--text-muted); }
 .quota-strip-note.warn { color: var(--danger); }
+.quota-seats { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+/* QUOTAPLAN1014: display:flex above would win over the UA [hidden] rule. */
+.quota-seats[hidden] { display: none; }
+.quota-seat { padding-top: 10px; border-top: 1px solid var(--border); }
 
 .overview-stats {
   display: grid;
