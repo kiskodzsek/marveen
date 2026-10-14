@@ -1350,6 +1350,44 @@ export function initDatabase(dbPathOverride?: string): void {
   try { db.exec('ALTER TABLE approvals ADD COLUMN content_hash TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE approvals ADD COLUMN consumed_at INTEGER') } catch { /* already exists */ }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_approvals_hash ON approvals(content_hash)`)
+  // f2c5edb0: the gate only sees a send it can read in the command text, so a
+  // letter sent by a script (ssh + a mailer run on another host) never flipped
+  // consumed_at and one approved row could authorize a second send. Such a
+  // sender now consumes on its own path (POST /api/approvals/:id/consume)
+  // BEFORE the letter goes out. consumed_by names the consumer, consumed_ref
+  // the Message-Id the sender generated up front, so the row says which letter
+  // used it. Rows consumed by the gate leave both NULL.
+  try { db.exec('ALTER TABLE approvals ADD COLUMN consumed_by TEXT') } catch { /* already exists */ }
+  // APPROVALBOT1013 (Patrik, Telegram 1623/1653; Viktor 2302): the dedicated
+  // approval bot's message is bound to the row by columns NO API route writes.
+  // bot_message_id / bot_chat_id: the message the SERVER sent (a callback from
+  // any other message is refused); bot_text_hash: sha256 of the text Telegram
+  // stored, so an editMessageText by a token holder is caught; bot_nonce_hash:
+  // sha256 of the one-time button secret, cleared on first use and on any
+  // resolution; resolution_channel: 'approval_bot' only when the server itself
+  // resolved from a verified button press.
+  try { db.exec('ALTER TABLE approvals ADD COLUMN bot_message_id INTEGER') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE approvals ADD COLUMN bot_chat_id TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE approvals ADD COLUMN bot_text_hash TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE approvals ADD COLUMN bot_nonce_hash TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE approvals ADD COLUMN resolution_channel TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE approvals ADD COLUMN consumed_ref TEXT') } catch { /* already exists */ }
+  // Every consume call leaves a row here, the refused ones too: a second send
+  // attempt on a used approval is exactly the event worth seeing afterwards.
+  // consumed_backfill is for a one-off data fix of rows a past send never
+  // consumed; it is written by an operator script, never by the API.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS approval_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      approval_id TEXT NOT NULL,
+      event TEXT NOT NULL CHECK(event IN ('consumed','consume_refused','consumed_backfill')),
+      reason TEXT,
+      actor TEXT,
+      ref TEXT,
+      created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_approval_events_approval ON approval_events(approval_id, created_at)`)
 
   // --- Control-bot custom commands (CMD920 3.12) ---
   // The owner's own slash commands. DB, not a file, so a later web admin writes
@@ -5406,8 +5444,20 @@ export interface Approval {
   requested_at: number
   resolved_at: number | null
   resolved_by: string | null
+  // f2c5edb0: who consumed the approval and with which letter; they pair with
+  // consumed_at below. Optional in the type only: a row read from the DB always
+  // carries both (NULL until consumed); hand-built literals made before these
+  // columns existed need not list them.
+  consumed_by?: string | null
+  consumed_ref?: string | null
   content_hash: string | null
   consumed_at: number | null
+  // APPROVALBOT1013: optional in the type for the same reason as consumed_by.
+  bot_message_id?: number | null
+  bot_chat_id?: string | null
+  bot_text_hash?: string | null
+  bot_nonce_hash?: string | null
+  resolution_channel?: string | null
 }
 
 export function createApproval(params: {
@@ -5445,6 +5495,8 @@ export function createApproval(params: {
     requested_at: now,
     resolved_at: null,
     resolved_by: null,
+    consumed_by: null,
+    consumed_ref: null,
     content_hash: params.content_hash ?? null,
     consumed_at: null,
   }
@@ -5459,9 +5511,31 @@ export function resolveApproval(id: string, status: 'approved' | 'rejected' | 't
   return db.prepare(`
     UPDATE approvals
     SET status = ?, resolved_at = ?, resolved_by = ?,
-        telegram_message_id = COALESCE(?, telegram_message_id)
+        telegram_message_id = COALESCE(?, telegram_message_id),
+        bot_nonce_hash = NULL
     WHERE id = ? AND status = 'pending'
   `).run(status, now, resolvedBy, telegramMessageId ?? null, id).changes > 0
+}
+
+// APPROVALBOT1013: stamp the approval bot's message onto the row. Server-only.
+export function setApprovalBotMessage(id: string, messageId: number, chatId: string, textHash: string, nonceHash: string): boolean {
+  return db.prepare(`
+    UPDATE approvals SET bot_message_id = ?, bot_chat_id = ?, bot_text_hash = ?, bot_nonce_hash = ?
+    WHERE id = ? AND status = 'pending'
+  `).run(messageId, chatId, textHash, nonceHash, id).changes > 0
+}
+
+// APPROVALBOT1013: the ONLY writer of resolution_channel='approval_bot'. Atomic
+// one-shot: it resolves only a still-pending, not-expired row whose nonce hash
+// is the one the caller verified, and clears the nonce in the same statement.
+export function resolveApprovalByBot(id: string, status: 'approved' | 'rejected', nonceHash: string, now: number = Math.floor(Date.now() / 1000)): boolean {
+  return db.prepare(`
+    UPDATE approvals
+    SET status = ?, resolved_at = ?, resolved_by = 'telegram_button', resolution_channel = 'approval_bot',
+        bot_nonce_hash = NULL
+    WHERE id = ? AND status = 'pending' AND bot_nonce_hash = ?
+      AND (timeout_at IS NULL OR timeout_at > ?)
+  `).run(status, now, id, nonceHash, now).changes > 0
 }
 
 // The CREATE path stamps the owner-notification message id onto the row
@@ -5508,9 +5582,77 @@ export function stampMessageTrace(
 export function expireTimedOutApprovals(): number {
   const now = Math.floor(Date.now() / 1000)
   return db.prepare(`
-    UPDATE approvals SET status = 'timeout', resolved_at = ?
+    UPDATE approvals SET status = 'timeout', resolved_at = ?, bot_nonce_hash = NULL
     WHERE status = 'pending' AND timeout_at IS NOT NULL AND timeout_at <= ?
   `).run(now, now).changes
+}
+
+// f2c5edb0: why a consume was refused. Classified AFTER the write failed, so
+// the write itself never depends on a read that could go stale.
+export type ApprovalConsumeRefusal =
+  | 'not_found' | 'wrong_category' | 'already_consumed' | 'not_approved' | 'hash_mismatch' | 'expired'
+
+export interface ApprovalConsumeResult {
+  ok: boolean
+  reason?: ApprovalConsumeRefusal
+  approval?: Approval
+}
+
+// One-shot consumption of an email_send approval by the SEND path itself
+// (f2c5edb0). The single conditional UPDATE is the whole decision: only the
+// call that flips consumed_at from NULL wins, so two concurrent senders can
+// never both get a yes. The conditions mirror the gate's find_and_consume
+// (scripts/hooks/email-approval-gate.py): same category, approved, unconsumed,
+// the exact content anchor, resolved inside the time window. A row the gate
+// consumed is refused here and vice versa -- both read consumed_at IS NULL.
+export function consumeApproval(params: {
+  id: string
+  contentHash: string
+  consumer: string
+  messageId?: string | null
+  windowSeconds: number
+  nowS?: number
+}): ApprovalConsumeResult {
+  const now = params.nowS ?? Math.floor(Date.now() / 1000)
+  const ref = params.messageId ?? null
+  return db.transaction((): ApprovalConsumeResult => {
+    const changes = db.prepare(`
+      UPDATE approvals SET consumed_at = ?, consumed_by = ?, consumed_ref = ?
+       WHERE id = ? AND category = 'email_send' AND status = 'approved' AND consumed_at IS NULL
+         AND content_hash = ? AND resolved_at IS NOT NULL AND resolved_at >= ?
+    `).run(now, params.consumer, ref, params.id, params.contentHash, now - params.windowSeconds).changes
+    const event = db.prepare(`
+      INSERT INTO approval_events (approval_id, event, reason, actor, ref, created_at) VALUES (?, ?, ?, ?, ?, ?)
+    `)
+    const row = getApproval(params.id)
+    if (changes === 1) {
+      event.run(params.id, 'consumed', null, params.consumer, ref, now)
+      return { ok: true, approval: row }
+    }
+    let reason: ApprovalConsumeRefusal
+    if (!row) reason = 'not_found'
+    else if (row.category !== 'email_send') reason = 'wrong_category'
+    else if (row.consumed_at != null) reason = 'already_consumed'
+    else if (row.status !== 'approved') reason = 'not_approved'
+    else if (row.content_hash !== params.contentHash) reason = 'hash_mismatch'
+    else reason = 'expired'
+    if (row) event.run(params.id, 'consume_refused', reason, params.consumer, ref, now)
+    return { ok: false, reason, approval: row }
+  })()
+}
+
+export interface ApprovalEvent {
+  id: number
+  approval_id: string
+  event: 'consumed' | 'consume_refused' | 'consumed_backfill'
+  reason: string | null
+  actor: string | null
+  ref: string | null
+  created_at: number
+}
+
+export function listApprovalEvents(approvalId: string): ApprovalEvent[] {
+  return db.prepare('SELECT * FROM approval_events WHERE approval_id = ? ORDER BY id').all(approvalId) as ApprovalEvent[]
 }
 
 // --- OTel Distributed Tracing (card def5a189) ---
