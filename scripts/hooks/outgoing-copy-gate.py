@@ -897,7 +897,9 @@ def accentless_evidence(words):
 # calls these) fail-open as designed.
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from email_extract import collect_bash_body, collect_mcp_body  # noqa: E402
+    from email_extract import (collect_bash_body, collect_mcp_body,  # noqa: E402
+                               collect_ms365_envelope, MS365_SEND_RE,
+                               MS365_UNANCHORABLE_RE)
 except Exception as _extract_exc:  # noqa: BLE001 -- deliberate fail-closed stub
     _EXTRACT_ERR = repr(_extract_exc)
 
@@ -906,6 +908,17 @@ except Exception as _extract_exc:  # noqa: BLE001 -- deliberate fail-closed stub
 
     def collect_mcp_body(tool_input: dict):
         return ""
+
+    def collect_ms365_envelope(tool_input):
+        return {"text": "", "unreadable_reason":
+                f"az email_extract modul nem toltheto be ({_EXTRACT_ERR})"}
+
+    # Without the module the ms365 send names must still reach the
+    # fail-closed branch, so the stubs match them by name.
+    MS365_SEND_RE = re.compile(r"ms-?365.*__send-mail$", re.I)
+    MS365_UNANCHORABLE_RE = re.compile(
+        r"ms-?365.*__(send-draft-message|reply-mail-message|reply-all-mail-message"
+        r"|forward-mail-message|send-shared-mailbox-mail)$", re.I)
 
 
 # --- Telegram reply (GATETG816) ---------------------------------------------
@@ -1477,6 +1490,18 @@ def main():
         text, unreadable = collect_mcp_body(tool_input), None
     elif EMAIL_TOOL_RE.search(tool):
         text, unreadable = collect_mcp_body(tool_input), None
+    elif MS365_SEND_RE.search(tool):
+        # MS365SEND1014: a Graph message under body.Message; the same extractor
+        # the approval gate anchors, so the audited text is the approved text.
+        env = collect_ms365_envelope(tool_input)
+        text, unreadable = env["text"], env["unreadable_reason"]
+    elif MS365_UNANCHORABLE_RE.search(tool):
+        # id-addressed reply/forward/send-draft: our only text is the Comment.
+        body = tool_input.get("body") if isinstance(tool_input.get("body"), dict) else {}
+        comment = body.get("Comment") or body.get("comment") or ""
+        if not str(comment).strip():
+            sys.exit(0)  # nothing of ours to audit; the approval gate decides the send
+        text, unreadable = str(comment), None
     elif tool == "Bash":
         cmd = str(tool_input.get("command") or "")
         if not is_send_invocation(cmd):

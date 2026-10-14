@@ -30,6 +30,20 @@ describe('gateDecision', () => {
     }
   })
 
+  // MS365SEND1014 (Viktor F5): the ms365 server's Mail.Send tools are denied
+  // for sub-agents; its reads and drafts stay open.
+  it('blocks the ms365 Mail.Send tools, keeps its reads and drafts', () => {
+    for (const tool of ['send-mail', 'send-draft-message', 'reply-mail-message', 'reply-all-mail-message',
+      'forward-mail-message', 'send-shared-mailbox-mail']) {
+      const verdict = gateDecision(`mcp__ms365__${tool}`, { body: { Message: {} } })
+      expect(verdict.deny, tool).toBe(true)
+      expect(verdict.kind, tool).toBe('connector-send')
+    }
+    for (const tool of ['list-mail-messages', 'get-mail-message', 'create-draft-email', 'create-reply-draft']) {
+      expect(gateDecision(`mcp__ms365__${tool}`, {}).deny, tool).toBe(false)
+    }
+  })
+
   it('allows email READ/draft tools (only sending is gated)', () => {
     expect(gateDecision('mcp__server-gmail-autoauth-mcp__search_emails', {}).deny).toBe(false)
     expect(gateDecision('mcp__server-gmail-autoauth-mcp__read_email', {}).deny).toBe(false)
@@ -233,7 +247,9 @@ describe('injectEmailSendGate', () => {
     injectEmailSendGate(s)
     const hooks = (s.hooks as Record<string, unknown>).PreToolUse as Array<Record<string, unknown>>
     expect(hooks).toHaveLength(1)
-    expect(hooks[0].matcher).toBe('Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*')
+    expect(hooks[0].matcher).toBe('Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*'
+      + '|.*ms-?365.*__send-mail|.*ms-?365.*__send-draft-message|.*ms-?365.*__reply-mail-message'
+      + '|.*ms-?365.*__reply-all-mail-message|.*ms-?365.*__forward-mail-message|.*ms-?365.*__send-shared-mailbox-mail')
     const inner = (hooks[0].hooks as Array<{ command: string }>)[0]
     expect(inner.command).toContain('email-send-gate.mjs')
   })

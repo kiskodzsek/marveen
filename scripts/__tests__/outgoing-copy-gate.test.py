@@ -360,6 +360,26 @@ def main():
                                       rules_file=active)
             check(f"connector {tool} is a read: passes untouched (exit 0)", code, 0)
 
+        # MS365SEND1014: the ms365 send-mail body (body.Message) is audited
+        # like any letter, and an unreadable one blocks.
+        def ms365_payload(content, tool="mcp__ms365__send-mail", **msg_extra):
+            msg = {"subject": "Teszt", "body": {"contentType": "text", "content": content},
+                   "toRecipients": [{"emailAddress": {"address": "a@b.hu"}}], **msg_extra}
+            return {"tool_name": tool,
+                    "tool_input": {"body": {"Message": msg, "SaveToSentItems": True}}}
+        code, out, err = run_hook(ms365_payload(CLEAN_HU_OK), rules_file=active)
+        check("ms365 send-mail with clean copy passes (exit 0)", code, 0)
+        code, out, err = run_hook(ms365_payload(CLEAN_HU_OK + " — mégis."), rules_file=active)
+        check("ms365 send-mail with em dash blocks (exit 2)", code, 2)
+        code, out, err = run_hook(ms365_payload(CLEAN_HU_OK, attachments=[{"name": "x"}]),
+                                  rules_file=active)
+        check("ms365 send-mail with an unreadable shape blocks (exit 2)", code, 2)
+        code, out, err = run_hook({"tool_name": "mcp__ms365__forward-mail-message",
+                                   "tool_input": {"message-id": "1",
+                                                  "body": {"Comment": CLEAN_HU_OK + " — mégis."}}},
+                                  rules_file=active)
+        check("ms365 forward comment with em dash blocks (exit 2)", code, 2)
+
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
         sys.exit(1)

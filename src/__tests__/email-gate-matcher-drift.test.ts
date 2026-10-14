@@ -75,6 +75,15 @@ describe('main-agent email hook matchers cover the canonical EMAIL_GATE_MATCHER'
     expect(gateDecision('mcp__server-gmail-autoauth-mcp__read_email', {}, verified).deny).toBe(false)
   })
 
+  it('the canonical matcher reaches the ms365 Mail.Send tools (MS365SEND1014)', () => {
+    const full = new RegExp(`^(${EMAIL_GATE_MATCHER})$`)
+    for (const tool of ['send-mail', 'send-draft-message', 'reply-mail-message', 'reply-all-mail-message',
+      'forward-mail-message', 'send-shared-mailbox-mail']) {
+      expect(full.test(`mcp__ms365__${tool}`), tool).toBe(true)
+      expect(gateDecision(`mcp__ms365__${tool}`, {}).deny, tool).toBe(true)
+    }
+  })
+
   it('the canonical matcher reaches the claude.ai Gmail connector (GMAILCONNECTOR914)', () => {
     // Full-match regex against the qualified tool name, as the harness does.
     // The connector's segment is claude_ai_Gmail (one underscore before Gmail),

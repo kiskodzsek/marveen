@@ -832,8 +832,11 @@ export function hasThreadReplyCapability(name: string, capabilities: string[]): 
 // keeps the draft surface reachable even under a server name with no gmail in
 // it at all -- a name-keyed matcher goes blind on the next new name, so the
 // draft surface is pinned by the OPERATION too, not only by the server.
+// MS365SEND1014: the ms365 server's Mail.Send tools (send-mail, send-draft,
+// reply, reply-all, forward, shared-mailbox send) carry none of the words above.
 export const EMAIL_GATE_MATCHER =
-  'Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*'
+  'Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*' +
+  '|.*ms-?365.*__send-mail|.*ms-?365.*__send-draft-message|.*ms-?365.*__reply-mail-message|.*ms-?365.*__reply-all-mail-message|.*ms-?365.*__forward-mail-message|.*ms-?365.*__send-shared-mailbox-mail'
 
 // Does an existing PreToolUse array carry an email-gate entry whose matcher is
 // NOT the current one? Pure + exported: this is the predicate that lets
