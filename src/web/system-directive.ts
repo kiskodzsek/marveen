@@ -26,12 +26,13 @@
 // it a second time. 'delivered' is honest -- delivery is this module's own
 // injection, and a failed injection downgrades the row to 'failed' so a
 // wrapper replayed later points at a row that says "never injected".
-import { createAgentMessage, markMessageDelivered, markMessageFailed } from '../db.js'
+import { createSystemMessage, markMessageDelivered, markMessageFailed } from '../db.js'
 import { sendPromptToSession, type SendEmitGuard } from './agent-process.js'
 import { logger } from '../logger.js'
+import { SYSTEM_SENDER } from '../reserved-sender.js'
 
 /** The reserved sender id of directive rows. Never accepted by POST /api/messages. */
-export const SYSTEM_DIRECTIVE_SENDER = 'system'
+export const SYSTEM_DIRECTIVE_SENDER = SYSTEM_SENDER
 
 type SendPromptOpts = NonNullable<Parameters<typeof sendPromptToSession>[3]>
 type SendOutcome = Awaited<ReturnType<typeof sendPromptToSession>>
@@ -87,7 +88,7 @@ export async function sendSystemDirective(
 ): Promise<SendOutcome | 'aborted-guard'> {
   // Anchor first, inject second -- the recipient may verify the instant the
   // prompt lands. No await between the two DB statements (see module header).
-  const msg = createAgentMessage(SYSTEM_DIRECTIVE_SENDER, toAgent, text)
+  const msg = createSystemMessage(toAgent, text)
   markMessageDelivered(msg.id)
 
   const wrapped = `${systemDirectiveEnvelope(msg.id)}\n${text}`

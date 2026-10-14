@@ -24,7 +24,11 @@ vi.mock('../config.js', async (importOriginal) => ({
 }))
 vi.mock('../db.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../db.js')>()
-  return { ...actual, createAgentMessage: (...a: unknown[]) => mockCreateAgentMessage(...a) }
+  return {
+    ...actual,
+    createAgentMessage: (...a: unknown[]) => mockCreateAgentMessage(...a),
+    createSystemMessage: (...a: unknown[]) => mockCreateAgentMessage('system', ...a),
+  }
 })
 vi.mock('../web/agent-config.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../web/agent-config.js')>()),

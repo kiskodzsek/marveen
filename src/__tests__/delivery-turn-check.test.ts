@@ -21,6 +21,7 @@ vi.mock('../config.js', async (importOriginal) => ({
 }))
 vi.mock('../db.js', () => ({
   createAgentMessage: (...a: unknown[]) => mockCreateAgentMessage(...a),
+  createSystemMessage: (...a: unknown[]) => mockCreateAgentMessage('system', ...a),
 }))
 vi.mock('../env.js', () => ({ readEnvFile: () => ({}) }))
 // The default transcript resolver, pointed at the temp dir of each test.

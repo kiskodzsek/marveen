@@ -5,7 +5,7 @@ import { PROJECT_ROOT, MAIN_AGENT_ID, TELEGRAM_BOT_TOKEN } from '../../config.js
 import {
   consumeApproval,
   createApproval, getApproval, resolveApproval, listApprovals, expireTimedOutApprovals,
-  createAgentMessage, setApprovalTelegramMessageId,
+  createSystemMessage, setApprovalTelegramMessageId,
   type Approval,
 } from '../../db.js'
 import { logger } from '../../logger.js'
@@ -180,7 +180,7 @@ export function buildOwnerApprovalText(approval: Approval, withButtons = false):
 function fallbackInBand(approval: Approval, reason: string): void {
   if (approval.agent_id !== MAIN_AGENT_ID) return
   try {
-    createAgentMessage('system', MAIN_AGENT_ID, buildMainAgentApprovalMessage(approval, reason))
+    createSystemMessage(MAIN_AGENT_ID, buildMainAgentApprovalMessage(approval, reason))
   } catch (err) {
     logger.warn({ err, approvalId: approval.id }, 'approval in-band fallback failed too -- the request is only visible on the dashboard')
   }
@@ -237,7 +237,7 @@ function notifyMainAgent(approval: Approval): void {
     return
   }
   try {
-    createAgentMessage('system', MAIN_AGENT_ID, buildMainAgentApprovalMessage(approval))
+    createSystemMessage(MAIN_AGENT_ID, buildMainAgentApprovalMessage(approval))
   } catch (err) {
     // Non-fatal: the approval is created regardless; main-agent notification is best-effort
     logger.warn({ err, approvalId: approval.id }, 'Failed to notify main agent of approval request')
@@ -309,7 +309,7 @@ export function buildResolutionAlertText(approval: Approval, resolverMessageId: 
 function resolutionAlertFailed(approvalId: string, reason: string, err?: unknown): void {
   logger.warn({ err, approvalId, reason }, 'approval resolution alert NOT sent')
   try {
-    createAgentMessage('system', MAIN_AGENT_ID, `approval-riasztás nem ment ki: ${approvalId} (${reason})`)
+    createSystemMessage(MAIN_AGENT_ID, `approval-riasztás nem ment ki: ${approvalId} (${reason})`)
   } catch (msgErr) {
     logger.warn({ err: msgErr, approvalId }, 'approval resolution alert fallback message failed too')
   }

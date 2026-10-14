@@ -11,9 +11,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const calls: string[] = []
 
-const createAgentMessage = vi.fn((from: string, to: string, content: string) => {
+const createSystemMessage = vi.fn((to: string, content: string) => {
   calls.push('create')
-  return { id: 42, from_agent: from, to_agent: to, content, status: 'pending' }
+  return { id: 42, from_agent: 'system', to_agent: to, content, status: 'pending' }
 })
 const markMessageDelivered = vi.fn(() => { calls.push('delivered'); return true })
 const markMessageFailed = vi.fn(() => { calls.push('failed'); return true })
@@ -25,7 +25,7 @@ const sendPromptToSession = vi.fn(
   },
 )
 
-vi.mock('../db.js', () => ({ createAgentMessage, markMessageDelivered, markMessageFailed }))
+vi.mock('../db.js', () => ({ createSystemMessage, markMessageDelivered, markMessageFailed }))
 vi.mock('../web/agent-process.js', () => ({ sendPromptToSession }))
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
@@ -36,7 +36,7 @@ const { sendSystemDirective, systemDirectiveEnvelope, SYSTEM_DIRECTIVE_SENDER } 
 
 beforeEach(() => {
   calls.length = 0
-  createAgentMessage.mockClear()
+  createSystemMessage.mockClear()
   markMessageDelivered.mockClear()
   markMessageFailed.mockClear()
   sendPromptToSession.mockClear()
@@ -48,11 +48,12 @@ describe('sendSystemDirective', () => {
     const outcome = await sendSystemDirective('boni', 'agent-boni', '[CONTEXT-GUARD] test direktiva')
 
     expect(outcome).toBe('sent')
-    expect(createAgentMessage).toHaveBeenCalledWith(SYSTEM_DIRECTIVE_SENDER, 'boni', '[CONTEXT-GUARD] test direktiva')
+    expect(createSystemMessage).toHaveBeenCalledWith('boni', '[CONTEXT-GUARD] test direktiva')
+    expect(SYSTEM_DIRECTIVE_SENDER).toBe('system')
     // The row content is the RAW directive body -- the recipient compares the
     // text after the envelope line against it, so the envelope must NOT be
     // stored (it would never match).
-    const stored = createAgentMessage.mock.calls[0][2]
+    const stored = createSystemMessage.mock.calls[0][1]
     const injected = sendPromptToSession.mock.calls[0][1]
     expect(injected).toBe(`${systemDirectiveEnvelope(42)}\n${stored}`)
     expect(injected).toContain('msg_id:42')

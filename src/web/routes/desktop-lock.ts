@@ -1,6 +1,6 @@
 // Desktop-lock API. ONE call sets the state AND tells the fleet -- see
 // src/web/desktop-lock.ts for why the broadcast is not left to the caller.
-import { MAIN_AGENT_ID } from '../../config.js'
+import { MAIN_AGENT_ID, OWNER_NAME } from '../../config.js'
 import { createAgentMessage } from '../../db.js'
 import { logger } from '../../logger.js'
 import { listAgentNames } from '../agent-config.js'
@@ -10,6 +10,7 @@ import {
 } from '../desktop-lock.js'
 import { readBody, json } from '../http-helpers.js'
 import { isChannelInboundSender } from '../agent-message-wrap.js'
+import { isReservedSender, isPlainSenderId } from '../../reserved-sender.js'
 import type { RouteContext } from './types.js'
 
 // Sender label for lock traffic. Deliberately NOT the main agent's id: an
@@ -124,8 +125,22 @@ export type LockBody = {
  * file. Returns the refusal reason, or null when the owner is acceptable.
  */
 export function lockOwnerRefusal(owner: string): string | null {
-  if (!isChannelInboundSender(owner)) return null
-  return `owner '${owner.trim()}' is a channel identity -- it would frame this broadcast as an inbound owner message. Use your own agent id.`
+  // RESERVEDSENDER1013 (Viktor M1): the same reasoning one level up. `system`
+  // is the sender agents authenticate supervisory directives by; a lock owned
+  // by it would broadcast a from=system row with the caller's note to the fleet.
+  if (isReservedSender(owner)) {
+    return `owner '${owner.trim()}' is reserved for in-process system messages. Use your own agent id.`
+  }
+  if (isChannelInboundSender(owner)) {
+    return `owner '${owner.trim()}' is a channel identity -- it would frame this broadcast as an inbound owner message. Use your own agent id.`
+  }
+  // Viktor L1: the owner becomes from_agent, so it is held to the router's id
+  // alphabet -- a look-alike the check above does not know is refused here.
+  // The human owner's exact configured name may carry accents and is allowed.
+  if (!isPlainSenderId(owner) && owner.trim() !== OWNER_NAME.trim()) {
+    return `owner '${owner.trim()}' must be a plain id ([A-Za-z0-9_-]). Use your own agent id.`
+  }
+  return null
 }
 
 export function parseLockBody(data: Record<string, unknown>): LockBody {
@@ -172,7 +187,7 @@ export async function tryHandleDesktopLock(ctx: RouteContext): Promise<boolean> 
     // Before ANY state change or broadcast: see lockOwnerRefusal.
     const refusal = lockOwnerRefusal(owner)
     if (refusal) {
-      logger.warn({ owner }, 'desktop-lock: refused a channel identity as lock owner')
+      logger.warn({ owner }, 'desktop-lock: refused lock owner')
       json(res, { error: refusal }, 403)
       return true
     }

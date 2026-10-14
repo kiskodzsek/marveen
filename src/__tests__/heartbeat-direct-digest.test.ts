@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { initDatabase, getDb, hasHeartbeatDigestSince, hasAgentMessageStartingWith, createAgentMessage } from '../db.js'
+import { initDatabase, getDb, hasHeartbeatDigestSince, hasAgentMessageStartingWith, createAgentMessage, createSystemMessage } from '../db.js'
 import { MAIN_AGENT_ID } from '../config.js'
 import { renderHeartbeatMetricsBlock } from '../web/heartbeat-metrics-inject.js'
 import { parseKanbanClaims } from '../web/heartbeat-kanban-verify.js'
@@ -228,7 +228,7 @@ describe('(B) the DB side of the guard (real queries)', () => {
   it('the one-note-per-slot memory survives a restart: it is the queued row itself', () => {
     const marker = gapNoteMarker('hourly-heartbeat', SLOT)
     expect(hasAgentMessageStartingWith('system', MAIN_AGENT_ID, marker)).toBe(false)
-    createAgentMessage('system', MAIN_AGENT_ID, `${marker} A 12:00-s heartbeat-digest ...`)
+    createSystemMessage(MAIN_AGENT_ID, `${marker} A 12:00-s heartbeat-digest ...`)
     expect(hasAgentMessageStartingWith('system', MAIN_AGENT_ID, marker)).toBe(true)
     expect(hasAgentMessageStartingWith('system', MAIN_AGENT_ID, gapNoteMarker('hourly-heartbeat', SLOT + HOUR))).toBe(false)
     const n = (getDb().prepare("SELECT count(*) AS n FROM agent_messages WHERE content LIKE '[HB-HIANY]%'").get() as { n: number }).n
@@ -244,7 +244,7 @@ describe('(A)+(B) a direct send that did not land is caught by the guard (Marvee
       prevOccurrence: (_s, fromMs, toMs) => (slot > fromMs && slot <= toMs ? slot : null),
       digestSince: (agent, sinceMs) => hasHeartbeatDigestSince(agent, MAIN_AGENT_ID, sinceMs - 1000),
       noteExists: (m) => hasAgentMessageStartingWith('system', MAIN_AGENT_ID, m),
-      sendNote: (c) => { createAgentMessage('system', MAIN_AGENT_ID, c) },
+      sendNote: (c) => { createSystemMessage(MAIN_AGENT_ID, c) },
       slotLabel: () => 'slot',
     })
     const task = [{ name: 'hourly-heartbeat', agent: 'heartbeat', schedule: '0 * * * *' }]

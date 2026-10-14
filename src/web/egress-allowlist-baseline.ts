@@ -24,7 +24,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, appendFileSync, watchFile, unwatchFile } from 'node:fs'
 import { join } from 'node:path'
 import { MAIN_AGENT_ID } from '../config.js'
-import { createAgentMessage } from '../db.js'
+import { createSystemMessage } from '../db.js'
 import { logger } from '../logger.js'
 
 export const HISTORY_DIRNAME = 'egress-allowlist.history'
@@ -157,5 +157,5 @@ export function watchEgressAllowlistBaseline(
  */
 export function queueAllowlistReport(report: string): void {
   logger.warn({ report }, 'egress-allowlist.json changed')
-  createAgentMessage('system', MAIN_AGENT_ID, report)
+  createSystemMessage(MAIN_AGENT_ID, report)
 }

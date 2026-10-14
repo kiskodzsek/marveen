@@ -50,6 +50,7 @@ vi.mock('../db.js', () => ({
   markPendingFederatedFailed: (..._a: unknown[]) => 0,
   setMessageResult: (..._a: unknown[]) => true,
   createAgentMessage: (...a: unknown[]) => mockCreateAgentMessage(...a),
+  createSystemMessage: (...a: unknown[]) => mockCreateAgentMessage('system', ...a),
   countNewerMessagesFromSameSender: (..._a: unknown[]) => 0,
   stampMessageTrace: (..._a: unknown[]) => false,
   upsertOtelSpan: (..._a: unknown[]) => undefined,
