@@ -29,7 +29,7 @@
 // is a checked finite number, the page carries no link or URL of its own, and
 // the document has its own <meta> CSP with no image, font or connect source.
 
-import { closeSync, constants, fstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 
 export const FINANCE_MAX_FILE_BYTES = 1024 * 1024
@@ -95,6 +95,9 @@ export function resolveFinanceRoot(configured: string | undefined, projectRoot: 
   }
 }
 
+/** The subscriptions view's directory under the root (ELOFIZETES1014). It is not a company. */
+export const SUBSCRIPTIONS_DIR = 'elofizetesek'
+
 /** Company directory names: plain directories directly under the root, sorted, capped. */
 export function listCompanies(root: string): string[] {
   let entries
@@ -104,7 +107,7 @@ export function listCompanies(root: string): string[] {
     return []
   }
   return entries
-    .filter((e) => e.isDirectory() && COMPANY_RE.test(e.name))
+    .filter((e) => e.isDirectory() && COMPANY_RE.test(e.name) && e.name !== SUBSCRIPTIONS_DIR)
     .map((e) => e.name)
     .sort()
     .slice(0, FINANCE_MAX_COMPANIES)
@@ -356,6 +359,232 @@ export function loadCompany(root: string, id: string): CompanyData {
 
 export function loadAll(root: string): CompanyData[] {
   return listCompanies(root).map((id) => loadCompany(root, id))
+}
+
+/** Company id -> display name from each company's meta.json (nev | ceg); the id when there is none. */
+export function companyNames(root: string): Map<string, string> {
+  return new Map(listCompanies(root).map((id) => [id, loadMeta(join(root, id, 'meta.json')).meta.name ?? id]))
+}
+
+// ------------------------------------------------------- subscriptions (ELOFIZETES1014)
+//
+// <root>/elofizetesek/ holds the finance agent's subscription list (Juró, card
+// ef6f75ce; contract: that folder's README.md and docs/penzugy-ful.md):
+//   elofizetesek.csv   one row per item (provider, plan, company, monthly HUF, renewal, flags, source, verified)
+//   osszesito.csv      company x category: monthly total, estimate/uncertain parts, statement months, change
+//   havi_terheles.csv  company, month, category, actual charge (the trend)
+//   meta.json          generated, basis, sources, warnings, not included
+// Same reader rules as the company files: fixed names, no symlink, size and cell caps.
+
+const SUB_NOTE_MAX = 600
+const SUB_STATUSES = ['aktiv', 'uj', 'proba', 'ismeretlen', 'megszunt'] as const
+export type SubStatus = (typeof SUB_STATUSES)[number]
+export const SUB_FLAGS = ['duplikalt', 'atfedes', 'nem_hasznalt_gyanu', 'kozelgo_megujulas', 'megszunes_ellenorzendo', 'ellenorizendo'] as const
+const STATEMENT_COL_RE = /^kivonat_(\d{4})_(0[1-9]|1[0-2])_huf$/
+const CHANGE_COL_RE = /^valtozas_[a-z0-9_]{1,40}_huf$/
+
+export interface SubscriptionRow {
+  id: string
+  provider: string
+  plan: string
+  company: string
+  category: string
+  type: string
+  cycle: string
+  origAmount: string
+  currency: string
+  cycleHuf: number | null
+  /** null = the price is not known (shown as such, never as 0) */
+  monthlyHuf: number | null
+  monthlyEstimate: boolean
+  monthlyNote: string
+  fxSource: string
+  lastCharge: string
+  lastChargeHuf: number | null
+  renewal: string
+  renewalNote: string
+  trialEnd: string
+  status: SubStatus
+  usedBy: string
+  sourceType: string
+  source: string
+  /** known flag slugs, then any unknown one as given */
+  flags: string[]
+  note: string
+  verified: boolean
+  verifiedNote: string
+}
+
+export interface SubSummaryRow {
+  company: string
+  category: string
+  monthly: number
+  projected: number
+  uncertain: number
+  unknownCount: number
+  recurring: number
+  /** statement months in column order, e.g. [{month:'2026-08', amount}] */
+  statements: Array<{ month: string; amount: number }>
+  change: number | null
+}
+
+export interface SubChargeRow { company: string; month: string; category: string; amount: number; estimate: boolean }
+
+export interface SubMeta {
+  generated: string | null
+  basis: string | null
+  meaning: string | null
+  change: string | null
+  sources: string[]
+  notIncluded: string[]
+  warnings: string[]
+}
+
+export interface SubscriptionsData {
+  present: boolean
+  meta: SubMeta
+  metaErrors: string[]
+  items: FileResult<SubscriptionRow>
+  summary: FileResult<SubSummaryRow>
+  charges: FileResult<SubChargeRow>
+}
+
+/** An optional whole-forint amount: empty is null (unknown), anything else must be an integer. */
+function optAmount(raw: string | undefined, field: string, line: number, errors: string[]): number | null | undefined {
+  const v = (raw ?? '').trim()
+  if (v === '') return null
+  const n = amount(v, field, line, errors)
+  return n === null ? undefined : n
+}
+
+const mapSubscription: RowMapper<SubscriptionRow> = (c, line, errors) => {
+  const status = (c['statusz'] ?? '').trim().toLowerCase() as SubStatus
+  if (!SUB_STATUSES.includes(status)) { pushErr(errors, `${line}. sor: statusz csak ${SUB_STATUSES.join(', ')} lehet`); return null }
+  const cycleHuf = optAmount(c['ciklusdij_huf'], 'ciklusdij_huf', line, errors)
+  const monthlyHuf = optAmount(c['havi_huf'], 'havi_huf', line, errors)
+  const lastChargeHuf = optAmount(c['utolso_terheles_huf'], 'utolso_terheles_huf', line, errors)
+  if (cycleHuf === undefined || monthlyHuf === undefined || lastChargeHuf === undefined) return null
+  const monthlyNote = cap(c['havi_huf_jeloles'] ?? '')
+  const rawFlags = (c['jeloles'] ?? '').split(',').map((f) => cap(f, 40).toLowerCase()).filter(Boolean)
+  const flags = [...SUB_FLAGS.filter((f) => rawFlags.includes(f)), ...rawFlags.filter((f) => !(SUB_FLAGS as readonly string[]).includes(f))]
+  const verifiedRaw = cap(c['ellenorzott'] ?? '')
+  return {
+    id: cap(c['id'] ?? '', 64),
+    provider: cap(c['szolgaltato'] ?? '') || '?',
+    plan: cap(c['csomag'] ?? ''),
+    company: cap(c['ceg'] ?? '', 64) || '?',
+    category: cap(c['kategoria'] ?? '', 64),
+    type: cap(c['tipus'] ?? '', 64),
+    cycle: cap(c['ciklus'] ?? '', 64),
+    origAmount: cap(c['dij_eredeti'] ?? '', 32),
+    currency: cap(c['deviza'] ?? '', 32),
+    cycleHuf,
+    monthlyHuf,
+    // The contract: a "tipp..." note marks an estimate (a yearly fee / 12 and the like).
+    monthlyEstimate: /^tipp/i.test(monthlyNote),
+    monthlyNote,
+    fxSource: cap(c['arfolyam_forras'] ?? ''),
+    lastCharge: cap(c['utolso_terheles'] ?? ''),
+    lastChargeHuf,
+    renewal: cap(c['kovetkezo_megujulas'] ?? ''),
+    renewalNote: cap(c['megujulas_jeloles'] ?? ''),
+    trialEnd: cap(c['probaido_vege'] ?? ''),
+    status,
+    usedBy: cap(c['hasznalja'] ?? ''),
+    sourceType: cap(c['forras_tipus'] ?? '', 64),
+    source: cap(c['forras'] ?? '', SUB_NOTE_MAX),
+    flags,
+    note: cap(c['megjegyzes'] ?? '', SUB_NOTE_MAX),
+    // Only an explicit "igen..." counts as verified; empty or anything else is shown as not verified.
+    verified: /^igen\b/i.test(verifiedRaw),
+    verifiedNote: verifiedRaw,
+  }
+}
+
+/** The statement-month and change columns are named by month (kivonat_2026_09_huf), so they are found by pattern. */
+function summaryMapper(header: string[]): RowMapper<SubSummaryRow> {
+  const statementCols = header.filter((h) => STATEMENT_COL_RE.test(h)).sort()
+  const changeCol = header.find((h) => CHANGE_COL_RE.test(h))
+  return (c, line, errors) => {
+    const nums = ['elofizetes_havi_huf', 'ebbol_vetitett_tipp_huf', 'bizonytalan_havi_huf', 'ismetlodo_dij_havi_huf']
+      .map((f) => optAmount(c[f], f, line, errors))
+    const cnt = (c['ar_nem_ismert_db'] ?? '').trim()
+    if (cnt !== '' && !/^\d{1,6}$/.test(cnt)) { pushErr(errors, `${line}. sor: ar_nem_ismert_db nem nemnegatív egész`); return null }
+    const statements = statementCols.map((col) => {
+      const m = STATEMENT_COL_RE.exec(col)!
+      return { month: `${m[1]}-${m[2]}`, amount: optAmount(c[col], col, line, errors) }
+    })
+    const change = changeCol ? optAmount(c[changeCol], changeCol, line, errors) : null
+    if (nums.some((n) => n === undefined) || statements.some((s) => s.amount === undefined) || change === undefined) return null
+    return {
+      company: cap(c['ceg'] ?? '', 64) || '?',
+      category: cap(c['kategoria'] ?? '', 64),
+      monthly: nums[0] ?? 0,
+      projected: nums[1] ?? 0,
+      uncertain: nums[2] ?? 0,
+      unknownCount: cnt === '' ? 0 : Number(cnt),
+      recurring: nums[3] ?? 0,
+      statements: statements.map((s) => ({ month: s.month, amount: s.amount ?? 0 })),
+      change,
+    }
+  }
+}
+
+const mapCharge: RowMapper<SubChargeRow> = (c, line, errors) => {
+  const month = (c['honap'] ?? '').trim()
+  if (!MONTH_RE.test(month)) { pushErr(errors, `${line}. sor: honap nem ÉÉÉÉ-HH`); return null }
+  const amt = amount(c['terheles_huf'] ?? '', 'terheles_huf', line, errors)
+  const estimate = estimateOf(c['jeloles'], line, errors)
+  if (amt === null || estimate === undefined) return null
+  return { company: cap(c['ceg'] ?? '', 64) || '?', month, category: cap(c['kategoria'] ?? '', 64), amount: amt, estimate }
+}
+
+/** meta.json of the subscriptions folder; like readMeta, only these keys, as plain text. */
+export function readSubscriptionMeta(text: string): { meta: SubMeta; errors: string[] } {
+  const empty: SubMeta = { generated: null, basis: null, meaning: null, change: null, sources: [], notIncluded: [], warnings: [] }
+  let obj: unknown
+  try { obj = JSON.parse(text) } catch { return { meta: empty, errors: ['meta.json nem érvényes JSON'] } }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { meta: empty, errors: ['meta.json nem objektum'] }
+  const o = obj as Record<string, unknown>
+  const str = (v: unknown, max = MAX_META_TEXT): string | null => (typeof v === 'string' && v.trim() ? cap(v, max) : null)
+  const list = (v: unknown, max = 20): string[] =>
+    Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string' && s.trim() !== '').slice(0, max).map((s) => cap(s, MAX_META_TEXT)) : []
+  return {
+    meta: {
+      generated: str(o['keszult'], 64) ?? str(o['generalva'], 64),
+      basis: str(o['szemlelet']),
+      meaning: str(o['havi_osszeg_jelentese'], 2000),
+      change: str(o['valtozas']),
+      sources: list(o['forrasok']),
+      notIncluded: list(o['nem_szerepel']),
+      warnings: list(o['figyelmeztetesek']),
+    },
+    errors: [],
+  }
+}
+
+function loadCsvWith<T>(path: string, required: string[], mapperFor: (header: string[]) => RowMapper<T>): FileResult<T> {
+  // The header decides the mapper (month-named columns), so peek at it first; loadCsv re-reads the capped file.
+  const read = readCapped(path)
+  const header = read.ok ? (parseCsv(read.text)[0] ?? []).map((h) => h.trim().toLowerCase()) : []
+  return loadCsv(path, required, mapperFor(header))
+}
+
+export function loadSubscriptions(root: string): SubscriptionsData {
+  const dir = join(root, SUBSCRIPTIONS_DIR)
+  let isDir = false
+  try { isDir = lstatSync(dir).isDirectory() } catch { /* absent */ }
+  const none: FileResult<never> = { present: false, rows: [], errors: [] }
+  if (!isDir) {
+    return { present: false, meta: readSubscriptionMeta('{}').meta, metaErrors: [], items: none, summary: none, charges: none }
+  }
+  const metaRead = readCapped(join(dir, 'meta.json'), 64 * 1024)
+  const { meta, errors: metaErrors } = metaRead.ok ? readSubscriptionMeta(metaRead.text)
+    : metaRead.reason === 'missing' ? readSubscriptionMeta('{}') : { meta: readSubscriptionMeta('{}').meta, errors: ['meta.json nem olvasható'] }
+  const items = loadCsv(join(dir, 'elofizetesek.csv'), ['szolgaltato', 'ceg', 'kategoria', 'havi_huf', 'statusz'], mapSubscription)
+  const summary = loadCsvWith(join(dir, 'osszesito.csv'), ['ceg', 'kategoria', 'elofizetes_havi_huf'], summaryMapper)
+  const charges = loadCsv(join(dir, 'havi_terheles.csv'), ['ceg', 'honap', 'kategoria', 'terheles_huf'], mapCharge)
+  return { present: items.present || summary.present || charges.present, meta, metaErrors, items, summary, charges }
 }
 
 // ---------------------------------------------------------------- aggregation
@@ -798,25 +1027,248 @@ function renderCompany(c: CompanyData, t: Record<string, string>, lang: Lang): s
   return `<section>${parts.join('')}</section>`
 }
 
-const STYLE_LIGHT = '--fg:#1f2328;--muted:#656d76;--line:#d0d7de;--inc:#1a7f37;--cost:#cf222e;--neg:#cf222e;--tot:#0969da;--warn-bg:#fff8c5;--warn-fg:#4d2d00'
-const STYLE_DARK = '--fg:#e6edf3;--muted:#8d96a0;--line:#30363d;--inc:#3fb950;--cost:#f85149;--neg:#f85149;--tot:#58a6ff;--warn-bg:#3b2e00;--warn-fg:#f2cc60'
-
 export function renderFinancePage(companies: CompanyData[], opts: { lang: Lang; theme: Theme }): string {
   const t = L[opts.lang]
   const body = companies.length
     ? `<p class="meta">${escapeHtml(t.estimateNote!)}</p>` + companies.map((c) => renderCompany(c, t, opts.lang)).join('')
     : `<p class="meta">${escapeHtml(t.none!)}</p>`
+  return pageShell(t.title!, body, opts)
+}
+
+// ------------------------------------------------------- subscriptions rendering
+
+const SL: Record<Lang, Record<string, string>> = {
+  hu: {
+    title: 'Előfizetések', none: 'Az előfizetés-mappában még nincs adat.',
+    summary: 'Havi előfizetés cégenként', byCategory: 'Kategóriánként (havi Ft)', trend: 'Tényleges SaaS-terhelés havonta (kivonat)',
+    list: 'Tételek', company: 'Cég', category: 'Kategória', monthly: 'Havi díj', projected: 'ebből becslés',
+    uncertain: 'bizonytalan', unknownCount: 'ár nem ismert (db)', recurring: 'Ismétlődő díj (nem előfizetés)',
+    statement: 'Kivonat', change: 'Változás', provider: 'Szolgáltató', cycle: 'Ciklus', lastCharge: 'Utolsó terhelés',
+    renewal: 'Megújulás', status: 'Állapot', usedBy: 'Ki használja', flags: 'Jelölés', details: 'részletek',
+    priceUnknown: 'ár nem ismert', estimate: 'becslés', notVerified: 'nem ellenőrzött', trial: 'próbaidő vége',
+    origAmount: 'Eredeti díj', cycleHuf: 'Ciklusdíj', fx: 'Árfolyam', source: 'Forrás', note: 'Megjegyzés',
+    monthlyNote: 'Havi díj jelölése', renewalNote: 'Megújulás jelölése', verified: 'Ellenőrzés',
+    meaning: 'Mit jelent a havi összeg', recurringBadge: 'ismétlődő díj', usageBadge: 'használatalapú',
+    estimateNote: '~ és dőlt: becslés (pl. éves díj / 12). Az "ár nem ismert" nem nulla: ott nincs forint-összeg.',
+    otherCompanies: 'Cég nem ismert', all: 'Összesen',
+  },
+  en: {
+    title: 'Subscriptions', none: 'No data in the subscriptions folder yet.',
+    summary: 'Monthly subscriptions per company', byCategory: 'Per category (HUF a month)', trend: 'Actual SaaS charges per month (statements)',
+    list: 'Items', company: 'Company', category: 'Category', monthly: 'Monthly fee', projected: 'of which estimate',
+    uncertain: 'uncertain', unknownCount: 'price unknown (items)', recurring: 'Recurring fee (not a subscription)',
+    statement: 'Statement', change: 'Change', provider: 'Provider', cycle: 'Cycle', lastCharge: 'Last charge',
+    renewal: 'Renewal', status: 'Status', usedBy: 'Used by', flags: 'Flags', details: 'details',
+    priceUnknown: 'price unknown', estimate: 'estimate', notVerified: 'not verified', trial: 'trial ends',
+    origAmount: 'Original fee', cycleHuf: 'Fee per cycle', fx: 'Exchange rate', source: 'Source', note: 'Note',
+    monthlyNote: 'Monthly fee basis', renewalNote: 'Renewal basis', verified: 'Verification',
+    meaning: 'What the monthly sum means', recurringBadge: 'recurring fee', usageBadge: 'usage-based',
+    estimateNote: '~ and italic: estimate (e.g. yearly fee / 12). "Price unknown" is not zero: there is no HUF amount.',
+    otherCompanies: 'Company not known', all: 'Total',
+  },
+}
+
+/** Juró's fixed slugs (README.md of the folder). An unknown slug is shown as is. */
+const SUB_LABELS: Record<Lang, Record<string, Record<string, string>>> = {
+  hu: {
+    category: { ai: 'AI', felho_hosting: 'Felhő és hosting', szoftver: 'Szoftver', telefon: 'Telefon', domain: 'Domain', egyeb: 'Egyéb', osszesen: 'Összesen' },
+    status: { aktiv: 'aktív', uj: 'új', proba: 'próbaidő', ismeretlen: 'ismeretlen', megszunt: 'megszűnt' },
+    cycle: { havi: 'havi', eves: 'éves', negyedeves: 'negyedéves', hasznalat: 'használat szerint', feltoltes: 'feltöltés' },
+    flag: { duplikalt: 'duplikált', atfedes: 'átfedés', nem_hasznalt_gyanu: 'nem használt?', kozelgo_megujulas: 'közelgő megújulás',
+      megszunes_ellenorzendo: 'megszűnés ellenőrzendő', ellenorizendo: 'ellenőrizendő' },
+  },
+  en: {
+    category: { ai: 'AI', felho_hosting: 'Cloud and hosting', szoftver: 'Software', telefon: 'Phone', domain: 'Domain', egyeb: 'Other', osszesen: 'Total' },
+    status: { aktiv: 'active', uj: 'new', proba: 'trial', ismeretlen: 'unknown', megszunt: 'ended' },
+    cycle: { havi: 'monthly', eves: 'yearly', negyedeves: 'quarterly', hasznalat: 'by usage', feltoltes: 'top-up' },
+    flag: { duplikalt: 'duplicate', atfedes: 'overlap', nem_hasznalt_gyanu: 'unused?', kozelgo_megujulas: 'renewal soon',
+      megszunes_ellenorzendo: 'check if ended', ellenorizendo: 'to check' },
+  },
+}
+const SUB_CATEGORY_ORDER = ['ai', 'felho_hosting', 'szoftver', 'telefon', 'domain', 'egyeb']
+const SUB_STATUS_ORDER: Record<SubStatus, number> = { aktiv: 0, uj: 1, proba: 2, ismeretlen: 3, megszunt: 4 }
+/** Flags that ask for a decision are shown louder than "to check". */
+const LOUD_FLAGS = new Set(['duplikalt', 'atfedes', 'nem_hasznalt_gyanu', 'kozelgo_megujulas'])
+const SUM_COMPANY = 'osszes'
+const SUM_CATEGORY = 'osszesen'
+
+function subLabel(kind: string, slug: string, lang: Lang): string {
+  return SUB_LABELS[lang][kind]?.[slug] ?? slug
+}
+
+function companyLabel(id: string, names: Map<string, string>, t: Record<string, string>): string {
+  if (id === SUM_COMPANY) return t.all!
+  return names.get(id) ?? id
+}
+
+function badge(text: string, cls: string): string {
+  return `<span class="badge ${cls}">${escapeHtml(text)}</span>`
+}
+
+function moneyOrDash(n: number | null, estimate = false): string {
+  return n === null ? '<td class="num">-</td>' : numCell(n, estimate)
+}
+
+function subsSummary(rows: SubSummaryRow[], names: Map<string, string>, t: Record<string, string>): string {
+  const totals = rows.filter((r) => r.category === SUM_CATEGORY)
+  if (!totals.length) return ''
+  const months = totals[0]!.statements.map((s) => s.month)
+  const hasChange = totals.some((r) => r.change !== null)
+  const order = (id: string): number => (id === SUM_COMPANY ? 2 : names.has(id) ? 0 : 1)
+  const sorted = [...totals].sort((a, b) => order(a.company) - order(b.company) || a.company.localeCompare(b.company))
+  const head = `<tr><th>${escapeHtml(t.company!)}</th><th class="num">${escapeHtml(t.monthly!)}</th><th class="num">${escapeHtml(t.projected!)}</th>` +
+    `<th class="num">${escapeHtml(t.uncertain!)}</th><th class="num">${escapeHtml(t.unknownCount!)}</th><th class="num">${escapeHtml(t.recurring!)}</th>` +
+    months.map((m) => `<th class="num">${escapeHtml(t.statement!)} ${escapeHtml(m)}</th>`).join('') +
+    (hasChange ? `<th class="num">${escapeHtml(t.change!)}</th>` : '') + '</tr>'
+  const body = sorted.map((r) => `<tr${r.company === SUM_COMPANY ? ' class="sub"' : ''}><td>${escapeHtml(companyLabel(r.company, names, t))}</td>` +
+    numCell(r.monthly) + numCell(r.projected, r.projected !== 0) + numCell(r.uncertain) + `<td class="num">${r.unknownCount}</td>` + numCell(r.recurring) +
+    r.statements.map((s) => numCell(s.amount)).join('') + (hasChange ? moneyOrDash(r.change) : '') + '</tr>').join('')
+  return `<h3>${escapeHtml(t.summary!)}</h3><div class="wrap"><table class="wide"><thead>${head}</thead><tbody>${body}</tbody></table></div>`
+}
+
+function subsByCategory(rows: SubSummaryRow[], names: Map<string, string>, t: Record<string, string>, lang: Lang): string {
+  const body = rows.filter((r) => r.category !== SUM_CATEGORY)
+  if (!body.length) return ''
+  const companies = [...new Set(rows.map((r) => r.company))]
+    .sort((a, b) => (a === SUM_COMPANY ? 1 : 0) - (b === SUM_COMPANY ? 1 : 0) || a.localeCompare(b))
+  const cats = [...new Set(body.map((r) => r.category))]
+    .sort((a, b) => ((SUB_CATEGORY_ORDER.indexOf(a) + 1 || 99) - (SUB_CATEGORY_ORDER.indexOf(b) + 1 || 99)) || a.localeCompare(b))
+  const cell = (company: string, cat: string): string => {
+    const r = rows.find((x) => x.company === company && x.category === cat)
+    return r ? numCell(r.monthly, r.projected !== 0) : '<td class="num">-</td>'
+  }
+  const changeOf = (cat: string): string => {
+    const r = rows.find((x) => x.company === SUM_COMPANY && x.category === cat)
+    return r && r.change !== null ? numCell(r.change) : '<td class="num">-</td>'
+  }
+  const hasChange = rows.some((r) => r.company === SUM_COMPANY && r.change !== null)
+  return `<h3>${escapeHtml(t.byCategory!)}</h3><div class="wrap"><table><thead><tr><th>${escapeHtml(t.category!)}</th>${
+    companies.map((c) => `<th class="num">${escapeHtml(companyLabel(c, names, t))}</th>`).join('')}${
+    hasChange ? `<th class="num">${escapeHtml(t.change!)}</th>` : ''}</tr></thead><tbody>${
+    [...cats, SUM_CATEGORY].map((cat) => `<tr${cat === SUM_CATEGORY ? ' class="sub"' : ''}><td>${escapeHtml(subLabel('category', cat, lang))}</td>${
+      companies.map((c) => cell(c, cat)).join('')}${hasChange ? changeOf(cat) : ''}</tr>`).join('')
+  }</tbody></table></div>`
+}
+
+const SERIES_CLASS = ['s1', 's2', 's3', 's4']
+
+/** Grouped bars: per month, one bar per company (sum over categories). */
+function subsTrend(rows: SubChargeRow[], names: Map<string, string>, t: Record<string, string>): string {
+  if (!rows.length) return ''
+  const companies = [...new Set(rows.map((r) => r.company))].sort()
+  const months = [...new Set(rows.map((r) => r.month))].sort().slice(-12)
+  const sum = new Map<string, number>()
+  for (const r of rows) sum.set(`${r.company}\u0000${r.month}`, (sum.get(`${r.company}\u0000${r.month}`) ?? 0) + r.amount)
+  const W = 640, H = 200, pad = 28
+  const max = Math.max(1, ...[...sum.values()])
+  const slot = (W - pad) / months.length
+  const bw = Math.max(2, Math.min(16, (slot - 4) / companies.length))
+  const y = (v: number): number => H - pad - (Math.max(0, v) / max) * (H - 2 * pad)
+  const bars = months.map((m, i) => {
+    const x0 = pad + i * slot + slot / 2 - (bw * companies.length) / 2
+    const label = `<text class="ax" x="${coord(pad + i * slot + slot / 2)}" y="${H - 8}" text-anchor="middle">${escapeHtml(m.slice(2))}</text>`
+    return companies.map((c, j) => {
+      const v = sum.get(`${c}\u0000${m}`) ?? 0
+      return `<rect class="${SERIES_CLASS[j % SERIES_CLASS.length]}" x="${coord(x0 + j * bw)}" y="${coord(y(v))}" width="${coord(bw - 1)}" height="${coord(H - pad - y(v))}"/>`
+    }).join('') + label
+  }).join('')
+  const legend = companies.map((c, j) => `<span class="sw ${SERIES_CLASS[j % SERIES_CLASS.length]}"></span>${escapeHtml(companyLabel(c, names, t))}`).join(' ')
+  return `<h3>${escapeHtml(t.trend!)}</h3><svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(t.trend!)}">` +
+    `<line class="base" x1="${pad}" y1="${H - pad}" x2="${W}" y2="${H - pad}"/>` +
+    `<text class="ax" x="${pad}" y="${pad - 8}">${escapeHtml(fmtHuf(max))}</text>${bars}</svg><p class="legend">${legend}</p>`
+}
+
+function subItemRow(r: SubscriptionRow, t: Record<string, string>, lang: Lang): string {
+  const badges: string[] = []
+  if (!r.verified) badges.push(badge(t.notVerified!, 'b-unv'))
+  for (const f of r.flags) badges.push(badge(subLabel('flag', f, lang), LOUD_FLAGS.has(f) ? 'b-loud' : 'b-flag'))
+  const typeBadge = r.type === 'ismetlodo_dij' ? badge(t.recurringBadge!, 'b-type') : r.type === 'hasznalatalapu' ? badge(t.usageBadge!, 'b-type') : ''
+  const monthly = r.monthlyHuf === null
+    ? `<td class="num unk">${escapeHtml(t.priceUnknown!)}</td>`
+    : `<td class="num${r.monthlyEstimate ? ' est' : ''}">${r.monthlyEstimate ? '~' : ''}${escapeHtml(fmtHuf(r.monthlyHuf))}${
+      r.monthlyEstimate ? ` ${badge(t.estimate!, 'b-type')}` : ''}</td>`
+  const detail: Array<[string, string]> = [
+    [t.origAmount!, [r.origAmount, r.currency].filter(Boolean).join(' ')],
+    [t.cycleHuf!, r.cycleHuf === null ? '' : fmtHuf(r.cycleHuf)],
+    [t.monthlyNote!, r.monthlyNote],
+    [t.fx!, r.fxSource],
+    [t.lastCharge!, r.lastChargeHuf === null ? '' : fmtHuf(r.lastChargeHuf)],
+    [t.renewalNote!, r.renewalNote],
+    [t.source!, [r.sourceType, r.source].filter(Boolean).join(': ')],
+    [t.verified!, r.verifiedNote],
+    [t.note!, r.note],
+  ].filter((d): d is [string, string] => d[1] !== '')
+  const details = detail.length
+    ? `<details><summary>${escapeHtml(t.details!)}</summary><dl>${detail.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join('')}</dl></details>`
+    : ''
+  const renewal = [r.renewal, r.trialEnd ? `${t.trial!}: ${r.trialEnd}` : ''].filter(Boolean).join('; ')
+  const cls = [r.status === 'megszunt' ? 'ended' : '', r.verified ? '' : 'unv'].filter(Boolean).join(' ')
+  return `<tr${cls ? ` class="${cls}"` : ''}><td><strong>${escapeHtml(r.provider)}</strong>${r.plan ? `<div class="plan">${escapeHtml(r.plan)}</div>` : ''}${details}</td>${monthly}` +
+    `<td>${escapeHtml(subLabel('category', r.category, lang))}${typeBadge ? ` ${typeBadge}` : ''}</td>` +
+    `<td>${escapeHtml(subLabel('cycle', r.cycle, lang))}</td>` +
+    `<td>${escapeHtml(r.lastCharge || '-')}</td><td>${escapeHtml(renewal || '-')}</td>` +
+    `<td>${escapeHtml(subLabel('status', r.status, lang))}</td><td>${escapeHtml(r.usedBy || '-')}</td><td>${badges.join(' ')}</td></tr>`
+}
+
+function subsList(rows: SubscriptionRow[], names: Map<string, string>, t: Record<string, string>, lang: Lang): string {
+  if (!rows.length) return ''
+  // Known companies first (in name order), then any other value (e.g. "nem ismert") as its own group, never dropped.
+  const groups = [...new Set(rows.map((r) => r.company))]
+    .sort((a, b) => (names.has(a) ? 0 : 1) - (names.has(b) ? 0 : 1) || a.localeCompare(b))
+  // The monthly fee is the second column and the provider column sticks: on a phone the
+  // table scrolls sideways, and the fee and the name must stay in view (2026-10-14 screen check).
+  const head = `<tr><th>${escapeHtml(t.provider!)}</th><th class="num">${escapeHtml(t.monthly!)}</th><th>${escapeHtml(t.category!)}</th>` +
+    `<th>${escapeHtml(t.cycle!)}</th><th>${escapeHtml(t.lastCharge!)}</th><th>${escapeHtml(t.renewal!)}</th>` +
+    `<th>${escapeHtml(t.status!)}</th><th>${escapeHtml(t.usedBy!)}</th><th>${escapeHtml(t.flags!)}</th></tr>`
+  const body = groups.map((g) => {
+    const items = rows.filter((r) => r.company === g).sort((a, b) =>
+      SUB_STATUS_ORDER[a.status] - SUB_STATUS_ORDER[b.status] ||
+      (b.monthlyHuf ?? -1) - (a.monthlyHuf ?? -1) || a.provider.localeCompare(b.provider))
+    const label = names.has(g) ? names.get(g)! : `${g} (${t.otherCompanies!})`
+    return `<tr class="prod"><th colspan="9"><span class="stick">${escapeHtml(label)}</span></th></tr>` + items.map((r) => subItemRow(r, t, lang)).join('')
+  }).join('')
+  return `<h3>${escapeHtml(t.list!)}</h3><div class="wrap"><table class="wide items"><thead>${head}</thead><tbody>${body}</tbody></table></div>`
+}
+
+export function renderSubscriptionsPage(data: SubscriptionsData, names: Map<string, string>, opts: { lang: Lang; theme: Theme }): string {
+  const t = SL[opts.lang]
+  const ft = L[opts.lang]
+  if (!data.present) return pageShell(t.title!, `<p class="meta">${escapeHtml(t.none!)}</p>`, opts)
+  const m = data.meta
+  const parts: string[] = [`<h2>${escapeHtml(t.title!)}</h2>`]
+  for (const w of m.warnings) parts.push(`<p class="warn">${escapeHtml(ft.warnings!)}: ${escapeHtml(w)}</p>`)
+  if (m.generated) parts.push(`<p class="meta">${escapeHtml(ft.generated!)}: ${escapeHtml(m.generated)}</p>`)
+  if (m.basis) parts.push(`<p class="basis">${escapeHtml(ft.basis!)}: ${escapeHtml(m.basis)}</p>`)
+  if (m.meaning) parts.push(`<details class="meta"><summary>${escapeHtml(t.meaning!)}</summary><p>${escapeHtml(m.meaning)}</p></details>`)
+  parts.push(`<p class="meta">${escapeHtml(t.estimateNote!)}</p>`, errorsBlock('meta.json', data.metaErrors, ft))
+  if (data.summary.present) {
+    parts.push(subsSummary(data.summary.rows, names, t), subsByCategory(data.summary.rows, names, t, opts.lang))
+    if (m.change) parts.push(`<p class="meta">${escapeHtml(m.change)}</p>`)
+    parts.push(errorsBlock('osszesito.csv', data.summary.errors, ft))
+  }
+  if (data.charges.present) parts.push(subsTrend(data.charges.rows, names, t), errorsBlock('havi_terheles.csv', data.charges.errors, ft))
+  if (data.items.present) parts.push(subsList(data.items.rows, names, t, opts.lang), errorsBlock('elofizetesek.csv', data.items.errors, ft))
+  if (m.sources.length) parts.push(`<p class="meta">${escapeHtml(ft.sources!)}: ${m.sources.map(escapeHtml).join('; ')}</p>`)
+  if (m.notIncluded.length) parts.push(`<p class="meta">${escapeHtml(ft.notIncluded!)}: ${m.notIncluded.map(escapeHtml).join('; ')}</p>`)
+  return pageShell(t.title!, `<section>${parts.join('')}</section>`, opts)
+}
+
+const STYLE_LIGHT = '--stick:#faf9f5;--fg:#1f2328;--muted:#656d76;--line:#d0d7de;--inc:#1a7f37;--cost:#cf222e;--neg:#cf222e;--tot:#0969da;--warn-bg:#fff8c5;--warn-fg:#4d2d00;--s1:#0969da;--s2:#bf8700;--s3:#8250df;--s4:#1a7f37;--badge:#eaeef2;--loud-bg:#ffebe9;--loud-fg:#a40e26'
+const STYLE_DARK = '--stick:#141413;--fg:#e6edf3;--muted:#8d96a0;--line:#30363d;--inc:#3fb950;--cost:#f85149;--neg:#f85149;--tot:#58a6ff;--warn-bg:#3b2e00;--warn-fg:#f2cc60;--s1:#58a6ff;--s2:#d29922;--s3:#a371f7;--s4:#3fb950;--badge:#30363d;--loud-bg:#4c1d24;--loud-fg:#ffa198'
+
+function pageShell(title: string, body: string, opts: { lang: Lang; theme: Theme }): string {
   const vars = opts.theme === 'dark' ? STYLE_DARK : STYLE_LIGHT
   return `<!doctype html><html lang="${opts.lang}"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width, initial-scale=1">` +
     `<meta http-equiv="Content-Security-Policy" content="${escapeHtml(FINANCE_DOC_CSP)}">` +
-    `<title>${escapeHtml(t.title!)}</title><style>
+    `<title>${escapeHtml(title)}</title><style>
 :root{${vars}}
 body{margin:0;padding:16px;background:transparent;color:var(--fg);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 section{margin:0 0 36px}h2{margin:0 0 4px;font-size:20px}h3{margin:20px 0 8px;font-size:15px}
 .meta{color:var(--muted);margin:0 0 6px}.basis{margin:0 0 6px;font-weight:600}
 .warn{background:var(--warn-bg);color:var(--warn-fg);padding:6px 10px;border-radius:6px;margin:0 0 8px;font-weight:600}
 table{border-collapse:collapse;width:100%;max-width:820px;margin:4px 0}
-th,td{border-bottom:1px solid var(--line);padding:4px 8px;text-align:left}
+th,td{border-bottom:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
 .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.neg{color:var(--neg)}
 .est{font-style:italic}tr.gap td{color:var(--muted)}.gaptxt{text-align:center;font-style:italic}
 tr.sub th,tr.sub td,tfoot th{font-weight:600}tr.prod th{padding-top:12px;border-bottom:2px solid var(--line)}
@@ -831,5 +1283,16 @@ polyline{fill:none;stroke-width:2}polyline.tot{stroke:var(--tot)}polyline.dash{s
 .events{margin:0 0 8px;padding-left:20px;color:var(--muted)}
 .errs{color:var(--neg);font-size:12px;margin:4px 0}
 details.meta summary{cursor:default}
+.wrap{max-width:100%;overflow-x:auto}table.wide{max-width:none;min-width:720px}table.items{min-width:980px}
+.s1{fill:var(--s1)}.s2{fill:var(--s2)}.s3{fill:var(--s3)}.s4{fill:var(--s4)}
+.sw.s1{background:var(--s1)}.sw.s2{background:var(--s2)}.sw.s3{background:var(--s3)}.sw.s4{background:var(--s4)}
+.badge{display:inline-block;padding:0 6px;border-radius:9px;background:var(--badge);font-size:11px;font-style:normal;white-space:nowrap;margin:1px 0}
+.b-loud,.b-unv{background:var(--loud-bg);color:var(--loud-fg);font-weight:600}
+.plan{color:var(--muted);font-size:12px}.unk{color:var(--muted);font-style:italic}
+tr.ended td{color:var(--muted)}tr.unv td:first-child{box-shadow:inset 3px 0 0 var(--loud-fg)}
+.items details{font-size:12px;color:var(--muted)}.items dl{margin:4px 0;display:grid;grid-template-columns:max-content 1fr;gap:2px 8px}
+.items td:first-child,.items thead th:first-child{position:sticky;left:0;z-index:1;background:var(--stick);min-width:150px;max-width:180px}
+.items .stick{position:sticky;left:8px}
+.items dt{font-weight:600}.items dd{margin:0;overflow-wrap:anywhere}
 </style></head><body>${body}</body></html>`
 }

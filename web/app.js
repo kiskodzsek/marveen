@@ -18761,6 +18761,16 @@ fetch('/api/finance/config')
 
 document.getElementById('refreshFinanceBtn')?.addEventListener('click', () => loadFinance())
 
+// ELOFIZETES1014: the overview or the subscriptions view (the server's ?view=). Only these two values ever reach the URL.
+let financeView = 'overview'
+document.querySelectorAll('#financeTabNav [data-finance-view]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    financeView = btn.getAttribute('data-finance-view') === 'elofizetesek' ? 'elofizetesek' : 'overview'
+    document.querySelectorAll('#financeTabNav [data-finance-view]').forEach((b) => b.classList.toggle('active', b === btn))
+    loadFinance()
+  })
+})
+
 function loadFinance() {
   const box = document.getElementById('financeContent')
   if (!box) return
@@ -18768,7 +18778,7 @@ function loadFinance() {
   const theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light'
   const lang = (window._lang || 'hu') === 'en' ? 'en' : 'hu'
   const xhr = new XMLHttpRequest()
-  xhr.open('GET', `/api/finance/view?lang=${lang}&theme=${theme}`)
+  xhr.open('GET', `/api/finance/view?lang=${lang}&theme=${theme}&view=${financeView}`)
   xhr.withCredentials = true
   xhr.onload = () => {
     if (xhr.status === 200) {
