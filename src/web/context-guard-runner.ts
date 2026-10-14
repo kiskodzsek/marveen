@@ -16,7 +16,7 @@ import {
   clearSaturationBannerOverride,
 } from './agent-process.js'
 import { sendSystemDirective } from './system-directive.js'
-import { urgentEmitRefusal } from './message-router.js'
+import { urgentEmitRefusal, setDeliveryHoldCheck } from './message-router.js'
 import { notifyChannel } from '../notify.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectPaneState, paneShowsContextSaturation, paneShowsContextSaturationHardError } from '../pane-state.js'
@@ -804,6 +804,10 @@ export function getHardGuardPhase(name: string): string {
 }
 
 export function startContextGuardRunner(): NodeJS.Timeout {
+  // GUARDHOLD1013: while an agent is asked for its handoff, the router keeps new
+  // messages pending so the pane can go idle and the restart can happen (see
+  // shouldHoldForGuard in message-router.ts).
+  setDeliveryHoldCheck((name) => getHardGuardPhase(name) === 'await-handoff' ? 'context-guard await-handoff' : null)
   let tickRunning = false
   async function sweep() {
     // Re-entrancy guard: checkAgent's 'restart' action now awaits a real

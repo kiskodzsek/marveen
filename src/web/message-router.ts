@@ -342,6 +342,55 @@ export function shouldAbandon(sessionExists: boolean, ageMs: number, windowMs: n
   return !sessionExists && ageMs > windowMs
 }
 
+// ---- Hold delivery while the context-guard waits for a handoff (GUARDHOLD1013) ----
+// The hard context-guard asks a near-full agent to write HANDOFF.md and then waits
+// (await-handoff) for an idle pane before restarting it; neither the hard threshold
+// nor the handoff timeout may cut a live turn. This router did not know about that
+// phase and kept injecting new inter-agent messages, so the agent never went idle:
+// measured 2026-10-13, Dave wrote his handoff within a minute, then worked 7 more
+// prompts for 14 minutes (84% -> 131% of limitTokens); Pixel took 14 prompts over
+// 25 minutes (72% -> 149%). Every extra turn re-reads the whole saturated context,
+// and the work done after the handoff is exactly what the handoff does not cover.
+//
+// While the phase is await-handoff, a message stays PENDING and the fresh session
+// gets it after the restart -- which also closes the restart-window loss (a message
+// delivered into the dying session's last minutes). `system` rows are exempt: the
+// guard's own directives (handoff refresh, resume) ride that sender.
+//
+// The guard registers the check (setDeliveryHoldCheck) instead of this module
+// importing the guard runner: the runner already imports this module, and an
+// unregistered check means no hold -- today's behavior, never a stuck queue.
+// GUARD_HOLD_MAX_MS is the fail-open cap for a phase that never ends (a bug, or a
+// guard that died mid-sequence): the await-handoff deadline is 20 minutes and the
+// restart follows on the next 5-minute sweep with an idle pane, so 30 minutes
+// covers the designed path and a held row is delivered rather than lost after it.
+export const GUARD_HOLD_MAX_MS = 30 * 60 * 1000
+let deliveryHoldCheck: ((agent: string) => string | null) | null = null
+const guardHeldSince = new Map<number, number>()  // msg id -> first tick it was held
+const guardHoldCapLogged = new Set<number>()
+
+// Drop bookkeeping for rows that left the queue while held or over the cap (they
+// never come back to the check that would delete them). Called once per tick.
+function pruneGuardHolds(nowMs: number): void {
+  for (const [id, since] of guardHeldSince) {
+    if (nowMs - since > 2 * GUARD_HOLD_MAX_MS) {
+      guardHeldSince.delete(id)
+      guardHoldCapLogged.delete(id)
+    }
+  }
+}
+
+export function setDeliveryHoldCheck(check: ((agent: string) => string | null) | null): void {
+  deliveryHoldCheck = check
+}
+
+export function shouldHoldForGuard(
+  holdReason: string | null, fromAgent: string, heldSinceMs: number | undefined, nowMs: number, maxMs: number,
+): boolean {
+  if (holdReason == null || fromAgent === 'system') return false
+  return heldSinceMs === undefined || nowMs - heldSinceMs < maxMs
+}
+
 // ---- Distributed trace context (card def5a189) ------------------------------
 // In-memory map of the last trace context delivered TO each agent. When the
 // agent subsequently sends a new message (no explicit trace_id), the router
@@ -562,6 +611,7 @@ export async function runMessageRouterTick(): Promise<void> {
     for (const m of allPending) (isQualifiedId(m.to_agent) ? federatedPending : localPending).push(m)
     const pending = selectTickWindow(localPending, MAX_MESSAGES_PER_TICK, MAIN_AGENT_ID)
     const now = Date.now()
+    pruneGuardHolds(now)
     // ---- update absent/present tracking for all receivers in this tick ----
     // Rebuild the stuck-detector's view of which agents are absent RIGHT NOW.
     // Shared across all messages to the same agent (one sessionExistsOnHost call
@@ -718,6 +768,32 @@ export async function runMessageRouterTick(): Promise<void> {
           routerLoggedMisses.add(msg.id)
         }
         continue
+      }
+
+      // GUARDHOLD1013: see shouldHoldForGuard. Placed after the absent-session
+      // gates (a held row's session exists: await-handoff stands down when the
+      // agent stops) and before the readiness gate, so a held row does not feed
+      // the stuck-session escalation either.
+      {
+        const holdReason = deliveryHoldCheck ? deliveryHoldCheck(msg.to_agent) : null
+        const heldSince = guardHeldSince.get(msg.id)
+        if (shouldHoldForGuard(holdReason, msg.from_agent, heldSince, now, GUARD_HOLD_MAX_MS)) {
+          if (heldSince === undefined) {
+            guardHeldSince.set(msg.id, now)
+            logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, holdReason },
+              'message-router: holding delivery until the context-guard restart')
+          }
+          continue
+        }
+        if (holdReason == null) {
+          guardHeldSince.delete(msg.id)
+        } else if (heldSince !== undefined && !guardHoldCapLogged.has(msg.id)) {
+          // Over the cap: the entry is KEPT, so a row that is still not deliverable
+          // (busy pane) is not re-held for another full cap on the next tick.
+          guardHoldCapLogged.add(msg.id)
+          logger.warn({ id: msg.id, to: msg.to_agent, holdReason, heldMs: now - heldSince },
+            'message-router: guard hold exceeded its cap -- delivering anyway')
+        }
       }
 
       if (!worksourceServing && !(await isSessionReadyForPrompt(session, host))) {
