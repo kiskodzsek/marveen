@@ -236,19 +236,33 @@ def _install_dir(state_dir=None):
     ]
     if state_dir:
         parts = os.path.abspath(state_dir).split(os.sep)
+        # The exact layouts first. The bare "last agents segment" guess is only
+        # a fallback: for a tree that itself sits under some .../agents/...
+        # directory it lands on an unrelated install above it.
+        if len(parts) >= 3 and parts[-3:-1] == [".claude", "channels"]:
+            base = parts[:-3]
+            if len(base) >= 2 and base[-2] == "agents":
+                candidates.append(os.sep.join(base[:-2]) or os.sep)
+            candidates.append(os.sep.join(base) or os.sep)
         if "agents" in parts:
             candidates.append(os.sep.join(parts[:len(parts) - 1 - parts[::-1].index("agents")]) or os.sep)
-        if len(parts) >= 3 and parts[-3:-1] == [".claude", "channels"]:
-            candidates.append(os.sep.join(parts[:-3]) or os.sep)
     for c in candidates:
         if _is_install_dir(c):
             return c
     return None
 
 
-def _agent_from_state_dir(state_dir, main_agent_id):
-    """Agent id from the channel state_dir: the <name> in .../agents/<name>/...,
-    otherwise the main agent (its state_dir has no agents/ segment)."""
+def _agent_from_state_dir(state_dir, main_agent_id, install=None):
+    """Agent id from the channel state_dir: the <name> in <install>/agents/<name>/...,
+    otherwise the main agent. Read relative to the install root when it is
+    known: an `agents` directory ABOVE the install (a checkout under
+    .../agents/<someone>/repos/...) is not a sub-agent, and the last-segment
+    guess below would book the main agent's reply under that name."""
+    if install:
+        rel = os.path.relpath(os.path.abspath(state_dir), os.path.abspath(install)).split(os.sep)
+        if len(rel) >= 2 and rel[0] == "agents":
+            return rel[1]
+        return main_agent_id
     parts = os.path.abspath(state_dir).split(os.sep)
     if "agents" in parts:
         i = len(parts) - 1 - parts[::-1].index("agents")
@@ -274,7 +288,7 @@ def _log_spoken_reply(state_dir, chat_id, text, message_id):
             sys.path.insert(0, hooks)
         import ledger_lib
         ledger_lib.log_outbound(
-            _agent_from_state_dir(state_dir, ledger_lib.main_agent_id()), str(chat_id),
+            _agent_from_state_dir(state_dir, ledger_lib.main_agent_id(), install), str(chat_id),
             "[voice] " + (text[:400] if text else ""), message_id,
         )
         return True
