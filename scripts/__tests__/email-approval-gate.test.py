@@ -835,7 +835,12 @@ with tempfile.TemporaryDirectory() as td:
             ("a zero-width character in the name", ms365_named("a@b.hu", name="Bal\u200bazs")),
             ("a comma in the name", ms365_named("evil@x.hu", name="Balazs, Patrik")),
             ("an @ in the name", ms365_named("evil@x.hu", name="balazs@myshp.hu")),
-            ("a line separator in the name", ms365_named("a@b.hu", name="Balazs\u2028Bcc"))):
+            ("a line separator in the name", ms365_named("a@b.hu", name="Balazs\u2028Bcc")),
+            # I9 (Viktor): fullwidth forms read as , @ < > to the approver.
+            ("a fullwidth @ in the name", ms365_named("evil@x.hu", name="balazs\uff20myshp.hu")),
+            ("a fullwidth comma in the name", ms365_named("evil@x.hu", name="Balazs\uff0c Patrik")),
+            ("fullwidth angle brackets in the name",
+             ms365_named("evil@x.hu", name="Balazs \uff1cbalazs\uff1e"))):
         code, _, err = run_gate(store, payload)
         check(f"G2: {label} is unreadable -> DENIED",
               code == 2 and "nem horgonyozhato" in err, f"exit={code} err={err[:160]!r}")

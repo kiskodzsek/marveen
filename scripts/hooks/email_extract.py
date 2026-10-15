@@ -317,9 +317,12 @@ _MS365_NAME_BAD_CHARS = frozenset(",@<>")
 _MS365_NAME_BAD_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
+# I9 (Viktor): a compatibility form reads as its ASCII twin (fullwidth U+FF20
+# "＠", U+FF0C "，", U+FF1C "＜"), so the name is checked in its NFKC form too.
 def _ms365_name_bad(name):
     return any(ch in _MS365_NAME_BAD_CHARS
-               or unicodedata.category(ch) in _MS365_NAME_BAD_CATEGORIES for ch in name)
+               or unicodedata.category(ch) in _MS365_NAME_BAD_CATEGORIES
+               for ch in name + unicodedata.normalize("NFKC", name))
 
 
 def _ms365_recipients(raw, field):
