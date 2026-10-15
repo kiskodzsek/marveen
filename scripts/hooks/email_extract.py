@@ -23,6 +23,7 @@ golden captured from the pre-move code -- scripts/__tests__/email-extract-parity
 import json
 import os
 import re
+import unicodedata
 
 def collect_bash_body(cmd: str):
     """Return (text, unreadable_reason). text is '' when nothing was recovered."""
@@ -306,8 +307,19 @@ _MS365_RECIPIENT_FIELDS = (("to", "toRecipients"), ("cc", "ccRecipients"),
 # address through an RFC comment -- the gate would then judge a string other
 # than the one Exchange receives. The name may not carry a control character or
 # angle brackets: it is shown to the approver next to the address.
+# G2b (Viktor, CWE-451/176): the approver must see what Exchange receives. The
+# address is printable ASCII only (no zero-width, no homoglyph, no accented
+# local part), and the name carries no format/control/separator character (bidi
+# override, zero-width) and no , @ < > that could read as a second address.
 _MS365_ADDR_RE = re.compile(r'^[^\s<>(),;:"\[\]\\]+@[^\s<>(),;:"\[\]\\]+$')
-_MS365_NAME_BAD_RE = re.compile(r"[\x00-\x1f\x7f<>]")
+_MS365_ADDR_ASCII_RE = re.compile(r"^[\x21-\x7e]+$")
+_MS365_NAME_BAD_CHARS = frozenset(",@<>")
+_MS365_NAME_BAD_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
+def _ms365_name_bad(name):
+    return any(ch in _MS365_NAME_BAD_CHARS
+               or unicodedata.category(ch) in _MS365_NAME_BAD_CATEGORIES for ch in name)
 
 
 def _ms365_recipients(raw, field):
@@ -330,11 +342,13 @@ def _ms365_recipients(raw, field):
         if not isinstance(addr, str) or not addr.strip() \
                 or (name is not None and not isinstance(name, str)):
             return [], [], f"a {field} egy elemeben nincs olvashato cim"
-        if not _MS365_ADDR_RE.match(addr):
-            return [], [], (f"a {field} egy cime nem csupasz e-mail-cim ({addr[:60]!r}); "
-                            "komment, nev, tobb cim vagy szokoz nem lehet benne")
-        if name is not None and _MS365_NAME_BAD_RE.search(name):
-            return [], [], f"a {field} egy neveben vezerlokarakter vagy <> van"
+        if not _MS365_ADDR_RE.match(addr) or not _MS365_ADDR_ASCII_RE.match(addr):
+            return [], [], (f"a {field} egy cime nem csupasz, ASCII e-mail-cim ({addr[:60]!r}); "
+                            "komment, nev, tobb cim, szokoz, ekezet vagy lathatatlan "
+                            "karakter nem lehet benne")
+        if name is not None and _ms365_name_bad(name):
+            return [], [], (f"a {field} egy neveben vezerlo-, formazo- vagy lathatatlan "
+                            "karakter, vagy , @ < > van")
         out.append(f"{name} <{addr}>" if name else addr)
         addrs.append(addr)
     return out, addrs, None

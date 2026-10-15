@@ -825,7 +825,17 @@ with tempfile.TemporaryDirectory() as td:
             ("a space", ms365_named("a @b.hu")),
             ("a comment in the cc", ms365_named("gazda@pelda.hu (x@y.hu)", field="ccRecipients")),
             ("a newline in the name", ms365_named("a@b.hu", name="Kedves\nBcc: x@y.hu")),
-            ("angle brackets in the name", ms365_named("evil@x.hu", name="Balazs <balazs@myshp.hu>"))):
+            ("angle brackets in the name", ms365_named("evil@x.hu", name="Balazs <balazs@myshp.hu>")),
+            # G2b (Viktor, CWE-451/176): what the approver reads must be what
+            # Exchange receives.
+            ("a zero-width character after the address", ms365_named("balazs@myshp.hu\u200b")),
+            ("an accented address", ms365_named("bal\u00e1zs@myshp.hu")),
+            ("a Cyrillic homoglyph in the domain", ms365_named("balazs@myshp.h\u0443")),
+            ("a bidi override in the name", ms365_named("a@b.hu", name="Bal\u00e1zs\u202emoc.x")),
+            ("a zero-width character in the name", ms365_named("a@b.hu", name="Bal\u200bazs")),
+            ("a comma in the name", ms365_named("evil@x.hu", name="Balazs, Patrik")),
+            ("an @ in the name", ms365_named("evil@x.hu", name="balazs@myshp.hu")),
+            ("a line separator in the name", ms365_named("a@b.hu", name="Balazs\u2028Bcc"))):
         code, _, err = run_gate(store, payload)
         check(f"G2: {label} is unreadable -> DENIED",
               code == 2 and "nem horgonyozhato" in err, f"exit={code} err={err[:160]!r}")

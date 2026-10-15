@@ -78,6 +78,12 @@
     "add-group-owner",
     "create-subscription",
     "update-subscription",
-    "reauthorize-subscription"
+    "reauthorize-subscription",
+    "update-chat-message",
+    "update-channel-message",
+    "update-channel-message-reply",
+    "create-planner-task",
+    "update-planner-task",
+    "create-group"
   ]
 }
