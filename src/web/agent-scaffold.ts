@@ -889,6 +889,12 @@ export const MS365_OUTBOUND_OPS: readonly string[] = [
   'create-subscription',
   'update-subscription',
   'reauthorize-subscription',
+  'update-chat-message',
+  'update-channel-message',
+  'update-channel-message-reply',
+  'create-planner-task',
+  'update-planner-task',
+  'create-group',
 ]
 export const EMAIL_GATE_MATCHER =
   'Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*' +
