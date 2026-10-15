@@ -9,13 +9,24 @@
 //   agent_file  the agents carry it in their own CLAUDE.md (scaffold blocks)
 //   main_only   the main agent's own business (persona, morning brief...)
 // A heading matches an entry by prefix, because the root headings carry dates.
+// Every entry must match exactly one heading and every H2 exactly one entry
+// (Viktor S2: a prefix must not swallow a new "## <same title> -- addendum").
 // An UNCLASSIFIED heading, or a fleet entry the root no longer has, stops the
 // sync: nothing is written and the old stamp stays, so the opted-in agents keep
 // loading the root (the safe direction). The decision -- does the new rule
 // belong to the sub-agents? -- is a human one; recording it is one line in the map.
 //
+// The same holds for an edit INSIDE a non-fleet part of the root (an agent_file or
+// main_only section, a stop_at tail, the preamble; Viktor S1): the sync compares
+// that non-fleet remainder with the root of the last stamp
+// (store/fleet-rules.root-at-stamp.md). If it changed, or there is no snapshot
+// yet, it writes nothing, prints the diff and exits 1; it stamps only with
+// --ack-nonfleet <sha12>, the hash of exactly the remainder the human looked at.
+//
 // Usage (from the install root, or pass --root):
-//   node scripts/fleet-rules-sync.mjs           build, write, stamp
+//   node scripts/fleet-rules-sync.mjs           build, write, stamp (non-fleet remainder unchanged)
+//   node scripts/fleet-rules-sync.mjs --ack-nonfleet <sha12>
+//                                               the same, after a human has read the non-fleet diff
 //   node scripts/fleet-rules-sync.mjs --check   exit 0 if the rules file is the build of the current root and stamped
 //   node scripts/fleet-rules-sync.mjs --print   print the build to stdout, write nothing
 // Exit: 0 ok / in sync, 1 needs a decision or out of sync, 2 cannot run.
@@ -76,28 +87,63 @@ export function build(rootText, map) {
     .filter((e) => typeof e === 'string' || e.heading)
     .map(prefixOf)
   for (const h of h2) {
-    if (!classified.some((p) => h.title.startsWith(p))) problems.push(`unclassified root section: "## ${h.title}"`)
+    const n = classified.filter((p) => h.title.startsWith(p)).length
+    if (n === 0) problems.push(`unclassified root section: "## ${h.title}"`)
+    else if (n > 1) problems.push(`root section matches ${n} map entries: "## ${h.title}"`)
   }
+  for (const p of classified) {
+    const n = h2.filter((h) => h.title.startsWith(p)).length
+    if (n > 1) problems.push(`map entry matches ${n} root sections: "${p}"`)
+  }
+  // The root lines the rules file carries; everything else is the non-fleet remainder.
+  const covered = new Array(lines.length).fill(false)
+  const cover = (from, sec) => { for (let k = from; k < from + sec.length; k++) covered[k] = true }
   const parts = []
   for (const entry of map.fleet) {
     const prefix = prefixOf(entry)
     if (typeof entry === 'object' && entry.h3) {
-      const h = heads.find((x) => x.level === 3 && x.title.startsWith(prefix))
-      if (!h) { problems.push(`fleet entry not in the root: "### ${prefix}"`); continue }
-      const body = sectionLines(lines, heads, h).slice(1).join('\n').replace(/^\n+/, '')
-      parts.push(`## ${entry.title}\n\n${body}`)
+      const found = heads.filter((x) => x.level === 3 && x.title.startsWith(prefix))
+      if (found.length !== 1) {
+        problems.push(found.length ? `fleet entry matches ${found.length} root sections: "### ${prefix}"` : `fleet entry not in the root: "### ${prefix}"`)
+        continue
+      }
+      const sec = sectionLines(lines, heads, found[0])
+      cover(found[0].i, sec)
+      parts.push(`## ${entry.title}\n\n${sec.slice(1).join('\n').replace(/^\n+/, '')}`)
       continue
     }
     const found = h2.filter((x) => x.title.startsWith(prefix))
     if (found.length !== 1) {
-      problems.push(found.length ? `fleet entry matches ${found.length} root sections: "${prefix}"` : `fleet entry not in the root: "## ${prefix}"`)
+      // more than one: already reported above for every entry
+      if (!found.length) problems.push(`fleet entry not in the root: "## ${prefix}"`)
       continue
     }
-    parts.push(sectionLines(lines, heads, found[0], typeof entry === 'object' ? entry.stop_at : undefined).join('\n'))
+    const sec = sectionLines(lines, heads, found[0], typeof entry === 'object' ? entry.stop_at : undefined)
+    cover(found[0].i, sec)
+    parts.push(sec.join('\n'))
   }
   let body = parts.map((p) => p.replace(/\s+$/, '') + '\n').join('\n')
   for (const [from, to] of map.substitutions ?? []) body = body.split(from).join(to)
-  return { text: `${HEADER}\n${body}`, problems }
+  const nonfleet = lines.filter((_, k) => !covered[k]).join('\n')
+  return { text: `${HEADER}\n${body}`, problems, nonfleet }
+}
+
+const sha12 = (s) => createHash('sha256').update(s).digest('hex').slice(0, 12)
+
+// A plain line diff (LCS) of the non-fleet remainder, for the human who acks it.
+export function lineDiff(a, b) {
+  const x = a.split('\n'), y = b.split('\n')
+  const n = x.length, m = y.length
+  const L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1))
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = x[i] === y[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1])
+  const out = []
+  let i = 0, j = 0
+  while (i < n || j < m) {
+    if (i < n && j < m && x[i] === y[j]) { i++; j++ }
+    else if (j < m && (i === n || L[i][j + 1] >= L[i + 1][j])) out.push(`+ ${y[j++]}`)
+    else out.push(`- ${x[i++]}`)
+  }
+  return out.join('\n')
 }
 
 // The rules file without its leading comment (the stamp lives there).
@@ -115,16 +161,17 @@ function main(argv) {
   const root = resolve(opt('--root') ?? join(HERE, '..'))
   const rulesPath = join(root, 'store', 'fleet-rules.md')
   const mapPath = join(root, 'store', 'fleet-rules-map.json')
-  let rootText, map
+  let rootBytes, rootText, map
   try {
-    rootText = readFileSync(join(root, 'CLAUDE.md'), 'utf-8')
+    rootBytes = readFileSync(join(root, 'CLAUDE.md'))
+    rootText = rootBytes.toString('utf-8')
     map = JSON.parse(readFileSync(mapPath, 'utf-8'))
     if (!Array.isArray(map.fleet)) throw new Error('fleet-rules-map.json: "fleet" is not a list')
   } catch (e) {
     console.error(`fleet-rules-sync: cannot run: ${e.message}`)
     return 2
   }
-  const { text, problems } = build(rootText, map)
+  const { text, problems, nonfleet } = build(rootText, map)
   if (problems.length) {
     for (const p of problems) console.error(`fleet-rules-sync: ${p}`)
     console.error('fleet-rules-sync: NOT synced -- classify the section in store/fleet-rules-map.json (fleet / agent_file / main_only); until then the opted-in agents keep loading the root CLAUDE.md')
@@ -142,9 +189,24 @@ function main(argv) {
     process.stdout.write(r.stdout ?? '')
     return r.status === 0 ? 0 : 1
   }
-  const sha = createHash('sha256').update(text).digest('hex').slice(0, 12)
+  // S1: a stamp tells the opted-in agents to stop loading the root, so it must not
+  // cover a root change that the rules file does not carry, unless a human acked it.
+  const snapshotPath = join(root, 'store', 'fleet-rules.root-at-stamp.md')
+  const before = existsSync(snapshotPath) ? build(readFileSync(snapshotPath, 'utf-8'), map).nonfleet : null
+  if (before !== nonfleet) {
+    const need = sha12(nonfleet)
+    if (opt('--ack-nonfleet') !== need) {
+      if (before === null) console.error(`fleet-rules-sync: no snapshot of the last stamped root (${snapshotPath}): the whole non-fleet remainder is unreviewed`)
+      else console.error(`fleet-rules-sync: the root changed OUTSIDE the fleet sections since the last stamp:\n${lineDiff(before, nonfleet)}`)
+      console.error(`fleet-rules-sync: NOT synced -- if none of this belongs to the sub-agents, re-run with --ack-nonfleet ${need}; `
+        + 'if it does, move it into a fleet section (or classify it in the map) first')
+      return 1
+    }
+  }
+  const rootSha = createHash('sha256').update(rootBytes).digest('hex')
+  const sha = sha12(text)
   writeAtomic(rulesPath, text)
-  const r = spawnSync(process.execPath, [stamp, '--root', root], { encoding: 'utf-8' })
+  const r = spawnSync(process.execPath, [stamp, '--root', root, '--expect-sha', rootSha], { encoding: 'utf-8' })
   process.stdout.write(r.stdout ?? '')
   process.stderr.write(r.stderr ?? '')
   if (r.status !== 0) return 2

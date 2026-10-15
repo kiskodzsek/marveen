@@ -17,7 +17,9 @@
 //   node scripts/fleet-rules-stamp.mjs            stamp the current root
 //   node scripts/fleet-rules-stamp.mjs --check    exit 0 if the stamp is current, 1 if not
 // Options: --root <dir> (default: the repo this script lives in), --rules <file>
-// (default: <root>/store/fleet-rules.md).
+// (default: <root>/store/fleet-rules.md), --expect-sha <sha256>: stamp only if the
+// root still has exactly this hash (fleet-rules-sync passes the hash of the bytes
+// it built from, so a root edit between build and stamp cannot get stamped; Viktor I1).
 //
 // Stamping is a statement that the rules file has been reviewed against the
 // current root. It does not check that by itself.
@@ -44,6 +46,11 @@ try { rootBytes = readFileSync(rootPath) } catch { console.error(`fleet-rules-st
 try { rules = readFileSync(rulesPath, 'utf-8') } catch { console.error(`fleet-rules-stamp: cannot read ${rulesPath}`); process.exit(2) }
 
 const sha = createHash('sha256').update(rootBytes).digest('hex')
+const expected = arg('--expect-sha')
+if (expected !== undefined && expected !== sha) {
+  console.error(`fleet-rules-stamp: the root changed since it was read (${expected.slice(0, 12)} -> ${sha.slice(0, 12)}); not stamped`)
+  process.exit(2)
+}
 const lead = rules.match(LEAD_RE)
 const current = lead?.[0].match(STAMP_RE)?.[0].split('=')[1] ?? null
 
