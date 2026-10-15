@@ -898,8 +898,8 @@ def accentless_evidence(words):
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from email_extract import (collect_bash_body, collect_mcp_body,  # noqa: E402
-                               collect_ms365_envelope, MS365_SEND_RE,
-                               MS365_UNANCHORABLE_RE)
+                               collect_ms365_envelope, is_ms365_send,
+                               is_ms365_unanchorable)
 except Exception as _extract_exc:  # noqa: BLE001 -- deliberate fail-closed stub
     _EXTRACT_ERR = repr(_extract_exc)
 
@@ -915,10 +915,14 @@ except Exception as _extract_exc:  # noqa: BLE001 -- deliberate fail-closed stub
 
     # Without the module the ms365 send names must still reach the
     # fail-closed branch, so the stubs match them by name.
-    MS365_SEND_RE = re.compile(r"ms-?365.*__send-mail$", re.I)
-    MS365_UNANCHORABLE_RE = re.compile(
-        r"ms-?365.*__(send-draft-message|reply-mail-message|reply-all-mail-message"
-        r"|forward-mail-message|send-shared-mailbox-mail)$", re.I)
+    _STUB_MS365_SEND_RE = re.compile(r"__send-mail$", re.I)
+    _STUB_MS365_OTHER_RE = re.compile(r"^mcp__.*ms-?365.*__", re.I)
+
+    def is_ms365_send(tool):
+        return bool(_STUB_MS365_SEND_RE.search(tool or ""))
+
+    def is_ms365_unanchorable(tool):
+        return bool(_STUB_MS365_OTHER_RE.search(tool or "")) and not is_ms365_send(tool)
 
 
 # --- Telegram reply (GATETG816) ---------------------------------------------
@@ -1490,13 +1494,15 @@ def main():
         text, unreadable = collect_mcp_body(tool_input), None
     elif EMAIL_TOOL_RE.search(tool):
         text, unreadable = collect_mcp_body(tool_input), None
-    elif MS365_SEND_RE.search(tool):
+    elif is_ms365_send(tool):
         # MS365SEND1014: a Graph message under body.Message; the same extractor
         # the approval gate anchors, so the audited text is the approved text.
         env = collect_ms365_envelope(tool_input)
         text, unreadable = env["text"], env["unreadable_reason"]
-    elif MS365_UNANCHORABLE_RE.search(tool):
+    elif is_ms365_unanchorable(tool):
         # id-addressed reply/forward/send-draft: our only text is the Comment.
+        # Any other unanchorable ms365 tool carries no Comment and exits 0
+        # here; the approval gate is the one that denies it.
         body = tool_input.get("body") if isinstance(tool_input.get("body"), dict) else {}
         comment = body.get("Comment") or body.get("comment") or ""
         if not str(comment).strip():

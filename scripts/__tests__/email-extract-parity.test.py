@@ -47,7 +47,9 @@ def check(name, ok, detail=""):
 
 
 def load_from_source(source, tag):
-    mod_ns = {}
+    # The module finds its sibling ms365-tool-policy.json through __file__
+    # (MS365GATE1015), so the exec'd copy gets the real module path.
+    mod_ns = {"__file__": os.path.join(HOOKS, "email_extract.py")}
     code = compile(source, f"email_extract<{tag}>", "exec")
     exec(code, mod_ns)  # noqa: S102 -- test-only, our own source
     return mod_ns

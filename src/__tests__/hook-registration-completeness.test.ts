@@ -68,6 +68,8 @@ const EXEMPT: Record<string, string> = {
     'shared library: the one memory-frontmatter check, imported by memory-frontmatter-gate.py (Write/Edit) and memory-frontmatter-bash-gate.py (Bash, KAPUEGYUT918); not itself a hook',
   'email_extract.py':
     'shared library imported by outgoing-copy-gate.py (and the level-2 email approval gate, EMAILKAPU901 PR2); not itself a hook',
+  'ms365-policy-check.mjs':
+    'operator CLI (MS365GATE1015): checks the live .mcp.json ms365 entry and the server tool list against ms365-tool-policy.json before send-mail is enabled; the same functions run in src/__tests__/ms365-tool-policy.test.ts; not a settings hook',
   'memory-save.sh':
     'legacy: referenced only by a historical rebuild prompt, wired nowhere; kept pending a maintainer decision to remove it',
   'telegram-ack.py':

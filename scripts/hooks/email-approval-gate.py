@@ -86,8 +86,7 @@ STANDING_PATH = os.path.join(STORE_DIR, "email-standing-recipients.json")
 WINDOW_S = int(os.environ.get("EMAIL_APPROVAL_WINDOW_S", "1800"))
 
 sys.path.insert(0, _HERE)
-from email_extract import (collect_email_envelope, MS365_SEND_RE,  # noqa: E402
-                           MS365_UNANCHORABLE_RE)
+from email_extract import (collect_email_envelope, ms365_class)  # noqa: E402
 
 # GMAILCONNECTOR914: the claude.ai Gmail connector's send-shaped tools carry
 # neither word (mcp__claude_ai_Gmail__send_message / reply / forward), so the
@@ -243,7 +242,15 @@ def standing_match(env: dict, standing):
     if any(str(v).strip() for v in (env.get("bcc") or [])):
         return None
 
+    raw = env.get("addrs")
+
     def parsed(field):
+        # MS365GATE1015 (Viktor G2): an extractor that kept the raw address
+        # fields (ms365 send-mail) is judged on THOSE, never on a re-parse of
+        # the "name <addr>" display string, where an RFC comment or a crafted
+        # name can make getaddresses see a different address.
+        if isinstance(raw, dict):
+            return [str(a).strip().lower() for a in (raw.get(field) or []) if str(a).strip()]
         return [a.strip().lower()
                 for _, a in email.utils.getaddresses([str(v) for v in (env.get(field) or [])])
                 if a and a.strip()]
@@ -525,10 +532,11 @@ def main():
         # a read or a draft is not what email_send levels.
         if _MULTIPLEX_TOOL.search(tool) and not manage_email_is_send(tool_input):
             sys.exit(0)
-    elif MS365_SEND_RE.search(tool) or MS365_UNANCHORABLE_RE.search(tool):
-        # MS365SEND1014: the ms365 Mail.Send tools. send-mail is anchored like
-        # any other letter; the id-addressed ones come back unreadable from the
-        # extractor, so below level 3 they are always denied.
+    elif ms365_class(tool) in ("send", "unanchorable"):
+        # MS365SEND1014 / MS365GATE1015: send-mail is anchored like any other
+        # letter; every other ms365 tool off the read/draft allowlist, and every
+        # outbound operation on any server name, comes back unreadable from the
+        # extractor, so below level 3 it is always denied.
         pass
     elif tool == "Bash":
         cmd = str(tool_input.get("command") or "")
