@@ -832,11 +832,68 @@ export function hasThreadReplyCapability(name: string, capabilities: string[]): 
 // keeps the draft surface reachable even under a server name with no gmail in
 // it at all -- a name-keyed matcher goes blind on the next new name, so the
 // draft surface is pinned by the OPERATION too, not only by the server.
-// MS365SEND1014: the ms365 server's Mail.Send tools (send-mail, send-draft,
-// reply, reply-all, forward, shared-mailbox send) carry none of the words above.
+// MS365SEND1014 + MS365GATE1015 (Viktor G1/G3, card d85d38c3): the ms365
+// alternative is the WHOLE server (`.*ms-?365.*__.*`), like the Gmail one above --
+// the gates decide by the operation against the read/draft allowlist in
+// scripts/hooks/ms365-tool-policy.json, and a name list is what drifted. The
+// outbound operations are ALSO matched by operation alone, on any server name,
+// so a renamed server (m365, outlook, mail) is not a blind spot. The list is a
+// copy of the policy file's "outbound"; src/__tests__/ms365-tool-policy.test.ts
+// fails when the two differ.
+export const MS365_OUTBOUND_OPS: readonly string[] = [
+  'send-mail',
+  'send-draft-message',
+  'reply-mail-message',
+  'reply-all-mail-message',
+  'forward-mail-message',
+  'send-shared-mailbox-mail',
+  'send-shared-mailbox-draft',
+  'reply-shared-mailbox-mail',
+  'reply-all-shared-mailbox-mail',
+  'forward-shared-mailbox-mail',
+  'graph-batch',
+  'create-mail-rule',
+  'update-mail-rule',
+  'update-mailbox-settings',
+  'create-calendar-event',
+  'update-calendar-event',
+  'delete-calendar-event',
+  'create-specific-calendar-event',
+  'update-specific-calendar-event',
+  'delete-specific-calendar-event',
+  'cancel-calendar-event',
+  'forward-calendar-event',
+  'accept-calendar-event',
+  'decline-calendar-event',
+  'tentatively-accept-calendar-event',
+  'create-my-calendar-permission',
+  'update-my-calendar-permission',
+  'share-drive-item',
+  'create-drive-item-share-link',
+  'send-chat-message',
+  'reply-to-chat-message',
+  'create-chat',
+  'send-channel-message',
+  'reply-to-channel-message',
+  'reply-to-group-thread',
+  'set-channel-message-reaction',
+  'unset-channel-message-reaction',
+  'set-chat-message-reaction',
+  'unset-chat-message-reaction',
+  'pin-chat-message',
+  'create-planner-task-message',
+  'send-my-activity-notification',
+  'add-team-member',
+  'add-group-member',
+  'add-group-owner',
+  'create-subscription',
+  'update-subscription',
+  'reauthorize-subscription',
+]
 export const EMAIL_GATE_MATCHER =
   'Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*' +
-  '|.*ms-?365.*__send-mail|.*ms-?365.*__send-draft-message|.*ms-?365.*__reply-mail-message|.*ms-?365.*__reply-all-mail-message|.*ms-?365.*__forward-mail-message|.*ms-?365.*__send-shared-mailbox-mail'
+  '|.*ms-?365.*__.*' +
+  MS365_OUTBOUND_OPS.map((op) => `|.*__${op}`).join('')
 
 // Does an existing PreToolUse array carry an email-gate entry whose matcher is
 // NOT the current one? Pure + exported: this is the predicate that lets

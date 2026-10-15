@@ -196,14 +196,98 @@ def collect_mcp_recipients(tool_input: dict):
 # no "send_email" in the name, so the name-based test above never saw them.
 CONNECTOR_SEND_RE = re.compile(r"gmail__(reply|reply_all|send_message|forward)$", re.I)
 
-# MS365SEND1014: the @softeria/ms-365-mcp-server Mail.Send tools. Only send-mail
-# carries the whole envelope in its input (a Graph message under body.Message);
-# the others address a message by id and the server decides the recipient, so
-# no per-letter approval can be anchored to them and every gate denies them.
-MS365_SEND_RE = re.compile(r"ms-?365.*__send-mail$", re.I)
-MS365_UNANCHORABLE_RE = re.compile(
-    r"ms-?365.*__(send-draft-message|reply-mail-message|reply-all-mail-message"
-    r"|forward-mail-message|send-shared-mailbox-mail)$", re.I)
+# MS365SEND1014 + MS365GATE1015 (Viktor G1/G3, card d85d38c3): the
+# @softeria/ms-365-mcp-server tools. The first version named six Mail.Send tools,
+# a BLOCKLIST -- and the 0.162.0 server has many more ways out (shared-mailbox
+# reply/forward/send, graph-batch, a forwarding mail rule, meeting requests, chat
+# messages, shares, a webhook subscription). So the classification is inverted:
+#   - send-mail is the one anchored send (the whole envelope is in its input);
+#   - an OUTBOUND operation is unanchorable on ANY server name (a renamed server
+#     stays gated, G3; a false positive is a deny, never an allow);
+#   - on a server whose name carries ms365 / ms-365, everything that is not on the
+#     read/draft allowlist is unanchorable too -- an unknown tool is a deny.
+# The lists live in ms365-tool-policy.json, shared with email-send-gate.mjs and
+# the hook matcher. An unreadable policy file is fail-closed: every ms365 tool and
+# the floor of known send operations below are denied.
+_MS365_POLICY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "ms365-tool-policy.json")
+_MS365_SERVER_RE = re.compile(r"ms-?365", re.I)
+# Used only when the policy file cannot be read: the six send tools the first
+# version knew, so a broken file can never make the gate blinder than before.
+_MS365_OUTBOUND_FLOOR = frozenset({
+    "send-mail", "send-draft-message", "reply-mail-message", "reply-all-mail-message",
+    "forward-mail-message", "send-shared-mailbox-mail"})
+
+
+def _load_ms365_policy():
+    """(read_draft, anchored_send, outbound, error). On any fault the sets are
+    empty except the outbound floor, and error says why."""
+    try:
+        with open(_MS365_POLICY_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        lists = [data[k] for k in ("read_draft", "anchored_send", "outbound")]
+        if not all(isinstance(v, list) and all(isinstance(x, str) for x in v) for v in lists):
+            raise ValueError("a listak nem szoveg-listak")
+        read_draft, anchored, outbound = (frozenset(v) for v in lists)
+        return read_draft, anchored, outbound | _MS365_OUTBOUND_FLOOR, None
+    except Exception as exc:  # noqa: BLE001 -- fail-closed below
+        return frozenset(), frozenset(), _MS365_OUTBOUND_FLOOR, repr(exc)
+
+
+_MS365_READ_DRAFT, _MS365_ANCHORED, _MS365_OUTBOUND, MS365_POLICY_ERROR = _load_ms365_policy()
+
+
+def _split_mcp_name(tool_name):
+    """(server, operation) of an mcp__<server>__<operation> name, else None."""
+    name = str(tool_name or "")
+    if not name.startswith("mcp__"):
+        return None
+    server, sep, op = name[5:].rpartition("__")
+    return (server, op) if sep and server and op else None
+
+
+def ms365_class(tool_name):
+    """'send' (anchored send-mail), 'unanchorable' (deny below level 3),
+    'read' (allowlisted read/draft) or None (not an ms365 tool)."""
+    parts = _split_mcp_name(tool_name)
+    if not parts:
+        return None
+    server, op = parts
+    ms365_server = bool(_MS365_SERVER_RE.search(server))
+    # On any server name (G3): a renamed server's send-mail is still anchored.
+    # Without the policy file the anchored set is empty, and send-mail falls to
+    # the outbound floor -- denied.
+    if op in _MS365_ANCHORED:
+        return "send"
+    if op in _MS365_OUTBOUND:
+        return "unanchorable"
+    if ms365_server:
+        return "read" if op in _MS365_READ_DRAFT else "unanchorable"
+    return None
+
+
+def is_ms365_send(tool_name):
+    return ms365_class(tool_name) == "send"
+
+
+def is_ms365_unanchorable(tool_name):
+    return ms365_class(tool_name) == "unanchorable"
+
+
+def ms365_unanchorable_reason(tool_name):
+    if MS365_POLICY_ERROR:
+        return ("ms365: a tool-szabalyzat (ms365-tool-policy.json) nem olvashato "
+                f"({MS365_POLICY_ERROR}) -- fail-closed, minden ms365 hivas tiltott")
+    parts = _split_mcp_name(tool_name)
+    op = parts[1] if parts else str(tool_name)
+    if op in _MS365_OUTBOUND:
+        return (f"ms365: a(z) {op} kifele visz (level, meghivo, uzenet, megosztas, "
+                "szabaly vagy webhook), a cimzettet uzenet-azonositoval vagy a szerver "
+                "donti el, ezert levelre szolo jovahagyas nem kotheto hozza -- csak a "
+                "send-mail hasznalhato")
+    return (f"ms365: a(z) {op} nincs az olvaso/piszkozat engedelylistan "
+            "(ms365-tool-policy.json read_draft) -- ismeretlen ms365 tool, tiltva")
+
 
 # The server merges a top-level argument whose name is a body field into the
 # request body, and its message schema is passthrough: any Graph property
@@ -217,26 +301,43 @@ _MS365_RECIPIENT_FIELDS = (("to", "toRecipients"), ("cc", "ccRecipients"),
                            ("bcc", "bccRecipients"))
 
 
+# G2 (Viktor, CWE-436): the address must be a bare addr-spec. The field is free
+# text on the wire, and "balazs@myshp.hu (evil@x.com)" re-parses to the standing
+# address through an RFC comment -- the gate would then judge a string other
+# than the one Exchange receives. The name may not carry a control character or
+# angle brackets: it is shown to the approver next to the address.
+_MS365_ADDR_RE = re.compile(r'^[^\s<>(),;:"\[\]\\]+@[^\s<>(),;:"\[\]\\]+$')
+_MS365_NAME_BAD_RE = re.compile(r"[\x00-\x1f\x7f<>]")
+
+
 def _ms365_recipients(raw, field):
-    """(addresses, unreadable_reason) for one Graph recipient list. Each entry
-    must be {"emailAddress": {"address": str, "name"?: str}} and nothing else;
-    the name is kept, because it is in the header the recipient sees."""
+    """(display, addresses, unreadable_reason) for one Graph recipient list.
+    Each entry must be {"emailAddress": {"address": str, "name"?: str}} and
+    nothing else. display keeps the name, because it is in the header the
+    recipient sees (and in the hash anchor); addresses are the raw address
+    fields, which the standing-recipient check compares (never a re-parse)."""
     if raw is None:
-        return [], None
+        return [], [], None
     if not isinstance(raw, list):
-        return [], f"a {field} nem lista"
-    out = []
+        return [], [], f"a {field} nem lista"
+    out, addrs = [], []
     for item in raw:
         ea = item.get("emailAddress") if isinstance(item, dict) else None
         if not isinstance(ea, dict) or set(item) != {"emailAddress"} \
                 or not set(ea) <= {"address", "name"}:
-            return [], f"a {field} egy eleme nem {{emailAddress: {{address, name}}}} alaku"
+            return [], [], f"a {field} egy eleme nem {{emailAddress: {{address, name}}}} alaku"
         addr, name = ea.get("address"), ea.get("name")
         if not isinstance(addr, str) or not addr.strip() \
                 or (name is not None and not isinstance(name, str)):
-            return [], f"a {field} egy elemeben nincs olvashato cim"
+            return [], [], f"a {field} egy elemeben nincs olvashato cim"
+        if not _MS365_ADDR_RE.match(addr):
+            return [], [], (f"a {field} egy cime nem csupasz e-mail-cim ({addr[:60]!r}); "
+                            "komment, nev, tobb cim vagy szokoz nem lehet benne")
+        if name is not None and _MS365_NAME_BAD_RE.search(name):
+            return [], [], f"a {field} egy neveben vezerlokarakter vagy <> van"
         out.append(f"{name} <{addr}>" if name else addr)
-    return out, None
+        addrs.append(addr)
+    return out, addrs, None
 
 
 def collect_ms365_envelope(tool_input):
@@ -271,11 +372,13 @@ def collect_ms365_envelope(tool_input):
         return bad(f"a Message nem engedett mezot tartalmaz ({', '.join(sorted(extra))}); "
                    "csatolmany, valaszcim, fejlec es felado nem horgonyozhato")
     env = dict(empty)
+    env["addrs"] = {}
     for key, field in _MS365_RECIPIENT_FIELDS:
-        addrs, reason = _ms365_recipients(msg.get(field), field)
+        display, addrs, reason = _ms365_recipients(msg.get(field), field)
         if reason:
             return bad(reason)
-        env[key] = addrs
+        env[key] = display
+        env["addrs"][key] = addrs
     subject = msg.get("subject")
     if subject is not None and not isinstance(subject, str):
         return bad("a subject nem szoveg")
@@ -315,13 +418,11 @@ def collect_email_envelope(tool_name: str, tool_input: dict):
         # the addresses: an approval for one message cannot answer another.
         if not to and ti.get("messageId"):
             to = [f"messageId:{ti['messageId']}"]
-    elif MS365_SEND_RE.search(tool_name or ""):
+    elif is_ms365_send(tool_name):
         return collect_ms365_envelope(tool_input)
-    elif MS365_UNANCHORABLE_RE.search(tool_name or ""):
+    elif is_ms365_unanchorable(tool_name):
         return {"to": [], "cc": [], "bcc": [], "text": "",
-                "unreadable_reason": "ms365: ez a kuldo tool uzenet-azonositoval cimez, a "
-                "cimzettet a szerver donti el, ezert levelre szolo jovahagyas nem "
-                "kotheto hozza -- csak a send-mail hasznalhato"}
+                "unreadable_reason": ms365_unanchorable_reason(tool_name)}
     elif tool_name == "Bash":
         cmd = str((tool_input or {}).get("command") or "") if isinstance(tool_input, dict) else ""
         text, reason = collect_bash_body(cmd)

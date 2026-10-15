@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest'
 import { gateDecision, buildUnverifiedRecipientMsg } from '../../scripts/email-send-gate.mjs'
 // @ts-expect-error -- plain .mjs hook script, no types
 import { isValidSource, normalizeAddress, splitAddresses, loadLedger, isVerifiedIn } from '../../scripts/recipient-ledger.mjs'
-import { injectEmailSendGate, agentGetsEmailGate } from '../web/agent-scaffold.js'
+import { injectEmailSendGate, agentGetsEmailGate, MS365_OUTBOUND_OPS } from '../web/agent-scaffold.js'
 import { MAIN_AGENT_ID } from '../config.js'
 
 // The PreToolUse gate decision: which tool calls count as outbound email-send.
@@ -247,9 +247,10 @@ describe('injectEmailSendGate', () => {
     injectEmailSendGate(s)
     const hooks = (s.hooks as Record<string, unknown>).PreToolUse as Array<Record<string, unknown>>
     expect(hooks).toHaveLength(1)
+    // MS365GATE1015: the ms365 part is the whole server plus every outbound
+    // operation by name (pinned against the policy file in ms365-tool-policy.test.ts).
     expect(hooks[0].matcher).toBe('Bash|.*send_email.*|.*manage_email.*|.*[Gg]mail.*__.*|.*draft_email.*'
-      + '|.*ms-?365.*__send-mail|.*ms-?365.*__send-draft-message|.*ms-?365.*__reply-mail-message'
-      + '|.*ms-?365.*__reply-all-mail-message|.*ms-?365.*__forward-mail-message|.*ms-?365.*__send-shared-mailbox-mail')
+      + '|.*ms-?365.*__.*' + MS365_OUTBOUND_OPS.map((op) => `|.*__${op}`).join(''))
     const inner = (hooks[0].hooks as Array<{ command: string }>)[0]
     expect(inner.command).toContain('email-send-gate.mjs')
   })
