@@ -13,6 +13,7 @@ export const MIME: Record<string, string> = {
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
   '.svg': 'image/svg+xml',
+  '.woff2': 'font/woff2',
 }
 
 // Default upper bound on a request body the dashboard will buffer in RAM.
