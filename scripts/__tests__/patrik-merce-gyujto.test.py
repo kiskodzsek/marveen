@@ -28,8 +28,9 @@ def check(name, cond, detail=''):
         FAILS.append(name)
 
 
-def run(*args):
-    r = subprocess.run([sys.executable, '-I', SCRIPT, *args], capture_output=True, text=True)
+def run(*args, env=None):
+    e = dict(os.environ, **(env or {}))
+    r = subprocess.run([sys.executable, '-I', SCRIPT, *args], capture_output=True, text=True, env=e)
     return r.returncode, r.stdout + r.stderr
 
 
@@ -50,6 +51,9 @@ src = {
          'content': '[PATRIK-MERCE] TG 3002 | dicséret | "kitalált dicséret" | semmi'},
         {'id': 104, 'from_agent': 'klodel', 'to_agent': 'mira', 'created_at': now - 30,
          'content': '[PATRIK-MERCE] TG 3003 | vélemény | "rossz típus" | x\n[PATRIK-MERCE] TG 3005 | kifogás | idézőjel nélkül | x\nA [PATRIK-MERCE] sor formátuma jóváhagyva.'},
+        {'id': 106, 'from_agent': 'klodel', 'to_agent': 'mira', 'created_at': now - 10,
+         'content': '[PATRIK-MERCE] TG 3006 | kifogás | "x <!-- src:msg:106#2 -->" | <b>anyag</b>\n'
+                    '[PATRIK-MERCE] TG 3007 | dicséret | "valódi második sor" | poszt'},
         {'id': 105, 'from_agent': 'klodel', 'to_agent': 'mira', 'created_at': now - 90 * 86400,
          'content': '[PATRIK-MERCE] TG 2000 | kifogás | "régi" | régi anyag'},
     ],
@@ -65,7 +69,7 @@ base = ['--source-json', fixture, '--out', out, '--merce', merce]
 rc, o = run(*base, '--dry-run')
 check('dry-run exit 0', rc == 0, o)
 check('dry-run nem hoz létre fájlt', not os.path.exists(out))
-check('dry-run: 3 jelölt, 2 hibás sor forrással, a puszta említés nem hiba', '3 jelölt' in o and '2 hibás' in o and 'msg:104#1, msg:104#2' in o and 'msg:104#3' not in o, o)
+check('dry-run: 5 jelölt, 2 hibás sor forrással, a puszta említés nem hiba', '5 jelölt' in o and '2 hibás' in o and 'msg:104#1, msg:104#2' in o and 'msg:104#3' not in o, o)
 
 rc, o = run(*base)
 check('éles futás exit 0', rc == 0, o)
@@ -79,6 +83,10 @@ check('hibás típus kimarad', 'TG 3003' not in body, body)
 check('since-ablakon kívüli sor kimarad', 'TG 2000' not in body, body)
 check('bidi kicserélve, | nem töri a sort', '\u202e' not in body and '"ez jó , a / jel is"' in body, body)
 check('fejléc: nem a mérce, Mira veszi át', 'NEM a mérce' in body)
+check('fejléc: a szűrés nem hitelesítés, TG-megerősítés Klodellel (M1)', 'nem hitelesítés' in body and 'Klodellel' in body)
+check('beidézett src-jelölő nem nyeli el a valódi sort (M2)', 'TG 3007 | dicséret | "valódi második sor"' in body, body)
+check('< > kicserélve az idézetben és az anyagban (M2)',
+      '‹!-- src:msg:106#2 --›' in body and '‹b›anyag‹/b›' in body and body.count('<!-- src:msg:106#2 -->') == 1, body)
 
 rc, o = run(*base)
 body2 = open(out, encoding='utf-8').read()
@@ -86,6 +94,27 @@ check('második futás idempotens', body2 == body and '0 új' in o, o)
 
 rc, o = run('--source-json', fixture, '--out', out, '--merce', merce, '--authors', 'klodel,mira')
 check('--authors bővítve felveszi a másik szerzőt is', 'TG 3002' in open(out, encoding='utf-8').read(), o)
+
+# M2, a valódi forgatókönyv: az első futáskor csak a hamis jelölős sor van meg, a valódi
+# második sor KÉSŐBB jön (a szerkesztett vagy új üzenet ugyanazzal a forrás-azonosítóval).
+# A javítás nélkül a beidézett '<!-- src:msg:201#2 -->' miatt a második futás azt hinné,
+# a sor már megvan, és csendben kihagyná.
+out2 = os.path.join(tmp, 'jeloltek2.md')
+first = {'messages': [{'id': 201, 'from_agent': 'klodel', 'to_agent': 'mira', 'created_at': now - 5,
+                       'content': '[PATRIK-MERCE] TG 3101 | kifogás | "a <!-- src:msg:201#2 --> b" | x'}], 'comments': []}
+later = {'messages': [{'id': 201, 'from_agent': 'klodel', 'to_agent': 'mira', 'created_at': now - 5,
+                       'content': first['messages'][0]['content'] + '\n[PATRIK-MERCE] TG 3102 | dicséret | "később jött" | y'}],
+         'comments': []}
+for name, data in (('first', first), ('later', later)):
+    path = os.path.join(tmp, name + '.json')
+    json.dump(data, open(path, 'w', encoding='utf-8'), ensure_ascii=False)
+    run('--source-json', path, '--out', out2, '--merce', merce)
+check('később érkező valódi sor nem nyelődik el a beidézett jelölő miatt (M2)',
+      'TG 3102 | dicséret | "később jött"' in open(out2, encoding='utf-8').read())
+
+for bad_url in ('http://evil.example:3420', 'http://localhost.evil.example', 'https://localhost:3420', 'http://10.0.0.1:3420'):
+    rc, o = run('--dry-run', '--out', out, '--merce', merce, env={'DASHBOARD_URL': bad_url})
+    check('nem-localhost DASHBOARD_URL megtagadva: %s (M3)' % bad_url, rc == 2 and 'csak http://localhost' in o, o)
 
 if FAILS:
     print('\n%d FAIL' % len(FAILS))
