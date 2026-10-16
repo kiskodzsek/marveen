@@ -24,7 +24,7 @@ const LIVE_SHAPE = {
     ms365: {
       command: 'npx',
       args: ['-y', '@softeria/ms-365-mcp-server@0.162.0', '--enabled-tools',
-        '^(list-mail-messages|list-mail-folders|list-mail-child-folders|list-mail-folder-messages|get-mail-message|list-mail-attachments|get-mail-message-mime|list-mail-folder-messages-delta|create-draft-email|create-reply-draft|create-reply-all-draft|create-forward-draft)$'],
+        '^(list-mail-messages|list-mail-folders|list-mail-child-folders|list-mail-folder-messages|get-mail-message|list-mail-attachments|get-mail-message-mime|list-mail-folder-messages-delta|create-draft-email|create-reply-draft|create-reply-all-draft|create-forward-draft|download-bytes-to-file)$'],
     },
     other: { command: 'node', args: ['x.js'] },
   },
@@ -51,6 +51,11 @@ describe('ms365 tool policy (MS365GATE1015)', () => {
     expect(endpointsDrift(FIXTURE, widened).join('\n')).toMatch(/send-mail is also outbound/)
     const typo = { ...POLICY, outbound: [...POLICY.outbound, 'send-mial'] }
     expect(endpointsDrift(FIXTURE, typo).join('\n')).toMatch(/send-mial is not a tool/)
+  })
+
+  it('endpointsDrift knows a local tool (tool:<name> in graph-tools.js) only through local_tools', () => {
+    const { local_tools: _unused, ...withoutLocal } = POLICY as Policy & { local_tools?: string[] }
+    expect(endpointsDrift(FIXTURE, withoutLocal).join('\n')).toMatch(/download-bytes-to-file is not a tool/)
   })
 
   it('mcpConfigDrift: the live shape passes', () => {

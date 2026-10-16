@@ -745,8 +745,9 @@ with tempfile.TemporaryDirectory() as td:
     code, _, err = run_gate(make_store(os.path.join(td, "ms4"), level=1), ms365())
     check("ms365: level 1 is a hard deny", code == 2 and "szint 1" in err, f"exit={code}")
     store_l1 = make_store(os.path.join(td, "ms5"), level=1)
+    # download-bytes-to-file (#37) sends nothing out; ms365-download-gate.mjs gates it.
     for tool in ("mcp__ms365__create-reply-draft", "mcp__ms365__create-draft-email",
-                 "mcp__ms365__list-mail-messages"):
+                 "mcp__ms365__list-mail-messages", "mcp__ms365__download-bytes-to-file"):
         code, _, _ = run_gate(store_l1, {"tool_name": tool, "tool_input": {"message-id": "AAMk1"}})
         check(f"ms365: {tool.split('__')[-1]} (no send) passes even at level 1", code == 0, f"exit={code}")
 

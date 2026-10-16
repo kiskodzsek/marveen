@@ -5,6 +5,8 @@
     "sub-agents, src/web/agent-scaffold.ts for the hook matcher).",
     "read_draft: the only ms365 tools that pass without a decision. Any OTHER tool on a",
     "server whose name carries ms365 / ms-365 is denied (allowlist, not a blocklist).",
+    "download-bytes-to-file is here because it sends nothing out: it writes a mail attachment",
+    "to disk, and its own PreToolUse gate (ms365-download-gate.mjs, #37) limits target and path.",
     "anchored_send: the one send whose whole envelope is in its input (main agent only,",
     "through the level-2 approval).",
     "outbound: tools of @softeria/ms-365-mcp-server 0.162.0 (dist/endpoints.json) that put",
@@ -12,9 +14,19 @@
     "chat message, a share, a forwarding rule, an automatic reply, a webhook to a foreign",
     "URL. Matched by OPERATION on ANY server name, so a renamed server stays gated (G3).",
     "The live .mcp.json --enabled-tools must stay inside read_draft + anchored_send:",
-    "src/__tests__/ms365-tool-policy.test.ts."
+    "src/__tests__/ms365-tool-policy.test.ts.",
+    "local_tools: the tools of 0.162.0 that dist/graph-tools.js registers with a tool:<name>",
+    "path, so they are not in dist/endpoints.json. Listed only so the drift check knows the",
+    "names; being here allows nothing (only read_draft and anchored_send pass)."
   ],
   "reviewed_version": "0.162.0",
+  "local_tools": [
+    "get-upload-url",
+    "parse-teams-url",
+    "download-bytes",
+    "download-bytes-to-file",
+    "get-download-url"
+  ],
   "read_draft": [
     "list-mail-messages",
     "list-mail-folders",
@@ -27,7 +39,8 @@
     "create-draft-email",
     "create-reply-draft",
     "create-reply-all-draft",
-    "create-forward-draft"
+    "create-forward-draft",
+    "download-bytes-to-file"
   ],
   "anchored_send": ["send-mail"],
   "outbound": [

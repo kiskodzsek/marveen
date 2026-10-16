@@ -24,6 +24,8 @@ export function loadPolicy(path = POLICY_PATH) {
 // The policy against the server's own tool list (dist/endpoints.json, or the
 // fixture copy of it): every name the policy uses exists, every tool with a
 // *.Send scope is outbound, and nothing outbound sits on the read/draft list.
+// The policy's local_tools (graph-tools.js tool:<name> entries, not in
+// endpoints.json) also count as tool names of the server.
 export function endpointsDrift(endpoints, policy) {
   const problems = []
   const list = Array.isArray(endpoints) ? endpoints : endpoints.endpoints
@@ -31,7 +33,7 @@ export function endpointsDrift(endpoints, policy) {
     tool: e.tool ?? e.toolName,
     scopes: [e.scopes, e.workScopes].flat(2).filter((x) => typeof x === 'string'),
   }))
-  const names = new Set(norm.map((e) => e.tool))
+  const names = new Set([...norm.map((e) => e.tool), ...(policy.local_tools ?? [])])
   const outbound = new Set(policy.outbound)
   for (const key of ['read_draft', 'anchored_send', 'outbound']) {
     for (const op of policy[key]) {
