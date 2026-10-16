@@ -29,7 +29,10 @@ import { fileURLToPath } from 'node:url'
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const DEFAULT_DROP_DIR = join(REPO_ROOT, 'store', 'mail-downloads')
 
-const SEG = '[^/?#\\s]+'
+// A segment is anything but a separator, query/fragment or whitespace, and
+// never `.` or `..`: a dot segment would let the target climb out of the
+// attachment shape once the URL is resolved.
+const SEG = '(?!\\.{1,2}(?:/|$))[^/?#\\s]+'
 const ATTACHMENT_TARGET = new RegExp(
   `^/(?:me|users/${SEG})(?:/mailFolders/${SEG})?/messages/${SEG}/attachments/${SEG}/\\$value$`,
 )
@@ -38,6 +41,11 @@ const ATTACHMENT_TARGET = new RegExp(
  * Decide on one download-bytes-to-file call. Returns { deny, reason }.
  * Pure apart from realpath/stat on the drop directory and the parent dir.
  */
+// File types macOS (or a shell) would run or open as an action on a double
+// click. The bytes are third-party data, so they only land as inert files.
+const RISKY_EXTENSION =
+  /\.(?:app|command|tool|terminal|sh|bash|zsh|csh|ksh|fish|py|pl|rb|js|mjs|cjs|jxa|scpt|scptd|applescript|workflow|action|pkg|mpkg|dmg|webloc|inetloc|fileloc|url|plist|mobileconfig|jar|dylib|so|kext|bundle|prefpane|saver)$/i
+
 export function gateDecision(toolInput, dropDir = process.env.MS365_DOWNLOAD_DIR || DEFAULT_DROP_DIR) {
   const target = toolInput?.target
   const outputPath = toolInput?.outputPath
@@ -57,8 +65,11 @@ export function gateDecision(toolInput, dropDir = process.env.MS365_DOWNLOAD_DIR
   }
   const name = basename(outputPath)
   // eslint-disable-next-line no-control-regex
-  if (!name || name.startsWith('.') || /[\u0000-\u001f\u007f]/.test(name)) {
-    return { deny: true, reason: 'download-bytes-to-file: the file name must be plain (no leading dot, no control characters).' }
+  if (!name || name.startsWith('.') || /[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(name)) {
+    return {
+      deny: true,
+      reason: 'download-bytes-to-file: the file name must be plain (no leading dot, no control or bidi characters).',
+    }
   }
   let drop
   try {
@@ -80,6 +91,12 @@ export function gateDecision(toolInput, dropDir = process.env.MS365_DOWNLOAD_DIR
         `download-bytes-to-file: refusing to write outside the drop directory.\n` +
         `  requested: ${join(parent, name)}\n  allowed:   ${drop}/<name>\n` +
         'Save into the drop directory, then move the file deliberately.',
+    }
+  }
+  if (RISKY_EXTENSION.test(name)) {
+    return {
+      deny: true,
+      reason: `download-bytes-to-file: refusing an executable or auto-opening file type: ${name}. Save it under a data extension (e.g. .pdf, .bin).`,
     }
   }
   return { deny: false, reason: '' }

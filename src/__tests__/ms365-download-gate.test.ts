@@ -69,6 +69,20 @@ describe('ms365-download-gate', () => {
   it('denies when the drop directory does not exist', () => {
     expect(decide(att, join(drop, 'a.pdf'), join(tmp, 'missing')).deny).toBe(true)
   })
+  it('denies dot segments in the target', () => {
+    expect(decide('/me/messages/../photo/attachments/a/$value', join(drop, 'a.pdf')).deny).toBe(true)
+    expect(decide('/me/messages/m/attachments/./$value', join(drop, 'a.pdf')).deny).toBe(true)
+    expect(decide('/me/messages/m..x/attachments/a.b/$value', join(drop, 'a.pdf')).deny).toBe(false)
+  })
+  it('denies executable or auto-opening file types, any case', () => {
+    for (const n of ['x.command', 'x.PKG', 'x.terminal', 'x.webloc', 'x.scpt', 'x.sh', 'x.app', 'x.plist', 'x.pdf.command'])
+      expect(decide(att, join(drop, n)).deny, n).toBe(true)
+    expect(decide(att, join(drop, 'invoice.pdf')).deny).toBe(false)
+  })
+  it('denies bidi control characters in the name', () => {
+    expect(decide(att, join(drop, 'invoice\u202Efdp.command')).deny).toBe(true)
+    expect(decide(att, join(drop, 'a\u2066b.pdf')).deny).toBe(true)
+  })
   it('denies missing or non-string fields', () => {
     expect(gateDecision({}, drop).deny).toBe(true)
     expect(gateDecision({ target: att }, drop).deny).toBe(true)
