@@ -15,7 +15,8 @@
 //     (no query string, no other Graph resource);
 //   - outputPath: an absolute path whose parent directory, after realpath,
 //     IS the drop directory (not a subdirectory, not a sibling), and whose
-//     file name is plain (no leading dot, no control characters).
+//     file name is plain (no leading dot, no control characters) and ends in
+//     an allowed data extension.
 // The drop directory is MS365_DOWNLOAD_DIR, default <repo>/store/mail-downloads,
 // and must already exist. Moving the file somewhere else afterwards is a
 // separate, deliberate act.
@@ -41,10 +42,15 @@ const ATTACHMENT_TARGET = new RegExp(
  * Decide on one download-bytes-to-file call. Returns { deny, reason }.
  * Pure apart from realpath/stat on the drop directory and the parent dir.
  */
-// File types macOS (or a shell) would run or open as an action on a double
-// click. The bytes are third-party data, so they only land as inert files.
-const RISKY_EXTENSION =
-  /\.(?:app|command|tool|terminal|sh|bash|zsh|csh|ksh|fish|py|pl|rb|js|mjs|cjs|jxa|scpt|scptd|applescript|workflow|action|pkg|mpkg|dmg|webloc|inetloc|fileloc|url|plist|mobileconfig|jar|dylib|so|kext|bundle|prefpane|saver)$/i
+// The bytes are third-party data, so they only land as inert data files. An
+// allowlist rather than a list of risky types: archives, macro formats and any
+// executable type macOS adds later stay out without anyone updating a list.
+// Not here on purpose (Viktor 6359): xls (old BIFF can carry VBA macros),
+// docm/xlsm (macros), html/svg (script). xml stays for NAV e-invoices.
+export const ALLOWED_EXTENSIONS = ['pdf', 'xml', 'csv', 'xlsx', 'docx', 'png', 'jpg', 'jpeg', 'heic', 'txt']
+// Anchored on the LAST extension, any case. A name with no extension, or one
+// ending in a dot or a space ("x.pdf.", "x.pdf "), does not match.
+const ALLOWED_EXTENSION = new RegExp(`\\.(?:${ALLOWED_EXTENSIONS.join('|')})$`, 'i')
 
 export function gateDecision(toolInput, dropDir = process.env.MS365_DOWNLOAD_DIR || DEFAULT_DROP_DIR) {
   const target = toolInput?.target
@@ -93,10 +99,12 @@ export function gateDecision(toolInput, dropDir = process.env.MS365_DOWNLOAD_DIR
         'Save into the drop directory, then move the file deliberately.',
     }
   }
-  if (RISKY_EXTENSION.test(name)) {
+  if (!ALLOWED_EXTENSION.test(name)) {
     return {
       deny: true,
-      reason: `download-bytes-to-file: refusing an executable or auto-opening file type: ${name}. Save it under a data extension (e.g. .pdf, .bin).`,
+      reason:
+        `download-bytes-to-file: file type not allowed: ${name}. ` +
+        `Allowed types: ${ALLOWED_EXTENSIONS.join(', ')}; if another type is needed, ask Kernel/Viktor.`,
     }
   }
   return { deny: false, reason: '' }

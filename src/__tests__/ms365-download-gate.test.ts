@@ -79,6 +79,17 @@ describe('ms365-download-gate', () => {
       expect(decide(att, join(drop, n)).deny, n).toBe(true)
     expect(decide(att, join(drop, 'invoice.pdf')).deny).toBe(false)
   })
+  it('allows only the data-extension allowlist, anchored on the last extension (Viktor 6359)', () => {
+    for (const n of ['x.PDF', 'x.pdf', 'e-szamla.xml', 'a.csv', 'a.xlsx', 'a.docx', 'a.png', 'a.JPG', 'a.jpeg', 'a.heic', 'a.txt'])
+      expect(decide(att, join(drop, n)).deny, n).toBe(false)
+    for (const n of ['x.zip', 'x.bin', 'noextension', 'x.pdf.', 'x.pdf ', 'x.pdf.app', 'x.xlsm', 'x.docm', 'x.xls', 'x.html', 'x.svg', 'x.pdfx'])
+      expect(decide(att, join(drop, n)).deny, n).toBe(true)
+  })
+  it('the deny reason names the allowed types and does not suggest renaming', () => {
+    const { reason } = decide(att, join(drop, 'x.zip'))
+    expect(reason).toContain('Allowed types: pdf, xml')
+    expect(reason).not.toMatch(/\.bin|data extension|Save it under/)
+  })
   it('denies bidi control characters in the name', () => {
     expect(decide(att, join(drop, 'invoice\u202Efdp.command')).deny).toBe(true)
     // RLO on an otherwise allowed extension: only the bidi rule can deny this one
