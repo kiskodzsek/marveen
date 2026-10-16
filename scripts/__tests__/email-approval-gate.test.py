@@ -20,6 +20,7 @@ import json
 import os
 import re
 import hashlib
+import importlib.util
 import sqlite3
 import subprocess
 import sys
@@ -744,10 +745,126 @@ with tempfile.TemporaryDirectory() as td:
     code, _, err = run_gate(make_store(os.path.join(td, "ms4"), level=1), ms365())
     check("ms365: level 1 is a hard deny", code == 2 and "szint 1" in err, f"exit={code}")
     store_l1 = make_store(os.path.join(td, "ms5"), level=1)
+    # download-bytes-to-file (#37) sends nothing out; ms365-download-gate.mjs gates it.
     for tool in ("mcp__ms365__create-reply-draft", "mcp__ms365__create-draft-email",
-                 "mcp__ms365__list-mail-messages"):
+                 "mcp__ms365__list-mail-messages", "mcp__ms365__download-bytes-to-file"):
         code, _, _ = run_gate(store_l1, {"tool_name": tool, "tool_input": {"message-id": "AAMk1"}})
         check(f"ms365: {tool.split('__')[-1]} (no send) passes even at level 1", code == 0, f"exit={code}")
+
+    # --- MS365GATE1015 (Viktor G1): allowlist, not a blocklist --------------
+    # Every outbound operation of the 0.162.0 server, and every ms365 tool off
+    # the read/draft list, is denied below level 3 -- not only the six names the
+    # first version knew.
+    store = make_store(os.path.join(td, "g1"), level=2)
+    for tool in ("reply-shared-mailbox-mail", "reply-all-shared-mailbox-mail",
+                 "forward-shared-mailbox-mail", "send-shared-mailbox-draft", "graph-batch",
+                 "create-mail-rule", "update-mail-rule", "update-mailbox-settings",
+                 "create-calendar-event", "update-specific-calendar-event",
+                 "forward-calendar-event", "send-chat-message", "share-drive-item",
+                 "create-subscription"):
+        code, _, err = run_gate(store, {"tool_name": f"mcp__ms365__{tool}", "tool_input": {}})
+        check(f"G1: ms365 {tool} (outbound) is DENIED at level 2",
+              code == 2 and "kifele visz" in err, f"exit={code} err={err[:160]!r}")
+    for tool in ("get-me", "list-calendar-events", "delete-mail-message", "some-future-tool"):
+        code, _, err = run_gate(store, {"tool_name": f"mcp__ms365__{tool}", "tool_input": {}})
+        check(f"G1: ms365 {tool} (off the read/draft allowlist) is DENIED at level 2",
+              code == 2 and "engedelylistan" in err, f"exit={code} err={err[:160]!r}")
+
+    # --- MS365GATE1015 (Viktor G3): a renamed server is not a blind spot ------
+    for server in ("outlook", "m365", "mail"):
+        for tool in ("graph-batch", "create-mail-rule", "reply-shared-mailbox-mail",
+                     "send-draft-message"):
+            code, _, err = run_gate(store, {"tool_name": f"mcp__{server}__{tool}", "tool_input": {}})
+            check(f"G3: {server}/{tool} is DENIED by operation, whatever the server name",
+                  code == 2, f"exit={code} err={err[:160]!r}")
+    store = make_store(os.path.join(td, "g3"), level=2)
+    code, _, err = run_gate(store, ms365(tool="mcp__outlook__send-mail"))
+    anchor = anchor_from_stderr(err)
+    check("G3: a renamed server's send-mail still needs the per-letter approval",
+          code == 2 and anchor is not None, f"exit={code} err={err[:160]!r}")
+    approve(store, anchor)
+    code, _, _ = run_gate(store, ms365(tool="mcp__outlook__send-mail"))
+    check("G3: ... and goes with it", code == 0, f"exit={code}")
+    code, _, _ = run_gate(make_store(os.path.join(td, "g3b"), level=1),
+                          {"tool_name": "mcp__outlook__list-mail-messages", "tool_input": {}})
+    check("G3: a read on a non-ms365 server name is not this gate's business", code == 0, f"exit={code}")
+
+    # An unreadable policy file is fail-closed: every ms365 tool is denied, the
+    # reads too, and the six send names of the first version stay denied on any
+    # server name.
+    nopol = os.path.join(td, "nopolicy-hooks")
+    os.makedirs(nopol)
+    for f in ("email-approval-gate.py", "email_extract.py"):
+        with open(os.path.join(HOOKS, f), encoding="utf-8") as src, \
+                open(os.path.join(nopol, f), "w", encoding="utf-8") as dst:
+            dst.write(src.read())
+    store = make_store(os.path.join(td, "g1np"), level=2)
+    for tool in ("mcp__ms365__list-mail-messages", "mcp__ms365__send-mail",
+                 "mcp__outlook__send-mail", "mcp__outlook__forward-mail-message"):
+        proc = subprocess.run([sys.executable, os.path.join(nopol, "email-approval-gate.py")],
+                              input=json.dumps(ms365(tool=tool)).encode(), capture_output=True,
+                              env=dict(os.environ, EMAIL_APPROVAL_GATE_STORE=store))
+        err = proc.stderr.decode()
+        check(f"G1: without ms365-tool-policy.json, {tool} is DENIED (fail-closed)",
+              proc.returncode == 2 and "nem olvashato" in err, f"exit={proc.returncode} err={err[:160]!r}")
+
+    # --- MS365GATE1015 (Viktor G2): the address is a bare addr-spec -----------
+    store = make_store(os.path.join(td, "g2"), level=2)
+
+    def ms365_named(address, name=None, field="toRecipients", **kw):
+        p = ms365(**kw)
+        ea = {"address": address}
+        if name is not None:
+            ea["name"] = name
+        p["tool_input"]["body"]["Message"][field] = [{"emailAddress": ea}]
+        return p
+    for label, payload in (
+            ("an RFC comment after the address (the fuzz case)",
+             ms365_named("balazs@myshp.hu (evil@x.com)")),
+            ("two addresses in one field", ms365_named("a@b.hu, c@d.hu")),
+            ("a display name inside the address", ms365_named("Balazs <balazs@myshp.hu>")),
+            ("a space", ms365_named("a @b.hu")),
+            ("a comment in the cc", ms365_named("gazda@pelda.hu (x@y.hu)", field="ccRecipients")),
+            ("a newline in the name", ms365_named("a@b.hu", name="Kedves\nBcc: x@y.hu")),
+            ("angle brackets in the name", ms365_named("evil@x.hu", name="Balazs <balazs@myshp.hu>")),
+            # G2b (Viktor, CWE-451/176): what the approver reads must be what
+            # Exchange receives.
+            ("a zero-width character after the address", ms365_named("balazs@myshp.hu\u200b")),
+            ("an accented address", ms365_named("bal\u00e1zs@myshp.hu")),
+            ("a Cyrillic homoglyph in the domain", ms365_named("balazs@myshp.h\u0443")),
+            ("a bidi override in the name", ms365_named("a@b.hu", name="Bal\u00e1zs\u202emoc.x")),
+            ("a zero-width character in the name", ms365_named("a@b.hu", name="Bal\u200bazs")),
+            ("a comma in the name", ms365_named("evil@x.hu", name="Balazs, Patrik")),
+            ("an @ in the name", ms365_named("evil@x.hu", name="balazs@myshp.hu")),
+            ("a line separator in the name", ms365_named("a@b.hu", name="Balazs\u2028Bcc")),
+            # I9 (Viktor): fullwidth forms read as , @ < > to the approver.
+            ("a fullwidth @ in the name", ms365_named("evil@x.hu", name="balazs\uff20myshp.hu")),
+            ("a fullwidth comma in the name", ms365_named("evil@x.hu", name="Balazs\uff0c Patrik")),
+            ("fullwidth angle brackets in the name",
+             ms365_named("evil@x.hu", name="Balazs \uff1cbalazs\uff1e"))):
+        code, _, err = run_gate(store, payload)
+        check(f"G2: {label} is unreadable -> DENIED",
+              code == 2 and "nem horgonyozhato" in err, f"exit={code} err={err[:160]!r}")
+    code, _, err = run_gate(store, ms365_named("a@b.hu", name="Kovács Éva"))
+    check("G2: a plain name with accents is still readable (anchor offered)",
+          code == 2 and anchor_from_stderr(err) is not None, f"exit={code} err={err[:160]!r}")
+
+    # The standing check reads the raw address fields, not a re-parse of the
+    # "name <addr>" display string.
+    spec = importlib.util.spec_from_file_location("eag_g2", GATE)
+    eag = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(eag)
+    standing = {"kollega@pelda.hu": "gazda@pelda.hu"}
+    env_ok = {"to": ["Kolléga <kollega@pelda.hu>"], "cc": ["gazda@pelda.hu"], "bcc": [],
+              "addrs": {"to": ["kollega@pelda.hu"], "cc": ["gazda@pelda.hu"], "bcc": []}}
+    check("G2: standing match on the raw addresses",
+          eag.standing_match(env_ok, standing) == ("kollega@pelda.hu", "gazda@pelda.hu"))
+    env_bad = dict(env_ok, addrs={"to": ["evil@x.hu"], "cc": ["gazda@pelda.hu"], "bcc": []})
+    check("G2: a display string that re-parses to the standing address does NOT match "
+          "when the raw address differs", eag.standing_match(env_bad, standing) is None)
+    env_cc = dict(env_ok, addrs={"to": ["kollega@pelda.hu"], "cc": ["masik@x.hu"], "bcc": []})
+    check("G2: the required cc is checked on the raw cc address too",
+          eag.standing_match(env_cc, standing) is None)
 
     # F2: the hook only runs if settings.json routes the tool to it. Removing
     # the matcher must fail here, not silently on the live install.
@@ -756,7 +873,9 @@ with tempfile.TemporaryDirectory() as td:
         pre = json.load(fh)["hooks"]["PreToolUse"]
     for hook in ("email-approval-gate.py", "outgoing-copy-gate.py"):
         for tool in ("mcp__ms365__send-mail", "mcp__ms365__forward-mail-message",
-                     "mcp__ms365__send-draft-message"):
+                     "mcp__ms365__send-draft-message", "mcp__ms365__graph-batch",
+                     "mcp__ms365__create-mail-rule", "mcp__ms365__get-me",
+                     "mcp__outlook__reply-shared-mailbox-mail", "mcp__m365__send-mail"):
             routed = any(re.fullmatch(e.get("matcher", ""), tool)
                          and any(hook in (h.get("command") or "") for h in e.get("hooks", []))
                          for e in pre)

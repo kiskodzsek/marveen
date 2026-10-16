@@ -336,8 +336,48 @@ function ledgerLookup() {
 // (the only path the thread-reply capability below can narrow),
 // 'unverified-recipient' is a draft/manage_email address with no recorded
 // source, and everything else is the sub-agent governance block.
-export const MS365_SEND_TOOL_RE =
-  /ms-?365.*__(send-mail|send-draft-message|reply-mail-message|reply-all-mail-message|forward-mail-message|send-shared-mailbox-mail)$/i
+// MS365GATE1015 (Viktor G1/G3, card d85d38c3): the ms365 policy is an
+// ALLOWLIST shared with the main agent's gates (scripts/hooks/ms365-tool-policy.json).
+// For a sub-agent nothing on an ms365 server leaves the mailbox: every tool off
+// the read/draft list is denied, send-mail included, and every outbound
+// operation is denied on ANY server name, so renaming the server does not blind
+// the gate. An unreadable policy denies every ms365 tool plus the six send
+// operations the first version knew (never blinder than before).
+export const MS365_POLICY_PATH = join(dirname(fileURLToPath(import.meta.url)), 'hooks', 'ms365-tool-policy.json')
+const MS365_SERVER_RE = /ms-?365/i
+const MS365_OUTBOUND_FLOOR = ['send-mail', 'send-draft-message', 'reply-mail-message',
+  'reply-all-mail-message', 'forward-mail-message', 'send-shared-mailbox-mail']
+
+export function loadMs365Policy(path = MS365_POLICY_PATH) {
+  try {
+    const data = JSON.parse(readFileSync(path, 'utf-8'))
+    const lists = ['read_draft', 'anchored_send', 'outbound'].map((k) => data[k])
+    if (!lists.every((v) => Array.isArray(v) && v.every((x) => typeof x === 'string'))) {
+      throw new Error('policy lists are not string arrays')
+    }
+    const [readDraft, anchored, outbound] = lists
+    return { readDraft: new Set(readDraft), anchored: new Set(anchored),
+      outbound: new Set([...outbound, ...MS365_OUTBOUND_FLOOR]), error: null }
+  } catch (e) {
+    return { readDraft: new Set(), anchored: new Set(), outbound: new Set(MS365_OUTBOUND_FLOOR), error: String(e) }
+  }
+}
+
+let ms365Policy = null
+
+// 'outbound' | 'unlisted' | 'read' | null (not an ms365 tool).
+export function ms365ToolClass(toolName, policy = (ms365Policy ??= loadMs365Policy())) {
+  const name = String(toolName ?? '')
+  if (!name.startsWith('mcp__')) return null
+  const rest = name.slice(5)
+  const cut = rest.lastIndexOf('__')
+  if (cut <= 0 || cut + 2 >= rest.length) return null
+  const server = rest.slice(0, cut)
+  const op = rest.slice(cut + 2)
+  if (policy.outbound.has(op)) return 'outbound'
+  if (MS365_SERVER_RE.test(server)) return policy.readDraft.has(op) ? 'read' : 'unlisted'
+  return null
+}
 
 export function gateDecision(toolName, toolInput, isVerified = null) {
   const name = String(toolName ?? '')
@@ -367,10 +407,11 @@ export function gateDecision(toolName, toolInput, isVerified = null) {
   // entrypoint reads send_email-shaped fields (threadId/to), which a connector
   // reply does not carry, so the connector stays fully gated for every agent.
   if (/gmail__(reply|reply_all|send_message|forward)$/i.test(name)) return { deny: true, kind: 'connector-send' }
-  // MS365SEND1014 (Viktor F5): the @softeria ms365 server's Mail.Send tools.
-  // Sub-agents load the root .mcp.json servers too, so a sub-agent session can
-  // see them; only the main agent may send, through its approval gate.
-  if (MS365_SEND_TOOL_RE.test(name)) return { deny: true, kind: 'connector-send' }
+  // MS365SEND1014 (Viktor F5) + MS365GATE1015 (G1/G3): sub-agents load the
+  // root .mcp.json servers too, so a sub-agent session can see the ms365 tools;
+  // only the main agent may send, through its approval gate.
+  const ms365 = ms365ToolClass(name)
+  if (ms365 === 'outbound' || ms365 === 'unlisted') return { deny: true, kind: 'connector-send' }
   // Drafting is allowed, but only to an address with a recorded source.
   if (DRAFT_TOOL_RE.test(name)) {
     const bad = unverifiedRecipients(toolInput, verify)

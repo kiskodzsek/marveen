@@ -379,6 +379,20 @@ def main():
                                                   "body": {"Comment": CLEAN_HU_OK + " — mégis."}}},
                                   rules_file=active)
         check("ms365 forward comment with em dash blocks (exit 2)", code, 2)
+        # MS365GATE1015: the matcher now routes the WHOLE ms365 server here. A
+        # read, and an outbound tool with no text of ours, must pass untouched:
+        # the approval gate is the one that decides the send.
+        for tool in ("mcp__ms365__list-mail-messages", "mcp__ms365__get-mail-message",
+                     "mcp__ms365__graph-batch", "mcp__ms365__create-mail-rule",
+                     "mcp__ms365__get-me"):
+            code, out, err = run_hook({"tool_name": tool, "tool_input": {"message-id": "1"}},
+                                      rules_file=active)
+            check(f"ms365 {tool.split('__')[-1]} without our text passes the copy gate (exit 0)",
+                  code, 0)
+        # G3: a renamed server's send-mail is audited the same way.
+        code, out, err = run_hook(ms365_payload(CLEAN_HU_OK + " — mégis.",
+                                                tool="mcp__outlook__send-mail"), rules_file=active)
+        check("renamed server send-mail with em dash blocks (exit 2)", code, 2)
 
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
