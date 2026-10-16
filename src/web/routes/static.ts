@@ -153,5 +153,19 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
     return true
   }
 
+  // Self-hosted brand fonts (MYSHPTHEME1015). Name-allowlisted: one flat
+  // directory, lowercase woff2 names only, so no path can climb out of it.
+  // Fonts never change under the same name, hence the long max-age.
+  if (path.startsWith('/fonts/')) {
+    const fontFile = path.slice('/fonts/'.length)
+    const fontPath = join(webDir, 'fonts', fontFile)
+    if (/^[a-z0-9-]+\.woff2$/.test(fontFile) && existsSync(fontPath)) {
+      serveFile(req, res, fontPath, { cacheSeconds: 604800 })
+      return true
+    }
+    res.writeHead(404); res.end()
+    return true
+  }
+
   return false
 }

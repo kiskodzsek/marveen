@@ -18,7 +18,7 @@
   --border-focus: #d97757;
   --accent: #d97757;
   --accent-hover: #c46849;
-  --accent-soft: rgba(217, 119, 87, 0.1);
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
   --danger: #bf4d43;
   --danger-soft: rgba(191, 77, 67, 0.12);
   --danger-hover: #a8413a;
@@ -1665,7 +1665,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   color: var(--accent);
   flex-shrink: 0;
 }
-.agent-avatar.gradient-1 { background: linear-gradient(135deg, rgba(217,119,87,0.15), rgba(217,119,87,0.35)); }
+.agent-avatar.gradient-1 { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 15%, transparent), color-mix(in srgb, var(--accent) 35%, transparent)); }
 .agent-avatar.gradient-2 { background: linear-gradient(135deg, rgba(106,155,204,0.15), rgba(106,155,204,0.35)); color: var(--info); }
 .agent-avatar.gradient-3 { background: linear-gradient(135deg, rgba(120,140,93,0.15), rgba(120,140,93,0.35)); color: var(--success); }
 .agent-avatar img {
@@ -1717,7 +1717,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   background: var(--bg-input);
   color: var(--text-muted);
 }
-.agent-model-badge.opus { background: rgba(217,119,87,0.12); color: var(--accent); }
+.agent-model-badge.opus { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .agent-model-badge.sonnet { background: var(--info-soft); color: var(--info); }
 .agent-model-badge.haiku { background: var(--success-soft); color: var(--success); }
 
@@ -2073,8 +2073,8 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   gap: 10px;
   margin-top: 14px;
   padding: 12px 16px;
-  background: rgba(217, 119, 87, 0.08);
-  border: 1px solid rgba(217, 119, 87, 0.2);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
   border-radius: var(--radius-sm);
   font-size: 13px;
   color: var(--text-secondary);
@@ -2452,7 +2452,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   border-radius: 50%;
   border: 2px solid var(--bg-modal);
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2495,7 +2495,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .avatar-upload-zone:hover,
 .avatar-upload-zone.drag-over {
   border-color: var(--accent);
-  background: rgba(217,119,87,0.05);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
 }
 .avatar-upload-content {
   display: flex;
@@ -2799,7 +2799,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   color: var(--success);
 }
 .badge-paused {
-  background: rgba(217, 119, 87, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent);
 }
 .badge-heartbeat {
@@ -3307,7 +3307,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 
 /* === Tier Badges === */
 .badge-hot { background: rgba(220, 60, 60, 0.12); color: #dc3c3c; }
-.badge-warm { background: rgba(217, 119, 87, 0.12); color: var(--accent); }
+.badge-warm { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .badge-cold { background: var(--info-soft); color: var(--info); }
 .badge-shared { background: rgba(200, 180, 100, 0.18); color: #9a8a30; }
 
@@ -3714,7 +3714,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .expand-option.selected {
   background: var(--accent);
   border-color: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 .expand-apply-row {
   display: flex;
@@ -4540,7 +4540,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   padding: 1px 6px;
   border-radius: 8px;
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
   vertical-align: middle;
   margin-left: 6px;
 }
@@ -5283,7 +5283,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .catalog-filter-btn.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 /* === Catalog Grid === */
@@ -5464,7 +5464,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   color: var(--success);
 }
 .status-overall.degraded {
-  background: rgba(217, 119, 87, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent);
 }
 .status-overall.unknown {
@@ -5566,7 +5566,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 .status-incident-badge.resolved { background: var(--success-soft); color: var(--success); }
 .status-incident-badge.monitoring { background: var(--info-soft); color: var(--info); }
-.status-incident-badge.identified { background: rgba(217,119,87,0.12); color: var(--accent); }
+.status-incident-badge.identified { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .status-incident-badge.investigating { background: rgba(191,77,67,0.12); color: var(--danger); }
 
 .status-incident-desc {
@@ -5739,7 +5739,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .skills-filter-btn.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .skill-health-dot {
@@ -6745,7 +6745,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 }
 .auth-mode-card.selected .auth-mode-card-icon {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 .auth-mode-card-body { flex: 1; min-width: 0; }
 .auth-mode-card-title {
@@ -6954,7 +6954,7 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
 .chat-bubble { max-width: 72%; display: flex; flex-direction: column; gap: 4px; }
 .bubble-out {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border-radius: 16px 4px 16px 16px;
   padding: 10px 14px;
   align-self: flex-end;
@@ -7547,7 +7547,7 @@ body {
 .onboarding-step.active { color: var(--text); border-color: var(--accent); }
 .onboarding-step.done { opacity: 0.55; }
 .onboarding-step .onb-num { display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center; border-radius: 50%; background: var(--border); font-size: 11px; }
-.onboarding-step.active .onb-num { background: var(--accent); color: #fff; }
+.onboarding-step.active .onb-num { background: var(--accent); color: var(--on-accent); }
 .onboarding-body p { font-size: 14px; line-height: 1.6; }
 .onb-input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-input); color: var(--text); font-size: 13px; margin: 4px 0; }
 .onb-hint { font-size: 12px; color: var(--text-muted); margin: 4px 0 12px; }
@@ -7576,7 +7576,7 @@ body {
   font-size: 10px;
   font-weight: 600;
   color: var(--accent);
-  background: var(--accent-soft, rgba(217, 119, 87, 0.1));
+  background: var(--accent-soft, color-mix(in srgb, var(--accent) 10%, transparent));
   padding: 1px 6px;
   border-radius: 8px;
   margin-left: 6px;
@@ -7634,7 +7634,7 @@ body {
   border: 0;
   border-radius: 8px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
@@ -7852,3 +7852,264 @@ body {
 .finance-state { padding: 24px; color: var(--text-secondary, #888); }
 .finance-tabs { padding: 0; margin-bottom: 12px; }
 .finance-state p { margin: 0 0 12px; }
+
+/* === mySHP brand theme (MYSHPTHEME1015) ===
+ * Source of truth: Company-OS apps/marketing/BRAND-GUIDE.md and public/brand/
+ * (approved board 2026-09-22): Deep Teal #102A33, Petrol #0B7D78, Ocean Blue
+ * #1769E0, Soft Gold #D7AC67, Warm Sand #F7F3EA, Mist #EEF3F1, Graphite
+ * #53636B; Manrope for display, Inter for body/UI. Logos are the unmodified
+ * master SVGs (web/icons/myshp-*-white.svg).
+ *
+ * Kept as ONE block at the end on purpose: it only re-points the tokens the
+ * rest of the sheet already uses, plus a handful of chrome rules (sidebar,
+ * type, cards), so an upstream change to any rule above merges cleanly.
+ * Both theme blocks below set the FULL token set: :root and [data-theme]
+ * have the same specificity, so a token set only in :root here would also
+ * win over the original dark block above.
+ *
+ * Contrast (WCAG, measured): text/bg 13.5:1, --text-muted on card 4.7:1
+ * (was 3.5:1), --accent on card 5.0:1, --on-accent on --accent 5.0:1 light
+ * and 7.0:1 dark, sidebar muted label 6.8:1. */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('/fonts/inter-latin-ext-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('/fonts/inter-latin-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Manrope';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 800;
+  src: url('/fonts/manrope-latin-ext-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Manrope';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 800;
+  src: url('/fonts/manrope-latin-wght-normal.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --font-display: 'Manrope', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --brand-gradient: linear-gradient(90deg, #0B7D78 0%, #1769E0 100%);
+
+  --bg: #F7F3EA;
+  --bg-card: #ffffff;
+  --bg-card-hover: #F3F7F5;
+  --bg-input: #EEF3F1;
+  --bg-modal: #ffffff;
+  --bg-code: #EEF3F1;
+  --text: #102A33;
+  --text-secondary: #24414A;
+  --text-muted: #66777D;
+  --text-dim: #53636B;
+  --border: #DCE3DF;
+  --border-focus: #1769E0;
+  --accent: #0B7D78;
+  --accent-hover: #096864;
+  --on-accent: #ffffff;
+  --danger: #B83E35;
+  --danger-soft: rgba(184, 62, 53, 0.1);
+  --danger-hover: #9C332C;
+  --success: #2F7D4F;
+  --success-soft: rgba(47, 125, 79, 0.12);
+  --info: #1769E0;
+  --info-soft: rgba(23, 105, 224, 0.1);
+  --shadow-sm: 0 1px 2px rgba(16, 42, 51, 0.05), 0 1px 3px rgba(16, 42, 51, 0.04);
+  --shadow-md: 0 6px 20px rgba(16, 42, 51, 0.08);
+  --shadow-lg: 0 16px 40px rgba(16, 42, 51, 0.14);
+  --radius: 14px;
+  --radius-sm: 9px;
+  --radius-lg: 18px;
+
+  --sidebar-bg: #102A33;
+  --sidebar-text: #EEF3F1;
+  --sidebar-muted: #9DB3B5;
+  --sidebar-border: rgba(238, 243, 241, 0.1);
+  --sidebar-hover: rgba(238, 243, 241, 0.07);
+  --sidebar-active: rgba(43, 179, 169, 0.16);
+  --sidebar-active-icon: #5FD3C9;
+}
+
+[data-theme="dark"] {
+  --bg: #0B1D23;
+  --bg-card: #112830;
+  --bg-card-hover: #163239;
+  --bg-input: #1A3740;
+  --bg-modal: #112830;
+  --bg-code: #0E232A;
+  --text: #EEF3F1;
+  --text-secondary: #C3D1D0;
+  --text-muted: #8CA2A6;
+  --text-dim: #A9BBBD;
+  --border: #23434C;
+  --border-focus: #6EA8F5;
+  --accent: #2BB3A9;
+  --accent-hover: #4CC7BD;
+  --on-accent: #06181C;
+  --danger: #F07167;
+  --danger-soft: rgba(240, 113, 103, 0.14);
+  --danger-hover: #F48B83;
+  --success: #5BBF85;
+  --success-soft: rgba(91, 191, 133, 0.14);
+  --info: #6EA8F5;
+  --info-soft: rgba(110, 168, 245, 0.14);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.4);
+
+  --sidebar-bg: #081A1F;
+  --sidebar-border: rgba(238, 243, 241, 0.08);
+}
+
+body { font-family: var(--font-body); font-feature-settings: 'cv11', 'ss01'; -webkit-font-smoothing: antialiased; }
+::selection { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+/* Visible keyboard focus everywhere (mouse clicks stay clean). */
+a:focus-visible, button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* Display type */
+h1, h2, h3,
+.page-header h1,
+.overview-card-head h3,
+.overview-stat-value,
+.stat-value,
+.sidebar-brand-name,
+.mobile-topbar-title {
+  font-family: var(--font-display);
+}
+.page-header h1 { font-weight: 700; letter-spacing: -0.025em; }
+.overview-stat-value { font-weight: 800; letter-spacing: -0.03em; }
+.overview-card-head h3 { font-weight: 700; letter-spacing: -0.01em; }
+
+/* Sidebar: deep-teal brand column in both themes, white master logo on top. */
+.sidebar,
+.sidebar::before {
+  background: var(--sidebar-bg);
+  border-right-color: var(--sidebar-border);
+}
+.sidebar { color: var(--sidebar-text); color-scheme: dark; }
+.sidebar-org {
+  display: flex;
+  align-items: center;
+  padding: 2px 6px 16px;
+}
+/* The live myshp.hu logo (Company-OS apps/marketing/public/brand/myshp-logo-dark.svg), byte for byte. */
+.sidebar-org img { display: block; height: 38px; width: auto; }
+.sidebar-brand { border-bottom-color: var(--sidebar-border); padding-top: 14px; border-top: 1px solid var(--sidebar-border); }
+.sidebar-brand-mark { background: var(--sidebar-text); color: var(--sidebar-bg); box-shadow: 0 0 0 2px rgba(238, 243, 241, 0.12); }
+.sidebar-brand-name { color: var(--sidebar-text); font-weight: 700; }
+.sidebar-brand-sub { color: var(--sidebar-active-icon); display: flex; align-items: center; gap: 6px; }
+.sidebar-brand-sub::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.sidebar .sb-link { color: var(--sidebar-muted); position: relative; }
+.sidebar .sb-link:hover { color: var(--sidebar-text); background: var(--sidebar-hover); }
+.sidebar .sb-link.active { color: #ffffff; background: var(--sidebar-active); font-weight: 600; }
+.sidebar .sb-link.active svg { color: var(--sidebar-active-icon); }
+.sidebar .sb-link.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--brand-gradient);
+}
+.sidebar .sb-group-header { color: rgba(238, 243, 241, 0.62); }
+.sidebar .sb-group-header:hover { color: var(--sidebar-text); background: var(--sidebar-hover); }
+.sidebar-docs, .sidebar-footer { border-top-color: var(--sidebar-border); }
+.sidebar .theme-toggle {
+  background: transparent;
+  border-color: var(--sidebar-border);
+  color: var(--sidebar-muted);
+}
+.sidebar .theme-toggle:hover { color: var(--sidebar-text); border-color: var(--sidebar-active-icon); background: var(--sidebar-hover); }
+.sidebar-footer { gap: 6px; }
+
+/* Portrait top bar follows the sidebar so the brand reads the same on a phone. */
+.mobile-topbar-mark { display: none; }
+@media (max-width: 768px) {
+  .mobile-topbar,
+  .mobile-topbar::before { background: var(--sidebar-bg); }
+  .mobile-topbar { border-bottom-color: var(--sidebar-border); color: var(--sidebar-text); }
+  .mobile-menu-btn { background: transparent; border-color: var(--sidebar-border); color: var(--sidebar-text); }
+  .mobile-topbar-mark { display: block; height: 28px; width: auto; }
+}
+
+/* Cards: soft lift instead of flat outlines. */
+.overview-stat, .overview-card, .stat-card, .quota-strip, .kanban-card {
+  box-shadow: var(--shadow-sm);
+}
+.overview-stat { position: relative; overflow: hidden; transition: border-color var(--transition), box-shadow var(--transition), transform var(--transition); }
+.overview-stat::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 3px;
+  background: var(--brand-gradient);
+  opacity: 0.85;
+}
+.overview-stat:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.kanban-card:hover { box-shadow: var(--shadow-md); }
+
+/* Primary action in the brand colour (was the inverted text colour). */
+.btn-primary { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.btn-primary:hover { opacity: 1; background: var(--accent-hover); }
+[data-theme="dark"] .btn-primary .spinner {
+  border-color: color-mix(in srgb, var(--on-accent) 30%, transparent);
+  border-top-color: var(--on-accent);
+}
+.btn-secondary:hover:not(:disabled) { background: var(--bg-card); }
+
+/* Kanban: the aging badge sits top-right over the title; keep the title text
+ * clear of it instead of letting the two overlap. */
+.kanban-card[data-aging] .kanban-card-title { padding-right: 46px; }
+.kanban-col-title { color: var(--text-secondary); }
+
+/* Phone: the four overview counters fit two per row instead of four tall
+ * single cards, so the team and the activity feed come into view sooner. */
+@media (max-width: 768px) {
+  .overview-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .overview-stat { padding: 14px 14px; }
+  .overview-stat-value { font-size: 26px; }
+  .page-header h1 { font-size: 24px; }
+}
+
+/* `.input` is used by ~50 fields (settings, vault, connectors, SSH keys) but
+ * had no base rule, so the ones without a parent rule rendered as raw browser
+ * boxes (a white box on the dark theme). :where() keeps this at the
+ * specificity of `.input` alone, so every existing contextual rule still wins. */
+:where(input, select, textarea).input {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+:where(input, select, textarea).input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--border-focus) 22%, transparent);
+}
