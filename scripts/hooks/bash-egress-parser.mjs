@@ -10,7 +10,14 @@
 //      cannot cover), and any positional / --url / proxy argument even WITHOUT a scheme;
 //   2. an interpreter one-liner (python/node/perl/ruby/php/deno/bun with -c/-e/-r/--eval) whose code
 //      carries an EXTERNAL URL;
-//   3. either of the above when the URL sits in a variable ASSIGNED IN THE SAME COMMAND.
+//   3. either of the above when the URL sits in a variable ASSIGNED IN THE SAME COMMAND -- also when
+//      the curl / one-liner runs inside a $(...) or backtick substitution of that command: an inner
+//      command sees the outer command's assignments and loop values (Viktor 5196, decfb196; before,
+//      `for u in <url>; do echo "$(curl -s $u)"; done` and `u=<url>; x=$(curl -s $u)` passed).
+//      Fail-closed reserve: a curl whose destination is still a variable after that expansion is
+//      denied when the command carries an external URL literal anywhere. A ( ... ) subshell and a
+//      <( ... ) / >( ... ) process substitution are inner commands the same way; past the nesting
+//      limit (4) an external URL literal in the command is a deny (subst-too-deep).
 // localhost / 127.0.0.1 / [::1] ALWAYS pass: the dashboard's own calls (memory, kanban, message
 // queue, approvals) go over http://localhost and a gate that cut them would silence the fleet.
 // Hosts are cut with a regex, not URL(), so http://localhost:$PORT stays local, while
@@ -94,9 +101,11 @@ const INTERPRETER = /^(?:python(?:\d+(?:\.\d+)?)?|node(?:js)?|perl|ruby|php|deno
 const CODE_FLAG = new Set(['-c', '-e', '-E', '-r', '--eval', '-p', '--print', 'eval'])
 // Words that can stand before the real command word of a sub-command. The shell keywords are here
 // because `for p in a b; do curl ...` splits at `;` into a span that starts with `do`, and without
-// them a curl inside a loop or an if/then body was never looked at.
+// them a curl inside a loop or an if/then body was never looked at. `if` / `while` / `until` /
+// `coproc` open a command too: `if curl <url>; then` passed (Viktor M1, decfb196); `coproc NAME {`
+// is stepped over by the function-head rule in commandWordAt().
 const PREFIX_WORDS = new Set(['env', 'sudo', 'command', 'exec', 'time', 'nohup', 'nice',
-  'do', 'then', 'else', 'elif', '{', '(', '!'])
+  'do', 'then', 'else', 'elif', 'if', 'while', 'until', 'coproc', '{', '(', '!'])
 // A one-liner is a DOWNLOADER only when its code uses a network primitive of the language itself.
 // Measured on 7 days of fleet commands: a one-liner that merely CARRIES a URL as data (an
 // inter-agent message built with subprocess + curl to localhost) must not be denied -- that was 4 of
@@ -130,9 +139,12 @@ export function isExternal(url) {
   if (h === null || h === '') return false
   return !isLocalHost(h)
 }
+// A lone `&` (background) ends a command like `;` does: `true & curl <url>` runs curl as its own
+// command, and without the split the span's command word was `true` (decfb196). Not split: `&&`
+// (matched first), and the redirections `2>&1`, `>&2`, `<&3`, `&>file`, `&>>file`.
 function spans(masked) {
   const out = []; let start = 0
-  const re = /&&|\|\||;|\||\n/g; let m
+  const re = /&&|\|\||;|\||\n|(?<![<>&])&(?![>&])/g; let m
   while ((m = re.exec(masked))) { out.push([start, m.index]); start = m.index + m[0].length }
   out.push([start, masked.length])
   return out
@@ -197,8 +209,11 @@ function expand(text, env) {
 // shell would run it (top level, inside "...", inside an unquoted-tag heredoc body). Inside '...',
 // $'...' and a quoted-tag heredoc body it is inert text. Lifting it there turned every HANDOFF.md
 // written with `cat > f <<'EOF'` that mentions a curl in backticks into a false deny.
-function substEnd(text, i) { // text[i..] starts with $( -> index just past the matching )
-  let depth = 1, j = i + 2, q = null
+function substEnd(text, i) { // text[i..] starts with $( (or <( / >() -> index just past the matching )
+  return parenEnd(text, i + 1)
+}
+function parenEnd(text, open) { // text[open] is ( -> index just past the matching )
+  let depth = 1, j = open + 1, q = null
   while (j < text.length && depth > 0) {
     const c = text[j]
     if (q) { if (c === q) q = null; else if (c === '\\' && q === '"') j++ }
@@ -289,6 +304,15 @@ export function liftSubstitutions(text) {
       out += '"'
       if (j >= text.length) { copyLive(i + 1, text.length); i = text.length; continue }
       copyLive(i + 1, j); out += '"'; i = j + 1; continue
+    }
+    // A ( ... ) subshell and a <( ... ) / >( ... ) process substitution run a command of their own
+    // too (Viktor, decfb196 review): `(curl -s http://x)` and `cat <(curl -s http://x)` passed,
+    // because the command word was read as "(curl" or never reached. Lifted like $( ... ), with the
+    // same scope. Only here, at top level: inside "..." and in a heredoc body ( is literal text.
+    if (c === '(' || ((c === '<' || c === '>') && text[i + 1] === '(')) {
+      const open = c === '(' ? i : i + 1
+      const j = parenEnd(text, open)
+      inners.push(text.slice(open + 1, Math.max(open + 1, j - 1))); out += ' '.repeat(j - i); i = j; continue
     }
     const n = lift(i)
     if (n !== -1) { i = n; continue }
@@ -393,20 +417,105 @@ export function curlDestinations(args) {
   }
   return dests.filter((h) => !isLocalHost(h))
 }
-export function classify(command, depth = 0, vendorHosts = new Set(), vendorDomains = new Set()) {
+// True when a curl destination (positional or --url / -x value) still holds a shell variable after
+// this command's assignments and loop values were expanded: curl will reach a host the text does
+// not name. Only used together with an external URL literal elsewhere in the command (classify).
+export function curlHasUnresolvedDestination(args) {
+  for (let k = 0; k < args.length; k++) {
+    const w = args[k]
+    if (/^\d*[<>]/.test(w) || w === '&') { if (/^\d*(?:>>?|<)&?$/.test(w)) k++; continue }
+    if (w === '--') continue
+    if (w.startsWith('--')) {
+      const [name, inline] = w.slice(2).split(/=(.*)/s)
+      if (!CURL_LONG_WITH_VALUE.has(name)) continue
+      const v = inline !== undefined ? inline : args[++k]
+      if (CURL_DEST_URL.has(name) && unresolvedHost(v)) return true
+      continue
+    }
+    if (w.startsWith('-') && w.length > 1) {
+      for (let q = 1; q < w.length; q++) {
+        if (!CURL_SHORT_WITH_VALUE.has(w[q])) continue
+        const v = q + 1 < w.length ? w.slice(q + 1) : args[++k]
+        if (CURL_DEST_URL.has(w[q]) && unresolvedHost(v)) return true
+        break
+      }
+      continue
+    }
+    if (unresolvedHost(w)) return true
+  }
+  return false
+}
+// The HOST part (scheme and userinfo dropped, up to the first / ? #) holds a $VAR or ${VAR}.
+// A variable only in the path (`http://localhost:3420/api/$id`) names its host and is not this.
+function unresolvedHost(value) {
+  if (!value) return false
+  const noScheme = String(value).replace(/^[^/?#\s]*:\/\//, '')
+  const host = /^(?:[^@/?#]*@)?([^/?#]*)/.exec(noScheme)?.[1] ?? ''
+  return /\$\{?[A-Za-z_]/.test(host)
+}
+function curlUnresolvedIn(text) {
+  const argv = shellWords(text)
+  const at = argv.findIndex((w) => w.split('/').pop() === 'curl')
+  return at !== -1 && curlHasUnresolvedDestination(argv.slice(at + 1))
+}
+// An external URL literal anywhere in the command text (vendor-listed hosts do not count).
+function hasExternalLiteral(text, vendorHosts, vendorDomains) {
+  for (const m of String(text).matchAll(URL_RE)) {
+    const h = hostOf(m[0])
+    if (h && !isLocalHost(h) && !vendorHosts.has(h) && !hostInDomains(h, vendorDomains)) return true
+  }
+  return false
+}
+// `scope` carries the enclosing command's assignments and loop values into a substitution, and
+// whether the WHOLE command (outermost text) carries an external URL literal.
+// Index of the real command word of a span's (masked) words. Besides assignments and PREFIX_WORDS it
+// steps over the words that open a body without being a command (decfb196, Viktor 2597/2634):
+//   - a case header up to its `in` (`case $x in a) curl ...`), and a case pattern: a leading word
+//     ending in `)` (`a)`, `a|b)`, `*)`; `(a)` is lifted as a subshell before this and leaves blanks);
+//   - a function head: `function NAME [{]`, or `NAME {` (`NAME()` leaves `NAME {` after lifting);
+//   - a leading `in`: a case header broken before it (`case $x` NEWLINE `in a) curl ...`) leaves a
+//     span that starts with `in` (Viktor L1, decfb196).
+// Fail-closed direction: a word wrongly stepped over only lets a LATER word be judged as curl.
+function commandWordAt(mw) {
+  let i = 0
+  while (i < mw.length) {
+    const w = mw[i]
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || PREFIX_WORDS.has(w)) i++
+    else if (w === 'case') { const at = mw.indexOf('in', i + 1); i = at === -1 ? mw.length : at + 1 }
+    else if (w === 'in' && i === 0) i++
+    else if (w === 'function') i += mw[i + 2] === '{' ? 3 : 2
+    else if (mw[i + 1] === '{' && /^[A-Za-z_][\w.:-]*$/.test(w)) i += 2
+    else if (w.endsWith(')') && !w.startsWith('$')) i++
+    else break
+  }
+  return i
+}
+export function classify(command, depth = 0, vendorHosts = new Set(), vendorDomains = new Set(), scope = null) {
   const norm = String(command ?? '').replace(/\\\r?\n/g, ' ')
   const { stripped: orig, inners } = liftSubstitutions(norm)
-  if (depth < 4) {
-    for (const inner of inners) { const r = classify(inner, depth + 1, vendorHosts, vendorDomains); if (r.deny) return r }
-  }
+  const outer = scope ?? { env: {}, loops: {}, externalLiteral: hasExternalLiteral(norm, vendorHosts, vendorDomains) }
   const masked = maskInertLiterals(orig)
-  if (masked === null || masked.length !== orig.length) return { deny: false, reason: 'unparseable', hosts: [] }
-  const env = collectAssignments(orig, masked)
-  const loops = collectLoops(orig, masked, env)
+  const parseable = masked !== null && masked.length === orig.length
+  // This command's own assignments and loops override the enclosing ones (a substitution runs in a
+  // subshell that inherits them). Collected before the inner commands are judged, so the curl in
+  // `u=<url>; x=$(curl -s $u)` reads u.
+  const env = { ...outer.env, ...(parseable ? collectAssignments(orig, masked) : {}) }
+  const loops = { ...outer.loops }
+  if (parseable) {
+    for (const [v, vals] of Object.entries(collectLoops(orig, masked, env))) loops[v] = [...(loops[v] ?? []), ...vals]
+  }
+  if (depth < 4) {
+    const inner = { env, loops, externalLiteral: outer.externalLiteral }
+    for (const sub of inners) { const r = classify(sub, depth + 1, vendorHosts, vendorDomains, inner); if (r.deny) return r }
+  } else if (inners.length && outer.externalLiteral) {
+    // Past the depth limit the inner commands are not read. That was a pass (Viktor LOW, decfb196:
+    // five nested $( ... ) around a curl); with an external URL literal in the command it denies.
+    return { deny: true, reason: 'subst-too-deep', hosts: [] }
+  }
+  if (!parseable) return { deny: false, reason: 'unparseable', hosts: [] }
   for (const [a, b] of spans(masked)) {
     const mw = words(masked.slice(a, b))
-    let i = 0
-    while (i < mw.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(mw[i]) || PREFIX_WORDS.has(mw[i]))) i++
+    const i = commandWordAt(mw)
     if (i >= mw.length) continue
     // Every loop reading AND the plain one: a loop variable can share its name with an assignment
     // elsewhere in the command (`for u in <local>; do ...; done; u=<external>; curl "$u"`), and a
@@ -435,6 +544,11 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
       if (hosts.length) return { deny: true, reason: `${target}-external`, hosts }
       if (variants === null) return { deny: true, reason: `${target}-loop-unbounded`, hosts: [] }
     }
+    // Fail-closed reserve, judged on the loop-expanded readings only: in the plain reading a loop
+    // variable is still a $NAME, and a loop over local URLs is not an unresolved destination.
+    if (outer.externalLiteral && mw[i].split('/').pop() === 'curl' && (variants ?? []).some(curlUnresolvedIn)) {
+      return { deny: true, reason: 'curl-unresolved-destination', hosts: [] }
+    }
   }
   return { deny: false, reason: null, hosts: [] }
 }
@@ -458,7 +572,7 @@ if (isInvokedDirectly()) {
       mkdirSync(dirname(BLOCK_LOG), { recursive: true })
       appendFileSync(BLOCK_LOG, JSON.stringify({ ts: new Date().toISOString(), cwd: process.cwd(), reason: r.reason, hosts: r.hosts }) + '\n')
     } catch { /* the deny still stands; a log failure must not turn it into an allow */ }
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `${GATE_MSG} (hoszt: ${r.hosts.join(', ')})` } }))
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `${GATE_MSG} (${r.hosts.length ? `hoszt: ${r.hosts.join(', ')}` : `ok: ${r.reason}`})` } }))
   }
   process.exit(0)
 }
