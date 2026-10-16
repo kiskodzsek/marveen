@@ -1806,13 +1806,18 @@ function startRemoteAgentProcess(
  * each caller.
  */
 export function shouldBriefAfterStart(
-  opts: { fresh?: boolean },
+  opts: { fresh?: boolean; brief?: boolean },
   result: { ok: boolean },
 ): boolean {
-  return opts.fresh === true && result.ok
+  // `brief: false` is for a caller that delivers its own, fuller resume prompt
+  // (the context guard's inject-resume). Without it the fresh session got
+  // both, ~90 s apart, and redid the same checks twice: measured 10-15 00:00
+  // .. 10-16 06:15, 10 of the 12 briefed sessions also got the guard resume,
+  // and a brief turn cost a weighted median of ~457k tokens.
+  return opts.fresh === true && opts.brief !== false && result.ok
 }
 
-export async function startAgentProcess(name: string, opts: { fresh?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
+export async function startAgentProcess(name: string, opts: { fresh?: boolean; brief?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
   const dir = agentDir(name)
   if (!existsSync(dir)) return { ok: false, error: 'Agent not found' }
 
@@ -2839,7 +2844,7 @@ export function getAgentProcessInfo(name: string): { running: boolean; session?:
   }
 }
 
-export async function restartAgentProcess(name: string, opts: { fresh?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
+export async function restartAgentProcess(name: string, opts: { fresh?: boolean; brief?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
   // Hold the restart slot across BOTH halves. stopAgentProcess waits ~2s for
   // tmux to tear the session down, and for that window isAgentRunning() already
   // says false -- every liveness-driven supervisor (channel-monitor reconcile,

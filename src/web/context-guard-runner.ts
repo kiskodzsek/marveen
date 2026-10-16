@@ -404,6 +404,7 @@ export function resumePrompt(
     base + source +
     `Utána ellenőrizd a kanban tábládat (in_progress kártyák, assignee=${name}) és a hot memóriáidat, ` +
     `és FOLYTASD a megkezdett munkát magadtól. Ne kezdd elölről ami a handoff szerint már kész. ` +
+    `Ha repo-munkád volt folyamatban, a worktree-ben nézd meg a git status-t (külön recovery-brief ezen az úton nem jön). ` +
     // ORSICTX912: msg 23670 was delivered SEVEN SECONDS after the guard kill
     // started, into the dying session -- the queue marked it delivered, the
     // fresh session had no reason to look, so the loss is invisible from the
@@ -508,7 +509,9 @@ async function performRestart(name: string): Promise<void> {
     // rescue reported success while the pane still held the saturated session
     // it was supposed to drop. Measured twice on levente, 2026-08-31 19:10 and
     // 19:41; the second restart WAS the first one's unnoticed failure.
-    const res = await restartAgentProcess(name, { fresh: true })
+    // brief: false -- the inject-resume below is this door's recovery prompt;
+    // the generic recovery-brief on top of it doubled the first turn.
+    const res = await restartAgentProcess(name, { fresh: true, brief: false })
     if (!res.ok) throw new Error(res.error ?? 'agent restart failed')
   }
 }

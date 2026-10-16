@@ -184,7 +184,7 @@ describe('context-guard: a failed rescue is not filed as a completed one', () =>
 
   it('performRestart still asks for FRESH and now checks the result', () => {
     const body = fnBody(runner, 'performRestart')
-    expect(body).toContain('restartAgentProcess(name, { fresh: true })')
+    expect(body).toContain('restartAgentProcess(name, { fresh: true, brief: false })')
     // The result was discarded before RESTARTRACE901; a discarded result is how
     // "Agent is already running" became a silent success.
     expect(body).toMatch(/if\s*\(!res\.ok\)\s*throw/)
