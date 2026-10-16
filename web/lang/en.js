@@ -662,7 +662,7 @@ window._i18n.en = {
   // --- Costs (CostOps v0.1, PR #524) ---
   'finance.nav':                 'Finance',
   'finance.page_title':          'Finance',
-  'finance.page_subtitle':       'Monthly result, forecast, bank balance and subscriptions per company, read only',
+  'finance.page_subtitle':       'Monthly result, forecast, bank balance, monthly closing and subscriptions per company, read only',
   'finance.loading':             'Loading...',
   'finance.login_needed':        'The finance view opens only with a password login. The shared access token is not enough, because every agent in the fleet knows it.',
   'finance.login_btn':           'Sign in',
@@ -670,6 +670,7 @@ window._i18n.en = {
   'finance.not_allowed':         'Your user is not on the finance view list (FINANCE_USERS).',
   'finance.load_failed':         'Could not load the finance view.',
   'finance.view.overview':       'Overview',
+  'finance.view.closing':        'Monthly closing',
   'finance.view.subscriptions':  'Subscriptions',
   'costs.page_title':            'Costs',
   'costs.page_subtitle':         'Monthly cost summary from the local config',

@@ -6,6 +6,7 @@ import {
   companyNames, listCompanies, loadAll, loadSubscriptions, renderFinancePage, renderSubscriptionsPage, resolveFinanceRoot,
   type Lang, type Theme,
 } from '../finance.js'
+import { loadClosing, localToday, renderClosingPage } from '../finance-closing.js'
 import { kindAllowed, FORBIDDEN_KIND } from './auth.js'
 import type { RouteContext } from './types.js'
 
@@ -81,11 +82,15 @@ export async function tryHandleFinance(ctx: RouteContext): Promise<boolean> {
     if (!cfg.root) { json(res, { error: 'finance_disabled' }, 404); return true }
     const lang: Lang = url.searchParams.get('lang') === 'en' ? 'en' : 'hu'
     const theme: Theme = url.searchParams.get('theme') === 'dark' ? 'dark' : 'light'
-    // ELOFIZETES1014: ?view=elofizetesek is the subscriptions view, anything else the overview.
-    const view = url.searchParams.get('view') === 'elofizetesek' ? 'elofizetesek' : 'overview'
+    // ELOFIZETES1014 / HAVIZARAS1016: ?view=elofizetesek is the subscriptions view, ?view=zaras the
+    // monthly closing view, anything else the overview. Only these three values reach the log.
+    const requested = url.searchParams.get('view')
+    const view = requested === 'elofizetesek' || requested === 'zaras' ? requested : 'overview'
     const html = view === 'elofizetesek'
       ? renderSubscriptionsPage(loadSubscriptions(cfg.root), companyNames(cfg.root), { lang, theme })
-      : renderFinancePage(loadAll(cfg.root), { lang, theme })
+      : view === 'zaras'
+        ? renderClosingPage(loadClosing(cfg.root, localToday()), companyNames(cfg.root), { lang, theme, today: localToday() })
+        : renderFinancePage(loadAll(cfg.root), { lang, theme })
     // Who opened which view and companies, never what it showed (F5).
     logger.info({ user, view, companies: listCompanies(cfg.root) }, 'finance view served')
     res.writeHead(200, VIEW_HEADERS)

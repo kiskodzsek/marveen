@@ -74,7 +74,7 @@ Személynév, számlaszám és partneradat ne kerüljön a fájlokba, csak össz
 
 ## Előfizetések nézet (ELOFIZETES1014)
 
-A fül tetején két gomb van: **Áttekintés** és **Előfizetések**. Ugyanaz a végpont szolgálja ki mindkettőt, a `?view=elofizetesek` választ. Minden más érték, a hiányzó paraméter is, az áttekintés. A kapu, a CSP és a sandbox ugyanaz, mint fent. A napló a `view`-t is rögzíti, de csak a két ismert értéket.
+A fül tetején három gomb van: **Áttekintés**, **Előfizetések** és **Havi zárás**. Ugyanaz a végpont szolgálja ki mindegyiket, a `?view=elofizetesek` és a `?view=zaras` választ. Minden más érték, a hiányzó paraméter is, az áttekintés. A kapu, a CSP és a sandbox ugyanaz, mint fent. A napló a `view`-t is rögzíti, de csak a három ismert értéket.
 
 Az adat a `FINANCE_DIR/elofizetesek/` mappából jön. Ezt Juró generálja, az adatszerződés a mappa `README.md`-je. A mappa nem cég, ezért az áttekintés kihagyja. Symlinkelt mappát a nézet nem követ.
 
@@ -96,3 +96,32 @@ Az adat a `FINANCE_DIR/elofizetesek/` mappából jön. Ezt Juró generálja, az 
 **A `meta.json`-ból csak ezek a kulcsok jelennek meg, szövegként:**
 - `keszult` (vagy `generalva`), `szemlelet`, `havi_osszeg_jelentese`, `valtozas`;
 - `forrasok`, `nem_szerepel`, `figyelmeztetesek`: legfeljebb 20 elemű szöveglista, a figyelmeztetés kiemelve látszik.
+
+## Havi zárás nézet (HAVIZARAS1016)
+
+Patrik kérése (TG 3180/3182, kártya eb885bd3): cégenként és hónaponként egy pillantással lássa, hol tart a könyvelőnek küldött havi zárás, és mi vár rá. A `?view=zaras` szolgálja ki, a kapu ugyanaz.
+
+Az adat a `FINANCE_DIR/zaras/<ceg>/<ÉÉÉÉ-HH>.json` fájlokból jön, cégenként és hónaponként egy. Ezeket Juró írja, az adatszerződés a mappa `SEMA.md`-je (v1). A `zaras` mappa nem cég, ezért az áttekintés kihagyja. A cég megjelenő neve az áttekintés `meta.json`-jából jön, ha nincs, a fájl `ceg_nev` mezőjéből. A nézet csak olvas. Symlinket nem követ, a fájl legfeljebb 256 KiB lehet, és minden szöveg hosszkorlátos.
+
+**Mit mutat:**
+- **TŐLED KELL** doboz: minden hónap `hianyok[]` sorai közül azok, ahol `patrikra_var` pontosan `true`. Látszik a szállító, a dátum, az összeg és a teendő.
+- **Rács**: sorok a hónapok (2026-07-től a múlt hónapig, vagy a legújabb fájlig, a legújabb felül), oszlopok a cégek. Egy cellában ezek látszanak:
+  - az állapot;
+  - a "számlával / számlát igénylő" arány;
+  - a hiányzó tételek száma;
+  - a Patrikra váró tételek száma, piros címkével, lezárt hónapnál is;
+  - a hiányzó bankkivonat;
+  - lezárt hónapnál a küldés dátuma, egyébként a határidő ("tipp" jelöléssel, ha nem rögzített szabályból jön, és "lejárt" jelöléssel, ha elmúlt).
+  - A fájl nélküli hónap "nincs adat".
+- **Részletek hónaponként**: `<details>` elemek, a kinyitáshoz nem kell JS. Tartalmuk:
+  - bankkivonatok, terhelések, bevétel, NAV kimenő és bejövő (a saját lista bruttójával és az eltéréssel);
+  - határidő, küldés (ki küldte), ki min dolgozik, megjegyzések, források;
+  - a hiánylista; mobilon a sorai egymás alá rendeződnek.
+
+**Hogyan jelöl:**
+- A `null` és a hiányzó mező "nincs adat", soha nem 0 Ft.
+- A NAV-összegek fillérrel jöhetnek, a nézet egész forintra kerekít.
+- A hibás típusú vagy ismeretlen értékű mező kimarad, az oka a hónap "Hibák a fájlban" listájában látszik. Az ismeretlen állapot "ISMERETLEN".
+- A nem olvasható vagy nem JSON fájl a rács alatt, a "Hibás fájlok" között jelenik meg, adatként nem.
+- A rács legfeljebb 24 hónapot mutat, és a folyó hónapnál későbbit soha. A tartományon kívül eső nevű fájl (pl. `0001-01.json`, `9999-12.json`) szintén a "Hibás fájlok" közé kerül, így nem tolhatja ki a rácsból az aktuális hónapokat.
+- Ismeretlen kulcs nem jelenik meg.
