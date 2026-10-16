@@ -268,8 +268,8 @@ describe('the route', () => {
 
 describe('the dashboard side (static contract)', () => {
   const app = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'web', 'app.js'), 'utf8')
-  it('only the two known view values reach the URL', () => {
-    expect(app).toContain("financeView = btn.getAttribute('data-finance-view') === 'elofizetesek' ? 'elofizetesek' : 'overview'")
+  it('only the known view values reach the URL (HAVIZARAS1016 added zaras)', () => {
+    expect(app).toContain("financeView = v === 'elofizetesek' || v === 'zaras' ? v : 'overview'")
     expect(app).toContain('&view=${financeView}')
   })
 })

@@ -937,7 +937,7 @@ window._i18n.hu = {
   // --- Costs (CostOps v0.1, PR #524) ---
   'finance.nav':                 'Pénzügy',
   'finance.page_title':          'Pénzügy',
-  'finance.page_subtitle':       'Havi eredmény, előrejelzés, bankegyenleg és előfizetések cégenként, csak olvasható',
+  'finance.page_subtitle':       'Havi eredmény, előrejelzés, bankegyenleg, havi zárás és előfizetések cégenként, csak olvasható',
   'finance.loading':             'Betöltés...',
   'finance.login_needed':        'A pénzügyi nézet csak jelszavas bejelentkezéssel nyílik meg. A közös hozzáférési token ehhez nem elég, mert azt a flotta minden ágense ismeri.',
   'finance.login_btn':           'Bejelentkezés',
@@ -945,6 +945,7 @@ window._i18n.hu = {
   'finance.not_allowed':         'A felhasználód nincs a pénzügyi nézet listáján (FINANCE_USERS).',
   'finance.load_failed':         'Nem sikerült betölteni a pénzügyi nézetet.',
   'finance.view.overview':       'Áttekintés',
+  'finance.view.closing':        'Havi zárás',
   'finance.view.subscriptions':  'Előfizetések',
   'costs.page_title':            'Költségek',
   'costs.page_subtitle':         'Havi költség-összefoglaló a helyi konfigurációból',

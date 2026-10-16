@@ -18873,11 +18873,13 @@ fetch('/api/finance/config')
 
 document.getElementById('refreshFinanceBtn')?.addEventListener('click', () => loadFinance())
 
-// ELOFIZETES1014: the overview or the subscriptions view (the server's ?view=). Only these two values ever reach the URL.
+// ELOFIZETES1014: the overview, the subscriptions or the monthly closing view (the server's ?view=). Only these three values ever reach the URL.
 let financeView = 'overview'
 document.querySelectorAll('#financeTabNav [data-finance-view]').forEach((btn) => {
   btn.addEventListener('click', () => {
-    financeView = btn.getAttribute('data-finance-view') === 'elofizetesek' ? 'elofizetesek' : 'overview'
+    // HAVIZARAS1016: the monthly closing view is the third known value.
+    const v = btn.getAttribute('data-finance-view')
+    financeView = v === 'elofizetesek' || v === 'zaras' ? v : 'overview'
     document.querySelectorAll('#financeTabNav [data-finance-view]').forEach((b) => b.classList.toggle('active', b === btn))
     loadFinance()
   })

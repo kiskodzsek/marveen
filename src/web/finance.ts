@@ -97,6 +97,8 @@ export function resolveFinanceRoot(configured: string | undefined, projectRoot: 
 
 /** The subscriptions view's directory under the root (ELOFIZETES1014). It is not a company. */
 export const SUBSCRIPTIONS_DIR = 'elofizetesek'
+/** The monthly closing view's directory under the root (HAVIZARAS1016, finance-closing.ts). It is not a company either. */
+export const CLOSING_DIR = 'zaras'
 
 /** Company directory names: plain directories directly under the root, sorted, capped. */
 export function listCompanies(root: string): string[] {
@@ -107,7 +109,7 @@ export function listCompanies(root: string): string[] {
     return []
   }
   return entries
-    .filter((e) => e.isDirectory() && COMPANY_RE.test(e.name) && e.name !== SUBSCRIPTIONS_DIR)
+    .filter((e) => e.isDirectory() && COMPANY_RE.test(e.name) && e.name !== SUBSCRIPTIONS_DIR && e.name !== CLOSING_DIR)
     .map((e) => e.name)
     .sort()
     .slice(0, FINANCE_MAX_COMPANIES)
@@ -1256,7 +1258,7 @@ export function renderSubscriptionsPage(data: SubscriptionsData, names: Map<stri
 const STYLE_LIGHT = '--stick:#faf9f5;--fg:#1f2328;--muted:#656d76;--line:#d0d7de;--inc:#1a7f37;--cost:#cf222e;--neg:#cf222e;--tot:#0969da;--warn-bg:#fff8c5;--warn-fg:#4d2d00;--s1:#0969da;--s2:#bf8700;--s3:#8250df;--s4:#1a7f37;--badge:#eaeef2;--loud-bg:#ffebe9;--loud-fg:#a40e26'
 const STYLE_DARK = '--stick:#141413;--fg:#e6edf3;--muted:#8d96a0;--line:#30363d;--inc:#3fb950;--cost:#f85149;--neg:#f85149;--tot:#58a6ff;--warn-bg:#3b2e00;--warn-fg:#f2cc60;--s1:#58a6ff;--s2:#d29922;--s3:#a371f7;--s4:#3fb950;--badge:#30363d;--loud-bg:#4c1d24;--loud-fg:#ffa198'
 
-function pageShell(title: string, body: string, opts: { lang: Lang; theme: Theme }): string {
+export function pageShell(title: string, body: string, opts: { lang: Lang; theme: Theme }): string {
   const vars = opts.theme === 'dark' ? STYLE_DARK : STYLE_LIGHT
   return `<!doctype html><html lang="${opts.lang}"><head><meta charset="utf-8">` +
     `<meta name="viewport" content="width=device-width, initial-scale=1">` +
@@ -1294,5 +1296,17 @@ tr.ended td{color:var(--muted)}tr.unv td:first-child{box-shadow:inset 3px 0 0 va
 .items td:first-child,.items thead th:first-child{position:sticky;left:0;z-index:1;background:var(--stick);min-width:150px;max-width:180px}
 .items .stick{position:sticky;left:8px}
 .items dt{font-weight:600}.items dd{margin:0;overflow-wrap:anywhere}
+.zyours{border:2px solid var(--loud-fg);background:var(--loud-bg);border-radius:8px;padding:8px 12px;margin:8px 0 14px;max-width:820px}
+.zyours.empty{border-color:var(--line);background:transparent}.zyours h3{margin:0 0 4px}.zyours ul{margin:0;padding-left:18px}.zyours li{margin:3px 0}
+.zyours p{margin:0}.zw{color:var(--muted);font-size:12px;white-space:nowrap}
+.zgrid{max-width:820px}.zgrid th,.zgrid td{padding:6px 8px}.zm{white-space:nowrap;font-variant-numeric:tabular-nums}
+.zl{font-size:12px;margin-top:2px}.zst{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;font-weight:700;white-space:nowrap}
+.z-done{background:var(--inc);color:#fff}.z-ready{background:var(--tot);color:#fff}.z-prog{background:var(--warn-bg);color:var(--warn-fg)}
+.z-none{background:var(--loud-bg);color:var(--loud-fg)}.z-unk,.z-nofile{background:var(--badge);color:var(--muted);font-weight:400}
+.z-late{background:var(--neg);color:#fff}
+details.zmonth{border-bottom:1px solid var(--line);padding:6px 0;max-width:820px}details.zmonth summary{cursor:pointer;font-weight:600}
+.zdl{display:grid;grid-template-columns:max-content 1fr;gap:3px 12px;margin:8px 0}.zdl dt{color:var(--muted)}.zdl dd{margin:0;overflow-wrap:anywhere}
+.zloud{color:var(--neg);font-weight:600}details.zmonth h4{margin:10px 0 4px;font-size:13px}table.zmiss{min-width:560px}tr.zmine td:first-child{box-shadow:inset 3px 0 0 var(--loud-fg)}
+@media (max-width:600px){table.zmiss{min-width:0}table.zmiss thead{display:none}table.zmiss tr{display:block;padding:6px 0;border-bottom:1px solid var(--line)}table.zmiss td{display:inline-block;border:0;padding:2px 8px 2px 0;text-align:left}table.zmiss td:last-child{display:block}table.zmiss tr.zmine{box-shadow:inset 3px 0 0 var(--loud-fg);padding-left:10px}table.zmiss tr.zmine td:first-child{box-shadow:none}}
 </style></head><body>${body}</body></html>`
 }
