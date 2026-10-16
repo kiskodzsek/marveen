@@ -81,6 +81,8 @@ describe('ms365-download-gate', () => {
   })
   it('denies bidi control characters in the name', () => {
     expect(decide(att, join(drop, 'invoice\u202Efdp.command')).deny).toBe(true)
+    // RLO on an otherwise allowed extension: only the bidi rule can deny this one
+    expect(decide(att, join(drop, 'invoice\u202Efdp.pdf')).deny).toBe(true)
     expect(decide(att, join(drop, 'a\u2066b.pdf')).deny).toBe(true)
   })
   it('denies missing or non-string fields', () => {
