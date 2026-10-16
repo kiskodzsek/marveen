@@ -130,6 +130,8 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'conversation-continuity ledger: same design as ledger-capture.py (docs/conversation-continuity.md, project settings only)',
   'ledger-replay.py':
     'conversation-continuity ledger: same design as ledger-capture.py; the docs state it is "wired in the repo\'s project settings only (the main agent)"',
+  'ms365-download-gate.mjs':
+    'gates the ms365 MCP download-bytes-to-file tool, which only the MAIN agent has: the ms365 server is configured in the repo\'s own .mcp.json (the main session), no agents/*/.mcp.json carries it (measured 2026-10-16), and the tool is enabled only by that file\'s --enabled-tools. Its drop directory is ONE repo-wide store/mail-downloads; seeding the gate as-is would point every agent\'s downloads at that shared directory, so a sub-agent that ever gets ms365 needs its own drop-dir design first (a separate, reviewed decision, Viktor/Lex)',
   'persona-change-notify.py':
     'fleet-wide BY CONSTRUCTION, so one wiring already covers every agent: it resolves the repo root from its own file location, and watched() enumerates agents/*/CLAUDE.md and SOUL.md alongside the main pair. Seeding it per-agent would point every seeded session at the SAME store/.persona-hashes.json, and because the hook stamps the new digest BEFORE it sends, whichever session reaches it first silences the others -- the race can only LOSE an alert, so seeding would weaken the guard rather than extend it',
   'telegram-reply-guard.py':
