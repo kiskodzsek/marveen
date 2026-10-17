@@ -497,30 +497,113 @@ describe('detectPaneState', () => {
     expect(detectPaneState(IDLE_BACKGROUND_ONE_SHELL_HIDDEN)).toBe('idle')
   })
 
-  it('does NOT classify a truncated "· N shell" prefix as idle', () => {
-    // Defense in depth: the shells-variant requires either the
-    // "· N shells · ctrl+t" marker or the "· N shells · ↓ to manage"
-    // marker, not just the bare "· N shell(s)" prefix. Two reasons we
-    // pin this down with an explicit negative test:
-    //   1. A malformed or partially rendered footer (terminal
-    //      corruption, mid-render frame) must classify as 'unknown'
-    //      so we do not deliver a prompt into a pane that is not
-    //      really ready.
-    //   2. The "bypass permissions on · 1 shell" substring could
-    //      appear in scrollback as quoted log output or an echoed
-    //      message, and the regex must not be tricked into treating
-    //      that as a live footer.
-    // The fixture is deliberately minimal: no other idle markers
-    // (no "(shift+tab to cycle)", no "? for shortcuts") so the
-    // assertion isolates the truncated-shells path specifically.
-    const truncated = [
-      '',
+  // The BARE background-task footer, no shift+tab hint and no idle-action tail.
+  // This test used to pin it as 'unknown' on the theory that Claude Code always
+  // renders a tail. Claude Code 2.1.302 does not: the tail of a real idle
+  // `tmux capture-pane -p` of the dave session on 2026-10-17, one background
+  // shell running, statusline row between box and footer, trailing blank rows
+  // as tmux returns them. Every such capture read 'unknown' and the router held
+  // the agent's messages until the background task ended (kanban c106c3ff).
+  const IDLE_BARE_SHELL_PILL = [
+    '✻ Cooked for 2m 0s · done 5:02 PM · 1 shell still running',
+    '─'.repeat(73) + ' Dave ─',
+    '❯\u00A0',
+    SEP,
+    '  Opus 5.5 | ctx 22% | 5h 21% | 7d 71%',
+    '  ⏵⏵ bypass permissions on · 1 shell',
+    '',
+    '      ',
+  ].join('\n')
+
+  it('detects idle on the bare background-task footer (real capture)', () => {
+    expect(detectPaneState(IDLE_BARE_SHELL_PILL)).toBe('idle')
+    expect(isReadyForPrompt(IDLE_BARE_SHELL_PILL)).toBe(true)
+    // Without the statusline row, separator directly above the footer.
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · 1 shell'))).toBe('idle')
+  })
+
+  it('accepts every pill shape Claude Code renders on the bare footer', () => {
+    // Labels as Claude Code's own pill function builds them (2.1.302).
+    for (const pill of [
+      '3 shells',
+      '1 shell, 1 monitor',
+      '2 monitors',
+      '1 local agent',
+      '2 local agents',
+      '1 team',
+      '1 MCP task',
+      '4 background tasks',
+      '1 background dynamic workflow',
+      '◇ 1 cloud session',
+      'dreaming',
+      'auto-mode scan',
+      'memory import 2/5',
+    ]) {
+      expect(detectPaneState(modeFooter(`  ⏵⏵ bypass permissions on · ${pill}`)), pill).toBe('idle')
+    }
+    expect(detectPaneState(modeFooter('  ⏵⏵ accept edits on · 1 shell'))).toBe('idle')
+  })
+
+  it('stays busy on the bare background-task footer while a turn runs (real capture)', () => {
+    // Same session, one capture earlier: the turn is still running and the
+    // footer already shows the bare pill. The busy signals win.
+    const busy = [
+      '· Swooping… (1m 59s · ↓ 9.6k tokens)',
+      '  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude\'s',
+      '     current work',
+      '─'.repeat(73) + ' Dave ─',
+      '❯\u00A0',
+      SEP,
+      '  Opus 5.5 | ctx 22% | 5h 21% | 7d 71%',
+      '  ⏵⏵ bypass permissions on · 1 shell',
+    ].join('\n')
+    expect(detectPaneState(busy)).toBe('busy')
+    expect(isReadyForPrompt(busy)).toBe(false)
+  })
+
+  it('does NOT accept the bare pill outside the live footer position', () => {
+    // Quoted in scrollback above a footer-less surface: not the last line.
+    const quoted = [
+      '  ⏵⏵ bypass permissions on · 1 shell',
+      'some later output',
       SEP,
       '❯ ',
       SEP,
+    ].join('\n')
+    expect(detectPaneState(quoted)).not.toBe('idle')
+    // Printed by a plain shell: last line, but no input box separator above.
+    const shell = [
+      'user@host ~ $ grep footer notes.txt',
       '  ⏵⏵ bypass permissions on · 1 shell',
     ].join('\n')
-    expect(detectPaneState(truncated)).toBe('unknown')
+    expect(detectPaneState(shell)).toBe('unknown')
+    // Box separator too far above (prose rows in between).
+    const far = [
+      SEP,
+      '❯ ',
+      SEP,
+      'line one',
+      'line two',
+      'line three',
+      '  ⏵⏵ bypass permissions on · 1 shell',
+    ].join('\n')
+    expect(detectPaneState(far)).toBe('unknown')
+    // One rule over the pill, no input box (Viktor R1): a bare separator, and
+    // a `cat`-ed report whose ─ line sits above a quoted pill.
+    expect(detectPaneState([SEP, '  ⏵⏵ bypass permissions on · 1 shell'].join('\n'))).toBe('unknown')
+    const report = [
+      'user@host ~ $ cat review.md',
+      '## Findings',
+      SEP,
+      'Footer seen on the pane:',
+      '  ⏵⏵ bypass permissions on · 1 shell',
+    ].join('\n')
+    expect(detectPaneState(report)).toBe('unknown')
+    // Two rules, but the span between them is not a ❯ input row.
+    const twoRules = [SEP, 'quoted text', SEP, '  ⏵⏵ bypass permissions on · 1 shell'].join('\n')
+    expect(detectPaneState(twoRules)).toBe('unknown')
+    // Not a pill: free text after the separator.
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · see the log'))).toBe('unknown')
   })
 
   it('detects busy when "esc to interrupt" footer marker is present', () => {
