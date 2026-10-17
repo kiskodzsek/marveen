@@ -13,13 +13,17 @@ karakteren belül egy dátum (ÉÉÉÉ-HH-NN vagy HH-NN), opcionális utótaggal
   "fókusz ... 10-19-től"                                           -> halasztva a dátum ELŐTTI napig.
 Csak a planned kártyára vonatkozik; az in_progress mindig számít (azon valaki aktívan dolgozik).
 Hiba (komment nem olvasható, rossz dátum) esetén a kártya számít: a hiba iránya a régi viselkedés,
-nem a csend. Ennek a fájlnak az élő példánya az ops/idle-check.py (symlink ide).
+nem a csend. A halasztás legfeljebb MAX_DEFER_DAYS napra szól: távolabbi dátumnál a kártya számít
+(Viktor L1, df41a35c), így egy elírt vagy szándékos "fókusz 2099-12-31" nem némít el végleg egy kártyát.
+Az assignee csak ágensnév-alakú lehet (Viktor L2): a kimeneti sor a Klodel-promptba és az
+agent-msg hívásba kerül, ezért a más alakú assignee kártyái kimaradnak (stderr-re egy darabszám). Ennek a fájlnak az élő példánya az ops/idle-check.py (symlink ide).
 """
 import collections
 import datetime
 import json
 import re
 import subprocess
+import sys
 import urllib.request
 
 API = 'http://localhost:3420'
@@ -30,6 +34,8 @@ TOKEN_PATH = '/Users/klodel/marveen/store/.dashboard-token'
 # a többi fejlesztőtől (Pixel, Kernel).
 ALWAYS_BUSY = ('dave',)
 SKIP_AGENTS = ('klodel', 'patrik')
+MAX_DEFER_DAYS = 14
+_AGENT_RE = re.compile(r'[a-z][a-z0-9_-]{0,31}')
 
 _DEFER_RE = re.compile(
     r'(?:fókusz|fokusz|halasztva)[^\n]{0,40}?(?<!\d)(?:(\d{4})-)?(\d{1,2})-(\d{1,2})(?!\d)'
@@ -60,6 +66,8 @@ def is_deferred(card, last_comment, today):
     if card.get('status') != 'planned':
         return False
     until = [u for u in (defer_until(card.get('title', ''), today), defer_until(last_comment, today)) if u]
+    # Each source's latest marker; one beyond the cap is ignored, so the card counts again.
+    until = [u for u in until if (u - today).days <= MAX_DEFER_DAYS]
     return bool(until) and today <= max(until)
 
 
@@ -77,7 +85,11 @@ def idle_report(cards, pane_idle, last_comment, today):
             by_agent[c.get('assignee')].append(c)
     lines = []
     open_agents = set()
-    for agent in sorted(a for a in by_agent if a):
+    invalid = [a for a in by_agent if a and not _AGENT_RE.fullmatch(a)]
+    if invalid:
+        # Count only: the raw value is exactly what must not reach a prompt or a command line.
+        print(f'idle-check: skipped {len(invalid)} assignee(s) not shaped like an agent name', file=sys.stderr)
+    for agent in sorted(a for a in by_agent if a and a not in invalid):
         if agent in SKIP_AGENTS:
             continue
         if not pane_idle(agent):

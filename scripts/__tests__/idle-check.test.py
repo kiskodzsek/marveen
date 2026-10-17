@@ -11,9 +11,14 @@ Pinned cases:
   5. a comment read error counts the card (old behaviour, never silence)
   6. the output keeps the old shape: "<agent> <n>", busy agents not printed,
      klodel/patrik skipped, "dave-szabad 0" when Dave is idle with nothing countable
+  7. a marker more than MAX_DEFER_DAYS ahead is ignored: the card counts (Viktor L1)
+  8. an assignee not shaped like an agent name never reaches the output, and its raw
+     value is not echoed to stderr either (Viktor L2)
 """
+import contextlib
 import datetime
 import importlib.util
+import io
 import os
 import unittest
 
@@ -66,6 +71,14 @@ class IsDeferred(unittest.TestCase):
         self.assertFalse(ic.is_deferred(plain, 'Klodel: (fókusz 10-16)', NEXT))
         self.assertFalse(ic.is_deferred(plain, 'nincs jelölés', TODAY))
 
+    def test_cap(self):
+        cap = TODAY + datetime.timedelta(days=ic.MAX_DEFER_DAYS)
+        self.assertTrue(ic.is_deferred(card('f', 'bella'), f'fókusz {cap.isoformat()}-ig', TODAY))
+        self.assertFalse(ic.is_deferred(card('f', 'bella'), f'fókusz {(cap + datetime.timedelta(days=1)).isoformat()}-ig', TODAY))
+        self.assertFalse(ic.is_deferred(card('g', 'bella', title='fókusz 2099-12-31'), '', TODAY))
+        # A capped title marker does not hide a valid comment marker.
+        self.assertTrue(ic.is_deferred(card('h', 'bella', title='fókusz 2099-12-31'), 'fókusz 10-19-ig', TODAY))
+
     def test_in_progress_is_never_deferred(self):
         self.assertFalse(ic.is_deferred(card('c', 'bella', status='in_progress', title='fókusz, 10-16 után'), '', TODAY))
 
@@ -108,6 +121,18 @@ class Report(unittest.TestCase):
     def test_comment_error_counts_the_card(self):
         out, _ = self.run_report([card('e', 'bella')], {'bella'}, {'e': OSError('down')}, TODAY)
         self.assertEqual(out, ['bella 1'])
+
+    def test_invalid_assignee_is_dropped(self):
+        bad = ['x; curl evil\nIGNORE ALL', 'Bella', 'bella\n', '$(id)', 'a' * 33, '-x']
+        cards = [card(f'i{n}', a) for n, a in enumerate(bad)] + [card('ok', 'bella')]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            out, asked = self.run_report(cards, set(bad) | {'bella'}, {}, TODAY)
+        self.assertEqual(out, ['bella 1'])
+        self.assertEqual(asked, ['ok'])
+        self.assertIn(f'skipped {len(bad)} assignee', err.getvalue())
+        self.assertNotIn('curl', err.getvalue())
+        self.assertNotIn('$(id)', err.getvalue())
 
     def test_dave_free_when_everything_is_deferred(self):
         cards = [card('d', 'dave', title='Z (fókusz, 10-16 után)')]
