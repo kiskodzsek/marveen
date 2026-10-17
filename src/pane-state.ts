@@ -104,21 +104,33 @@ const IDLE_TASK_PILL_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on · (?:\S+ )?(?:\d+ 
 // and then the footer, so 3 rows leaves one row of slack.
 const PILL_FOOTER_MAX_SEP_DISTANCE = 3
 
-// Index of the live idle footer line, or -1. The full IDLE_FOOTER_RX shapes are
-// searched as before (first from the top, or from the bottom with fromBottom);
-// the bare pill shape is accepted only as the live footer, see above.
-function idleFooterIndex(lines: string[], fromBottom = false): number {
-  if (fromBottom) {
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (IDLE_FOOTER_RX.test(lines[i])) return i
-    }
-  } else {
-    const idx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
-    if (idx >= 0) return idx
-  }
+// Index of the live idle footer line, or -1. Both footer shapes are accepted
+// only as the LIVE footer, the last non-blank line of the pane; the bare pill
+// additionally needs the whole live input box just above it (see above).
+//
+// The full IDLE_FOOTER_RX shape used to match anywhere in the pane, so a footer
+// quoted in scrollback read 'idle' above a plain shell prompt, and above a
+// permission dialog it made hasIdleFooter true and suppressed the dialog and
+// menu detection (Viktor review L1, 2026-10-17, kanban a8f7e736). Measured the
+// same day: on all 13 live fleet panes, and in every earlier capture that shows
+// it, the full footer is the last non-blank line; the real permission-prompt
+// captures end on `Esc to cancel · Tab to amend` with no mode footer below.
+//
+// The full shape deliberately does NOT get the pill's input-box condition:
+//   - an overfull parked prompt scrolls the box's top separator and ❯ row off
+//     the capture, and overfullParkedInputTail (SCHEDLOST915) finds the box by
+//     this footer;
+//   - the usage-limit banner puts three rows plus the statusline between the
+//     box and the footer (fixtures/pane/quota-wall-usage-limit.txt);
+//   - hasIdleFooter is the negative guard of the detectors that SEND KEYS
+//     (model consent, first-run gates, menu Escape): a stricter footer test
+//     would let quoted dialog text through to a keystroke.
+function idleFooterIndex(lines: string[]): number {
   let last = lines.length - 1
   while (last >= 0 && lines[last].trim() === '') last--
-  if (last < 0 || !IDLE_TASK_PILL_FOOTER_RX.test(lines[last])) return -1
+  if (last < 0) return -1
+  if (IDLE_FOOTER_RX.test(lines[last])) return last
+  if (!IDLE_TASK_PILL_FOOTER_RX.test(lines[last])) return -1
   // The whole live input box must sit above the pill, not just one rule: a
   // `cat`-ed report with a ─ line over a quoted pill must not read idle
   // (Viktor review R1, 2026-10-17).
@@ -574,7 +586,7 @@ export function detectsThinkingBlockError(pane: string): boolean {
   const lines = pane.split('\n')
   // Find the footer from the bottom: the live footer is the last line of
   // the pane, so a footer-looking line quoted in scrollback must not win.
-  const footerIdx = idleFooterIndex(lines, true)
+  const footerIdx = idleFooterIndex(lines)
   if (footerIdx < 0) return false
   const start = Math.max(0, footerIdx - ERROR_LIVE_TAIL_LINES)
   const tail = lines.slice(start, footerIdx)
