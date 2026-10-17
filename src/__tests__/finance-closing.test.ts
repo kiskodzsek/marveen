@@ -118,6 +118,25 @@ describe('months', () => {
     expect(d2.months[d2.months.length - 1]).toBe('2026-09')
     expect(d2.months.length).toBeLessThanOrEqual(24)
   })
+  it('every file read is on the grid: a current-month file does not leave last month - 23 read but hidden (Viktor 6832 (b))', () => {
+    const r = join(base, 'edge23')
+    mkdirSync(join(r, 'zaras', 'acme'), { recursive: true })
+    // TODAY 2026-10-16: last month 2026-09, and 2026-09 - 23 = 2024-10.
+    writeFileSync(join(r, 'zaras', 'acme', '2024-10.json'), JSON.stringify({ schema: 'zaras-allapot/v1', allapot: 'KESZ' }))
+    const before = loadClosing(r, TODAY)
+    expect(before.months[0]).toBe('2024-10')
+    expect(before.cells.has('acme\u00002024-10')).toBe(true)
+    // A current-month file moves the window to 2024-11 .. 2026-10: 2024-10 is now a file error, not a hidden cell.
+    writeFileSync(join(r, 'zaras', 'acme', '2026-10.json'), JSON.stringify({ schema: 'zaras-allapot/v1', allapot: 'FOLYAMATBAN' }))
+    writeFileSync(join(r, 'zaras', 'acme', '2024-11.json'), JSON.stringify({ schema: 'zaras-allapot/v1', allapot: 'KESZ' }))
+    const d = loadClosing(r, TODAY)
+    expect(d.months[0]).toBe('2024-11')
+    expect(d.months[d.months.length - 1]).toBe('2026-10')
+    expect(d.months).toHaveLength(24)
+    expect(d.cells.has('acme\u00002024-10')).toBe(false)
+    expect(d.fileErrors).toEqual([{ company: 'acme', month: '2024-10', error: 'a hónap a megjeleníthető 2024-11 – 2026-10 tartományon kívül esik' }])
+    for (const key of d.cells.keys()) expect(d.months).toContain(key.split('\u0000')[1])
+  })
   it('a newer file extends the grid', () => {
     const r = join(base, 'newer')
     mkdirSync(join(r, 'zaras', 'acme'), { recursive: true })
@@ -261,6 +280,27 @@ describe('rendering', () => {
     const out = renderClosingPage(loadClosing(r, TODAY), new Map(), { lang: 'hu', theme: 'dark', today: TODAY })
     expect(out).toContain('Most nincs rád váró tétel.')
     expect(out).toMatch(/<dd class="zloud">kimenő: 2 számla, nettó 10 Ft, ELTÉRÉS -3 Ft/)
+  })
+  it('the file error list shows at most 20 lines, then one "and N more" line; the count stays the total (Viktor 6832 (a))', () => {
+    const r = join(base, 'manyerrors')
+    mkdirSync(join(r, 'zaras', 'acme'), { recursive: true })
+    for (let y = 1990; y < 1995; y++) for (let m = 1; m <= 5; m++) {
+      writeFileSync(join(r, 'zaras', 'acme', `${y}-0${m}.json`), JSON.stringify({ schema: 'zaras-allapot/v1', allapot: 'KESZ' }))
+    }
+    const d = loadClosing(r, TODAY)
+    expect(d.fileErrors).toHaveLength(25)
+    const hu = renderClosingPage(d, new Map(), { lang: 'hu', theme: 'light', today: TODAY })
+    const errs = hu.slice(hu.indexOf('class="errs"'), hu.indexOf('</details>', hu.indexOf('class="errs"')))
+    expect(errs).toContain('Hibás fájlok (nem jelennek meg) (25)')
+    expect(errs.match(/<li>/g)).toHaveLength(21)
+    expect(errs).toContain('acme/1993-05.json')
+    expect(errs).not.toContain('acme/1994-01.json')
+    expect(errs).toContain('<li>és még 5 hibás fájl</li>')
+    const en = renderClosingPage(d, new Map(), { lang: 'en', theme: 'light', today: TODAY })
+    expect(en).toContain('<li>and 5 more invalid files</li>')
+    // Up to the cap there is no extra line.
+    const twenty = { ...d, fileErrors: d.fileErrors.slice(0, 20) }
+    expect(renderClosingPage(twenty, new Map(), { lang: 'hu', theme: 'light', today: TODAY })).not.toContain('és még')
   })
   it('English labels exist for the same page, and no folder means a plain note', () => {
     const en = renderClosingPage(loadClosing(root, TODAY), companyNames(root), { lang: 'en', theme: 'light', today: TODAY })

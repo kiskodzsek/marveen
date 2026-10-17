@@ -117,11 +117,17 @@ export function listCompanies(root: string): string[] {
 
 export type ReadResult = { ok: true; text: string } | { ok: false; reason: 'missing' | 'not_regular' | 'too_large' | 'unreadable' }
 
-/** Read one fixed-name file: no symlink, regular file only, size-capped. */
+/**
+ * Read one fixed-name file: no symlink, regular file only, size-capped.
+ * O_NONBLOCK: open(2) on a FIFO with no writer blocks, and this call is
+ * synchronous, so a FIFO in the folder would hang the whole dashboard; with
+ * the flag the open returns and the isFile check refuses it. A regular file
+ * reads the same with or without it (Viktor 6832 I2).
+ */
 export function readCapped(path: string, maxBytes = FINANCE_MAX_FILE_BYTES): ReadResult {
   let fd: number
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code
     if (code === 'ENOENT') return { ok: false, reason: 'missing' }
