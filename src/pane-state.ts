@@ -77,6 +77,70 @@ export type PaneState = 'idle' | 'busy' | 'typing' | 'unknown' | 'error'
 // `← for agents` is the FleetView tail on current builds; older tails kept.
 const IDLE_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\)| · [^\n]*?(?:ctrl\+t|↓ to manage|← for agents))|\? for shortcuts/
 
+// The BARE background-task footer: `⏵⏵ bypass permissions on · 1 shell`, with
+// no shift+tab hint and no idle-action tail. Claude Code 2.1.302 renders exactly
+// this on an idle session while a run_in_background shell or a background agent
+// is alive. IDLE_FOOTER_RX rejects it on purpose (a bare pill could be a quoted
+// log line), so the pane read 'unknown' and the router held every message until
+// the background task ended. Measured 2026-10-17 on the dave pane: 18/18 idle
+// captures 'unknown' while one background shell ran (kanban c106c3ff).
+//
+// The pill text comes from Claude Code's own label function: `N shell(s)`,
+// `N monitor(s)` (comma-joined with shells), `N local agent(s)`, `N team(s)`,
+// `N MCP task(s)`, `N background task(s)` for a mix, a glyph-prefixed
+// `N cloud session(s)`, plus the count-less `dreaming` / `auto-mode scan` /
+// `memory import`. Shape-matched (count + words), not enumerated, for the same
+// reason the mode prefix above is not.
+//
+// The quoted-scrollback risk is handled by WHERE it may match, not by the
+// pattern: only the last non-blank line of the pane, and only with the whole
+// live input box (two separators around a ❯ row) just above it (see
+// idleFooterIndex). A pill quoted in scrollback or printed by a plain shell
+// does not sit there.
+const IDLE_TASK_PILL_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on · (?:\S+ )?(?:\d+ [A-Za-z][\w ,-]*?|dreaming|auto-mode scan|memory import(?: \d+\/\d+)?)[ \t]*$/
+
+// How far above the bare pill footer the input box's bottom separator may sit.
+// The box is followed by an optional statusline row (`Opus 5.5 | ctx 22% ...`)
+// and then the footer, so 3 rows leaves one row of slack.
+const PILL_FOOTER_MAX_SEP_DISTANCE = 3
+
+// Index of the live idle footer line, or -1. The full IDLE_FOOTER_RX shapes are
+// searched as before (first from the top, or from the bottom with fromBottom);
+// the bare pill shape is accepted only as the live footer, see above.
+function idleFooterIndex(lines: string[], fromBottom = false): number {
+  if (fromBottom) {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (IDLE_FOOTER_RX.test(lines[i])) return i
+    }
+  } else {
+    const idx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+    if (idx >= 0) return idx
+  }
+  let last = lines.length - 1
+  while (last >= 0 && lines[last].trim() === '') last--
+  if (last < 0 || !IDLE_TASK_PILL_FOOTER_RX.test(lines[last])) return -1
+  // The whole live input box must sit above the pill, not just one rule: a
+  // `cat`-ed report with a ─ line over a quoted pill must not read idle
+  // (Viktor review R1, 2026-10-17).
+  let bottomSep = -1
+  for (let i = last - 1; i >= Math.max(0, last - PILL_FOOTER_MAX_SEP_DISTANCE); i--) {
+    if (BOX_SEP_RX.test(lines[i])) { bottomSep = i; break }
+  }
+  if (bottomSep <= 0) return -1
+  let topSep = -1
+  for (let i = bottomSep - 1; i >= 0; i--) {
+    if (BOX_SEP_RX.test(lines[i])) { topSep = i; break }
+  }
+  if (topSep < 0) return -1
+  const firstNonEmpty = lines.slice(topSep + 1, bottomSep).find(l => l.trim().length > 0)
+  if (firstNonEmpty == null || !/^\s*❯/.test(firstNonEmpty)) return -1
+  return last
+}
+
+function hasIdleFooter(pane: string): boolean {
+  return idleFooterIndex(pane.split('\n')) >= 0
+}
+
 // Positive busy signals. ANY match anywhere in the pane means the turn
 // is mid-flight, even if the footer looks idle for a frame.
 //
@@ -495,10 +559,7 @@ export function detectsThinkingBlockError(pane: string): boolean {
   const lines = pane.split('\n')
   // Find the footer from the bottom: the live footer is the last line of
   // the pane, so a footer-looking line quoted in scrollback must not win.
-  let footerIdx = -1
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (IDLE_FOOTER_RX.test(lines[i])) { footerIdx = i; break }
-  }
+  const footerIdx = idleFooterIndex(lines, true)
   if (footerIdx < 0) return false
   const start = Math.max(0, footerIdx - ERROR_LIVE_TAIL_LINES)
   const tail = lines.slice(start, footerIdx)
@@ -558,7 +619,7 @@ export function detectsBlockingMenu(pane: string): boolean {
   const lines = pane.split('\n')
   const footerRegion = liveTailRegion(lines, MENU_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
-  if (IDLE_FOOTER_RX.test(pane)) return false
+  if (hasIdleFooter(pane)) return false
   return MENU_NAV_RX.test(footerRegion) || MENU_ESC_RX.test(footerRegion)
 }
 
@@ -907,7 +968,7 @@ export function detectsFirstRunGate(pane: string): FirstRunGateKind | null {
   }
   const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return null
-  if (IDLE_FOOTER_RX.test(pane)) return null
+  if (hasIdleFooter(pane)) return null
   for (const g of FIRST_RUN_GATES) {
     if (!g.rx.test(pane)) continue
     // The welcome banner also heads the NORMAL fresh-session layout (logo +
@@ -982,7 +1043,7 @@ export function detectsPermissionDialog(pane: string): boolean {
   }
   const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
-  if (IDLE_FOOTER_RX.test(pane)) return false
+  if (hasIdleFooter(pane)) return false
   return PERMISSION_AMEND_RX.test(footerRegion)
     || (PERMISSION_QUESTION_RX.test(pane) && PERMISSION_YES_RX.test(pane))
 }
@@ -996,7 +1057,7 @@ export function detectsModelConsentDialog(pane: string): boolean {
   }
   const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
-  if (IDLE_FOOTER_RX.test(pane)) return false
+  if (hasIdleFooter(pane)) return false
   return MODEL_CONSENT_TITLE_RX.test(pane)
     && MODEL_CONSENT_CONTINUE_RX.test(pane)
     && MODEL_CONSENT_CONFIRM_RX.test(footerRegion)
@@ -1170,7 +1231,7 @@ export function detectPaneState(
   // defer rather than pile a second prompt on.
   if (detectsPastePlaceholder(pane)) return 'busy'
 
-  if (!IDLE_FOOTER_RX.test(pane)) {
+  if (!hasIdleFooter(pane)) {
     // Footer-less fresh-session / welcome-screen: a PARKED \u276F input box still
     // means the agent has a delivered message waiting to submit. Classify it
     // 'typing' (not 'unknown') so the stuck-input recovery stack can see and
@@ -1189,7 +1250,7 @@ export function detectPaneState(
   // Scan UPWARDS from the footer so we stay inside the live box and
   // don't pick up historical ❯ lines from scrollback.
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = idleFooterIndex(lines)
   if (footerIdx >= 0) {
     let bottomSep = -1
     for (let i = footerIdx - 1; i >= 0; i--) {
@@ -1290,7 +1351,7 @@ function liveInputBoxFooterless(lines: string[]): string | null {
 
 function liveInputBox(pane: string): string | null {
   const lines = pane.split('\n')
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = idleFooterIndex(lines)
   if (footerIdx < 0) return liveInputBoxFooterless(lines)
   let bottomSep = -1
   for (let i = footerIdx - 1; i >= 0; i--) {
@@ -1404,7 +1465,7 @@ export function shouldRetrySubmit(
 
   // Without an idle footer the pane is either not Claude Code or in an
   // unknown render state. Be conservative and skip.
-  if (!IDLE_FOOTER_RX.test(pane)) return false
+  if (!hasIdleFooter(pane)) return false
 
   const inputBox = liveInputBox(pane)
   if (inputBox == null) return false
@@ -1886,7 +1947,7 @@ export function overfullParkedInputTail(pane: string): string | null {
     if (rx.test(busyRegion)) return null
   }
   if (BUSY_ESC_TO_INTERRUPT_RX.test(liveTailRegion(lines, LIVE_FOOTER_REGION_LINES))) return null
-  const footerIdx = lines.findIndex(l => IDLE_FOOTER_RX.test(l))
+  const footerIdx = idleFooterIndex(lines)
   if (footerIdx < 0) return null
   let bottomSep = -1
   for (let i = footerIdx - 1; i >= 0; i--) {
