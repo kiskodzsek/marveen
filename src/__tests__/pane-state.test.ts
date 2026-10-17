@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   detectPaneState,
   detectPermissionMode,
@@ -2749,5 +2751,40 @@ describe('detectsFirstRunGate / mcpTrustAcceptKeys: the MCP approval dialog', ()
   it('a busy pane quoting the dialog is never the dialog', () => {
     const quoted = `New MCP server found in this project: worksource\n  1. Use this MCP server\n\n✻ Thinking… (esc to interrupt)`
     expect(detectsFirstRunGate(quoted)).toBeNull()
+  })
+})
+
+// The full idle footer counts only as the live footer, the last non-blank line
+// (Viktor review L1, 2026-10-17, kanban a8f7e736). It used to match anywhere in
+// the pane: a footer quoted in scrollback read 'idle' above a plain shell, and
+// above a permission dialog it hid the dialog from detectsPermissionDialog.
+describe('idle footer position: only the last non-blank line is the live footer', () => {
+  const FOOTER = '  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  const PANE_GREP = readFileSync(join(__dirname, 'fixtures/pane/permission-prompt-bash-grep.txt'), 'utf8')
+
+  it('a footer quoted mid-pane above a plain shell prompt is not idle', () => {
+    // A `cat` of a report that quotes a whole idle pane, then the shell prompt.
+    const pane = ['$ cat report.md', 'notes', SEP, '❯ ', SEP, FOOTER, 'more notes', '$ '].join('\n')
+    expect(detectPaneState(pane)).not.toBe('idle')
+    expect(isReadyForPrompt(pane)).toBe(false)
+  })
+
+  it('a footer quoted in scrollback does not hide a live permission prompt', () => {
+    const pane = [SEP, '❯ ', SEP, FOOTER, '', PANE_GREP].join('\n')
+    expect(detectsPermissionDialog(pane)).toBe(true)
+    expect(detectPaneState(pane)).not.toBe('idle')
+  })
+
+  it('a footer quoted in scrollback does not hide a live menu', () => {
+    const pane = ['old output', FOOTER, '', '   Manage MCP servers', '   ❯ claude.ai Canva · ✔ connected · 39 tools', '', '   ↑/↓ to navigate · Enter to confirm · Esc to cancel'].join('\n')
+    expect(detectsBlockingMenu(pane)).toBe(true)
+  })
+
+  it('a live idle pane with a quoted footer higher up stays idle', () => {
+    const pane = ['old output', FOOTER, 'more output', SEP, '❯ ', SEP, FOOTER, '', '   '].join('\n')
+    expect(detectPaneState(pane)).toBe('idle')
+    expect(isReadyForPrompt(pane)).toBe(true)
+    expect(detectsPermissionDialog(pane)).toBe(false)
+    expect(detectsBlockingMenu(pane)).toBe(false)
   })
 })
