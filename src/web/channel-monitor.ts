@@ -2282,8 +2282,11 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       // "scheduled tasks pile up" incident (Oligo2000 VPS, 2026-07-22). These
       // panes get the channels.sh-style dialog answers instead; only the
       // login picker is alert-only (nobody can log in on the operator's behalf).
-      const firstRunGate = pane != null ? detectsFirstRunGate(pane) : null
-      const inMenu = firstRunGate != null || (pane != null && detectsBlockingMenu(pane))
+      // 'last-line': both matches lead to keystrokes below (dialog answers or
+      // Escape), so a dialog `cat`-ed above a shell prompt must not match
+      // (cc6ba6e0). The refusing guards elsewhere keep the broad 'tail' anchor.
+      const firstRunGate = pane != null ? detectsFirstRunGate(pane, 'last-line') : null
+      const inMenu = firstRunGate != null || (pane != null && detectsBlockingMenu(pane, 'last-line'))
       if (firstRunGate != null) menuTargetsFirstRun++
       if (inMenu) menuTargetsInMenu++
       const prev = paneMenuState.get(t.session) ?? { firstSeenAt: null, lastAlertAt: null, lastErrorAt: null }

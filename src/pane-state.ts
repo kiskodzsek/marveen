@@ -283,6 +283,40 @@ function liveTailRegion(lines: string[], count: number): string {
   return lines.slice(Math.max(0, end - count), end).join('\n')
 }
 
+/**
+ * The last line that still has content, or '' -- the live bottom of the pane.
+ *
+ * The detectors that SEND KEYS (model consent `1`+Enter, menu Escape,
+ * first-run answers) anchor their confirm/navigation line here rather than
+ * anywhere in the live tail region. A dialog `cat`-ed in a shell sits a line
+ * or two above the shell's own `$ ` prompt, inside every tail window, and read
+ * as the live dialog: consent=true, menu=true, so `1`+Enter or Escape went to
+ * the shell (Viktor review of a8f7e736, 2026-10-17, kanban cc6ba6e0). A real
+ * Claude Code modal replaces the input box and draws its hint as the last row:
+ * the live captures of the consent dialog, the trust dialog (2.1.246, 2.1.252)
+ * and all three permission prompts end on it, with no statusline below.
+ */
+function lastLiveLine(lines: string[]): string {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].trim() !== '') return lines[i]
+  }
+  return ''
+}
+
+/**
+ * Where a dialog detector looks for the dialog's own chrome (kanban cc6ba6e0).
+ *
+ *   'last-line': the chrome must be the last non-blank line. For callers that
+ *     SEND KEYS on a match (menu Escape, first-run answers): a key on a wrong
+ *     match lands in whatever is really in the foreground, so match narrowly.
+ *   'tail' (default): anywhere in the live tail window, as before. For callers
+ *     that REFUSE to type on a match (urgentEmitRefusal, schedule forceSend,
+ *     the worksource parked check, mcp-reconnect): a missed dialog there means
+ *     a prompt + Enter typed into it, so the guard stays broad and fails closed
+ *     (Viktor review R1, CWE-636).
+ */
+export type DialogAnchor = 'last-line' | 'tail'
+
 // How many trailing lines the BUSY_INDICATORS (spinner / token-counter)
 // scan inspects. During a live turn the status line renders just above the
 // input box (footer ~3 lines + box ~2 lines + the spinner line + a little
@@ -624,7 +658,9 @@ export function detectsThinkingBlockError(pane: string): boolean {
 //       idle footer present means the normal prompt is live, not a menu.
 //   (c) The dismiss/navigation hint must sit in the live footer region (the
 //       bottom few lines), not anywhere in the pane, so a message body that
-//       quotes "Esc to cancel" does not trigger it.
+//       quotes "Esc to cancel" does not trigger it. With anchor 'last-line'
+//       (the Escape sender) it must be the last non-blank line, so a menu
+//       `cat`-ed above a shell prompt does not get an Escape either.
 // `esc to interrupt` (the busy footer) is deliberately excluded from
 // MENU_ESC_RX, and guard (a) rejects it anyway.
 const MENU_NAV_RX = /(?:↑\/↓|↑↓)\s+to\s+(?:navigate|select|choose)/
@@ -638,7 +674,7 @@ const MENU_FOOTER_REGION_LINES = 8
  * intentionally still returns 'unknown' for these panes so the hot-path
  * scheduler/router behaviour is unchanged.
  */
-export function detectsBlockingMenu(pane: string): boolean {
+export function detectsBlockingMenu(pane: string, anchor: DialogAnchor = 'tail'): boolean {
   if (!pane || !pane.trim()) return false
   for (const rx of BUSY_INDICATORS) {
     if (rx.test(pane)) return false
@@ -647,7 +683,8 @@ export function detectsBlockingMenu(pane: string): boolean {
   const footerRegion = liveTailRegion(lines, MENU_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
   if (hasIdleFooter(pane)) return false
-  return MENU_NAV_RX.test(footerRegion) || MENU_ESC_RX.test(footerRegion)
+  const hintArea = anchor === 'last-line' ? lastLiveLine(lines) : footerRegion
+  return MENU_NAV_RX.test(hintArea) || MENU_ESC_RX.test(hintArea)
 }
 
 // What the prompt is ASKING, in one line, for an alert that has to be
@@ -887,6 +924,17 @@ const FIRST_RUN_GATES: Array<{ kind: FirstRunGateKind; rx: RegExp }> = [
   { kind: 'welcome', rx: /Welcome to Claude Code/ },
 ]
 
+// With anchor 'last-line' (the callers that answer the gate), the last
+// non-blank line of a first-run gate must be the dialog's own chrome:
+// its confirm/continue/cancel hint, the bottom border of a boxed dialog, or an
+// option row. These gates answer with keys (Down/Up + Enter, or Enter), so a
+// dialog `cat`-ed above a shell prompt must not match: the shell's `$ ` line
+// is last there, and an Up + Enter would rerun the previous shell command
+// (kanban cc6ba6e0). Broader than the consent/menu rule (hint must be last) on
+// purpose: not every gate draws a hint row (the bypass and theme fixtures end
+// on the box border and on an option), and a missed gate parks a fresh install.
+const FIRST_RUN_LIVE_TAIL_RX = /Enter to (?:confirm|continue|select)\b|\besc to (?:cancel|exit|close|go back|quit)\b|^\s*╰─+╯\s*$|^\s*(?:│\s*)?(?:❯\s*)?\d+\.\s/i
+
 /**
  * Which keys select the ACCEPTING option on a first-run consent dialog
  * (folder-trust, bypass-permissions), from wherever the cursor currently
@@ -986,7 +1034,7 @@ export function firstRunAcceptKeys(pane: string): string[] | null {
  * Classify the pane as a Claude Code first-run gate, or null when it is a
  * normal (busy / idle / typing) surface. Pure + dependency-free.
  */
-export function detectsFirstRunGate(pane: string): FirstRunGateKind | null {
+export function detectsFirstRunGate(pane: string, anchor: DialogAnchor = 'tail'): FirstRunGateKind | null {
   if (!pane || !pane.trim()) return null
   const lines = pane.split('\n')
   const busyRegion = lines.slice(-BUSY_LIVE_REGION_LINES).join('\n')
@@ -996,6 +1044,7 @@ export function detectsFirstRunGate(pane: string): FirstRunGateKind | null {
   const footerRegion = liveTailRegion(lines, LIVE_FOOTER_REGION_LINES)
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return null
   if (hasIdleFooter(pane)) return null
+  if (anchor === 'last-line' && !FIRST_RUN_LIVE_TAIL_RX.test(lastLiveLine(lines))) return null
   for (const g of FIRST_RUN_GATES) {
     if (!g.rx.test(pane)) continue
     // The welcome banner also heads the NORMAL fresh-session layout (logo +
@@ -1030,7 +1079,9 @@ export function detectsFirstRunGate(pane: string): FirstRunGateKind | null {
 // dialog, and a visible idle footer means the real prompt is live -- so a
 // reply/inter-agent message that merely QUOTES the dialog text (which
 // happened the very day this shipped) can never trigger a keystroke. The
-// confirm hint must sit in the live footer region, not anywhere in the pane.
+// confirm hint must be the last non-blank line (lastLiveLine): near the bottom
+// is not enough, because a dialog `cat`-ed above a shell prompt is near the
+// bottom too, and `1`+Enter would go to the shell.
 const MODEL_CONSENT_TITLE_RX = /(?:now uses|runs on|requires) usage credits/
 const MODEL_CONSENT_CONTINUE_RX = /1\.\s*Continue with /
 const MODEL_CONSENT_CONFIRM_RX = /Enter to confirm/
@@ -1087,7 +1138,7 @@ export function detectsModelConsentDialog(pane: string): boolean {
   if (hasIdleFooter(pane)) return false
   return MODEL_CONSENT_TITLE_RX.test(pane)
     && MODEL_CONSENT_CONTINUE_RX.test(pane)
-    && MODEL_CONSENT_CONFIRM_RX.test(footerRegion)
+    && MODEL_CONSENT_CONFIRM_RX.test(lastLiveLine(lines))
 }
 
 // Claude Code's self-drafted feedback modal (first observed 2026-08-31 on

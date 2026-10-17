@@ -3046,7 +3046,8 @@ export async function answerFirstRunGates(
   let acted = false
   for (let i = 0; i < FIRST_RUN_ANSWER_MAX_STEPS; i++) {
     const pane = capturePane(session, host)
-    const gate: FirstRunGateKind | null = pane != null ? detectsFirstRunGate(pane) : null
+    // 'last-line': this walk answers with keys (cc6ba6e0).
+    const gate: FirstRunGateKind | null = pane != null ? detectsFirstRunGate(pane, 'last-line') : null
     if (gate == null) return acted ? 'cleared' : 'unchanged'
     if (gate === 'login') return 'login'
     try {
