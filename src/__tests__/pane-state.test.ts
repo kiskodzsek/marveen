@@ -24,6 +24,7 @@ import {
   paneShowsContextSaturationHardError,
   mcpTrustAcceptKeys,
   detectsFirstRunGate,
+  detectsModelConsentDialog,
 } from '../pane-state.js'
 
 // Realistic pane fixtures modelled on actual `tmux capture-pane -p`
@@ -2786,5 +2787,79 @@ describe('idle footer position: only the last non-blank line is the live footer'
     expect(isReadyForPrompt(pane)).toBe(true)
     expect(detectsPermissionDialog(pane)).toBe(false)
     expect(detectsBlockingMenu(pane)).toBe(false)
+  })
+})
+
+// The detectors that send keys anchor their confirm/navigation line on the
+// last non-blank line (kanban cc6ba6e0, Viktor review of a8f7e736): a dialog
+// `cat`-ed in a shell sits just above the shell's own prompt, inside every
+// tail window, and used to read as the live dialog. The refusing guards keep
+// the broad 'tail' anchor (Viktor review R1): see the last test here and
+// context-guard-emit-guard.test.ts.
+describe('key-sending detectors: the dialog chrome must be the live last line', () => {
+  // The live capture from fable-overage-consent.test.ts (agent-deeper, 2026-07-23).
+  const CONSENT = [
+    '  Fable 5 now uses usage credits',
+    '  Fable 5 runs on usage credits, purchased separately from your plan.',
+    '    1. Continue with Fable 5',
+    '  ❯ 2. Switch to Sonnet 5 and continue',
+    '  Enter to confirm · Esc to cancel',
+  ]
+  // The live 2.1.246 trust dialog capture from pane-first-run-gate.test.ts,
+  // with the cursor moved BELOW the accept row, so its keys start with Up.
+  const TRUST = [
+    ' Accessing workspace:',
+    '',
+    ' /home/gabor/marveen/agents/nova',
+    '',
+    '   1. Yes, I trust this folder',
+    ' ❯ 2. No, exit',
+    '',
+    ' Enter to confirm · Esc to cancel',
+  ]
+  const MENU = [
+    '   Manage MCP servers',
+    '   ❯ claude.ai Canva · ✔ connected · 39 tools',
+    '',
+    '   ↑/↓ to navigate · Enter to confirm · Esc to cancel',
+  ]
+
+  it('a consent dialog cat-ed above a shell prompt sends no keys', () => {
+    const pane = ['$ cat notes.txt', ...CONSENT, '$ '].join('\n')
+    expect(detectsModelConsentDialog(pane)).toBe(false)
+    expect(detectsBlockingMenu(pane, 'last-line')).toBe(false)
+  })
+
+  it('the same with a quoted idle footer in it (the a8f7e736 case) sends no keys', () => {
+    const pane = ['$ cat notes.txt', SEP, '❯ ', SEP, '  ⏵⏵ bypass permissions on (shift+tab to cycle)', ...CONSENT, '$ '].join('\n')
+    expect(detectsModelConsentDialog(pane)).toBe(false)
+    expect(detectsBlockingMenu(pane, 'last-line')).toBe(false)
+  })
+
+  it('a menu cat-ed above a shell prompt is not a menu', () => {
+    expect(detectsBlockingMenu(['$ cat mcp.txt', ...MENU, '$ ', '', ''].join('\n'), 'last-line')).toBe(false)
+  })
+
+  it('a first-run dialog cat-ed above a shell prompt is not a gate', () => {
+    const pane = ['$ cat trust.txt', ...TRUST, 'user@host:~$ '].join('\n')
+    expect(detectsFirstRunGate(pane, 'last-line')).toBeNull()
+  })
+
+  it('controls: the live dialogs, chrome last (blank tail allowed), are still detected', () => {
+    expect(detectsModelConsentDialog([...CONSENT, '', ''].join('\n'))).toBe(true)
+    for (const anchor of ['last-line', 'tail'] as const) {
+      expect(detectsBlockingMenu([...CONSENT, ''].join('\n'), anchor)).toBe(true)
+      expect(detectsBlockingMenu([...MENU, '', '', ''].join('\n'), anchor)).toBe(true)
+      expect(detectsFirstRunGate([...TRUST, '', ''].join('\n'), anchor)).toBe('trust')
+    }
+  })
+
+  it('the default (tail) anchor of the refusing guards still sees the cat-ed dialogs', () => {
+    expect(detectsBlockingMenu(['$ cat mcp.txt', ...MENU, '$ '].join('\n'))).toBe(true)
+    expect(detectsBlockingMenu(['$ cat notes.txt', ...CONSENT, '$ '].join('\n'))).toBe(true)
+    expect(detectsFirstRunGate(['$ cat trust.txt', ...TRUST, 'user@host:~$ '].join('\n'))).toBe('trust')
+    // A line drawn below a real menu (a future statusline, say) keeps the guard on.
+    expect(detectsBlockingMenu([...MENU, '  Opus 5.5 | ctx 22%'].join('\n'))).toBe(true)
+    expect(detectsBlockingMenu([...MENU, '  Opus 5.5 | ctx 22%'].join('\n'), 'last-line')).toBe(false)
   })
 })

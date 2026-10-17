@@ -293,7 +293,7 @@ describe('first-run gate wiring contracts', () => {
   })
 
   it('the channel-monitor answers first-run dialogs instead of sending Escape', () => {
-    const gateIdx = CHANNEL_MONITOR.indexOf('const firstRunGate = pane != null ? detectsFirstRunGate(pane) : null')
+    const gateIdx = CHANNEL_MONITOR.indexOf("const firstRunGate = pane != null ? detectsFirstRunGate(pane, 'last-line') : null")
     expect(gateIdx).toBeGreaterThan(0)
     // The Escape recovery must be in the ELSE branch after the first-run
     // handling, and the login picker must be alert-only (no keystrokes).
