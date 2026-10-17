@@ -19,7 +19,7 @@ import {
 import { isQualifiedId } from './federation/address.js'
 import { sendFederatedMessage } from './federation/bridge.js'
 import { getFederationConfig, abandonWindowMsForPeer } from './federation/config.js'
-import { scheduleDeliveryTurnCheck } from './delivery-turn-check.js'
+import { scheduleDeliveryTurnCheck, snapshotTranscriptOffsets } from './delivery-turn-check.js'
 import { readAgentRemoteHost, readAgentVoiceConfig, readAgentWorksourceChannel, type AgentVoiceConfig } from './agent-config.js'
 import { enqueueWorksourceItem, worksourceItemId } from './worksource-queue.js'
 import {
@@ -358,27 +358,33 @@ export function shouldAbandon(sessionExists: boolean, ageMs: number, windowMs: n
 // The guard registers the check (setDeliveryHoldCheck) instead of this module
 // importing the guard runner: the runner already imports this module, and an
 // unregistered check means no hold -- today's behavior, never a stuck queue.
-// GUARD_HOLD_MAX_MS is the fail-open cap for a phase that never ends (a bug, or a
-// guard that died mid-sequence): the await-handoff deadline is 20 minutes and the
-// restart follows on the next 5-minute sweep with an idle pane, so 30 minutes
-// covers the designed path and a held row is delivered rather than lost after it.
-export const GUARD_HOLD_MAX_MS = 30 * 60 * 1000
-let deliveryHoldCheck: ((agent: string) => string | null) | null = null
-const guardHeldSince = new Map<number, number>()  // msg id -> first tick it was held
+// The fail-open cap for a phase that never ends (a bug, or a guard that died
+// mid-sequence) comes WITH the hold from the guard, per agent: C106C3FF (Viktor
+// 2659) -- a fixed 30 minutes neither followed a changed handoffTimeoutMinutes
+// nor said where the number came from. See guardHoldCapMs in
+// context-guard-runner.ts; a held row is delivered rather than lost after it.
+export interface DeliveryHold {
+  reason: string
+  /** Fail-open cap for this hold (ms), counted from the first held tick. */
+  maxMs: number
+}
+let deliveryHoldCheck: ((agent: string) => DeliveryHold | null) | null = null
+// msg id -> first tick it was held, and the cap in force at the last look.
+const guardHeldSince = new Map<number, { since: number; maxMs: number }>()
 const guardHoldCapLogged = new Set<number>()
 
 // Drop bookkeeping for rows that left the queue while held or over the cap (they
 // never come back to the check that would delete them). Called once per tick.
 function pruneGuardHolds(nowMs: number): void {
-  for (const [id, since] of guardHeldSince) {
-    if (nowMs - since > 2 * GUARD_HOLD_MAX_MS) {
+  for (const [id, h] of guardHeldSince) {
+    if (nowMs - h.since > 2 * h.maxMs) {
       guardHeldSince.delete(id)
       guardHoldCapLogged.delete(id)
     }
   }
 }
 
-export function setDeliveryHoldCheck(check: ((agent: string) => string | null) | null): void {
+export function setDeliveryHoldCheck(check: ((agent: string) => DeliveryHold | null) | null): void {
   deliveryHoldCheck = check
 }
 
@@ -773,13 +779,17 @@ export async function runMessageRouterTick(): Promise<void> {
       // agent stops) and before the readiness gate, so a held row does not feed
       // the stuck-session escalation either.
       {
-        const holdReason = deliveryHoldCheck ? deliveryHoldCheck(msg.to_agent) : null
-        const heldSince = guardHeldSince.get(msg.id)
-        if (shouldHoldForGuard(holdReason, msg.from_agent, heldSince, now, GUARD_HOLD_MAX_MS)) {
-          if (heldSince === undefined) {
-            guardHeldSince.set(msg.id, now)
-            logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, holdReason },
+        const hold = deliveryHoldCheck ? deliveryHoldCheck(msg.to_agent) : null
+        const holdReason = hold?.reason ?? null
+        const held = guardHeldSince.get(msg.id)
+        const heldSince = held?.since
+        if (hold && shouldHoldForGuard(holdReason, msg.from_agent, heldSince, now, hold.maxMs)) {
+          if (held === undefined) {
+            guardHeldSince.set(msg.id, { since: now, maxMs: hold.maxMs })
+            logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, holdReason, capMs: hold.maxMs },
               'message-router: holding delivery until the context-guard restart')
+          } else {
+            held.maxMs = hold.maxMs
           }
           continue
         }
@@ -1001,6 +1011,9 @@ export async function runMessageRouterTick(): Promise<void> {
         // and which batch mates rode along with the head row.
         let turnCheckSentAt: number | null = null
         const turnCheckIds: number[] = []
+        // C106C3FF: transcript sizes at that moment, so the check reads from
+        // here instead of a fixed tail that later output can push it out of.
+        let turnCheckOffsets: Map<string, number> | null = null
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.
         if (usesWorksource) {
@@ -1032,6 +1045,7 @@ export async function runMessageRouterTick(): Promise<void> {
             : 'message-router: worksource item already present, not re-queued')
         } else {
           turnCheckSentAt = Date.now()
+          if (!isChannelInbound) turnCheckOffsets = snapshotTranscriptOffsets(msg.to_agent, host)
           // MULTI-ENVELOPE INJECTION (B1F38C8C): while the pane is free, take the
           // OTHER pending inter-agent rows for this same recipient from the
           // tick's snapshot and send them in this one injection, each with its
@@ -1075,7 +1089,7 @@ export async function runMessageRouterTick(): Promise<void> {
         // envelope msg_id (channel-inbound has none to look for). Async and
         // fire-and-forget: it neither delays nor blocks this loop.
         if (turnCheckSentAt != null && !isChannelInbound) {
-          scheduleDeliveryTurnCheck({ toAgent: msg.to_agent, msgIds: [msg.id, ...turnCheckIds], sentAtMs: turnCheckSentAt, host })
+          scheduleDeliveryTurnCheck({ toAgent: msg.to_agent, msgIds: [msg.id, ...turnCheckIds], sentAtMs: turnCheckSentAt, host, offsets: turnCheckOffsets })
         }
         // Propagate trace context: the receiving agent inherits this trace_id
         // and span_id so its next outbound message continues the same chain.

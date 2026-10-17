@@ -16,7 +16,7 @@ import {
   clearSaturationBannerOverride,
 } from './agent-process.js'
 import { sendSystemDirective } from './system-directive.js'
-import { urgentEmitRefusal, setDeliveryHoldCheck } from './message-router.js'
+import { urgentEmitRefusal, setDeliveryHoldCheck, type DeliveryHold } from './message-router.js'
 import { notifyChannel } from '../notify.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { detectPaneState, paneShowsContextSaturation, paneShowsContextSaturationHardError } from '../pane-state.js'
@@ -35,11 +35,13 @@ import {
   IDLE_FLUSH_REASON_PREFIX,
   INITIAL_GUARD_STATE,
   STALE_REFRESH_REASON_PREFIX,
+  HANDOFF_RESEND_REASON_PREFIX,
   SATURATION_CREDIBLE_MIN_PCT,
   saturationBannerCredible,
   type GuardState,
   type HandoffStaleness,
   type GuardInputs,
+  type ContextGuardConfig,
 } from '../context-guard.js'
 
 // Fleet context guard (kanban #81): acts BEFORE a session drowns in its own
@@ -55,7 +57,34 @@ import {
 // so the context size cannot be measured here (v1 limitation, logged once).
 
 const INITIAL_DELAY_MS = 270_000
-const INTERVAL_MS = 300_000
+export const INTERVAL_MS = 300_000
+
+// C106C3FF (measured 2026-10-14, Mira 22:44-22:59): while an agent is in
+// await-handoff the router holds its messages (GUARDHOLD1013), and the hold
+// ends only when the phase does. With the full sweep every 5 minutes, a
+// handoff written right after a sweep kept 13 messages pending for up to one
+// whole interval more. The fast round re-runs ONLY the await-handoff -> restart
+// step, every FAST_INTERVAL_MS, with the same decideGuard (Viktor 2659):
+// it types nothing (request-handoff and resend decisions stay on the full
+// sweep), and it restarts only after FAST_IDLE_CONFIRM consecutive idle
+// readings, so one idle-looking frame between two tool calls cannot cut a turn.
+export const FAST_INTERVAL_MS = 20_000
+export const FAST_IDLE_CONFIRM = 2
+
+// The router's fail-open cap for a guard hold, per agent and derived from the
+// same config the guard runs on (Viktor 2659): the designed path is "handoff
+// timeout, then the restart on the next full sweep"; the slack covers one slow
+// sweep (a restart in flight) on top. Above this, a held row is delivered.
+export const GUARD_HOLD_SLACK_MS = 2 * 60_000
+export function guardHoldCapMs(cfg: Pick<ContextGuardConfig, 'handoffTimeoutMinutes'>): number {
+  return cfg.handoffTimeoutMinutes * 60_000 + INTERVAL_MS + GUARD_HOLD_SLACK_MS
+}
+
+/** The router's hold check: a hold (with its cap) while the agent is in await-handoff. */
+export function guardDeliveryHold(name: string): DeliveryHold | null {
+  if (getHardGuardPhase(name) !== 'await-handoff') return null
+  return { reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(readContextGuardConfig(name)) }
+}
 
 // How long the dispatch gate honours one sweep's "this banner is not
 // credible" verdict. Expressed in SWEEPS, not minutes, so it cannot silently
@@ -73,6 +102,9 @@ const guardStates = new Map<string, GuardState>()
 // agent (reset when a cooldown runs out normally). In memory, like guardStates.
 const earlyCooldownExits = new Map<string, number>()
 const earlyBlockLogged = new Set<string>()
+// C106C3FF: consecutive fast-round readings of an idle pane, per agent in
+// await-handoff. Cleared whenever the agent is seen in any other phase.
+const fastIdleStreak = new Map<string, number>()
 
 // agent name -> when the daily-handoff tier last fired (ms). Seeded on first
 // sight WITHOUT firing, so a slot that already passed before the dashboard
@@ -342,9 +374,20 @@ async function performRestart(name: string): Promise<void> {
   }
 }
 
-async function checkAgent(name: string, nowMs: number): Promise<void> {
+/**
+ * 'sweep' = the full five-minute decision. 'fast' = C106C3FF's fast round: the
+ * same measurement and the same decideGuard, but only for an agent already in
+ * await-handoff, and only a 'restart' decision confirmed by FAST_IDLE_CONFIRM
+ * consecutive idle readings is acted on; anything else is dropped (state
+ * untouched), so the full sweep keeps every other transition.
+ */
+type CheckMode = 'sweep' | 'fast'
+
+async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'): Promise<void> {
   const cfg = readContextGuardConfig(name)
   const state = guardStates.get(name) ?? INITIAL_GUARD_STATE
+  if (state.phase !== 'await-handoff') fastIdleStreak.delete(name)
+  if (mode === 'fast' && state.phase !== 'await-handoff') return
 
   // Fully disarmed only when EVERY tier and the always-on saturation net are
   // off; the net alone keeps the sweep alive so a 100%-context pane (which
@@ -471,6 +514,9 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     idleMs: running && needPct ? measureIdleMs(name, nowMs) : null,
     // Seed-on-first-ARMED-sight, and forget-while-disarmed on every sweep:
     // dailyHandoffSweep decides both, applyDailyHandoffSweep applies the record.
+    // The fast round only ever sees await-handoff, so it passes eligible=false
+    // here: the record is kept (armed) or forgotten (disarmed), exactly as the
+    // full sweep would do, and nothing is ever due from a fast round.
     dailyHandoffDue: applyDailyHandoffSweep(lastDailyHandoff, name, cfg, running && state.phase === 'idle', localMidnightMs(nowMs), nowMs),
   }
 
@@ -481,6 +527,12 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
   // length, and the chain is logged loudly.
   const earlyBlocked = state.phase === 'cooldown' && (earlyCooldownExits.get(name) ?? 0) >= 1
   const decision = decideGuard(state, earlyBlocked ? { ...inputs, pct: null } : inputs, cfg)
+
+  if (mode === 'fast') {
+    const streak = paneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0
+    fastIdleStreak.set(name, streak)
+    if (!fastRoundActs(decision.action, streak)) return
+  }
   if (state.phase === 'cooldown') {
     if (decision.action !== 'none') {
       earlyCooldownExits.set(name, (earlyCooldownExits.get(name) ?? 0) + 1)
@@ -555,11 +607,11 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
   }
 
   const pctRound = inputs.pct !== null ? Math.round(inputs.pct * 100) : null
-  logger.info({ name, action: decision.action, reason: decision.reason, pct: pctRound, bannerRaw: paneSaturatedRaw, bannerTrusted: paneSaturatedTrusted, measuredPct: measuredPct !== null ? Math.round(measuredPct * 100) : null }, 'context-guard: acting')
+  logger.info({ name, mode, action: decision.action, reason: decision.reason, pct: pctRound, bannerRaw: paneSaturatedRaw, bannerTrusted: paneSaturatedTrusted, measuredPct: measuredPct !== null ? Math.round(measuredPct * 100) : null }, 'context-guard: acting')
 
   try {
     switch (decision.action) {
-      case 'request-handoff':
+      case 'request-handoff': {
         // GUARDHITELES903: through the authenticated-directive primitive, not
         // bare sendPromptToSession -- this text asks the agent to drop work
         // and STOP, which without a queue anchor is indistinguishable from a
@@ -570,31 +622,49 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
         // (hard+busy) is exactly the case where one can open during the idle
         // wait. Nothing typed -> the anchor row is marked failed and the
         // await-handoff timeout stays the fallback.
+        // C106C3FF: a resend repeats the original request's wording, so the
+        // prompt is chosen by THAT reason, not by the resend's own.
+        const promptReason = decision.reason.startsWith(HANDOFF_RESEND_REASON_PREFIX)
+          ? (state.requestReason ?? '')
+          : decision.reason
+        // Whether the request went into a pane still busy after the idle wait.
+        let sentBestEffort = false
         const handoffOutcome = await sendSystemDirective(
           name,
           session,
-          decision.reason.startsWith(STALE_REFRESH_REASON_PREFIX)
+          promptReason.startsWith(STALE_REFRESH_REASON_PREFIX)
             // The handoff exists but went stale while we waited for an idle
             // pane; ask for a refresh, not a first write.
             ? staleRefreshHandoffPrompt(((sm) => typeof sm === 'number' ? sm : 0)(handoffStaleMinutes(inputs)), handoffPathFor(name))
-            : decision.reason.startsWith(IDLE_FLUSH_REASON_PREFIX)
+            : promptReason.startsWith(IDLE_FLUSH_REASON_PREFIX)
               // pct is null whenever the idle tier runs without the proactive
               // tiers, so the alarming percentage-based prompt would read "~0%
               // -- critical". The idle tier states the token count it measured.
               ? idleFlushHandoffPrompt(inputs.contextTokens ?? 0, cfg.idleMinutes, handoffPathFor(name))
-              : decision.reason.startsWith(DAILY_HANDOFF_REASON_PREFIX)
+              : promptReason.startsWith(DAILY_HANDOFF_REASON_PREFIX)
                 // Same trap as the idle tier: pct is null for a daily-only
                 // agent, so the percentage prompt would announce "~0% --
                 // critical" at 04:00 to a session that is perfectly healthy.
                 ? dailyHandoffPrompt(cfg.dailyHandoffTime ?? '', handoffPathFor(name))
                 : handoffPrompt(pctRound ?? 0, handoffPathFor(name)),
           null,
-          { emitGuard: urgentEmitRefusal },
+          { emitGuard: urgentEmitRefusal, onBusySend: () => { sentBestEffort = true } },
         )
         if (handoffOutcome === 'aborted-guard') {
           logger.warn({ name, reason: decision.reason }, 'context-guard: handoff request NOT typed -- the pane holds a prompt/menu or is unreadable (emit guard)')
         }
+        // C106C3FF: remember an unclean delivery, so await-handoff can resend
+        // once (decideGuard, MAX_HANDOFF_RESENDS) when the pane goes idle with
+        // no handoff written. Only while the state is still the one this
+        // decision produced.
+        const unclean = handoffOutcome === 'aborted-guard' || (handoffOutcome === 'sent' && sentBestEffort)
+        const now = guardStates.get(name)
+        if (unclean && now?.phase === 'await-handoff') {
+          guardStates.set(name, { ...now, requestUnconfirmed: true })
+          logger.info({ name, outcome: handoffOutcome, bestEffort: sentBestEffort }, 'context-guard: handoff request not cleanly delivered -- one resend armed for when the pane is idle')
+        }
         break
+      }
       case 'restart': {
         // A forced restart must never be silent: the supervisor has to know
         // that prompts delivered to the OLD session (queued steering input,
@@ -807,7 +877,9 @@ export function startContextGuardRunner(): NodeJS.Timeout {
   // GUARDHOLD1013: while an agent is asked for its handoff, the router keeps new
   // messages pending so the pane can go idle and the restart can happen (see
   // shouldHoldForGuard in message-router.ts).
-  setDeliveryHoldCheck((name) => getHardGuardPhase(name) === 'await-handoff' ? 'context-guard await-handoff' : null)
+  setDeliveryHoldCheck(guardDeliveryHold)
+  // One flag for both rounds: a full sweep and a fast round never decide the
+  // same agent at the same time.
   let tickRunning = false
   async function sweep() {
     // Re-entrancy guard: checkAgent's 'restart' action now awaits a real
@@ -829,6 +901,29 @@ export function startContextGuardRunner(): NodeJS.Timeout {
       tickRunning = false
     }
   }
+  // C106C3FF: the fast round (see FAST_INTERVAL_MS). Skips while a full sweep
+  // runs; touches only agents already in await-handoff.
+  async function fastRound() {
+    if (tickRunning) return
+    const waiting = guardSweepAgentNames().filter((n) => getHardGuardPhase(n) === 'await-handoff')
+    if (waiting.length === 0) return
+    tickRunning = true
+    try {
+      const now = Date.now()
+      for (const name of waiting) {
+        try { await checkAgent(name, now, 'fast') } catch (err) { logger.debug({ err, agent: name }, 'context-guard: fast round check error') }
+      }
+    } finally {
+      tickRunning = false
+    }
+  }
   setTimeout(sweep, INITIAL_DELAY_MS)
+  setInterval(fastRound, FAST_INTERVAL_MS).unref?.()
   return setInterval(sweep, INTERVAL_MS)
+}
+
+/** C106C3FF: the fast round acts on a restart decision only, and only after
+ *  FAST_IDLE_CONFIRM consecutive idle readings. Pure, for the test. */
+export function fastRoundActs(action: string, idleStreak: number): boolean {
+  return action === 'restart' && idleStreak >= FAST_IDLE_CONFIRM
 }

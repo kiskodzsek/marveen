@@ -5,7 +5,7 @@
 // pane, and the system row Claude Code writes when a UserPromptSubmit hook
 // blocks the prompt).
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, statSync, rmSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -48,6 +48,8 @@ import {
   formatUnconfirmedAlert,
   graceSecFrom,
   alertWindowMsFrom,
+  readStartFor,
+  snapshotTranscriptOffsets,
   type TurnCheckDeps,
 } from '../web/delivery-turn-check.js'
 
@@ -226,6 +228,76 @@ describe('runDeliveryTurnCheck (behaviour, real files)', () => {
     now += 21 * 60_000
     expect(await runDeliveryTurnCheck(req([116]), 60, 30 * 60_000, d)).toBe('alerted')
     expect(d.notify).toHaveBeenCalledTimes(3)
+  })
+})
+
+// C106C3FF (bella/5511, 2026-10-14): the prompt row was in the transcript, but
+// 5.74 MB of screenshot base64 was written in the 60 s after it and the fixed
+// 4 MB tail no longer reached it -> a false "no trace" alert.
+describe('reading from the send-time offset (C106C3FF)', () => {
+  // One transcript row the size of the measured screenshot lines (~1.25 MB).
+  const bigRow = (at = SENT + 2000) =>
+    JSON.stringify({ type: 'user', timestamp: iso(at), message: { content: [{ type: 'tool_result', content: 'A'.repeat(1_250_000) }] } })
+
+  it('the 5511 repro: prompt, then >5.74 MB of later output -> seen (the old 4 MB tail said absent)', async () => {
+    writeTranscript('live.jsonl', [unrelated(SENT - 5000)])
+    const offsets = snapshotTranscriptOffsets('dex', null)
+    expect(offsets?.get('live.jsonl')).toBe(statSync(join(dir, 'live.jsonl')).size)
+    appendFileSync(join(dir, 'live.jsonl'), [userPrompt(5511), ...Array.from({ length: 5 }, () => bigRow())].join('\n') + '\n')
+    utimesSync(join(dir, 'live.jsonl'), (SENT + 1000) / 1000, (SENT + 1000) / 1000)
+    expect(statSync(join(dir, 'live.jsonl')).size).toBeGreaterThan(5_741_859) // the measured post-prompt growth
+    const d = deps()
+    expect(await runDeliveryTurnCheck({ ...req([5511], 'dex'), offsets }, 60, 30 * 60_000, d)).toBe('confirmed')
+    expect(d.notify).not.toHaveBeenCalled()
+  })
+
+  it('bytes before the offset are not read: an old copy of the tag there is not evidence', async () => {
+    writeTranscript('live.jsonl', [userPrompt(601, SENT + 300)])
+    const offsets = new Map([['live.jsonl', statSync(join(dir, 'live.jsonl')).size]])
+    const ev = await readTurnEvidence(dir, [601], SENT, { offsets })
+    expect(ev?.get(601)).toBe('absent')
+  })
+
+  it('a file that did not exist at send time (fresh session) is read from 0', async () => {
+    writeTranscript('old.jsonl', [unrelated()])
+    const offsets = new Map([['old.jsonl', statSync(join(dir, 'old.jsonl')).size]])
+    writeTranscript('new.jsonl', [userPrompt(602)])
+    expect((await readTurnEvidence(dir, [602], SENT, { offsets }))?.get(602)).toBe('seen')
+  })
+
+  it('a file that shrank since the send (rotated / rewritten) is read from 0', () => {
+    expect(readStartFor('a.jsonl', 100, new Map([['a.jsonl', 5000]]), 1000)).toBe(0)
+    expect(readStartFor('a.jsonl', 9000, new Map([['a.jsonl', 5000]]), 1000)).toBe(5000)
+    expect(readStartFor('b.jsonl', 9000, new Map([['a.jsonl', 5000]]), 1000)).toBe(0)
+  })
+
+  it('no snapshot: a bounded tail of the budget size (never the whole file)', () => {
+    expect(readStartFor('a.jsonl', 100_000_000, null, 32 * 1024 * 1024)).toBe(100_000_000 - 32 * 1024 * 1024)
+    expect(readStartFor('a.jsonl', 1000, undefined, 32 * 1024 * 1024)).toBe(0)
+  })
+
+  it('budget exhausted before every id was seen -> unknown (no alert), not absent', async () => {
+    writeTranscript('live.jsonl', [bigRow(), userPrompt(603)])
+    const d = deps({ readEvidence: (dd, ids, since, o) => readTurnEvidence(dd, ids, since, { ...o, budgetBytes: 64 * 1024 }) })
+    expect(await runDeliveryTurnCheck({ ...req([603]), offsets: new Map([['live.jsonl', 0]]) }, 60, 30 * 60_000, d)).toBe('unknown')
+    expect(d.notify).not.toHaveBeenCalled()
+  })
+
+  it('budget exhausted but every id already seen -> confirmed', async () => {
+    writeTranscript('live.jsonl', [userPrompt(604), bigRow()])
+    const ev = await readTurnEvidence(dir, [604], SENT, { offsets: new Map([['live.jsonl', 0]]), budgetBytes: 64 * 1024 })
+    expect(ev?.get(604)).toBe('seen')
+  })
+
+  it('snapshot is null for a remote host and for the main agent (no local transcript to anchor)', () => {
+    expect(snapshotTranscriptOffsets('dex', 'laptop.local')).toBeNull()
+    expect(snapshotTranscriptOffsets('orin', null)).toBeNull()
+  })
+
+  it('concurrent checks all finish (the read slots are released)', async () => {
+    writeTranscript('live.jsonl', [userPrompt(610), userPrompt(611), userPrompt(612), userPrompt(613), userPrompt(614)])
+    const res = await Promise.all([610, 611, 612, 613, 614].map((id) => readTurnEvidence(dir, [id], SENT)))
+    expect(res.map((r, i) => r?.get(610 + i))).toEqual(['seen', 'seen', 'seen', 'seen', 'seen'])
   })
 })
 

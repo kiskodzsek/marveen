@@ -27,7 +27,9 @@
  *   - alerts are rate-limited per recipient and name the msg id, the
  *     recipient and the reason -- never the message content.
  */
-import { open, readdir, stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
+import { createReadStream, readdirSync, statSync } from 'node:fs'
+import { createInterface } from 'node:readline'
 import { join } from 'node:path'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID } from '../config.js'
@@ -46,9 +48,18 @@ export const DEFAULT_ALERT_WINDOW_MIN = 30
 // to -1.2s against delivered_at. Entries older than this before the send
 // started are another message.
 export const CLOCK_SLACK_MS = 5_000
-// Same budget as delivery-integrity's tail read: a prompt is at most tens of
-// KB, and the window only has to reach back one grace period.
-export const TAIL_BYTES = 4 * 1024 * 1024
+// C106C3FF (measured 2026-10-14, bella/5511): a fixed 4 MB tail is NOT "one
+// grace period" -- 5.74 MB of screenshot base64 landed in the 60 s after the
+// prompt, the evidence slid out of the window and the alert was false. The
+// read now starts at the size each transcript had when the keys started going
+// out (snapshotTranscriptOffsets), so what lands after the prompt no longer
+// pushes it out. This is the ceiling on what ONE check may read across all
+// files: the evidence sits within seconds of the offset, so reaching the
+// ceiling without it is reported as unknown, never as absent.
+export const READ_BUDGET_BYTES = 32 * 1024 * 1024
+// Checks that may stream transcripts at the same time (a burst of deliveries
+// must not turn into a burst of 32 MB reads).
+export const MAX_CONCURRENT_READS = 2
 
 const BLOCKED_PREFIX = 'UserPromptSubmit operation blocked by hook'
 
@@ -115,31 +126,80 @@ export function classifyTranscriptLines(lines: Iterable<string>, msgId: number, 
   return blocked ? 'blocked-by-hook' : 'absent'
 }
 
-async function readTail(path: string, maxBytes: number): Promise<string> {
-  const fh = await open(path, 'r')
+/**
+ * File name -> size in bytes for every transcript in the recipient's project
+ * dir, taken just before the keystrokes go out. Synchronous on purpose: an
+ * async stat could resolve after the prompt's own row is written and start
+ * the read past the evidence. A few dozen stat() calls; null (= read from a
+ * bounded tail instead) on any error, and never throws into the router.
+ */
+export function snapshotTranscriptOffsets(toAgent: string, host: string | null): Map<string, number> | null {
+  if (host != null || toAgent === MAIN_AGENT_ID) return null
   try {
-    const size = (await fh.stat()).size
-    const start = Math.max(0, size - maxBytes)
-    const buf = Buffer.alloc(size - start)
-    await fh.read(buf, 0, buf.length, start)
-    let text = buf.toString('utf8')
-    if (start > 0) text = text.slice(text.indexOf('\n') + 1)
-    return text
-  } finally {
-    await fh.close()
+    const dir = projectsDirFor(agentDir(toAgent), configDirFor(toAgent))
+    const out = new Map<string, number>()
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue
+      try { out.set(f, statSync(join(dir, f)).size) } catch { /* vanished: read from 0 if it comes back */ }
+    }
+    return out
+  } catch {
+    return null
   }
 }
 
 /**
+ * Where to start reading one file. From the send-time size when it is known;
+ * from 0 for a file that did not exist then (a fresh session) or shrank since
+ * (rotated/rewritten); from a bounded tail when there is no snapshot at all.
+ */
+export function readStartFor(name: string, size: number, offsets: ReadonlyMap<string, number> | null | undefined, budget: number): number {
+  if (offsets == null) return Math.max(0, size - budget)
+  const at = offsets.get(name)
+  if (at === undefined || at > size) return 0
+  return at
+}
+
+let activeReads = 0
+const readWaiters: Array<() => void> = []
+async function withReadSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeReads >= MAX_CONCURRENT_READS) await new Promise<void>((r) => readWaiters.push(r))
+  activeReads++
+  try {
+    return await fn()
+  } finally {
+    activeReads--
+    readWaiters.shift()?.()
+  }
+}
+
+/** Stream [start, start+len) line by line, keeping only lines that carry a needle. */
+async function collectNeedleLines(path: string, start: number, len: number, needles: readonly string[], into: string[]): Promise<void> {
+  if (len <= 0) return
+  const rl = createInterface({ input: createReadStream(path, { start, end: start + len - 1 }), crlfDelay: Infinity })
+  for await (const line of rl) {
+    if (needles.some((n) => line.includes(n))) into.push(line)
+  }
+}
+
+export interface EvidenceReadOpts {
+  /** Send-time transcript sizes (snapshotTranscriptOffsets); null/absent = bounded tail. */
+  offsets?: ReadonlyMap<string, number> | null
+  /** Total bytes this check may read across all files. */
+  budgetBytes?: number
+}
+
+/**
  * Evidence for each id from the transcripts in `dir`, or null when the
- * directory cannot be read or holds no transcript at all (= unknown).
- * Only files modified since the send are opened.
+ * directory cannot be read, holds no transcript at all, or the read budget ran
+ * out before every id was seen (= unknown). Only files modified since the send
+ * are opened, each from its send-time offset.
  */
 export async function readTurnEvidence(
   dir: string,
   msgIds: readonly number[],
   sinceMs: number,
-  maxBytes: number = TAIL_BYTES,
+  opts: EvidenceReadOpts = {},
 ): Promise<Map<number, TurnEvidence> | null> {
   let files: string[]
   try {
@@ -148,24 +208,38 @@ export async function readTurnEvidence(
     return null
   }
   if (files.length === 0) return null
-  const lines: string[] = []
-  let unreadable = 0
-  let candidates = 0
-  for (const f of files) {
-    const path = join(dir, f)
-    try {
-      if ((await stat(path)).mtimeMs < sinceMs - CLOCK_SLACK_MS) continue
-      candidates++
-      for (const l of (await readTail(path, maxBytes)).split('\n')) lines.push(l)
-    } catch {
-      unreadable++
+  const budget = opts.budgetBytes ?? READ_BUDGET_BYTES
+  const needles = msgIds.map((id) => `msg_id:${id}`)
+  return withReadSlot(async () => {
+    const lines: string[] = []
+    let unreadable = 0
+    let candidates = 0
+    let left = budget
+    let truncated = false
+    for (const f of files) {
+      const path = join(dir, f)
+      try {
+        const st = await stat(path)
+        if (st.mtimeMs < sinceMs - CLOCK_SLACK_MS) continue
+        candidates++
+        const start = readStartFor(f, st.size, opts.offsets, budget)
+        const want = st.size - start
+        const len = Math.min(want, left)
+        if (len < want) truncated = true
+        await collectNeedleLines(path, start, len, needles, lines)
+        left -= len
+      } catch {
+        unreadable++
+      }
     }
-  }
-  // Every transcript that could hold the answer failed to read: we cannot see.
-  if (candidates > 0 && unreadable === candidates) return null
-  const out = new Map<number, TurnEvidence>()
-  for (const id of msgIds) out.set(id, classifyTranscriptLines(lines, id, sinceMs))
-  return out
+    // Every transcript that could hold the answer failed to read: we cannot see.
+    if (candidates > 0 && unreadable === candidates) return null
+    const out = new Map<number, TurnEvidence>()
+    for (const id of msgIds) out.set(id, classifyTranscriptLines(lines, id, sinceMs))
+    // A budget-capped read that did not find everything has not proven absence.
+    if (truncated && [...out.values()].some((e) => e !== 'seen')) return null
+    return out
+  })
 }
 
 /** PURE. One alert per recipient per window. */
@@ -218,6 +292,8 @@ export interface TurnCheckRequest {
   sentAtMs: number
   /** Remote host of the recipient, null for local. */
   host: string | null
+  /** Transcript sizes at sentAtMs (snapshotTranscriptOffsets); absent = bounded tail. */
+  offsets?: ReadonlyMap<string, number> | null
 }
 
 export interface TurnCheckDeps {
@@ -255,7 +331,7 @@ export async function runDeliveryTurnCheck(
     return 'unknown'
   }
   const dir = deps.transcriptDir(req.toAgent)
-  const evidence = await deps.readEvidence(dir, req.msgIds, req.sentAtMs)
+  const evidence = await deps.readEvidence(dir, req.msgIds, req.sentAtMs, { offsets: req.offsets })
   if (evidence == null) {
     logger.debug({ to: req.toAgent, ids: req.msgIds, dir }, 'delivery-turn-check: transcript not readable (unknown), no alert')
     return 'unknown'
