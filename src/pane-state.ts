@@ -194,6 +194,20 @@ function hasIdleFooter(pane: string): boolean {
 // edit rather than a hunt for copies.
 const TURN_ELAPSED = String.raw`(?:\d+h\s*)?(?:\d+m\s*)?\d+s`
 
+// Optional phase text Claude Code renders INSIDE the counter parentheses,
+// before the elapsed time. Measured on the dave pane 2026-10-17 17:02
+// (Claude Code 2.1.302) while a turn ran its tool hooks:
+//
+//   "· Swooping… (running PreToolUse hooks… 2/4 · 1m 57s · ↓ 9.4k tokens)"
+//
+// The counter regex wanted the elapsed time right after the paren, so for the
+// whole hook phase the pane had no spinner signal and, with the footer showing
+// "(shift+tab to cycle)", read 'idle' -- the router could deliver into the
+// running turn (kanban c5e9409a). The phase is any text up to a `·` on the
+// same line, no nested parenthesis; the `· ↓N` tail is still required, so
+// prose cannot match.
+const TURN_PHASE = String.raw`(?:[^()\n]*?·\s*)?`
+
 const BUSY_INDICATORS: RegExp[] = [
   // NOTE: /\besc to interrupt\b/ is NOT in this list.
   // It is checked separately via BUSY_ESC_TO_INTERRUPT_RX scoped to the
@@ -211,8 +225,9 @@ const BUSY_INDICATORS: RegExp[] = [
   // 2026-06-30). The live spinner/token line renders just above the input
   // box during a real turn, so the bottom-region scope still catches it.
   //
-  // Tokens-down-arrow counter: "(52s · ↓ 2.6k tokens ...", "(1m 16s · ↓ 4.0k tokens)"
-  new RegExp(String.raw`\(\s*${TURN_ELAPSED}\s*·\s*↓\s*\d`),
+  // Tokens-down-arrow counter: "(52s · ↓ 2.6k tokens ...", "(1m 16s · ↓ 4.0k tokens)",
+  // "(running PreToolUse hooks… 2/4 · 1m 57s · ↓ 9.4k tokens)"
+  new RegExp(String.raw`\(\s*${TURN_PHASE}${TURN_ELAPSED}\s*·\s*↓\s*\d`),
   // Known spinner labels paired with the turn-scoped `(Ns · ↓` tail on
   // the same line. The tail requirement kills the "Thinking…" prose
   // false positive. Non-exhaustive by design; the bare tokens pattern

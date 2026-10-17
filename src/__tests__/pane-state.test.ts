@@ -2603,6 +2603,105 @@ describe('detectPaneState: minute- and hour-shaped turn durations', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// HOOKSPIN1017 -- a turn running its tool hooks must still read as busy.
+//
+// While Claude Code runs a hook it puts the hook phase INSIDE the counter
+// parentheses, before the elapsed time:
+//   "(running PreToolUse hooks… 2/4 · 1m 57s · ↓ 9.4k tokens)"
+// The counter regex required the elapsed time right after the paren, so for
+// the whole hook phase the pane had no spinner signal; with the footer showing
+// "(shift+tab to cycle)" instead of `esc to interrupt`, the pane read 'idle'
+// and the router could deliver into the running turn (kanban c5e9409a).
+//
+// The fixture is the bottom of a verbatim `tmux capture-pane -p` of the dave
+// session, 2026-10-17 17:02:37 (Claude Code 2.1.302), the prose above the
+// spinner cut off. It read 'idle' on main before this fix.
+// ---------------------------------------------------------------------------
+describe('detectPaneState: hook phase inside the turn counter', () => {
+  const HOOK_PHASE_TURN = [
+    '· Swooping… (running PreToolUse hooks… 2/4 · 1m 57s · ↓ 9.4k tokens)',
+    "  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's",
+    '     current work',
+    '',
+    '─'.repeat(72) + ' Dave ─',
+    '❯ ',
+    SEP,
+    '  Opus 5.5 | ctx 22% | 5h 21% | 7d 71%',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    '',
+  ].join('\n')
+
+  const liveTurn = (statusLine: string) =>
+    [
+      '⏺ Running the checks.',
+      '',
+      statusLine,
+      SEP,
+      '❯ ',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+
+  it('reads the running-hooks counter as busy (verbatim live capture)', () => {
+    expect(detectPaneState(HOOK_PHASE_TURN)).toBe('busy')
+    expect(isReadyForPrompt(HOOK_PHASE_TURN)).toBe(false)
+  })
+
+  it('reads the wrapped running-hooks counter as busy (verbatim live capture)', () => {
+    // Same session, 2026-10-17 20:07: the counter grows a "thought for Ns"
+    // segment and wraps onto a second line. Of 120 captures taken every
+    // 0.25s during one running turn, 12 showed a hook phase; main read all
+    // 12 as idle and ready for a prompt.
+    const wrapped = [
+      '✽ Cogitating… (running PreToolUse hooks… 2/4 · 6m 13s · ↓ 10.6k tokens ·',
+      'thought for 9s)',
+      "  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's",
+      '     current work',
+      '',
+      '─'.repeat(72) + ' Dave ─',
+      '❯ ',
+      SEP,
+      '  Opus 5.5 | ctx 17% | 5h 5% | 7d 72%',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+      '',
+    ].join('\n')
+    expect(detectPaneState(wrapped)).toBe('busy')
+    expect(isReadyForPrompt(wrapped)).toBe(false)
+  })
+
+  it('reads other hook phases and the seconds shape as busy', () => {
+    // Defensive, not measured: the same counter with the other hook events.
+    expect(detectPaneState(liveTurn('✻ (running PostToolUse hooks… 1/2 · 5s · ↓ 300 tokens)'))).toBe('busy')
+    expect(detectPaneState(liveTurn('✻ Swooping… (running Stop hooks… 1/1 · 1h 2m 3s · ↓ 12k tokens)'))).toBe('busy')
+  })
+
+  it('does NOT read a hook-phase parenthesis without the ↓-tokens tail as busy', () => {
+    // Prose control: the `· ↓N` chrome tail is still required.
+    expect(detectPaneState(liveTurn('  The hook ran (running PreToolUse hooks… 2/4 · 1m 57s) and passed.'))).toBe('idle')
+    expect(detectPaneState(liveTurn('  Notes (see the plan · step 2 · 5s budget) for details.'))).toBe('idle')
+  })
+
+  it('does NOT read a hook-phase counter scrolled above the live region as busy', () => {
+    const stale = [
+      '· Swooping… (running PreToolUse hooks… 2/4 · 1m 57s · ↓ 9.4k tokens)',
+      '⏺ Done: the checks passed.',
+      '⏺ Trailing scrollback line one.',
+      '⏺ Trailing scrollback line two.',
+      '⏺ Trailing scrollback line three.',
+      '⏺ Trailing scrollback line four.',
+      '⏺ Trailing scrollback line five.',
+      '⏺ Trailing scrollback line six.',
+      '',
+      SEP,
+      '❯ ',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    expect(detectPaneState(stale)).toBe('idle')
+  })
+})
+
 // MCP server-approval dialog (2026-09-03, PR #1099 review). The reviewer
 // measured this pane in a real tmux session: detectPaneState read 'unknown',
 // detectsFirstRunGate returned null, detectsBlockingMenu was false -- nothing
