@@ -1,0 +1,16 @@
+{
+  "_comment": "Example of store/fleet-rules-map.json (install-local, FLEETRULESSYNC1015). scripts/fleet-rules-sync.mjs classifies every level-2 heading of the root CLAUDE.md by prefix: fleet = copied verbatim into store/fleet-rules.md; agent_file = the agents carry it in their own CLAUDE.md; main_only = the main agent's own. An unclassified heading stops the sync. {\"heading\", \"stop_at\"} copies a section up to a sub-heading; {\"h3\", \"title\"} lifts one level-3 section under its own level-2 title. substitutions turn main-agent literals into the placeholders {{AGENT_ID}}, {{PROJECT_ROOT}}, {{DASHBOARD_ORIGIN}}.",
+  "fleet": [
+    "Hard rules",
+    "Kanban",
+    {"heading": "Inter-agent communication", "stop_at": "Unknown sender"},
+    {"h3": "Progressive disclosure", "title": "Skill writing: size, structure, linter"}
+  ],
+  "agent_file": ["Scheduled tasks", "Time handling", "Autonomy and approval"],
+  "main_only": ["Persona", "Owner profile", "Morning brief"],
+  "substitutions": [
+    ["\"from\": \"main\"", "\"from\": \"{{AGENT_ID}}\""],
+    ["$(cat store/.dashboard-token)", "$(cat {{PROJECT_ROOT}}/store/.dashboard-token)"],
+    ["http://localhost:3420", "{{DASHBOARD_ORIGIN}}"]
+  ]
+}

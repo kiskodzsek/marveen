@@ -15,6 +15,10 @@
 
   Placeholders: {{AGENT_ID}}, {{PROJECT_ROOT}}, {{DASHBOARD_ORIGIN}}.
 
+  Building it: node scripts/fleet-rules-sync.mjs rebuilds this file from the root
+  CLAUDE.md and store/fleet-rules-map.json (templates/fleet-rules-map.example.json)
+  and stamps it; a root section the map does not classify stops the sync.
+
   Drift gate: the exclusion only applies while this comment carries the sha256 of
   the current root CLAUDE.md. After syncing the rules, stamp them:
     node scripts/fleet-rules-stamp.mjs          (writes synced-from-root-sha256=...)
