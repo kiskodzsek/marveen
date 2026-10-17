@@ -14,6 +14,14 @@
 
 set -e
 
+# MARVEEN_AGENT_ID is the launcher's explicit session name and outranks the cwd
+# in ledger_lib's agent resolution. Run from inside an agent session (every
+# agent's shell exports it), it pins EVERY hook below to that agent: the scope
+# and live-drain cases then red out with no bug behind them (measured
+# 2026-10-15: 7 of 60 failed with MARVEEN_AGENT_ID=dave, 60/60 without it).
+# The cases here derive agent_id from cwd, so the override must not leak in.
+unset MARVEEN_AGENT_ID
+
 PASS=0
 FAIL=0
 TMPDIR_BASE=$(mktemp -d)

@@ -51,17 +51,39 @@ printf 'MemTotal:       16000000 kB\nMemAvailable:     400000 kB\n' > "$SANDBOX/
 
 SAFE_FLAG="$SANDBOX/store/.fleet-safe-mode"
 
+# _timeout <sec> <cmd...>: GNU timeout semantics (exit 124 when it had to kill).
+# macOS ships no `timeout`; there `env ... timeout` exited 127 before the gate
+# ever ran, so 7 of 9 checks failed AND check 1 ("terminates", RC != 124) went
+# green on a run that measured nothing (2026-10-15). gtimeout (coreutils) if
+# present, else a perl fork+alarm with the same 124 contract.
+_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return $?; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
+  perl -e '
+    my $s = shift; my $pid = fork; die "fork: $!" unless defined $pid;
+    if (!$pid) { setpgrp(0, 0); exec @ARGV; exit 127 }
+    $SIG{ALRM} = sub { kill "KILL", -$pid; waitpid $pid, 0; exit 124 };
+    alarm $s; waitpid $pid, 0;
+    exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+  ' "$secs" "$@"
+}
+# The instrument proves itself before it is trusted: it must pass an exit code
+# through AND kill a hang with 124, or every RC below means nothing.
+_timeout 5 bash -c 'exit 3'; [ $? = 3 ] || { echo "FATAL: _timeout does not pass the exit code through" >&2; exit 2; }
+_timeout 1 bash -c 'while :; do :; done'; [ $? = 124 ] || { echo "FATAL: _timeout does not stop a hang with 124" >&2; exit 2; }
+
 # run_gate <timeout-sec> <args...>  -> exit code in RC, stdout+stderr in OUT
 run_gate() {
   local secs="$1"; shift
   rm -f "$SAFE_FLAG" "$SANDBOX/store/.fleet-memgate-alert"
-  OUT="$(env PATH="$SANDBOX/bin:$PATH" \
+  OUT="$(_timeout "$secs" env PATH="$SANDBOX/bin:$PATH" \
       MEMGATE_PROC_MEMINFO="$SANDBOX/meminfo" \
       MARVEEN_STORE="$SANDBOX/store" \
       MARVEEN_ALERT_CHAT_ID="111" \
       MARVEEN_CORE_AGENTS="__no_core__" \
       MARVEEN_MEM_GATE_OBSERVE=0 \
-      timeout "$secs" bash "$GATE" "$@" 2>&1)"
+      bash "$GATE" "$@" 2>&1)"
   RC=$?
 }
 

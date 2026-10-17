@@ -159,6 +159,30 @@ for label, path in (("source tree", SRC), ("installed copy", os.path.join(instal
     check(f"[{label}] ledger failure does not raise", ok, "" if ok else err)
     os.environ["LEDGER_DB_PATH"] = os.path.join(tmp, "ledger.db")
 
+    # 6) an install that itself sits under another install's agents/ tree (a
+    #    checkout in <outer>/agents/<name>/repos/<inst>): the main agent's
+    #    state_dir belongs to the inner install and the main agent, not to the
+    #    outer install and <name>. Measured 2026-10-15: the last-"agents"
+    #    guess booked the main agent's voice reply under "dave".
+    outer = os.path.join(tmp, "nest-" + label.replace(" ", "-"))
+    inner = os.path.join(outer, "agents", "someone", "repos", "inst")
+    for d in (outer, inner):
+        os.makedirs(os.path.join(d, "scripts", "hooks"), exist_ok=True)
+        open(os.path.join(d, "scripts", "hooks", "ledger_lib.py"), "w").close()
+    inner_main = os.path.join(inner, ".claude", "channels", "telegram")
+    inner_sub = os.path.join(inner, "agents", "dex", ".claude", "channels", "telegram")
+    if label == "installed copy":
+        check(f"[{label}] nested install: main state_dir resolves to the inner install",
+              v._install_dir(inner_main) == inner, repr(v._install_dir(inner_main)))
+        check(f"[{label}] nested install: sub-agent state_dir resolves to the inner install",
+              v._install_dir(inner_sub) == inner, repr(v._install_dir(inner_sub)))
+    check(f"[{label}] nested install: main state_dir -> main agent id",
+          v._agent_from_state_dir(inner_main, "mainagent", inner) == "mainagent",
+          repr(v._agent_from_state_dir(inner_main, "mainagent", inner)))
+    check(f"[{label}] nested install: sub-agent state_dir -> its own name",
+          v._agent_from_state_dir(inner_sub, "mainagent", inner) == "dex",
+          repr(v._agent_from_state_dir(inner_sub, "mainagent", inner)))
+
 shutil.rmtree(tmp, ignore_errors=True)
 print("All tests passed." if not fails else f"{fails} failed")
 sys.exit(1 if fails else 0)
