@@ -28,6 +28,8 @@ export const CLOSING_MAX_MISSING = 300
 export const CLOSING_MAX_TASKS = 50
 export const CLOSING_MAX_COMPANIES = 10
 export const CLOSING_MAX_MONTHS = 24
+/** File errors listed on the page; the rest is one "and N more" line (Viktor 6832 (a)). */
+export const CLOSING_MAX_FILE_ERRORS_SHOWN = 20
 /** Patrik's first month (Klodel 6755): the grid starts here even when a month has no file yet. */
 export const CLOSING_FIRST_MONTH = '2026-07'
 
@@ -319,37 +321,40 @@ export function loadClosing(root: string, today: string): ClosingData {
   const cells = new Map<string, ClosingMonth>()
   const fileErrors: ClosingData['fileErrors'] = []
   const fileMonths = new Set<string>()
-  const lastClosable = previousMonth(today)
-  const thisMonth = today.slice(0, 7)
-  const oldest = addMonths(lastClosable, -(CLOSING_MAX_MONTHS - 1))
+  // Names first: the window is fixed before any file is read, so a file is read
+  // exactly when its month can be on the grid. Before, a current-month file moved
+  // the window one month on after the bounds were set, and last month - 23 was
+  // read but shown neither in the grid nor among the errors (Viktor 6832 (b)).
+  const named: Array<{ company: string; path: string; month: string }> = []
   for (const company of companies) {
     const cdir = join(dir, company)
     let files: string[]
     try { files = readdirSync(cdir) } catch { continue }
     for (const f of files.sort()) {
       const mm = MONTH_FILE_RE.exec(f)
-      if (!mm) continue
-      const month = mm[1]!
-      if (month > thisMonth || month < oldest) {
-        fileErrors.push({ company, month, error: `a hónap a megjelenített ${oldest} – ${thisMonth} tartományon kívül esik` })
-        continue
-      }
-      fileMonths.add(month)
-      const read = readCapped(join(cdir, f), CLOSING_MAX_FILE_BYTES)
-      if (!read.ok) {
-        if (read.reason !== 'missing') fileErrors.push({ company, month, error: `nem olvasható (${read.reason})` })
-        continue
-      }
-      const parsed = parseClosingMonth(read.text, company, month)
-      if ('error' in parsed) fileErrors.push({ company, month, error: parsed.error })
-      else cells.set(`${company}\u0000${month}`, parsed)
+      if (mm) named.push({ company, path: join(cdir, f), month: mm[1]! })
     }
   }
-  const sorted = [...fileMonths].sort()
-  const newest = sorted[sorted.length - 1]
-  const last = newest && newest > lastClosable ? newest : lastClosable
-  const wanted = sorted[0] && sorted[0] < CLOSING_FIRST_MONTH ? sorted[0] : CLOSING_FIRST_MONTH
+  const thisMonth = today.slice(0, 7)
+  const last = named.some((n) => n.month === thisMonth) ? thisMonth : previousMonth(today)
   const floor = addMonths(last, -(CLOSING_MAX_MONTHS - 1))
+  for (const { company, path, month } of named) {
+    if (month > last || month < floor) {
+      fileErrors.push({ company, month, error: `a hónap a megjeleníthető ${floor} – ${last} tartományon kívül esik` })
+      continue
+    }
+    fileMonths.add(month)
+    const read = readCapped(path, CLOSING_MAX_FILE_BYTES)
+    if (!read.ok) {
+      if (read.reason !== 'missing') fileErrors.push({ company, month, error: `nem olvasható (${read.reason})` })
+      continue
+    }
+    const parsed = parseClosingMonth(read.text, company, month)
+    if ('error' in parsed) fileErrors.push({ company, month, error: parsed.error })
+    else cells.set(`${company}\u0000${month}`, parsed)
+  }
+  const sorted = [...fileMonths].sort()
+  const wanted = sorted[0] && sorted[0] < CLOSING_FIRST_MONTH ? sorted[0] : CLOSING_FIRST_MONTH
   const months = monthRange(wanted > floor ? wanted : floor, last)
   return { present: companies.length > 0, companies, months, cells, fileErrors }
 }
@@ -369,7 +374,7 @@ const CL: Record<Lang, Record<string, string>> = {
     who: 'Ki min dolgozik', updated: 'Frissítve', sources: 'Források', notes: 'Megjegyzések', guess: 'tipp', ownList: 'saját lista bruttó', by: 'küldte',
     missingList: 'Hiánylista', supplier: 'Szállító', date: 'Dátum', amount: 'Összeg', reason: 'Ok', task: 'Teendő', owner: 'Kié',
     r_papir: 'papíron van', r_patrikra_var: 'rád vár', r_szolgaltatotol_kertuk: 'szolgáltatótól kértük', r_csapat_dolgozik: 'a csapat dolgozik rajta', r_ismeretlen: 'ismeretlen',
-    noMissing: 'Nincs hiányzó számla.', fileErrors: 'Hibás fájlok (nem jelennek meg)', errors: 'Hibák a fájlban (a hibás mezők kimaradtak)',
+    noMissing: 'Nincs hiányzó számla.', fileErrors: 'Hibás fájlok (nem jelennek meg)', fileErrorsMore: 'és még {n} hibás fájl', errors: 'Hibák a fájlban (a hibás mezők kimaradtak)',
   },
   en: {
     title: 'Monthly closing', none: 'No closing state file yet (zaras/<company>/<YYYY-MM>.json).',
@@ -383,7 +388,7 @@ const CL: Record<Lang, Record<string, string>> = {
     who: 'Who works on what', updated: 'Updated', sources: 'Sources', notes: 'Notes', guess: 'estimate', ownList: 'own list gross', by: 'sent by',
     missingList: 'Missing invoices', supplier: 'Supplier', date: 'Date', amount: 'Amount', reason: 'Reason', task: 'To do', owner: 'Owner',
     r_papir: 'on paper', r_patrikra_var: 'waits on you', r_szolgaltatotol_kertuk: 'requested from supplier', r_csapat_dolgozik: 'team is on it', r_ismeretlen: 'unknown',
-    noMissing: 'No missing invoice.', fileErrors: 'Invalid files (not shown)', errors: 'Problems in the file (invalid fields skipped)',
+    noMissing: 'No missing invoice.', fileErrors: 'Invalid files (not shown)', fileErrorsMore: 'and {n} more invalid files', errors: 'Problems in the file (invalid fields skipped)',
   },
 }
 
@@ -547,7 +552,10 @@ export function renderClosingPage(data: ClosingData, names: Map<string, string>,
   const parts: string[] = [`<h2>${escapeHtml(t.title!)}</h2>`, yoursBox(data, names, t), grid(data, names, t, opts.today)]
   if (data.fileErrors.length) {
     parts.push(`<details class="errs" open><summary>${escapeHtml(t.fileErrors!)} (${data.fileErrors.length})</summary><ul>${
-      data.fileErrors.map((e) => `<li>${escapeHtml(`${e.company}/${e.month}.json: ${e.error}`)}</li>`).join('')}</ul></details>`)
+      data.fileErrors.slice(0, CLOSING_MAX_FILE_ERRORS_SHOWN).map((e) => `<li>${escapeHtml(`${e.company}/${e.month}.json: ${e.error}`)}</li>`).join('')}${
+      data.fileErrors.length > CLOSING_MAX_FILE_ERRORS_SHOWN
+        ? `<li>${escapeHtml(t.fileErrorsMore!.replace('{n}', String(data.fileErrors.length - CLOSING_MAX_FILE_ERRORS_SHOWN)))}</li>`
+        : ''}</ul></details>`)
   }
   const details: string[] = []
   for (const month of [...data.months].reverse()) {

@@ -10,6 +10,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, realpathSync, readF
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
+import { execFileSync, spawnSync } from 'node:child_process'
 
 const base = realpathSync(mkdtempSync(join(tmpdir(), 'marveen-finance-test-')))
 const root = join(base, 'penzugy')
@@ -121,6 +122,18 @@ describe('the file reader (containment)', () => {
   })
   it('refuses a file over 1 MB', () => {
     expect(readCapped(join(root, 'beta', 'elorejelzes.csv'))).toEqual({ ok: false, reason: 'too_large' })
+  })
+  it.skipIf(process.platform === 'win32')('a FIFO is refused at once, it does not block the synchronous open (Viktor 6832 I2)', () => {
+    // open(2) on a FIFO with no writer blocks; this call is synchronous, so it
+    // would hang the test worker too -- hence a child process with a timeout.
+    const fifo = join(base, 'probe.fifo')
+    execFileSync('mkfifo', [fifo])
+    const mod = join(dirname(fileURLToPath(import.meta.url)), '..', 'web', 'finance.ts')
+    const r = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+      `import { readCapped } from ${JSON.stringify(mod)}; process.stdout.write(JSON.stringify(readCapped(process.argv[1])))`, fifo],
+    { encoding: 'utf-8', timeout: 15000 })
+    expect(r.signal).toBeNull()
+    expect(JSON.parse(r.stdout)).toEqual({ ok: false, reason: 'not_regular' })
   })
   it('a missing file is a missing section, not an error', () => {
     expect(loadCompany(root, 'beta').productCost).toEqual({ present: false, rows: [], errors: [] })
