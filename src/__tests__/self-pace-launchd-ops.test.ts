@@ -134,21 +134,21 @@ describe('the invoice mover v3 and its B5 probe (Pulzus 2864, card daef6926)', (
     writeFileSync(movPlist, '<plist>other program</plist>')
     expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${movPlist}` }, pulzus).deny).toBe(true)
   })
-  it('the B5 probe: bootstrap of the approved plist and bootout; never kickstart', () => {
+  it('the B5 probe is gone after the go-live (Viktor 2905, card bb0dd4e0): its once-approved plist, bootout and kickstart are refused', () => {
+    expect(LAUNCHD_APPROVED_PLIST_SHA256[B5]).toBeUndefined()
     const b5Plist = join(agentsDir, `${B5}.plist`)
-    writeFileSync(b5Plist, readFileSync(join(__dirname, 'fixtures', `${B5}.plist`)))
-    const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${b5Plist}` }, pulzus)
-    expect(ok.deny).toBe(false)
-    expect(ok.launchdOps[0].plist_sha256).toBe('6b9b1f571ccab6c0f97858ea3b614e62aebe04d8cbbd282a928bb2c6a1265231')
-    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${B5}` }, pulzus).deny).toBe(false)
-    expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${B5}` }, pulzus).deny).toBe(true)
-    writeFileSync(b5Plist, '<plist>other program</plist>')
+    const body = readFileSync(join(__dirname, 'fixtures', `${B5}.plist`))
+    // The fixture is still the plist approved until now, so the refusal below is the removal, not a hash mismatch.
+    expect(createHash('sha256').update(body).digest('hex')).toBe('6b9b1f571ccab6c0f97858ea3b614e62aebe04d8cbbd282a928bb2c6a1265231')
+    writeFileSync(b5Plist, body)
     expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${b5Plist}` }, pulzus).deny).toBe(true)
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${B5}` }, pulzus).deny).toBe(true)
+    expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${B5}` }, pulzus).deny).toBe(true)
   })
   it('the same commands from any other agent are refused', () => {
     const kernel = { ...pulzus, agent: 'kernel', configDirAgent: 'kernel' }
     expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${MOV}` }, kernel).deny).toBe(true)
-    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${B5}` }, kernel).deny).toBe(true)
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${MOV}` }, kernel).deny).toBe(true)
   })
 })
 
