@@ -157,7 +157,7 @@ const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_
 // boundary is a separate uid (H1).
 export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
 export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato'])
-export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.szamla.b5probe'])
+export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.szamla.b5probe', 'hu.myshp.vesz-kapcsolo'])
 export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // K1 (Viktor 3423, card ad7d3eaa): the worker runs under sandbox-exec denying writes under
   // ~/Library/CloudStorage, plus the ~/Library and ~ directory nodes so a parent rename cannot
@@ -173,6 +173,10 @@ export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // kickstarted. Remove this entry and its label once the go-live is done.
   // K1: the probe carries the worker's sandbox profile, so its re-run proves the sandbox.
   'hu.myshp.szamla.b5probe': new Set(['6b9b1f571ccab6c0f97858ea3b614e62aebe04d8cbbd282a928bb2c6a1265231']),
+  // Klodel 6082 (shared/vesz-atvetel.md): the LLM-free takeover switch ops/vesz/kapcsolo.py,
+  // every 5 minutes. A command task would run inside the dashboard process (Viktor M2/L2), so
+  // launchd it is. Bootstrap and bootout only; StartInterval runs it, nothing kickstarts it.
+  'hu.myshp.vesz-kapcsolo': new Set(['b6ab84e961ebe53b3b5b6d6703c427d9ca82dc52bb5626e0bdee587b2a41586f']),
 }
 const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
 const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)

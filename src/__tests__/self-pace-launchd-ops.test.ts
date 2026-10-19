@@ -100,6 +100,26 @@ describe('the incident checker (Pulzus 2369)', () => {
   })
 })
 
+describe('the takeover switch (Klodel 6082, shared/vesz-atvetel.md)', () => {
+  const VK = 'hu.myshp.vesz-kapcsolo'
+  const vkPlist = join(agentsDir, `${VK}.plist`)
+  it('bootstrap of the approved plist and bootout pass; kickstart and a changed plist are refused', () => {
+    writeFileSync(vkPlist, readFileSync(join(__dirname, 'fixtures', `${VK}.plist`)))
+    const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${vkPlist}` }, pulzus)
+    expect(ok.deny).toBe(false)
+    expect(ok.launchdOps[0].plist_sha256).toBe('b6ab84e961ebe53b3b5b6d6703c427d9ca82dc52bb5626e0bdee587b2a41586f')
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${VK}` }, pulzus).deny).toBe(false)
+    expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${VK}` }, pulzus).deny).toBe(true)
+    writeFileSync(vkPlist, readFileSync(join(__dirname, 'fixtures', `${VK}.plist`), 'utf8').replace('<integer>300</integer>', '<integer>1</integer>'))
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${vkPlist}` }, pulzus).deny).toBe(true)
+  })
+  it('the same bootstrap from any other agent is refused', () => {
+    writeFileSync(vkPlist, readFileSync(join(__dirname, 'fixtures', `${VK}.plist`)))
+    const kernel = { ...pulzus, agent: 'kernel', configDirAgent: 'kernel' }
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${vkPlist}` }, kernel).deny).toBe(true)
+  })
+})
+
 describe('the invoice mover v3 and its B5 probe (Pulzus 2864, card daef6926)', () => {
   const MOV = 'hu.myshp.szamla.mozgato'
   const B5 = 'hu.myshp.szamla.b5probe'
