@@ -4,7 +4,7 @@
 Subcommands:
   transcribe <file_id> <state_dir>
       Download a Telegram voice file by file_id using the bot token in
-      <state_dir>/.env, transcribe it (Hungarian, faster-whisper small),
+      <state_dir>/.env, transcribe it (Hungarian, faster-whisper; model: _whisper_model_name),
       print the transcript to stdout.
 
   speak <voice_onnx> <state_dir> <chat_id> <text...>
@@ -51,9 +51,35 @@ _orig_getaddrinfo = socket.getaddrinfo
 
 
 
-def _whisper_model_name():
-    """faster-whisper model size (MARVEEN_WHISPER_MODEL, default 'small')."""
-    return (os.environ.get("MARVEEN_WHISPER_MODEL") or "small").strip()
+# The model can also be set by a one-line file next to this script, because the
+# hook runs inside the dashboard process and inherits ITS environment (launchd
+# plist), so MARVEEN_WHISPER_MODEL alone cannot be changed without a dashboard
+# restart. The installer copies scripts only and leaves this file alone. Only
+# known model sizes are accepted from the file: faster-whisper also takes a
+# path or a Hugging Face repo id, and a writable text file must not be able to
+# point the hook at an arbitrary download.
+_MODEL_FILE = "whisper-model"
+_MODEL_FILE_ALLOWED = ("tiny", "base", "small", "medium", "large-v2", "large-v3")
+
+
+def _whisper_model_name(model_file=None):
+    """faster-whisper model size: MARVEEN_WHISPER_MODEL, else the whisper-model
+    file next to this script, else 'small'."""
+    env = (os.environ.get("MARVEEN_WHISPER_MODEL") or "").strip()
+    if env:
+        return env
+    if model_file is None:
+        model_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), _MODEL_FILE)
+    try:
+        with open(model_file, encoding="utf-8") as f:
+            value = f.readline(64).strip()
+    except (OSError, ValueError):  # missing, unreadable, or not UTF-8
+        return "small"
+    if value in _MODEL_FILE_ALLOWED:
+        return value
+    # The value itself is not echoed: the file may be a symlink to something else.
+    print("_vtools: ignoring %s: not a known model size, using 'small'" % model_file, file=sys.stderr)
+    return "small"
 
 def _getaddrinfo_ipv4_first(host, port, family=0, *args, **kwargs):
     results = _orig_getaddrinfo(host, port, family, *args, **kwargs)
