@@ -157,7 +157,7 @@ const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_
 // boundary is a separate uid (H1).
 export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
 export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato'])
-export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.szamla.b5probe', 'hu.myshp.vesz-kapcsolo'])
+export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo'])
 export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // K1 (Viktor 3423, card ad7d3eaa): the worker runs under sandbox-exec denying writes under
   // ~/Library/CloudStorage, plus the ~/Library and ~ directory nodes so a parent rename cannot
@@ -169,10 +169,6 @@ export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // Kernel/Pulzus 2864 (card daef6926, Viktor 2832): the invoice mover v3, ops/szamla
   // deploy/hu.myshp.szamla.mozgato.plist; kickstart is the first, Patrik-attended run.
   'hu.myshp.szamla.mozgato': new Set(['f59a3a05f411075c00370d875b60ddbf7a94682eaa389534c7420102dc223d66']),
-  // The one-shot B5 negative probe (Viktor 2746 B5 / 2804 C4), RunAtLoad only, never
-  // kickstarted. Remove this entry and its label once the go-live is done.
-  // K1: the probe carries the worker's sandbox profile, so its re-run proves the sandbox.
-  'hu.myshp.szamla.b5probe': new Set(['6b9b1f571ccab6c0f97858ea3b614e62aebe04d8cbbd282a928bb2c6a1265231']),
   // Klodel 6082 (shared/vesz-atvetel.md): the LLM-free takeover switch ops/vesz/kapcsolo.py,
   // every 5 minutes. A command task would run inside the dashboard process (Viktor M2/L2), so
   // launchd it is. Bootstrap and bootout only; StartInterval runs it, nothing kickstarts it.
