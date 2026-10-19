@@ -5,11 +5,16 @@
 # never touches stt.sh/tts.sh's live state. Exits 0 on pass, 1 on fail/mismatch.
 # Usage: canary.sh [voice] [expected text...]   (voice: imre|anna|<path-to-onnx>, default imre)
 set -euo pipefail
+# Resolve the toolkit dir the way stt.sh does: it must hold BOTH _vtools.py AND a
+# venv. The source tree (scripts/voice) has _vtools.py but no venv, so picking it on
+# _vtools.py alone made this canary print "skip" and exit 0 on every run from the
+# source tree, even with a working install next door (2026-10-19).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [[ -f "$SCRIPT_DIR/_vtools.py" ]]; then
+INSTALL_DIR="${MARVEEN_VOICE_DIR:-$HOME/.local/share/marveen-voice}"
+if [[ -f "$SCRIPT_DIR/_vtools.py" && -x "$SCRIPT_DIR/venv/bin/python" ]]; then
   DEST="$SCRIPT_DIR"
 else
-  DEST="$HOME/.local/share/marveen-voice"
+  DEST="$INSTALL_DIR"
 fi
 # Graceful skip when the (opt-in) voice stack is not installed: a missing venv
 # must read as "nothing to test", not as a weekly false-alarm regression.

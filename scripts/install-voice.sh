@@ -90,28 +90,60 @@ mkdir -p "$DEST/voices"
 # stub has it. bin/pip is what step 3 actually calls, so that is what decides.
 # A stub found here is rebuilt rather than merely reported, since re-running
 # cannot otherwise recover the install.
-if [[ ! -x "$DEST/venv/bin/pip" ]]; then
+#
+# bin/python must also RUN: a Homebrew python upgrade removes the interpreter the
+# venv was built from, which leaves bin/python dangling while bin/pip still exists,
+# and stt.sh then dies on `venv/bin/python: No such file or directory` (2026-10-19).
+#
+# The interpreter: faster-whisper's binary dependencies (ctranslate2, onnxruntime,
+# av) ship wheels for a new CPython only some time after its release. On 2026-10-19
+# Homebrew's python3 was 3.15, and pip could not resolve faster-whisper + piper-tts
+# for it at all, while 3.14 had a wheel for every package. So the newest known-good
+# minor version with a venv module wins, and the bare python3 is the last resort.
+# VOICE_PYTHON overrides the choice; if it is set, it must work.
+_pick_python() {
+  local c
+  if [[ -n "${VOICE_PYTHON:-}" ]]; then
+    "$VOICE_PYTHON" -m venv --help &>/dev/null && { echo "$VOICE_PYTHON"; return 0; }
+    return 1
+  fi
+  for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
+    command -v "$c" &>/dev/null && "$c" -m venv --help &>/dev/null && { echo "$c"; return 0; }
+  done
+  return 1
+}
+if [[ ! -x "$DEST/venv/bin/pip" ]] || ! "$DEST/venv/bin/python" -c '' &>/dev/null; then
+  PY="$(_pick_python)" || _fail "no usable python (VOICE_PYTHON='${VOICE_PYTHON:-}') with a venv module"
   if [[ -d "$DEST/venv" ]]; then
-    echo "    Unusable venv at $DEST/venv (no bin/pip) -- rebuilding"
+    echo "    Unusable venv at $DEST/venv (no bin/pip, or bin/python does not run) -- rebuilding"
     # Scope: this removes the venv only. The sibling $DEST/voices holds the
     # downloaded TTS models and must survive.
     rm -rf "$DEST/venv"
   fi
-  python3 -m venv "$DEST/venv"
-  _pass "venv created at $DEST/venv"
+  "$PY" -m venv "$DEST/venv"
+  _pass "venv created at $DEST/venv ($("$DEST/venv/bin/python" --version 2>&1))"
 else
   _skip "venv exists"
 fi
 
 # --- Step 3: Python packages ---
 _step "[3/5] Python packages (faster-whisper + piper-tts)"
-if "$DEST/venv/bin/python" -c "import faster_whisper, piper" 2>/dev/null; then
+# av 19 dropped the `metadata_errors` keyword that faster-whisper 1.2.1 passes to
+# av.open() (faster_whisper/audio.py), so every transcription died with a TypeError
+# (measured 2026-10-19; av 16.1, 17.1 and 18.1 accept it). faster-whisper itself only
+# asks for av>=11, so the pin lives here. The gate checks it too, so a re-run repairs
+# an install that already pulled av 19.
+AV_PIN='av<19'
+_packages_ok() {
+  "$DEST/venv/bin/python" -c "import faster_whisper, piper, av, sys; sys.exit(int(av.__version__.split('.')[0]) >= 19)" 2>/dev/null
+}
+if _packages_ok; then
   _skip "packages already installed"
 else
-  "$DEST/venv/bin/pip" install --quiet faster-whisper piper-tts
-  _pass "faster-whisper + piper-tts installed"
+  "$DEST/venv/bin/pip" install --quiet faster-whisper piper-tts "$AV_PIN"
+  _pass "faster-whisper + piper-tts installed ($AV_PIN)"
 fi
-"$DEST/venv/bin/python" -c "import faster_whisper, piper" || _fail "package import check failed"
+_packages_ok || _fail "package import check failed (faster_whisper, piper, $AV_PIN)"
 
 # --- Step 4: Hungarian voice models ---
 _step "[4/5] Hungarian TTS voice models"
