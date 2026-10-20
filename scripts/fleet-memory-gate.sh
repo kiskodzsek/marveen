@@ -17,7 +17,8 @@
 #   (any internal error -> exit 0 / ALLOW: fail-open, so a broken gate can never
 #    freeze the fleet -- worst case is the pre-Commit-3 behaviour.)
 #
-# Bands (usedPct = 100 * (MemTotal - MemAvailable) / MemTotal):
+# Bands (usedPct = 100 * (MemTotal - MemAvailable) / MemTotal; on macOS
+# usedPct = 100 - kern.memorystatus_level, see lib/mem-read.sh):
 #   usedPct < WARN            -> allow all; clear safe-mode flag
 #   WARN <= usedPct < HARD    -> allow ONLY core agents (safe-mode); warn once
 #   usedPct >= HARD           -> hard pause: block ALL new spawns; alert once
@@ -126,15 +127,16 @@ ALERT_COOLDOWN=600   # seconds; do not repeat the same band's alert within this
 log() { echo "[fleet-memory-gate] $*" >&2; }
 
 # --- read memory ---
-# MEMGATE_PROC_MEMINFO exists for tests only (no /proc to stub on macOS).
-PROC_MEMINFO="${MEMGATE_PROC_MEMINFO:-/proc/meminfo}"
-mem_total="$(awk '/^MemTotal:/{print $2}' "$PROC_MEMINFO" 2>/dev/null)"
-mem_avail="$(awk '/^MemAvailable:/{print $2}' "$PROC_MEMINFO" 2>/dev/null)"
-if [[ -z "${mem_total:-}" || -z "${mem_avail:-}" || "$mem_total" -le 0 ]]; then
-  log "cannot read /proc/meminfo -- fail-open (allow)"
+# Linux /proc/meminfo or macOS kern.memorystatus_level, see lib/mem-read.sh
+# (MEMGATE_PROC_MEMINFO / MEMGATE_SYSCTL are its test hooks).
+MEM_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/mem-read.sh"
+if [[ ! -r "$MEM_LIB" ]] || ! . "$MEM_LIB" || ! mem_read; then
+  log "cannot read memory (/proc/meminfo or kern.memorystatus_level) -- fail-open (allow)"
   echo "meminfo-unreadable: allow"
   exit 0
 fi
+mem_total="$MEM_TOTAL_KB"
+mem_avail="$MEM_AVAIL_KB"
 used_pct=$(( (mem_total - mem_avail) * 100 / mem_total ))
 avail_mb=$(( mem_avail / 1024 ))
 
@@ -210,7 +212,7 @@ else
   clear_safe_mode
 fi
 
-status_line="used=${used_pct}% avail=${avail_mb}MB running_agents=${running} cap=${AGENT_CAP} band=${band}"
+status_line="used=${used_pct}% avail=${avail_mb}MB running_agents=${running} cap=${AGENT_CAP} band=${band} src=${MEM_SOURCE}"
 
 # Observe-only: alerts have already fired above; from here the gate only reports and
 # always ALLOWS -- no block exit (10), no cap-block. Istvan owns the throttle call.
