@@ -13,8 +13,9 @@
 # render/video and `colima start`:
 #
 #   1. a single machine-wide lock (store/.heavy-job.lock): one heavy job at a time;
-#   2. start only when free memory >= --min-free (default 40%) and the data
-#      volume has >= --min-disk-gb (default 3) free; otherwise wait up to --wait
+#   2. start only when free memory >= --min-free (default 40%), the data
+#      volume has >= --min-disk-gb (default 3) free, and a fresh
+#      store/.host-state (host-monitor.sh) is not warn/critical; otherwise wait up to --wait
 #      seconds (default 600), then give up with exit 75;
 #   3. while the job runs, a 3 s watchdog stops the WHOLE process group (TERM,
 #      then KILL after 10 s) if free memory drops below --kill-below (default
@@ -72,6 +73,19 @@ disk_free_kb() {
 }
 MIN_DISK_KB=$(( MIN_DISK_GB * 1024 * 1024 ))
 
+# host-monitor.sh's verdict (store/.host-state): a FRESH warn/critical blocks
+# the start (it also covers swap, load and heat, which this script does not
+# measure). A missing or stale file is ignored: no monitor installed, or it
+# stopped running -- then the memory and disk checks above still apply.
+host_state() {
+  local b e r now; now="$(date +%s)"
+  read -r b e r < "$STORE/.host-state" 2>/dev/null || return 0
+  [[ "$e" =~ ^[0-9]+$ ]] || return 0
+  (( now - e <= ${HEAVY_JOB_STATE_MAX_AGE:-300} )) || return 0
+  [[ "$b" == "warn" || "$b" == "critical" ]] && echo "$b (${r:-no reason})"
+  return 0
+}
+
 # --- lock: mkdir is atomic on every filesystem we run on; flock is not on macOS ---
 have_lock=0
 release() { (( have_lock )) && rm -rf "$LOCK" 2>/dev/null; have_lock=0; }
@@ -106,6 +120,8 @@ while :; do
     reason="free memory ${MEM_FREE_PCT}% < ${MIN_FREE}%"
   elif d="$(disk_free_kb)"; [[ ! "$d" =~ ^[0-9]+$ ]] || (( d < MIN_DISK_KB )); then
     reason="free disk ${d:-?} KB < ${MIN_DISK_GB} GB"
+  elif hs="$(host_state)"; [[ -n "$hs" ]]; then
+    reason="host-monitor says $hs"
   elif try_lock; then
     break
   else
