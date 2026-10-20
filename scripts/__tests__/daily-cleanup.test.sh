@@ -42,13 +42,14 @@ chmod +x "$SB/sysctl"
 
 NOW=2000000000; H=3600; GB=1048576
 # dc <tick|run> with: HOUR, DF_KB (default 50 GiB), LAST (stamp, empty = none), HJ_BIN (default the stub).
+# No VM (HEAVY_JOB_VM_PID empty): env -i would drop the export below, and the host may run a real one.
 dc() {
   rm -f "$SB/calls" "$SB/hj.args"
   if [ -n "${LAST:-}" ]; then echo "$LAST" > "$SB/store/.daily-cleanup.last"; else rm -f "$SB/store/.daily-cleanup.last"; fi
   OUT="$(env -i PATH="$SB/bin:/usr/bin:/bin" HOME="$SB/home" MARVEEN_STORE="$SB/store" \
       DAILY_CLEANUP_NOW="$NOW" DAILY_CLEANUP_HOUR="${HOUR:-12}" DAILY_CLEANUP_DF_KB="${DF_KB:-$((50 * GB))}" \
       DAILY_CLEANUP_SCRATCH_ROOT="$SB/scratch" DAILY_CLEANUP_HEAVY_JOB="${HJ_BIN:-$SB/hj-stub}" \
-      HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 HEAVY_JOB_DF_KB="${HJ_DF:-99999999}" \
+      HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 HEAVY_JOB_DF_KB="${HJ_DF:-99999999}" HEAVY_JOB_VM_PID= \
       MEMGATE_PROC_MEMINFO="$SB/no-such" MEMGATE_SYSCTL="$SB/sysctl" \
       ${STUB_ENV:-} bash "$DC" "$@" 2>&1)"; RC=$?
 }
@@ -77,13 +78,14 @@ check "9 GiB free, last run 30 min ago -> nothing (at most hourly)" "$(ok "$(ran
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((11 * GB)) dc tick
 check "11 GiB free, last run 2 h ago -> nothing" "$(ok "$(ran)" = 1)" "rc=$RC"
 HOUR=4 LAST= dc tick
-check "the run goes through heavy-job, past a disk-only host state and the disk floor" "$(grep -q -- '--name daily-cleanup --ignore-host-disk --min-disk-gb 0 ' "$SB/hj.args" && echo 0 || echo 1)" "$(cat "$SB/hj.args" 2>/dev/null)"
+check "the run goes through heavy-job, past a disk-only host state, the disk floor and a running VM" "$(grep -q -- '--name daily-cleanup --ignore-host-disk --min-disk-gb 0 --allow-vm ' "$SB/hj.args" && echo 0 || echo 1)" "$(cat "$SB/hj.args" 2>/dev/null)"
 
 printf '#!/bin/bash\nexit 75\n' > "$SB/hj-75"; chmod +x "$SB/hj-75"
 HOUR=4 LAST=$((NOW - 40 * H)) HJ_BIN="$SB/hj-75" dc tick
 check "heavy-job did not start it (75) -> rc 75 and the old stamp stays" "$(ok "$RC" = 75 -a "$(stamp)" = $((NOW - 40 * H)))" "rc=$RC stamp=$(stamp)"
 
 echo "== the real heavy-job.sh: a disk-only host state does not block the cleanup, anything else does"
+export HEAVY_JOB_VM_PID=""  # no VM: the host running this test may have a real one
 hjrun() { OUT="$(env HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 HEAVY_JOB_DF_KB=99999999 MEMGATE_PROC_MEMINFO="$SB/no-such" MEMGATE_SYSCTL="$SB/sysctl" \
     bash "$HJ" --wait 0 "$@" 2>&1)"; RC=$?; }
 echo "critical $(date +%s) free disk 2 GiB" > "$SB/store/.host-state"

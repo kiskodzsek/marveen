@@ -98,6 +98,7 @@ check "the failure is logged without the token" "$(ok -n "$(grep 'Telegram FAILE
 rm -f "$SB/curl-fail"
 
 echo "== heavy-job.sh reads the state"
+export HEAVY_JOB_VM_PID=""  # no VM: the host running this test may have a real one
 hj() { echo 70 > "$SB/level"; OUT="$(env MEMGATE_PROC_MEMINFO="$SB/no-such" MEMGATE_SYSCTL="$SB/sysctl" HEAVY_JOB_DF_KB=99999999 HEAVY_JOB_POLL=1 \
     bash "$SB/scripts/heavy-job.sh" --wait 0 -- touch "$1" 2>&1)"; RC=$?; }
 echo "warn $(date +%s) swap 80%" > "$STATE"; hj "$SB/hj1"
