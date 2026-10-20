@@ -161,6 +161,7 @@ HEAVY_JOB_VM_PID=4242 hj --name mflux --wait 1 -- bash -c 'echo ran > "$0"' "$SB
 check "VM running -> another heavy job is not started (75) and does not run" "$(ok "$RC" = 75 -a ! -e "$SB/vm1")" "rc=$RC $OUT"
 check "...says it is the VM, with its pid and the way out" "$(ok -n "$(echo "$OUT" | grep 'a Colima VM is running (limactl pid 4242): it holds its memory until colima stop')")" "$OUT"
 check "...and takes no lock" "$(ok ! -e "$LOCK")"
+check "the test hook leaves a WARN in heavy-job.log (Viktor I1)" "$(ok -n "$(grep "WARN test hook HEAVY_JOB_VM_PID='4242'" "$SB/store/heavy-job.log")")"
 HEAVY_JOB_VM_PID=4242 hj --name colima --allow-vm --wait 1 -- bash -c 'echo ran > "$0"' "$SB/vm2"
 check "--allow-vm (the VM's own start, the cleanup) runs past a running VM" "$(ok "$RC" = 0 -a -f "$SB/vm2")" "rc=$RC $OUT"
 level 30; HEAVY_JOB_VM_PID=4242 hj --name colima --allow-vm --wait 1 -- bash -c 'echo ran > "$0"' "$SB/vm3"
@@ -173,6 +174,7 @@ FAKE=$!; sleep 0.3
 OUT="$(env -u HEAVY_JOB_VM_PID HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
     HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name probe --wait 0 -- bash -c 'echo ran > "$0"' "$SB/vm4" 2>&1)"; RC=$?
 kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null
+check "...and without the hook there is no WARN" "$(ok -z "$(echo "$OUT" | grep 'WARN test hook')")" "$OUT"
 check "without the hook, a running 'limactl hostagent' is detected (75)" "$(ok "$RC" = 75 -a ! -e "$SB/vm4" -a -n "$(echo "$OUT" | grep 'a Colima VM is running (limactl pid [0-9]')")" "rc=$RC $OUT"
 
 hj --name x

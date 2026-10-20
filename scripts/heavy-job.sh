@@ -113,6 +113,8 @@ vm_pid() {
   if [[ -n "${HEAVY_JOB_VM_PID+x}" ]]; then echo "$HEAVY_JOB_VM_PID"; return; fi
   pgrep -f '(^|/)limactl hostagent ' 2>/dev/null | head -1
 }
+# A stray export (e.g. from a test shell) would silently turn the VM rule off.
+[[ -n "${HEAVY_JOB_VM_PID+x}" ]] && log "WARN test hook HEAVY_JOB_VM_PID='${HEAVY_JOB_VM_PID}' overrides the VM check"
 
 # --- lock: mkdir is atomic on every filesystem we run on; flock is not on macOS ---
 have_lock=0
