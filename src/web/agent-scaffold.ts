@@ -775,6 +775,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsDestructiveGate(name, profile)) injectDestructiveGate(existing)
   injectEgressGate(existing)
   if (agentGetsBashEgressParser(name)) injectBashEgressParser(existing)
+  if (agentGetsImageQuarantineGate(name)) injectImageQuarantineGate(existing)
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
 }
 
@@ -1365,6 +1366,39 @@ export function injectBashEgressParser(existing: Record<string, unknown>): void 
   ]
 }
 
+// IMAGESAFETY1020 (card 1a4fe725): the image-quarantine gate has to see every
+// tool that can open a file, above all Read -- the self-pace gate also runs the
+// screening decision, but its matcher (Bash|Write|Edit|NotebookEdit + the
+// scheduler tools) never fires on Read, Grep, Glob, MultiEdit or an MCP tool,
+// so on its own it left the main route into _quarantine/ open on every
+// sub-agent. Must equal the matcher the main agent's hook carries in the
+// repo-shipped .claude/settings.json; a test pins the two.
+export const IMAGE_QUARANTINE_GATE_MATCHER = 'Bash|Read|Write|Edit|MultiEdit|NotebookEdit|Grep|Glob|mcp__.*'
+
+// Every sub-agent. The main agent gets the same hook from the repo-shipped
+// project settings, so seeding it here too would only run it twice.
+export function agentGetsImageQuarantineGate(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+export function injectImageQuarantineGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'image-quarantine-gate.mjs'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  const entry = {
+    matcher: IMAGE_QUARANTINE_GATE_MATCHER,
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('image-quarantine-gate.mjs')),
+    entry,
+  ]
+}
+
 // Which Telegram tools carry copyable text out of the install. `reply` is the
 // send route; `edit_message` rewrites a message already on the phone and can
 // just as easily replace a working code block with a broken one.
@@ -1571,6 +1605,31 @@ export function ensureBashEgressParser(name: string): boolean {
   if (wired) return false
   if (isUnsafeHookCommand(command)) return false
   injectBashEgressParser(settings)
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  return true
+}
+
+// Idempotent migration for the EXISTING fleet, same shape as
+// ensureBashEgressParser: without it the gate would reach the running
+// sub-agents no sooner than their next respawn. Returns true if written.
+export function ensureImageQuarantineGate(name: string): boolean {
+  if (!agentGetsImageQuarantineGate(name)) return false
+  const settingsPath = agentSettingsPath(name)
+  if (!existsSync(settingsPath)) return false
+  let settings: Record<string, unknown> = {}
+  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'image-quarantine-gate.mjs'))
+  const hooks = (settings.hooks && typeof settings.hooks === 'object')
+    ? settings.hooks as Record<string, unknown>
+    : {}
+  const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse as unknown[] : []
+  // A narrower matcher is the exact defect this gate fixes, so it counts as
+  // not wired, the same as a stale node path.
+  const wired = ptu.some((e) => (e as { matcher?: unknown })?.matcher === IMAGE_QUARANTINE_GATE_MATCHER
+    && hookCommandWired(JSON.stringify(e), command))
+  if (wired) return false
+  if (isUnsafeHookCommand(command)) return false
+  injectImageQuarantineGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }

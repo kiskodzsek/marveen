@@ -336,6 +336,11 @@ const SCREENING_PATH_RX = new RegExp(String.raw`\/(?:${dirAlt(SCREENING_DIR_NAME
 const SCREENING_LISTERS = new Set(['ls', 'du'])
 const UNSCREENED_WRITERS_RX = /^(?:mkdir|mflux-generate[\w-]*)$/
 const GIT_READONLY_SUBCOMMANDS = new Set(['grep', 'log', 'diff', 'show', 'status', 'blame'])
+// `git diff --no-index --text` and `git grep --no-index -a` print the raw bytes of
+// files outside the repo (review L4), so the exemption ends at these flags. Long
+// options match by prefix, because git's option parser takes abbreviations
+// (`--no-ind`, `--tex`); a short cluster with `a` covers `-a` and `-Ia`.
+const GIT_RAW_BYTES_FLAG_RX = /^(?:--(?:no-i|tex|bin)|-[A-Za-z0-9]*a)/
 const SCREENING_PATH_FIELDS = {
   Read: ['file_path'], Write: ['file_path'], Edit: ['file_path'], MultiEdit: ['file_path'],
   NotebookEdit: ['notebook_path'], Grep: ['path', 'glob'], Glob: ['pattern', 'path'],
@@ -366,7 +371,9 @@ export function screeningBashSegmentAllowed(seg) {
   // a writer into _unscreened/ is fine as long as no other screening dir is named
   if (UNSCREENED_WRITERS_RX.test(cmd) && !OTHER_SCREENING_TOKEN_RX.test(s)) return true
   if (cmd === 'git') {
-    const sub = words.slice(i + 1).find((w) => !w.startsWith('-'))
+    const args = words.slice(i + 1)
+    const sub = args.find((w) => !w.startsWith('-'))
+    if (args.some((w) => GIT_RAW_BYTES_FLAG_RX.test(w.replace(/^['"]/, '')))) return false
     return GIT_READONLY_SUBCOMMANDS.has(sub ?? '')
   }
   if (!SCREENING_LISTERS.has(cmd)) return false
@@ -710,11 +717,9 @@ export function normalizeShellEvasion(seg) {
 export function gateDecision(toolName, toolInput, opts = {}) {
   const name = String(toolName ?? '')
   if (SELF_PACE_TOOLS.has(name)) return { deny: true }
-  // IMAGESAFETY1020: file tools, and every MCP tool (Playwright, a channel reply
-  // with an attachment), on an unscreened or quarantined image.
-  if (screeningFileToolDenied(name, toolInput) || (name.startsWith('mcp__') && screeningPathMentioned(toolInput))) {
-    return { deny: true, reason: 'image-quarantine' }
-  }
+  // IMAGESAFETY1020: an unscreened or quarantined image, by any route.
+  const screening = screeningDecision(name, toolInput, opts)
+  if (screening.deny) return screening
   // Native file tools writing the self-schedule store would bypass any Bash regex.
   if (name === 'Write' || name === 'Edit' || name === 'MultiEdit' || name === 'NotebookEdit') {
     const fp = String(toolInput?.file_path ?? toolInput?.notebook_path ?? '')
@@ -750,8 +755,6 @@ export function gateDecision(toolName, toolInput, opts = {}) {
       if (SCHEDULE_API_RX.test(seg) && HTTP_WRITE_RX.test(seg)) return { deny: true }
       // the egress allowlist: a plain read only (EGRESSSELFEDIT824)
       if (!allowlistBashSegmentAllowed(seg)) return { deny: true, reason: 'egress-allowlist' }
-      // the image screening dirs: name listing only (IMAGESAFETY1020)
-      if (!screeningBashSegmentAllowed(seg)) return { deny: true, reason: 'image-quarantine' }
     }
     // The scheduler check is the ANCHORED one -- it fires on what sits at a
     // segment START -- so it is the one a fake segment boundary can mislead, and
@@ -787,6 +790,38 @@ export function gateDecision(toolName, toolInput, opts = {}) {
   return { deny: false }
 }
 
+// IMAGESAFETY1020, the whole decision on its own: gateDecision runs it for
+// sub-agents, and scripts/hooks/image-quarantine-gate.mjs runs it for the main
+// agent, which does not get this self-pace gate (review P2, Klodel 9186).
+// File tools and MCP tools by their path fields; Bash per segment after the same
+// data/prose/heredoc stripping as above, and sh -c / eval payloads recursively.
+export function screeningDecision(toolName, toolInput, opts = {}) {
+  const name = String(toolName ?? '')
+  if (screeningFileToolDenied(name, toolInput) || (name.startsWith('mcp__') && screeningPathMentioned(toolInput))) {
+    return { deny: true, reason: 'image-quarantine' }
+  }
+  if (name !== 'Bash') return { deny: false }
+  const raw = String(toolInput?.command ?? '')
+  const safe = stripProseArguments(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw))))
+  for (const seg of splitSegments(safe)) {
+    if (!screeningBashSegmentAllowed(seg)) return { deny: true, reason: 'image-quarantine' }
+  }
+  const depth = (opts.depth ?? 0) + 1
+  for (const payload of wrappedPayloads(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw))))) {
+    if (depth > MAX_WRAP_DEPTH) return { deny: true, reason: 'image-quarantine' }
+    const inner = screeningDecision('Bash', { command: payload }, { depth })
+    if (inner.deny) return inner
+  }
+  return { deny: false }
+}
+
+export const QUARANTINE_GATE_MSG =
+  'Kep-karanten TILTOTT (governance hard-gate, IMAGESAFETY1020). A _unscreened/ es a ' +
+  '_quarantine/ (valamint panna-elvetett/, visszavonva/, quarantine-meta/) alatti fajlt ugynok ' +
+  'NEM nyitja meg (Read, Playwright, cat/open/qlmanage/sips, masolas, csatolas, chmod): amit ' +
+  'megnyitsz, az a modell-szolgaltatohoz is kimegy. A nevek listazasa (ls, du) szabad. A szuro: ' +
+  'scripts/image-safety/check.py. Kerdes eseten Kernel; a karanten sorsa Lex es Patrik dontese.'
+
 const GATE_MSG =
   'Self-pace TILTOTT (governance hard-gate). Sub-agentkent NEM utemezhetsz sajat ' +
   'jovobeli turn-t: se ScheduleWakeup/Cron*/RemoteTrigger, se tmux send-keys, se ' +
@@ -800,13 +835,6 @@ const ALLOWLIST_GATE_MSG =
   'store/egress-allowlist.json-t: ez a kapu RAD vonatkozik. Ha egy domain kell, kerd a fo ' +
   'agenst (inter-agent uzenet: domain + miert); o a gazda jovahagyasaval veszi fel. ' +
   'Olvasni szabad: cat / grep / jq a fajlra (ertelmezo -- python, node -- nem).'
-
-const QUARANTINE_GATE_MSG =
-  'Kep-karanten TILTOTT (governance hard-gate, IMAGESAFETY1020). A _unscreened/ es a ' +
-  '_quarantine/ alatti kepet ugynok NEM nyitja meg (Read, Playwright, cat/open/qlmanage/sips, ' +
-  'masolas, csatolas): amit megnyitsz, az a modell-szolgaltatohoz is kimegy. A nevek listazasa ' +
-  '(ls, du) szabad. A szuro: scripts/image-safety/check.py. Kerdes eseten Kernel; a karanten ' +
-  'sorsa Lex es Patrik dontese.'
 
 function allow() { process.exit(0) }
 
