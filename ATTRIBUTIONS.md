@@ -26,17 +26,22 @@ A Marveen saját licensze: [LICENSE](./LICENSE) (MIT).
 
 ## Helyben futtatott külső modellek (nincsenek a repóban)
 
-A képszűrő (`scripts/image-safety/`) két detektor-modellt tölt be. A hívó kód saját (`detectors.py`: OpenCV `cv2.dnn`, illetve transformers safetensors-ból), a modellfájlok viszont NEM részei a repónak és nem is lesznek: a telepítés helyi, git-ignorált modellkönyvtárában vannak (alapból `<mflux-gyökér>/models/image-safety/`). Semmilyen telepítő vagy scaffold nem tölti le őket automatikusan. Modell nélkül a `check.py` 3-as kóddal kilép, és egyetlen képet sem enged át (fail-closed); aki saját telepítésen használja, a modellt maga, a saját felelősségére tölti le.
+A képszűrő (`scripts/image-safety/`) két detektor-modellt tölt be. A hívó kód saját (`detectors.py`: onnxruntime a CPU-provideren, illetve transformers safetensors-ból), és minden modellfájlt sha256-tal pinnel, betöltés ELŐTT ellenőrizve; eltérésnél, hiányzó vagy nem pinnelt fájlnál a detektor nem tölt be. A modellfájlok viszont NEM részei a repónak és nem is lesznek: a telepítés helyi, git-ignorált modellkönyvtárában vannak (alapból `<mflux-gyökér>/models/image-safety/`). Semmilyen telepítő vagy scaffold nem tölti le őket automatikusan. Modell nélkül a `check.py` 3-as kóddal kilép, és egyetlen képet sem enged át (fail-closed); aki saját telepítésen használja, a modellt maga, a saját felelősségére tölti le.
 
 ### NudeNet (meztelenség-detektor)
-- **Forrás**: https://github.com/notAI-tech/NudeNet (súly: a `v3.4-weights` release)
-- **Licensz**: AGPL-3.0 (a repó LICENSE-a, 2026-10-20-án olvasva, repo sha 6ccc81c6). A súly-release külön feltételei és a fájl SHA256-ja letöltéskor kerül ide.
-- **Hol a Marveen-ben**: sehol. A `model.onnx`, `labels.json` és `config.json` csak helyben van, git-ignorálva.
+- **Forrás**: a PyPI `nudenet==3.4.2` wheel (`nudenet-3.4.2-py3-none-any.whl`, sha256 `5937dbd84e5d8e5de038f08ffea5a1bb50a08475776bf2b4795914ce0eaf0331`), ebből csak a `nudenet/320n.onnx` (sha256 `c15d8273adad2d0a92f014cc69ab2d6c311a06777a55545f2c4eb46f51911f0f`), zipfile-lal, pontos névvel; a csomag nincs telepítve, a kódja nem fut. Projekt: https://github.com/notAI-tech/NudeNet
+- **Licensz**: AGPL-3.0. A PyPI-metaadat "MIT"-et ír, a wheel saját `dist-info/LICENSE` fájlja viszont az AGPL v3 teljes szövege (2026-10-20-án olvasva); ellentmondás esetén a szigorúbbat alkalmazzuk.
+- **Hol a Marveen-ben**: sehol. A `model.onnx`, `labels.json` és `config.json` csak helyben van, git-ignorálva. A `labels.json` a pinnelt forrás címkelistájából, a `config.json` (`input_size` 320) a forrás alapértékéből készült; mindkettő tartalom szerint pinnelve.
 - **Használat**: helyi, nem terjesztett, nem módosított futtatás; hálózati szolgáltatásként nem érhető el. A NudeNet forrásából nem másoltunk kódot.
 
 ### ViT NSFW-osztályozó (második detektor)
-- **Jelölt**: Falconsai/nsfw_image_detection (Hugging Face). A `load_vit()` bármely safetensors-checkpointot betölt, ezért a használt modellt itt pinneljük.
-- **Licensz**: még NINCS rögzítve. A model card licenc-sora, a pinnelt revízió és a SHA256 a letöltés ELŐTT kerül ide.
+- **Modell**: Falconsai/nsfw_image_detection (Hugging Face), revízió `96cb0d0342c7afb80cab76ecc58b265fa44da256`. Pinnelt fájlok: `model.safetensors` (sha256 `97b2ce64ec146884b37f98ee7944ca4891aa72f6827dc0cb10684a1cbecd5830`, = HF LFS), `config.json` (`cd8c0a19566f199b5c64da402f1d6a9daf80d094fe6536befb060a2cc59449c2`), `preprocessor_config.json` (`a34861a24e781942424ad790b82bc99348404a2e64ea882de88c40905851698d`). Pickle-formátum (`.bin`, `.pt`) nincs.
+- **Licensz**: apache-2.0 a HF API cardData szerint (2026-10-20, nem gated); a súlyfájl saját licenc-fájlját és a betanító adat jogait NEM néztük. Ez a feltöltő által deklarált metaadat, nem a licenc szövege: terjesztés vagy más telepítés előtt újra kell nézni.
+
+### onnxruntime (a NudeNet futtatója)
+- **Forrás**: a PyPI `onnxruntime==1.30.0` wheel (`onnxruntime-1.30.0-cp314-cp314-macosx_14_0_arm64.whl`, sha256 `8b6169c16a48429890d2f4a0c774ebf54dfe9066a998514aad0518a16d398547`), a képgeneráló venv-ben `--no-deps --no-index --require-hashes` telepítve, OSV-ellenőrzés után. A `flatbuffers` függőség szándékosan hiányzik (csak a `tools` és a `quantization` modul importálja), ezért a `pip check` jelez.
+- **Licensz**: MIT, Copyright (c) Microsoft Corporation (a wheel saját `onnxruntime/LICENSE` fájljából idézve); a wheelben `ThirdPartyNotices.txt` is van.
+- **Használat**: csak `InferenceSession`, kizárólag a `CPUExecutionProvider`-rel, custom op nélkül.
 
 ## Koncepcionális hatás (nem becsomagolt kód)
 
