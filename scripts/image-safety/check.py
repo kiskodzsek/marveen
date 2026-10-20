@@ -392,8 +392,8 @@ def run_sweep(root: Path, dirs: list[str], detectors: list[Detector], sinks: Sin
 # --- real detectors (loaded only in the CLI path) ---------------------------
 
 def load_detectors(models_dir: Path) -> list[Detector]:
-    from detectors import load_nudenet_cv, load_vit  # local module, lazy heavy imports
-    return [load_nudenet_cv(models_dir / "nudenet"), load_vit(models_dir / "vit")]
+    from detectors import load_nudenet, load_vit  # local module, lazy heavy imports
+    return [load_nudenet(models_dir / "nudenet"), load_vit(models_dir / "vit")]
 
 
 def main(argv: list[str] | None = None) -> int:

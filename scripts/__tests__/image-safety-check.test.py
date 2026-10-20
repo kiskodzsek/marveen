@@ -294,5 +294,117 @@ class GuardTests(unittest.TestCase):
                 detectors._refuse_pickles(d)
 
 
+class DetectorPins(unittest.TestCase):
+    """Viktor 9018 P1, #5205 O5, 9429: pinned files, CPU provider only. Stdlib
+    only: onnxruntime, cv2 and numpy are faked, no model is loaded."""
+
+    @classmethod
+    def setUpClass(cls):
+        import detectors
+        cls.det = detectors
+
+    def _sha(self, b):
+        import hashlib
+        return hashlib.sha256(b).hexdigest()
+
+    def test_pins_refuse_mismatch_missing_symlink_and_extra_files(self):
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            (d / "model.safetensors").write_bytes(b"weights")
+            pins = {"model.safetensors": self._sha(b"weights")}
+            self.det._verify_pins(d, pins)
+            self.det._only_pinned_files(d, pins)
+            with self.assertRaises(check.DetectorError):
+                self.det._verify_pins(d, {"model.safetensors": self._sha(b"other")})
+            with self.assertRaises(check.DetectorError):
+                self.det._verify_pins(d, {**pins, "config.json": self._sha(b"{}")})
+            (d / "model.safetensors.index.json").write_text("{}")
+            with self.assertRaises(check.DetectorError):
+                self.det._only_pinned_files(d, pins)
+            (d / "model.safetensors.index.json").unlink()
+            (d / "real").write_bytes(b"weights")
+            (d / "model.safetensors").unlink()
+            os.symlink(d / "real", d / "model.safetensors")
+            with self.assertRaises(check.DetectorError):
+                self.det._verify_pins(d, pins)
+            with self.assertRaises(check.DetectorError):
+                self.det._pinned_bytes(d / "model.safetensors", pins["model.safetensors"])
+
+    def test_json_pin_is_on_content_not_formatting(self):
+        import json
+        canon = json.dumps(["A_EXPOSED", "B_COVERED"], separators=(",", ":")).encode()
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "labels.json"
+            p.write_text('[\n "A_EXPOSED",\n "B_COVERED"\n]\n')
+            self.assertEqual(self.det._pinned_json(p, self._sha(canon)), ["A_EXPOSED", "B_COVERED"])
+            p.write_text('["A_EXPOSED"]')
+            with self.assertRaises(check.DetectorError):
+                self.det._pinned_json(p, self._sha(canon))
+
+    def test_no_onnxruntime_tools_or_quantization_import(self):
+        import re
+        src = (SCRIPT_DIR / "detectors.py").read_text(encoding="utf-8")
+        code = "\n".join(l.split("#", 1)[0].rstrip() for l in src.splitlines())
+        self.assertNotRegex(code, r"onnxruntime\.(tools|quantization)")
+        self.assertEqual(re.findall(r"^\s*(?:import|from)\s+onnxruntime\b.*$", code, re.M),
+                         ["    import onnxruntime as ort"])
+
+    def _nudenet_dir(self, d, providers_seen):
+        import json
+        import types
+        files = {"model.onnx": b"onnx", "labels.json": b'["A_EXPOSED","FEET_EXPOSED"]',
+                 "config.json": b'{"input_size": 320}'}
+        for n, b in files.items():
+            (d / n).write_bytes(b)
+        canon = lambda b: json.dumps(json.loads(b), sort_keys=True, separators=(",", ":")).encode()
+        pins = {"model.onnx": self._sha(files["model.onnx"])}
+        jpins = {n: self._sha(canon(files[n])) for n in ("labels.json", "config.json")}
+
+        class Session:
+            def __init__(self, model, providers):
+                self.model = model
+                providers_seen.append(providers)
+
+            def get_providers(self):
+                return list(Session.active)
+
+            def get_inputs(self):
+                return [types.SimpleNamespace(name="images")]
+
+        fakes = {"onnxruntime": types.SimpleNamespace(InferenceSession=Session),
+                 "cv2": types.ModuleType("cv2"), "numpy": types.ModuleType("numpy")}
+        return pins, jpins, Session, fakes
+
+    def test_nudenet_runs_on_the_cpu_provider_only(self):
+        from unittest import mock
+        seen = []
+        with tempfile.TemporaryDirectory() as t:
+            pins, jpins, Session, fakes = self._nudenet_dir(Path(t), seen)
+            with mock.patch.dict(sys.modules, fakes), \
+                    mock.patch.object(self.det, "NUDENET_PINS", pins), \
+                    mock.patch.object(self.det, "NUDENET_JSON_PINS", jpins):
+                Session.active = ["CPUExecutionProvider"]
+                d = self.det.load_nudenet(Path(t))
+                self.assertEqual(seen, [["CPUExecutionProvider"]])
+                self.assertTrue(d.name.startswith("nudenet:"))
+                Session.active = ["AzureExecutionProvider", "CPUExecutionProvider"]
+                with self.assertRaises(check.DetectorError):
+                    self.det.load_nudenet(Path(t))
+
+    def test_nudenet_refuses_a_tampered_model_before_the_session(self):
+        from unittest import mock
+        seen = []
+        with tempfile.TemporaryDirectory() as t:
+            pins, jpins, Session, fakes = self._nudenet_dir(Path(t), seen)
+            (Path(t) / "model.onnx").write_bytes(b"tampered")
+            with mock.patch.dict(sys.modules, fakes), \
+                    mock.patch.object(self.det, "NUDENET_PINS", pins), \
+                    mock.patch.object(self.det, "NUDENET_JSON_PINS", jpins):
+                Session.active = ["CPUExecutionProvider"]
+                with self.assertRaises(check.DetectorError):
+                    self.det.load_nudenet(Path(t))
+        self.assertEqual(seen, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
