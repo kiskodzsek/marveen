@@ -106,6 +106,8 @@ describe('Bash', () => {
     'git diff --no-index _unscreened/a.png /dev/null',
     'git --no-pager diff --tex _unscreened/a.png /dev/null',
     'git diff --binary -- _unscreened',
+    // review L5: git resolves the abbreviation --bi to --binary
+    'git diff --bi _unscreened/x.png /dev/null',
     'git grep -Ia x -- _quarantine',
   ])('denies: %s', (command) => {
     expect(decide('Bash', { command })).toEqual(DENY)

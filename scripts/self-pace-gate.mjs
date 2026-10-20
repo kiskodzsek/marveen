@@ -339,8 +339,9 @@ const GIT_READONLY_SUBCOMMANDS = new Set(['grep', 'log', 'diff', 'show', 'status
 // `git diff --no-index --text` and `git grep --no-index -a` print the raw bytes of
 // files outside the repo (review L4), so the exemption ends at these flags. Long
 // options match by prefix, because git's option parser takes abbreviations
-// (`--no-ind`, `--tex`); a short cluster with `a` covers `-a` and `-Ia`.
-const GIT_RAW_BYTES_FLAG_RX = /^(?:--(?:no-i|tex|bin)|-[A-Za-z0-9]*a)/
+// (`--no-ind`, `--tex`, and `--bi` already resolves to --binary, review L5); a
+// short cluster with `a` covers `-a` and `-Ia`.
+const GIT_RAW_BYTES_FLAG_RX = /^(?:--(?:no-i|tex|bi)|-[A-Za-z0-9]*a)/
 const SCREENING_PATH_FIELDS = {
   Read: ['file_path'], Write: ['file_path'], Edit: ['file_path'], MultiEdit: ['file_path'],
   NotebookEdit: ['notebook_path'], Grep: ['path', 'glob'], Glob: ['pattern', 'path'],
