@@ -366,6 +366,33 @@ export function screeningPathMentioned(value) {
   return SCREENING_PATH_RX.test(withDecoded(text).replace(/\\\//g, '/'))
 }
 
+// Viktor #5144 B2: `echo <dir>/a.png | xargs cat` reads the file the name
+// printer named (and `ls <dir> | xargs cat` already did). A stage that names a
+// screening dir may pipe only into filters that treat stdin as text. awk is
+// out (getline reads a named file), and so is any --files0-from/--files-from.
+const SCREENING_TEXT_FILTERS = new Set(['grep', 'egrep', 'fgrep', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'tr', 'nl', 'column', 'cat'])
+
+export function screeningPipesAllowed(command) {
+  const s = String(command ?? '')
+    .replace(/\\\r?\n/g, ' ')
+    .replace(/\|&/g, '|') // bash |& is a pipe too
+    .replace(/\d*[<>]&(?:\d+|-)/g, ' ') // 2>&1, >&2: not separators
+    .replace(/&>>?/g, '>')
+  for (const pipeline of s.split(/&&|\|\||[;&]|\r?\n/)) {
+    const stages = pipeline.split('|')
+    const first = stages.findIndex((st) => SCREENING_TOKEN_RX.test(st))
+    if (first === -1) continue
+    for (const st of stages.slice(first + 1)) {
+      const words = st.trim().split(/\s+/)
+      let i = 0
+      while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++
+      const cmd = (words[i] ?? '').replace(/^.*\//, '')
+      if (!SCREENING_TEXT_FILTERS.has(cmd) || /files0?-from/.test(st)) return false
+    }
+  }
+  return true
+}
+
 export function screeningBashSegmentAllowed(seg) {
   const s = String(seg ?? '').trim()
   if (!SCREENING_TOKEN_RX.test(s)) return true
@@ -653,27 +680,40 @@ export function stripDataPayloads(seg) {
 // remote/container executor.
 const HEREDOC_INTERPRETER_RX = /^(?:bash|sh|zsh|dash|ksh|ash|python[0-9.]*|node|nodejs|ruby|perl|php|ssh)$/
 
-// Interpreter flags after which the body is still (or may be) code: inline code
-// (-c, -e, --eval, -p), a module (-m code reads stdin), bash -s, interactive -i.
-const STDIN_CODE_FLAG_RX = /^(?:-[A-Za-z]*[cemspi][A-Za-z]*|--eval|--print|--interactive)$/
-// Flags that take the next word as their value (python -W arg, -X opt).
-const VALUE_FLAGS = new Set(['-W', '-X'])
-
 // `python3 -I cardc.py X <<'EOF'` hands the body to cardc.py on stdin: the
-// interpreter reads its CODE from the file, the body is data. Only an
-// interpreter with no script operand (or `-`) reads code from stdin. Opt-in,
-// for the image-quarantine decision only (Pulzus 9266): the self-pace checks
-// keep the stricter reading, because a script may still exec what it reads.
+// interpreter reads its CODE from the file, the body is data. Opt-in, for the
+// image-quarantine decision only (Pulzus 9266); the self-pace checks keep the
+// stricter reading, because a script may still exec what it reads.
+// Fail-closed (Viktor #5144 B1): the first operand must carry a script
+// extension (so `python3 /dev/stdin` stays code), and only the value-less flags
+// listed for that interpreter may come before it. Any other flag may take a
+// value (`bash -o pipefail`, `node -r ./x.js`, `perl -I lib`) or turn stdin
+// into code, so the body stays visible.
+const SCRIPT_OPERAND_RX = /^[^-][^\s]*\.(?:py|js|mjs|cjs|sh|bash|rb|pl|php)$/i
+const SCRIPT_SAFE_FLAGS = {
+  python: /^-(?:[IuBEsSq]+|OO?)$/,
+  sh: /^-[euxv]+$/,
+}
+function interpreterFamily(word) {
+  if (/^python[0-9.]*$/.test(word)) return 'python'
+  if (/^(?:bash|sh|zsh|dash|ksh|ash)$/.test(word)) return 'sh'
+  return null
+}
 function scriptOperandTakesStdin(tokens) {
+  const safe = SCRIPT_SAFE_FLAGS[interpreterFamily(tokens[0].split('/').pop())]
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]
-    if (t === '-' || STDIN_CODE_FLAG_RX.test(t)) return false
-    if (VALUE_FLAGS.has(t)) { i++; continue }
-    if (t.startsWith('-')) continue
-    return true // the first operand is a script file
+    if (t.startsWith('-')) {
+      if (safe && safe.test(t)) continue
+      return false
+    }
+    return SCRIPT_OPERAND_RX.test(t) && !t.startsWith('/dev/')
   }
   return false
 }
+// L1 (Viktor #5144): a body fed to xargs or to a `while read ... done` loop is
+// a list of names that a command will open, so it stays visible.
+const HEREDOC_NAME_CONSUMER_RX = /^(?:xargs|parallel|done)$/
 
 function heredocOwnerRunsBody(before, opts = {}) {
   // `before` is the command text up to the << redirect; the owner is the first
@@ -689,8 +729,9 @@ function heredocOwnerRunsBody(before, opts = {}) {
   if (!tokens.length) return false
   const word = tokens[0].split('/').pop()
   if (HEREDOC_INTERPRETER_RX.test(word)) {
-    return !(opts.scriptStdinIsData && word !== 'ssh' && scriptOperandTakesStdin(tokens))
+    return !(opts.screening && word !== 'ssh' && scriptOperandTakesStdin(tokens))
   }
+  if (opts.screening && HEREDOC_NAME_CONSUMER_RX.test(word)) return true
   // docker/podman/kubectl exec run the body through a shell in the target.
   if (['docker', 'podman', 'kubectl'].includes(word) && tokens.slice(1).includes('exec')) return true
   return false
@@ -835,11 +876,12 @@ export function screeningDecision(toolName, toolInput, opts = {}) {
   }
   if (name !== 'Bash') return { deny: false }
   const raw = String(toolInput?.command ?? '')
-  const heredocOpts = { scriptStdinIsData: true }
+  const heredocOpts = { screening: true }
   const safe = stripProseArguments(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw, heredocOpts))))
   for (const seg of splitSegments(safe)) {
     if (!screeningBashSegmentAllowed(seg)) return { deny: true, reason: 'image-quarantine' }
   }
+  if (!screeningPipesAllowed(safe)) return { deny: true, reason: 'image-quarantine' }
   const depth = (opts.depth ?? 0) + 1
   for (const payload of wrappedPayloads(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw, heredocOpts))))) {
     if (depth > MAX_WRAP_DEPTH) return { deny: true, reason: 'image-quarantine' }

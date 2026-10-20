@@ -132,14 +132,28 @@ describe('Bash', () => {
 })
 
 // Pulzus 9266: a name in a report or message is text, not a file read.
+// Viktor #5144: the probe2 cases (R*, E*) are below.
 describe('Bash: names as text (false-deny fix)', () => {
+  const Q = '/Users/klodel/marveen/out/_quarantine/a.png'
+  const U = '/Users/klodel/marveen/out/_unscreened/a.png'
+  const hd = (owner: string, body: string) => `${owner} <<'EOF'\n${body}\nEOF`
   it.each([
     `python3 -I cardc.py 1a4fe725 <<'EOF'\nmoved to x/_quarantine/a.png\nEOF`,
+    `python3 -I -u cardc.py X <<'EOF'\nx/_quarantine/a.png\nEOF`,
+    `bash -e run.sh <<'EOF'\nx/_quarantine/a.png\nEOF`,
+    `node tool.mjs <<'EOF'\nx/_quarantine/a.png\nEOF`,
+    // flags after the script operand are the script's own argv
     `python3 scripts/report.py -W ignore <<'EOF'\nx/_unscreened/a.png\nEOF`,
     'echo "x/_quarantine/y.png"',
+    `echo ${Q}`,
     `printf '%s\\n' "x/_quarantine/y.png"`,
     'bash /Users/klodel/marveen/scripts/agent-msg.sh kernel viktor "see x/_quarantine/a.png"',
+    `bash /Users/klodel/marveen/scripts/agent-msg.sh viktor kernel - <<'EOF'\nmoved to ${Q}\nEOF`,
     `cat <<'EOF' | bash agent-msg.sh a b -\nx/_quarantine/a\nEOF`,
+    // Viktor #5144 B2: a name piped into a text filter
+    'ls x/_quarantine | grep png | wc -l',
+    'ls -la x/_quarantine/ 2>&1 | head -5',
+    'ls x/_quarantine | sort | uniq -c',
   ])('allows: %s', (command) => {
     expect(decide('Bash', { command })).toEqual({ deny: false })
   })
@@ -165,6 +179,36 @@ describe('Bash: names as text (false-deny fix)', () => {
     // a script argument is still a possible read
     'python3 script.py x/_quarantine/a.png',
     'bash other.sh "x/_unscreened/a.png"',
+    // Viktor #5144 B1: a flag value is not a script operand, the body is code
+    hd('bash -o pipefail', `cat ${Q}`),
+    hd('sh -o errexit', `cat ${Q}`),
+    hd('node -r ./x.js', `require("fs").readFileSync("${Q}")`),
+    hd('node --require ./x.js', `require("fs").readFileSync("${Q}")`),
+    hd('node --import ./x.mjs', `require("fs").readFileSync("${Q}")`),
+    hd('perl -I lib', `open F,"${Q}"; print <F>`),
+    hd('ruby -r json', `print File.read("${Q}")`),
+    hd('bash -O extglob', `cat ${Q}`),
+    hd('bash --rcfile /dev/null', `cat ${Q}`),
+    hd('python3 -W ignore', `print(open("${Q}","rb").read())`),
+    hd('php -d display_errors=1', `<?php echo file_get_contents("${Q}");`),
+    hd('python3 /dev/stdin', `open("${Q}")`),
+    hd('python3 notascript', `open("${Q}")`),
+    `echo $(<${Q})`,
+    `bash /Users/klodel/marveen/scripts/agent-msg.sh viktor kernel - < ${Q}`,
+    // B2: a stage that names the dir pipes only into a text filter
+    `echo ${Q} | xargs cat`,
+    'echo "x/_quarantine/a.png" | xargs cat',
+    `ls ${Q} | xargs cat`,
+    `printf '%s\\n' ${U} | xargs base64`,
+    `printf '%s\\n' '${Q}' | xargs -I{} cp {} /tmp/o`,
+    `echo ${Q} | while read f; do base64 "$f"; done`,
+    `echo ${Q} | sh`,
+    `ls x/_quarantine | awk '{getline l < $0; print l}'`,
+    'ls x/_quarantine |& xargs cat',
+    'ls x/_quarantine 2>&1 | xargs cat',
+    // L1: a heredoc of names for xargs / while read
+    hd('xargs cat', Q),
+    `while read f; do base64 "$f"; done <<'EOF'\n${Q}\nEOF`,
   ])('denies: %s', (command) => {
     expect(decide('Bash', { command })).toEqual(DENY)
   })
