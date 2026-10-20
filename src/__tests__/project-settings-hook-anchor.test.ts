@@ -59,7 +59,7 @@ const EXPECTED: Record<string, string[]> = {
   PreToolUse: [
     'outgoing-copy-gate.py', 'email-approval-gate.py',
     'channel-image-resize.sh', 'egress-gate.mjs', 'ms365-download-gate.mjs', 'memory-frontmatter-gate.py',
-    'memory-frontmatter-bash-gate.py',
+    'memory-frontmatter-bash-gate.py', 'image-quarantine-gate.mjs',
   ],
   Stop: ['marveen-commands.py', 'telegram-reply-guard.py', 'telegram_progress_clear.py', 'slack_progress_clear.py'],
   SessionStart: ['ledger-replay.py', 'taskstate-replay.py', 'clear-replay.py', 'marveen-commands.py'],

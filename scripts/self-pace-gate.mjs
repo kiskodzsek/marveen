@@ -307,6 +307,85 @@ export function allowlistBashSegmentAllowed(seg) {
   return true
 }
 
+// IMAGESAFETY1020 (card 1a4fe725, Viktor 9018 F3): generated images wait in an
+// `_unscreened/` directory until scripts/image-safety/check.py screens them, and a
+// flagged one goes to `_quarantine/` with mode 000. Mode 000 is no boundary -- every
+// agent runs as the same uid and could chmod it back -- so this gate is the layer
+// that keeps an agent from opening one by accident: whatever an agent reads also
+// leaves for the model provider.
+//   - Case-insensitive, because APFS is: `_Quarantine/a.png` opens the same file
+//     (review B2).
+//   - Bash and file-tool paths match the directory as a bare TOKEN too, not only
+//     with a slash: `cd _unscreened`, `cp -R _unscreened /tmp`, `chmod -R 755
+//     _quarantine` all reach the files (review B3). The price is a false deny on a
+//     plain `grep _quarantine x.py`; read-only git subcommands are exempt (agents/
+//     is git-ignored, so git never reads the images), `git add` is not.
+//   - MCP tools match only path-like forms (with a slash, also %-decoded), so a
+//     channel message that merely names the directory still goes out.
+//   - Listing names (ls, du) is allowed: names carry only the prompt name and seed.
+//     The generator and mkdir may write INTO _unscreened/ (new images belong there).
+// SCREENING_DIRS must equal SCREENING_DIRS in scripts/image-safety/check.py (the
+// sweep skips exactly these); a test compares the two. panna-elvetett/ and
+// visszavonva/ are Mira's reject dirs from before the screen (Viktor F5).
+const SCREENING_DIR_NAMES = ['_quarantine', '_unscreened', 'panna-elvetett', 'visszavonva', 'quarantine-meta']
+const dirAlt = (names) => names.map((n) => n.replace(/[-]/g, '\\-')).join('|')
+const tokenRx = (names) => new RegExp(String.raw`(?:^|[\s'"=:(/])(?:${dirAlt(names)})(?=[\/\s'")]|$)`, 'i')
+const SCREENING_TOKEN_RX = tokenRx(SCREENING_DIR_NAMES)
+const OTHER_SCREENING_TOKEN_RX = tokenRx(SCREENING_DIR_NAMES.filter((n) => n !== '_unscreened'))
+const SCREENING_PATH_RX = new RegExp(String.raw`\/(?:${dirAlt(SCREENING_DIR_NAMES)})(?=[\/\s'"]|$)|(?:^|[\s'"=:(])(?:${dirAlt(SCREENING_DIR_NAMES)})\/`, 'i')
+const SCREENING_LISTERS = new Set(['ls', 'du'])
+const UNSCREENED_WRITERS_RX = /^(?:mkdir|mflux-generate[\w-]*)$/
+const GIT_READONLY_SUBCOMMANDS = new Set(['grep', 'log', 'diff', 'show', 'status', 'blame'])
+// `git diff --no-index --text` and `git grep --no-index -a` print the raw bytes of
+// files outside the repo (review L4), so the exemption ends at these flags. Long
+// options match by prefix, because git's option parser takes abbreviations
+// (`--no-ind`, `--tex`, and `--bi` already resolves to --binary, review L5); a
+// short cluster with `a` covers `-a` and `-Ia`.
+const GIT_RAW_BYTES_FLAG_RX = /^(?:--(?:no-i|tex|bi)|-[A-Za-z0-9]*a)/
+const SCREENING_PATH_FIELDS = {
+  Read: ['file_path'], Write: ['file_path'], Edit: ['file_path'], MultiEdit: ['file_path'],
+  NotebookEdit: ['notebook_path'], Grep: ['path', 'glob'], Glob: ['pattern', 'path'],
+}
+
+function withDecoded(text) {
+  try { return `${text}\n${decodeURIComponent(text)}` } catch { return text } // %5F_quarantine (review I1)
+}
+
+export function screeningFileToolDenied(toolName, toolInput) {
+  const fields = SCREENING_PATH_FIELDS[toolName]
+  if (!fields) return false
+  return fields.some((f) => SCREENING_TOKEN_RX.test(withDecoded(String(toolInput?.[f] ?? ''))))
+}
+
+export function screeningPathMentioned(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value ?? '')
+  return SCREENING_PATH_RX.test(withDecoded(text).replace(/\\\//g, '/'))
+}
+
+export function screeningBashSegmentAllowed(seg) {
+  const s = String(seg ?? '').trim()
+  if (!SCREENING_TOKEN_RX.test(s)) return true
+  const words = s.split(/\s+/)
+  let i = 0
+  while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++ // leading VAR=x
+  const cmd = (words[i] ?? '').replace(/^.*\//, '')
+  // a writer into _unscreened/ is fine as long as no other screening dir is named
+  if (UNSCREENED_WRITERS_RX.test(cmd) && !OTHER_SCREENING_TOKEN_RX.test(s)) return true
+  if (cmd === 'git') {
+    const args = words.slice(i + 1)
+    const sub = args.find((w) => !w.startsWith('-'))
+    if (args.some((w) => GIT_RAW_BYTES_FLAG_RX.test(w.replace(/^['"]/, '')))) return false
+    return GIT_READONLY_SUBCOMMANDS.has(sub ?? '')
+  }
+  if (!SCREENING_LISTERS.has(cmd)) return false
+  // `ls x > _quarantine/y` writes into it; `ls` piping into a reader is split
+  // into its own segment and judged there.
+  for (const m of s.matchAll(OUTPUT_REDIRECT_RX)) {
+    if (SCREENING_TOKEN_RX.test(' ' + m[1])) return false
+  }
+  return true
+}
+
 function expandHome(p) {
   return p.startsWith('~/') ? join(homedir(), p.slice(2)) : p
 }
@@ -639,6 +718,9 @@ export function normalizeShellEvasion(seg) {
 export function gateDecision(toolName, toolInput, opts = {}) {
   const name = String(toolName ?? '')
   if (SELF_PACE_TOOLS.has(name)) return { deny: true }
+  // IMAGESAFETY1020: an unscreened or quarantined image, by any route.
+  const screening = screeningDecision(name, toolInput, opts)
+  if (screening.deny) return screening
   // Native file tools writing the self-schedule store would bypass any Bash regex.
   if (name === 'Write' || name === 'Edit' || name === 'MultiEdit' || name === 'NotebookEdit') {
     const fp = String(toolInput?.file_path ?? toolInput?.notebook_path ?? '')
@@ -709,6 +791,38 @@ export function gateDecision(toolName, toolInput, opts = {}) {
   return { deny: false }
 }
 
+// IMAGESAFETY1020, the whole decision on its own: gateDecision runs it for
+// sub-agents, and scripts/hooks/image-quarantine-gate.mjs runs it for the main
+// agent, which does not get this self-pace gate (review P2, Klodel 9186).
+// File tools and MCP tools by their path fields; Bash per segment after the same
+// data/prose/heredoc stripping as above, and sh -c / eval payloads recursively.
+export function screeningDecision(toolName, toolInput, opts = {}) {
+  const name = String(toolName ?? '')
+  if (screeningFileToolDenied(name, toolInput) || (name.startsWith('mcp__') && screeningPathMentioned(toolInput))) {
+    return { deny: true, reason: 'image-quarantine' }
+  }
+  if (name !== 'Bash') return { deny: false }
+  const raw = String(toolInput?.command ?? '')
+  const safe = stripProseArguments(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw))))
+  for (const seg of splitSegments(safe)) {
+    if (!screeningBashSegmentAllowed(seg)) return { deny: true, reason: 'image-quarantine' }
+  }
+  const depth = (opts.depth ?? 0) + 1
+  for (const payload of wrappedPayloads(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw))))) {
+    if (depth > MAX_WRAP_DEPTH) return { deny: true, reason: 'image-quarantine' }
+    const inner = screeningDecision('Bash', { command: payload }, { depth })
+    if (inner.deny) return inner
+  }
+  return { deny: false }
+}
+
+export const QUARANTINE_GATE_MSG =
+  'Kep-karanten TILTOTT (governance hard-gate, IMAGESAFETY1020). A _unscreened/ es a ' +
+  '_quarantine/ (valamint panna-elvetett/, visszavonva/, quarantine-meta/) alatti fajlt ugynok ' +
+  'NEM nyitja meg (Read, Playwright, cat/open/qlmanage/sips, masolas, csatolas, chmod): amit ' +
+  'megnyitsz, az a modell-szolgaltatohoz is kimegy. A nevek listazasa (ls, du) szabad. A szuro: ' +
+  'scripts/image-safety/check.py. Kerdes eseten Kernel; a karanten sorsa Lex es Patrik dontese.'
+
 const GATE_MSG =
   'Self-pace TILTOTT (governance hard-gate). Sub-agentkent NEM utemezhetsz sajat ' +
   'jovobeli turn-t: se ScheduleWakeup/Cron*/RemoteTrigger, se tmux send-keys, se ' +
@@ -764,7 +878,7 @@ if (isInvokedDirectly()) {
   if (reason === 'launchd-agent-mismatch' || (launchdOps && launchdOps.length)) {
     writeLaunchdOpsLog(opts, reason === 'launchd-agent-mismatch' ? [{ sub: 'MISMATCH', label: '-' }] : launchdOps)
   }
-  if (shouldDeny) deny(reason === 'egress-allowlist' ? ALLOWLIST_GATE_MSG : GATE_MSG)
+  if (shouldDeny) deny(reason === 'egress-allowlist' ? ALLOWLIST_GATE_MSG : reason === 'image-quarantine' ? QUARANTINE_GATE_MSG : GATE_MSG)
   allow()
 }
 
