@@ -140,6 +140,26 @@ describe('the host-restart notice (Patrik TG 3775, card 1c58f629)', () => {
   })
 })
 
+describe('the host health check (card 1c58f629)', () => {
+  const HM = 'com.marveen.host-monitor'
+  const hmPlist = join(agentsDir, `${HM}.plist`)
+  it('bootstrap of the approved plist and bootout pass; kickstart and a changed plist are refused', () => {
+    writeFileSync(hmPlist, readFileSync(join(__dirname, 'fixtures', `${HM}.plist`)))
+    const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${hmPlist}` }, pulzus)
+    expect(ok.deny).toBe(false)
+    expect(ok.launchdOps[0].plist_sha256).toBe('b78d3543c82c1c5f12287ae7b15c1cf59d00b2bd393a2f1d25fd463f2a303086')
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${HM}` }, pulzus).deny).toBe(false)
+    expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${HM}` }, pulzus).deny).toBe(true)
+    writeFileSync(hmPlist, readFileSync(join(__dirname, 'fixtures', `${HM}.plist`), 'utf8').replace('<integer>60</integer>', '<integer>1</integer>'))
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${hmPlist}` }, pulzus).deny).toBe(true)
+  })
+  it('the same bootstrap from any other agent is refused', () => {
+    writeFileSync(hmPlist, readFileSync(join(__dirname, 'fixtures', `${HM}.plist`)))
+    const kernel = { ...pulzus, agent: 'kernel', configDirAgent: 'kernel' }
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${hmPlist}` }, kernel).deny).toBe(true)
+  })
+})
+
 describe('the invoice mover v3 and its B5 probe (Pulzus 2864, card daef6926)', () => {
   const MOV = 'hu.myshp.szamla.mozgato'
   const B5 = 'hu.myshp.szamla.b5probe'

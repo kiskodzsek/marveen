@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # HOSTMON1020 -- host-monitor.sh bands, state file, alert dedupe, and the
-# heavy-job.sh link to its state (card 1c58f629).
+# heavy-job.sh link to its state, and the macOS launchd installer (card 1c58f629).
 #
 # Everything runs in a staged copy: curl and agent-msg.sh are stubs that only
 # log their arguments, every metric comes from a HOSTMON_* / MEMGATE_* hook, so
@@ -107,6 +107,23 @@ echo "warn $(( $(date +%s) - 900 )) swap 80%" > "$STATE"; hj "$SB/hj2"
 check "stale state (15 min) is ignored -> the job runs" "$(ok "$RC" = 0 -a -e "$SB/hj2")" "rc=$RC $OUT"
 echo "ok $(date +%s) " > "$STATE"; hj "$SB/hj3"
 check "fresh ok state -> the job runs" "$(ok "$RC" = 0 -a -e "$SB/hj3")" "rc=$RC $OUT"
+
+echo "== install-host-monitor.sh (macOS launchd)"
+FAKEHOME="$SB/home"; mkdir -p "$FAKEHOME" "$SB/ubin"
+printf '#!/bin/bash\necho Darwin\n' > "$SB/ubin/uname"; chmod +x "$SB/ubin/uname"
+printf '#!/bin/bash\necho "launchctl $*" >> "%s/launchctl.calls"\n' "$SB" > "$SB/ubin/launchctl"; chmod +x "$SB/ubin/launchctl"
+P="$FAKEHOME/Library/LaunchAgents/com.marveen.host-monitor.plist"
+OUT="$(PATH="$SB/ubin:$PATH" HOME="$FAKEHOME" bash "$ROOT/scripts/install-host-monitor.sh" 2>&1)"; RC=$?
+check "the installer writes the plist and does not load it" "$(ok "$RC" = 0 -a -f "$P" -a ! -f "$SB/launchctl.calls")" "rc=$RC $OUT"
+if command -v plutil >/dev/null 2>&1; then
+  check "the plist is valid" "$(plutil -lint "$P" >/dev/null 2>&1 && echo 0 || echo 1)" "$(plutil -lint "$P" 2>&1)"
+fi
+check "the plist runs this monitor at load and every 60 s, with the install's store" "$(grep -q "<string>$ROOT/scripts/host-monitor.sh</string>" "$P" && grep -A1 RunAtLoad "$P" | grep -q '<true/>' && grep -A1 StartInterval "$P" | grep -q '<integer>60</integer>' && grep -A1 MARVEEN_STORE "$P" | grep -q "<string>$ROOT/store</string>" && echo 0 || echo 1)" "$(cat "$P" 2>/dev/null)"
+check "stdout is dropped (one line a minute), stderr kept in the store" "$(grep -A1 StandardOutPath "$P" | grep -q '<string>/dev/null</string>' && grep -A1 StandardErrorPath "$P" | grep -q "<string>$ROOT/store/host-monitor.err.log</string>" && echo 0 || echo 1)" "$(cat "$P" 2>/dev/null)"
+OUT="$(PATH="$SB/ubin:$PATH" HOME="$FAKEHOME" bash "$ROOT/scripts/install-host-monitor.sh" --load 2>&1)"; RC=$?
+check "--load unloads and loads this plist" "$(ok "$RC" = 0 -a "$(grep -c "$P" "$SB/launchctl.calls" 2>/dev/null)" = 2)" "rc=$RC $(cat "$SB/launchctl.calls" 2>/dev/null)"
+OUT="$(PATH="$SB/ubin:$PATH" HOME="$FAKEHOME" bash -c 'uname() { echo Linux; }; export -f uname; bash "$1"' _ "$ROOT/scripts/install-host-monitor.sh" 2>&1)"; RC=$?
+check "the installer refuses on Linux" "$(ok "$RC" != 0)" "$OUT"
 
 echo
 echo "$((DONE-FAILS))/$DONE passed"
