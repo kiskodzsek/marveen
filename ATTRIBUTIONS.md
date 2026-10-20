@@ -24,6 +24,20 @@ A Marveen saját licensze: [LICENSE](./LICENSE) (MIT).
 - **Szerző**: Mike Van Horn
 - **Hol a Marveen-ben**: generátor eszközként használjuk (nem becsomagolva) -- ezzel készülnek a `skool-cli`, `aiam-blog-pp-cli`, `connectors-hu` CLI csomagok, amelyek külső API-kat csomagolnak, plus a hozzájuk tartozó Claude Code skill fájlok.
 
+## Helyben futtatott külső modellek (nincsenek a repóban)
+
+A képszűrő (`scripts/image-safety/`) két detektor-modellt tölt be. A hívó kód saját (`detectors.py`: OpenCV `cv2.dnn`, illetve transformers safetensors-ból), a modellfájlok viszont NEM részei a repónak és nem is lesznek: a telepítés helyi, git-ignorált modellkönyvtárában vannak (alapból `<mflux-gyökér>/models/image-safety/`). Semmilyen telepítő vagy scaffold nem tölti le őket automatikusan. Modell nélkül a `check.py` 3-as kóddal kilép, és egyetlen képet sem enged át (fail-closed); aki saját telepítésen használja, a modellt maga, a saját felelősségére tölti le.
+
+### NudeNet (meztelenség-detektor)
+- **Forrás**: https://github.com/notAI-tech/NudeNet (súly: a `v3.4-weights` release)
+- **Licensz**: AGPL-3.0 (a repó LICENSE-a, 2026-10-20-án olvasva, repo sha 6ccc81c6). A súly-release külön feltételei és a fájl SHA256-ja letöltéskor kerül ide.
+- **Hol a Marveen-ben**: sehol. A `model.onnx`, `labels.json` és `config.json` csak helyben van, git-ignorálva.
+- **Használat**: helyi, nem terjesztett, nem módosított futtatás; hálózati szolgáltatásként nem érhető el. A NudeNet forrásából nem másoltunk kódot.
+
+### ViT NSFW-osztályozó (második detektor)
+- **Jelölt**: Falconsai/nsfw_image_detection (Hugging Face). A `load_vit()` bármely safetensors-checkpointot betölt, ezért a használt modellt itt pinneljük.
+- **Licensz**: még NINCS rögzítve. A model card licenc-sora, a pinnelt revízió és a SHA256 a letöltés ELŐTT kerül ide.
+
 ## Koncepcionális hatás (nem becsomagolt kód)
 
 ### Mark Kashef -- Claude Code-alapú AI-asszisztens architektúra
