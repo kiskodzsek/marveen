@@ -58,12 +58,18 @@ UNSCREENED = "_unscreened"
 QUARANTINE = "_quarantine"
 QUARANTINE_META = "quarantine-meta"
 PASSED_LEDGER = ".image-safety-passed.jsonl"
-IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+# The ONE list of directories the sweep never enters and the governance gate
+# (scripts/self-pace-gate.mjs SCREENING_DIRS) bans; a test keeps the two equal.
+# panna-elvetett/ and visszavonva/ are Mira's reject dirs from before the screen:
+# untouched until Lex decides (Viktor 9018 F5, review B1).
+SCREENING_DIRS = (QUARANTINE, UNSCREENED, "panna-elvetett", "visszavonva", QUARANTINE_META)
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif", ".gif", ".tif", ".tiff", ".bmp", ".avif"}
 SEED_RX = re.compile(r"^(?P<prompt>.+?)_seed(?P<seed>\d+)$")
 
 EXIT_OK = 0
 EXIT_QUARANTINED = 2
 EXIT_DETECTORS_UNAVAILABLE = 3
+EXIT_FILE_ERRORS = 4
 EXIT_USAGE = 64
 
 
@@ -252,14 +258,20 @@ def sha256_of(p: Path) -> str:
     return h.hexdigest()
 
 
-def load_passed(root: Path) -> set[str]:
+def detector_ident(detectors: list[Detector]) -> str:
+    return ",".join(f"{d.name}@{d.threshold}" for d in detectors)
+
+
+def load_passed(root: Path) -> set[tuple[str, str]]:
+    """(sha256, detector ident) pairs: a model or threshold change re-screens."""
     led = root / PASSED_LEDGER
     if not led.exists():
         return set()
     out = set()
     for raw in led.read_text(encoding="utf-8").splitlines():
         try:
-            out.add(json.loads(raw)["sha256"])
+            j = json.loads(raw)
+            out.add((j["sha256"], j["detectors"]))
         except Exception:
             continue
     return out
@@ -272,24 +284,27 @@ def add_passed(root: Path, digest: str, ident: str) -> None:
 # --- modes -------------------------------------------------------------------
 
 def iter_images(d: Path) -> Iterable[Path]:
-    if not d.is_dir() or d.is_symlink():
+    skip = {x.lower() for x in SCREENING_DIRS}  # APFS is case-insensitive (review B2)
+    if not d.is_dir() or d.is_symlink() or skip & {x.lower() for x in d.parts}:
         return
     for dirpath, dirnames, filenames in os.walk(d, followlinks=False):
-        dirnames[:] = [x for x in dirnames if x not in (QUARANTINE, UNSCREENED)]
+        dirnames[:] = [x for x in dirnames if x.lower() not in skip]
         for fn in sorted(filenames):
             if Path(fn).suffix.lower() in IMAGE_EXT:
                 yield Path(dirpath) / fn
 
 
 def process(root: Path, p: Path, detectors: list[Detector], sinks: Sinks,
-            dest: Path | None, passed: set[str] | None) -> bool:
+            dest: Path | None, passed: set[tuple[str, str]] | None) -> bool:
     """Screen one file. Returns True if it was quarantined."""
+    ident = detector_ident(detectors)
     reason = check_candidate(root, p)
+    digest = ""
     if reason:
         v = Verdict(True, "path-check", None, error=reason)
     else:
         digest = sha256_of(p)
-        if passed is not None and digest in passed:
+        if passed is not None and (digest, ident) in passed:
             return False
         v = screen(p, detectors)
     if v.flagged:
@@ -299,10 +314,9 @@ def process(root: Path, p: Path, detectors: list[Detector], sinks: Sinks,
         move_sidecar(p, root / QUARANTINE_META)
         on_quarantine(p, v, sinks)
         return True
-    ident = ",".join(f"{d.name}@{d.threshold}" for d in detectors)
     add_passed(root, digest, ident)
     if passed is not None:
-        passed.add(digest)
+        passed.add((digest, ident))
     if dest is not None:
         dest.mkdir(parents=True, exist_ok=True)
         move_sidecar(p, dest)
@@ -312,15 +326,48 @@ def process(root: Path, p: Path, detectors: list[Detector], sinks: Sinks,
 
 def run_inbox(root: Path, dest_rel: str, detectors: list[Detector], sinks: Sinks) -> int:
     dest = (root / dest_rel)
-    if not _inside(root, Path(os.path.realpath(dest))) or {QUARANTINE, UNSCREENED} & set(Path(dest_rel).parts):
+    if not _inside(root, Path(os.path.realpath(dest))) or {x.lower() for x in SCREENING_DIRS} & {x.lower() for x in Path(dest_rel).parts}:
         print("image-safety: --dest must be inside the root and not a screening dir", file=sys.stderr)
         return EXIT_USAGE
     inbox = root / UNSCREENED
-    if not inbox.exists():
+    if not os.path.lexists(inbox):
         return EXIT_OK
-    q = 0
-    for p in list(_inbox_entries(inbox)):
-        q += process(root, p, detectors, sinks, dest, None)
+    bad = unsafe_dir(root, inbox) or (os.path.lexists(dest) and unsafe_dir(root, dest))
+    if bad:
+        print(f"image-safety: {bad}; nothing moved", file=sys.stderr)
+        return EXIT_USAGE
+    return run_batch(root, list(_inbox_entries(inbox)), detectors, sinks, dest, None)
+
+
+def unsafe_dir(root: Path, d: Path) -> str | None:
+    """A working dir must be a real directory on the root's volume (review L3):
+    os.rename cannot cross volumes, and a symlinked dir would move files elsewhere."""
+    st = os.lstat(d)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+        return f"{d.name} is not a real directory"
+    if st.st_dev != os.lstat(root).st_dev:
+        return f"{d.name} is on another volume"
+    return None
+
+
+def run_batch(root: Path, paths: list[Path], detectors: list[Detector], sinks: Sinks,
+              dest: Path | None, passed: set[tuple[str, str]] | None) -> int:
+    """One file's failure never stops the batch (review B1): it is logged by file
+    name and makes the exit code non-zero, and the next file is screened."""
+    q = errors = 0
+    for p in paths:
+        try:
+            q += process(root, p, detectors, sinks, dest, passed)
+        except Exception as e:
+            errors += 1
+            ts = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+            try:
+                _append_private(sinks.log_path, f"{ts}\tfile={p.name}\tverdict=error:{type(e).__name__}\n")
+            except Exception:
+                pass
+            print(f"image-safety: {p.name}: {type(e).__name__}", file=sys.stderr)
+    if errors:
+        return EXIT_FILE_ERRORS
     return EXIT_QUARANTINED if q else EXIT_OK
 
 
@@ -336,11 +383,10 @@ def _inbox_entries(inbox: Path) -> Iterable[Path]:
 
 def run_sweep(root: Path, dirs: list[str], detectors: list[Detector], sinks: Sinks) -> int:
     passed = load_passed(root)
-    q = 0
+    paths: list[Path] = []
     for rel in dirs:
-        for p in list(iter_images(root / rel)):
-            q += process(root, p, detectors, sinks, None, passed)
-    return EXIT_QUARANTINED if q else EXIT_OK
+        paths.extend(iter_images(root / rel))
+    return run_batch(root, paths, detectors, sinks, None, passed)
 
 
 # --- real detectors (loaded only in the CLI path) ---------------------------

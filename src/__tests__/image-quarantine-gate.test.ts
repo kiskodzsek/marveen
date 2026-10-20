@@ -18,6 +18,13 @@ describe('file tools', () => {
     ['Grep', { pattern: 'x', path: `${ROOT}/_quarantine` }],
     ['Write', { file_path: `${ROOT}/_quarantine/a.png`, content: '' }],
     ['Glob', { pattern: '**/*.png', path: `${ROOT}/_quarantine` }],
+    ['Glob', { pattern: '**/_unscreened/**' }],
+    // review B2: APFS is case-insensitive
+    ['Read', { file_path: `${ROOT}/_Quarantine/a.png` }],
+    ['Read', { file_path: `${ROOT.toUpperCase()}/_QUARANTINE/A.PNG` }],
+    ['Read', { file_path: `${ROOT}/out/Panna-Elvetett/x.png` }],
+    // review I1: percent-encoded
+    ['Read', { file_path: `${ROOT}/%5Fquarantine/a.png` }],
   ])('%s on a screening dir is denied', (tool, input) => {
     expect(decide(tool, input)).toEqual(DENY)
   })
@@ -26,7 +33,8 @@ describe('file tools', () => {
     ['Read', { file_path: `${ROOT}/out/panna/a_seed7.png` }],
     ['Read', { file_path: `${ROOT}/scripts/check_quarantine.py` }],
     ['Read', { file_path: '/repo/scripts/image-safety/check.py' }],
-    ['Edit', { file_path: '/repo/scripts/image-safety/check.py', old_string: 'QUARANTINE = "_quarantine"', new_string: 'x' }],
+    ['Edit', { file_path: '/repo/scripts/image-safety/check.py', old_string: 'QUARANTINE = "_quarantine"', new_string: "QUARANTINE = '_quarantine'" }],
+    ['Grep', { pattern: '_quarantine', path: '/repo/scripts' }],
   ])('%s outside the screening dirs passes', (tool, input) => {
     expect(decide(tool, input)).toEqual({ deny: false })
   })
@@ -36,12 +44,18 @@ describe('MCP tools', () => {
   it.each([
     ['mcp__playwright__browser_navigate', { url: `file://${ROOT}/_quarantine/a.png` }],
     ['mcp__plugin_telegram_telegram__reply', { chat_id: '1', text: 'x', files: [`${ROOT}/_unscreened/a.png`] }],
+    ['mcp__playwright__browser_navigate', { url: `file://${ROOT}/%5Fquarantine/a.png` }],
+    ['mcp__playwright__browser_navigate', { url: `file://${ROOT}/_QUARANTINE/a.png` }],
   ])('%s with a screening path is denied', (tool, input) => {
     expect(decide(tool, input)).toEqual(DENY)
   })
 
   it('an MCP tool without one passes', () => {
     expect(decide('mcp__playwright__browser_navigate', { url: 'https://example.com/_quarantine-docs' })).toEqual({ deny: false })
+  })
+
+  it('a channel message that only names the directory passes', () => {
+    expect(decide('mcp__plugin_telegram_telegram__reply', { chat_id: '1', text: 'a _quarantine mappa mode 000' })).toEqual({ deny: false })
   })
 })
 
@@ -60,6 +74,22 @@ describe('Bash', () => {
     'mkdir -p _quarantine/x',
     'mflux-generate --output _quarantine/x.png',
     "python3 - <<'EOF'\nopen('/m/_quarantine/a.png','rb').read()\nEOF",
+    // review B2
+    `cat ${ROOT}/_QUARANTINE/a.png`,
+    'open out/Panna-Elvetett/x.png',
+    // review B3: the bare directory name, no slash
+    `cd ${ROOT} && cd _unscreened`,
+    'cp -R _unscreened /tmp/x',
+    'mv _unscreened /tmp/u',
+    'tar cf /tmp/u.tar _unscreened',
+    'zip -r /tmp/q.zip _quarantine',
+    'rsync -a _unscreened /tmp/u',
+    'chmod -R 755 _quarantine',
+    'open _unscreened',
+    'cp -R final/visszavonva /tmp/v',
+    'grep -n _quarantine scripts/image-safety/check.py',
+    'git add -f agents/mira/tools/mflux/_quarantine/a.png',
+    'ls _quarantine > /tmp/x && cat /tmp/x _quarantine/a.png',
   ])('denies: %s', (command) => {
     expect(decide('Bash', { command })).toEqual(DENY)
   })
@@ -68,7 +98,10 @@ describe('Bash', () => {
     'ls -la _quarantine/',
     `ls ${ROOT}/out/panna-elvetett`,
     'du -sh _quarantine/',
-    'grep -n _quarantine scripts/image-safety/check.py',
+    'ls _quarantine',
+    'du -sh _QUARANTINE',
+    'git grep -n _quarantine',
+    'git diff -- scripts/image-safety/check.py',
     'git commit -m "screen into out/_quarantine/ first"',
     'mkdir -p _unscreened/panna',
     'venv/bin/mflux-generate-z-image-turbo --prompt-file p.txt --output _unscreened/panna/a_seed{seed}.png',

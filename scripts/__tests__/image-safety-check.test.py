@@ -191,6 +191,68 @@ class SweepTests(Base):
         self.assertEqual(len(calls), 2)
 
 
+class ReviewFixTests(Base):
+    """Viktor's b0471f83 review (card 1a4fe725 #5060)."""
+
+    def test_b1_unreadable_file_does_not_stop_the_sweep(self):
+        locked = self.put("out/a_locked_seed1.png")
+        os.chmod(locked, 0)
+        self.put("final/b_seed2.png")
+        calls = []
+        rc = check.run_sweep(self.root, ["out", "final"], [det("a", 0.1, calls=calls)], self.sinks)
+        self.assertEqual(rc, check.EXIT_FILE_ERRORS)
+        self.assertEqual(calls, ["b_seed2.png"])  # final/ still screened
+        self.assertTrue(os.path.lexists(locked))  # left where it is
+        self.assertIn("file=a_locked_seed1.png\tverdict=error:PermissionError", self.sinks.log_path.read_text())
+
+    def test_b1_reject_dirs_are_untouched_by_the_sweep(self):
+        keep = [self.put("out/panna-elvetett/x_seed1.png"), self.put("final/visszavonva/y.jpg"),
+                self.put("out/Panna-Elvetett/z.png"), self.put("quarantine-meta/m.png")]
+        locked = self.put("out/panna-elvetett/l_seed2.png")
+        os.chmod(locked, 0)
+        calls = []
+        rc = check.run_sweep(self.root, ["out", "final", "quarantine-meta"], [det("a", 0.99, calls=calls)], self.sinks)
+        self.assertEqual(rc, check.EXIT_OK)
+        self.assertEqual(calls, [])
+        for k in keep + [locked]:
+            self.assertTrue(os.path.lexists(k), k)
+        self.assertFalse((self.root / check.QUARANTINE).exists())
+
+    def test_l1_detector_change_rescreens_passed_content(self):
+        self.put("out/a_seed1.png")
+        calls = []
+        check.run_sweep(self.root, ["out"], [det("a", 0.1, threshold=0.5, calls=calls)], self.sinks)
+        check.run_sweep(self.root, ["out"], [det("a", 0.1, threshold=0.5, calls=calls)], self.sinks)
+        self.assertEqual(len(calls), 1)  # same content, same detectors: skipped
+        check.run_sweep(self.root, ["out"], [det("a", 0.1, threshold=0.3, calls=calls)], self.sinks)
+        self.assertEqual(len(calls), 2)
+
+    def test_l2_other_image_formats_are_swept(self):
+        for ext in ("heic", "gif", "tiff", "avif", "BMP"):
+            self.put(f"out/a.{ext}", ext.encode())  # distinct bytes: the ledger skips by content
+        calls = []
+        check.run_sweep(self.root, ["out"], [det("a", 0.1, calls=calls)], self.sinks)
+        self.assertEqual(len(calls), 5)
+
+    def test_l3_symlinked_inbox_is_refused(self):
+        os.rmdir(self.inbox)
+        real = self.root.parent / "elsewhere-inbox"
+        real.mkdir()
+        (real / "a_seed1.png").write_bytes(b"x")
+        os.symlink(real, self.inbox)
+        rc = check.run_inbox(self.root, "out", [det("a", 0.0)], self.sinks)
+        self.assertEqual(rc, check.EXIT_USAGE)
+        self.assertTrue((real / "a_seed1.png").is_file())
+
+    def test_screening_dirs_equal_the_gate_list(self):
+        gate = (HERE.parent / "self-pace-gate.mjs").read_text(encoding="utf-8")
+        import re
+        m = re.search(r"const SCREENING_DIR_NAMES = \[([^\]]*)\]", gate)
+        self.assertIsNotNone(m)
+        names = re.findall(r"'([^']+)'", m.group(1))
+        self.assertEqual(sorted(names), sorted(check.SCREENING_DIRS))
+
+
 class GuardTests(unittest.TestCase):
     def test_network_is_blocked_after_block_network(self):
         code = (
