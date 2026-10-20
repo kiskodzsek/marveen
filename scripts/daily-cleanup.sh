@@ -18,8 +18,12 @@
 # The run goes through heavy-job.sh: one heavy job at a time, and only with
 # free memory. --ignore-host-disk and --min-disk-gb 0, because a low disk puts
 # host-monitor into warn or critical (and below 3 GiB heavy-job's own disk
-# check refuses), and those would block the one job that frees disk. A memory,
-# swap, load or thermal reason in the host state still blocks it. The memory
+# check refuses), and those would block the one job that frees disk.
+# --ignore-host-swap, because the warn-level swap reason can stand for hours
+# on macOS while free memory is fine, and on 2026-10-20 it held the cleanup
+# back at 8 GiB free disk (Pulzus 12317); the memory floor below still
+# applies. A memory, critical swap, load or thermal reason in the host state
+# still blocks it. The memory
 # floor is 20% to start / 10% to stop, below heavy-job's 40/25: the cleanup
 # itself needs little memory, which is also why a running Colima VM does not
 # hold it back (--allow-vm): a VM left up for days must not stop the disk
@@ -95,7 +99,7 @@ tick() {
   fi
   [[ -n "$reason" ]] || return 0
   log "TICK due ($reason)"
-  bash "$HEAVY_JOB" --name daily-cleanup --ignore-host-disk --min-disk-gb 0 --allow-vm \
+  bash "$HEAVY_JOB" --name daily-cleanup --ignore-host-disk --ignore-host-swap --min-disk-gb 0 --allow-vm \
     --min-free 20 --kill-below 10 --wait 1800 -- bash "$HERE/daily-cleanup.sh" run
   local rc=$?
   # 0 and 1 both mean the run happened; anything else (75 not started, 70
