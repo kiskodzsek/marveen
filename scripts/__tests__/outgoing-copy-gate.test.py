@@ -177,6 +177,26 @@ def main():
         check("missing accents still blocks (exit 2)", code, 2)
         check_true("missing accents: stderr names it", "HIANYZO EKEZETEK" in err, err)
 
+        # 5b'. ac3cf99f (2026-10-20): the markers match whole words only. As
+        # substrings "ami"/"amit" (in NotramIT) and "van" (in advance) made this
+        # English reminder "Hungarian", and the accent ratio blocked it.
+        english = (
+            "Hello, this is a friendly reminder from NotramIT about the KOMPaaS subscription. "
+            "The next invoice will be issued on the first business day of the month, and we would "
+            "like to settle it in advance. Please let us know if the billing contact or the amount "
+            "has changed since the last period. Thank you, NotramIT"
+        )
+        code, out, err = run_hook(email_payload(english), rules_file=active)
+        check("English text with NotramIT / advance proceeds (exit 0)", code, 0)
+        # ...and a long accentless Hungarian text still trips the ratio check.
+        accentless_long = (
+            "Szia, csak jelezni szeretnem, hogy a holnapi talalkozot at kell tennunk, mert nem "
+            "tudok ott lenni idoben. Ha neked jo, akkor csutortokon delelott tiz orakor "
+            "megbeszelhetjuk ugyanott, vagy irj egy masik idopontot, ami jobban megfelel."
+        )
+        code, out, err = run_hook(email_payload(accentless_long), rules_file=active)
+        check("long accentless Hungarian still blocks (exit 2)", code, 2)
+
         # 5c. double-hyphen em-dash substitute
         code, out, err = run_hook(
             email_payload(CLEAN_HU_OK + " ez most -- szerintem -- jo lesz."), rules_file=active,
