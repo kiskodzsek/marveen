@@ -2,7 +2,7 @@
 # heavy-job.sh -- run ONE heavy job at a time, only with free memory, under a watchdog.
 #
 #   heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB]
-#                [--wait SEC] -- <command> [args...]
+#                [--wait SEC] [--ignore-host-disk] -- <command> [args...]
 #
 # Why: the Mac mini (16 GB) panicked at 07:02:20 on 2026-10-20 ("no checkins
 # from watchdogd in 93 seconds"). In the panic stackshot free memory was 871
@@ -16,7 +16,11 @@
 #   2. start only when free memory >= --min-free (default 40%), the data
 #      volume has >= --min-disk-gb (default 3) free, and a fresh
 #      store/.host-state (host-monitor.sh) is not warn/critical; otherwise wait up to --wait
-#      seconds (default 600), then give up with exit 75;
+#      seconds (default 600), then give up with exit 75. --ignore-host-disk
+#      lets a warn/critical through when EVERY reason in it is the disk: the
+#      disk cleanup (daily-cleanup.sh) needs it, since a low disk would block
+#      the one job that frees disk. Any memory, swap, load or thermal reason
+#      still blocks (Viktor 9834);
 #   3. while the job runs, a 3 s watchdog stops the WHOLE process group (TERM,
 #      then KILL after 10 s) if free memory drops below --kill-below (default
 #      25%) or the disk below --min-disk-gb. Exit 70 then, so the caller can
@@ -44,8 +48,8 @@ LOCK="$STORE/.heavy-job.lock"
 LOG="$STORE/heavy-job.log"
 POLL="${HEAVY_JOB_POLL:-3}"
 
-NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=3; WAIT=600
-usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--wait SEC] -- cmd [args...]" >&2; exit 64; }
+NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0
+usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--wait SEC] [--ignore-host-disk] -- cmd [args...]" >&2; exit 64; }
 num() { [[ "${1:-}" =~ ^[0-9]+$ ]] || usage; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,6 +58,7 @@ while [[ $# -gt 0 ]]; do
     --kill-below)  [[ $# -ge 2 ]] || usage; num "$2"; KILL_BELOW="$2"; shift 2 ;;
     --min-disk-gb) [[ $# -ge 2 ]] || usage; num "$2"; MIN_DISK_GB="$2"; shift 2 ;;
     --wait)        [[ $# -ge 2 ]] || usage; num "$2"; WAIT="$2"; shift 2 ;;
+    --ignore-host-disk) IGNORE_HOST_DISK=1; shift ;;
     --) shift; break ;;
     *) usage ;;
   esac
@@ -82,7 +87,15 @@ host_state() {
   read -r b e r < "$STORE/.host-state" 2>/dev/null || return 0
   [[ "$e" =~ ^[0-9]+$ ]] || return 0
   (( now - e <= ${HEAVY_JOB_STATE_MAX_AGE:-300} )) || return 0
-  [[ "$b" == "warn" || "$b" == "critical" ]] && echo "$b (${r:-no reason})"
+  [[ "$b" == "warn" || "$b" == "critical" ]] || return 0
+  if (( IGNORE_HOST_DISK )) && [[ -n "$r" ]]; then
+    # host-monitor joins its reasons with ';' ("free disk 2 GiB;swap 80%").
+    local x others=0; local -a parts
+    IFS=';' read -r -a parts <<< "$r"
+    for x in "${parts[@]}"; do [[ "$x" == "free disk "* ]] || others=1; done
+    (( others )) || return 0
+  fi
+  echo "$b (${r:-no reason})"
   return 0
 }
 

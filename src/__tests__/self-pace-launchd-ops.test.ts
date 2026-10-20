@@ -160,6 +160,26 @@ describe('the host health check (card 1c58f629)', () => {
   })
 })
 
+describe('the daily cache cleanup (card 1c58f629)', () => {
+  const DC = 'com.marveen.daily-cleanup'
+  const dcPlist = join(agentsDir, `${DC}.plist`)
+  it('bootstrap of the approved plist and bootout pass; kickstart and a changed plist are refused', () => {
+    writeFileSync(dcPlist, readFileSync(join(__dirname, 'fixtures', `${DC}.plist`)))
+    const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${dcPlist}` }, pulzus)
+    expect(ok.deny).toBe(false)
+    expect(ok.launchdOps[0].plist_sha256).toBe('fab4d3ac7d4fa8903363faf728d9defa091d662f267de0cec425e4f77cd4df51')
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${DC}` }, pulzus).deny).toBe(false)
+    expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${DC}` }, pulzus).deny).toBe(true)
+    writeFileSync(dcPlist, readFileSync(join(__dirname, 'fixtures', `${DC}.plist`), 'utf8').replace('<integer>3600</integer>', '<integer>1</integer>'))
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${dcPlist}` }, pulzus).deny).toBe(true)
+  })
+  it('the same bootstrap from any other agent is refused', () => {
+    writeFileSync(dcPlist, readFileSync(join(__dirname, 'fixtures', `${DC}.plist`)))
+    const kernel = { ...pulzus, agent: 'kernel', configDirAgent: 'kernel' }
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${dcPlist}` }, kernel).deny).toBe(true)
+  })
+})
+
 describe('the invoice mover v3 and its B5 probe (Pulzus 2864, card daef6926)', () => {
   const MOV = 'hu.myshp.szamla.mozgato'
   const B5 = 'hu.myshp.szamla.b5probe'

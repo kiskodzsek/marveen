@@ -157,7 +157,7 @@ const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_
 // boundary is a separate uid (H1).
 export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
 export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato'])
-export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo', 'com.marveen.host-restart-watchdog', 'com.marveen.host-monitor'])
+export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo', 'com.marveen.host-restart-watchdog', 'com.marveen.host-monitor', 'com.marveen.daily-cleanup'])
 export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // K1 (Viktor 3423, card ad7d3eaa): the worker runs under sandbox-exec denying writes under
   // ~/Library/CloudStorage, plus the ~/Library and ~ directory nodes so a parent rename cannot
@@ -181,6 +181,10 @@ export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // writes for this install. RunAtLoad + every 60 s; bootstrap and bootout only, nothing
   // kickstarts it.
   'com.marveen.host-monitor': new Set(['b78d3543c82c1c5f12287ae7b15c1cf59d00b2bd393a2f1d25fd463f2a303086']),
+  // Card 1c58f629 (Klodel 9767): the daily cache cleanup, the plist that
+  // scripts/install-daily-cleanup.sh writes for this install. RunAtLoad + an hourly tick;
+  // bootstrap and bootout only, nothing kickstarts it.
+  'com.marveen.daily-cleanup': new Set(['fab4d3ac7d4fa8903363faf728d9defa091d662f267de0cec425e4f77cd4df51']),
 }
 const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
 const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)
