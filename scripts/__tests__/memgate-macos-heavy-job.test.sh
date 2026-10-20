@@ -168,9 +168,15 @@ level 30; HEAVY_JOB_VM_PID=4242 hj --name colima --allow-vm --wait 1 -- bash -c 
 check "--allow-vm still waits for memory (75 at 30% free)" "$(ok "$RC" = 75 -a ! -e "$SB/vm3")" "rc=$RC $OUT"
 level 70
 # The real probe: a process that looks like Lima's host agent is found.
-mkdir -p "$SB/lima"; printf '#!/usr/bin/env bash\nexec sleep 30\n' > "$SB/lima/limactl"; chmod +x "$SB/lima/limactl"
+# No exec in the fake: exec would swap its command line for "sleep 30", and the probe would
+# then see it only if it looked before the exec (a timing race; Pulzus 10697). The fake keeps
+# its own command line and takes its sleep with it when killed.
+mkdir -p "$SB/lima"
+printf '#!/usr/bin/env bash\ntrap '"'"'kill $! 2>/dev/null; exit 0'"'"' TERM\nsleep 30 & wait\n' > "$SB/lima/limactl"; chmod +x "$SB/lima/limactl"
 "$SB/lima/limactl" hostagent --pidfile x &
 FAKE=$!; sleep 0.3
+check "the probe's pattern finds the fake host agent itself (not a real VM of the host)" \
+  "$(ok -n "$(pgrep -f '(^|/)limactl hostagent ' 2>/dev/null | grep -x "$FAKE")")" "fake=$FAKE pgrep=$(pgrep -f '(^|/)limactl hostagent ' | tr '\n' ' ')"
 OUT="$(env -u HEAVY_JOB_VM_PID HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
     HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name probe --wait 0 -- bash -c 'echo ran > "$0"' "$SB/vm4" 2>&1)"; RC=$?
 kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null
