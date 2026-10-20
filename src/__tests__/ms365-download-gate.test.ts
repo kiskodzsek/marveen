@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { gateDecision } from '../../scripts/hooks/ms365-download-gate.mjs'
+import { consumeMarker, gateDecision } from '../../scripts/hooks/ms365-download-gate.mjs'
 
 // download-bytes-to-file writes third-party bytes wherever outputPath says;
 // the server only refuses overwrites. The gate is the directory boundary, so
@@ -112,5 +112,105 @@ describe('ms365-download-gate', () => {
     expect(run(payload(join(drop, 'a.pdf')))).toBe(0)
     expect(run(payload(join(tmp, 'a.pdf')))).toBe(2)
     expect(run('not json')).toBe(2)
+  })
+})
+
+// The whole-message ($value) shape: closed unless the one-shot marker is fresh,
+// and then only into the MIME directory as .eml (Klodel 11031).
+describe('ms365-download-gate, one-shot MIME shape', () => {
+  let tmp: string
+  let drop: string
+  let mime: string
+  let once: string
+  const msg = '/me/messages/AAMkAD-x_y=/$value'
+  beforeEach(() => {
+    tmp = realpathSync(mkdtempSync(join(tmpdir(), 'dlgate-mime-')))
+    drop = join(tmp, 'mail-downloads')
+    mime = join(tmp, 'secure')
+    once = join(tmp, 'ms365-mime-once')
+    mkdirSync(drop)
+    mkdirSync(join(mime, 'sub'), { recursive: true })
+  })
+  afterEach(() => rmSync(tmp, { recursive: true, force: true }))
+  const decide = (target: string, outputPath: string, now = Date.now()) =>
+    gateDecision({ target, outputPath }, drop, { mimeDir: mime, mimeOnce: once, now })
+
+  it('denies a whole message while the marker is missing', () => {
+    expect(decide(msg, join(mime, 'confirm.eml')).deny).toBe(true)
+  })
+  it('allows it into the MIME directory as .eml while the marker is fresh', () => {
+    writeFileSync(once, '')
+    expect(decide(msg, join(mime, 'confirm.eml')).deny).toBe(false)
+  })
+  it('denies once the marker is older than 60 minutes, or is a directory', () => {
+    writeFileSync(once, '')
+    const old = (Date.now() - 61 * 60 * 1000) / 1000
+    utimesSync(once, old, old)
+    expect(decide(msg, join(mime, 'confirm.eml')).deny).toBe(true)
+    rmSync(once)
+    mkdirSync(once)
+    expect(decide(msg, join(mime, 'confirm.eml')).deny).toBe(true)
+  })
+  it('with a fresh marker still denies other places, names and types', () => {
+    writeFileSync(once, '')
+    expect(decide(msg, join(drop, 'confirm.eml')).deny).toBe(true)
+    expect(decide(msg, join(mime, 'sub', 'confirm.eml')).deny).toBe(true)
+    expect(decide(msg, `${mime}/../confirm.eml`).deny).toBe(true)
+    expect(decide(msg, join(mime, '.confirm.eml')).deny).toBe(true)
+    for (const n of ['confirm.pdf', 'confirm.eml.command', 'confirm', 'confirm.EML.sh', 'confirm.EML', 'számla.eml', 'a b.eml', 'a\u202Eb.eml'])
+      expect(decide(msg, join(mime, n)).deny, n).toBe(true)
+    expect(decide(msg, join(mime, 'confirm-1_a.b.eml')).deny).toBe(false)
+  })
+  it('denies a symlinked parent that points out of the MIME directory', () => {
+    writeFileSync(once, '')
+    mkdirSync(join(tmp, 'outside'))
+    symlinkSync(join(tmp, 'outside'), join(mime, 'link'))
+    expect(decide(msg, join(mime, 'link', 'confirm.eml')).deny).toBe(true)
+  })
+  it('an allow names the marker to consume; the attachment shape never does', () => {
+    writeFileSync(once, '')
+    expect(decide(msg, join(mime, 'confirm.eml')).consumeMarker).toBe(once)
+    expect(decide('/me/messages/m/attachments/a/$value', join(drop, 'a.pdf')).consumeMarker).toBeUndefined()
+  })
+  it('consumeMarker deletes the marker, logs a timestamp only, and denies if either fails', () => {
+    writeFileSync(once, '')
+    const log = join(tmp, 'gate.log')
+    expect(consumeMarker(once, log, new Date('2026-10-20T15:30:00Z')).deny).toBe(false)
+    expect(existsSync(once)).toBe(false)
+    expect(readFileSync(log, 'utf-8')).toBe('2026-10-20T15:30:00.000Z ms365-mime-once consumed: one whole-message download allowed\n')
+    expect(statSync(log).mode & 0o777).toBe(0o600)
+    expect(consumeMarker(once, log).deny).toBe(true)
+    writeFileSync(once, '')
+    expect(consumeMarker(once, join(tmp, 'missing', 'gate.log')).deny).toBe(true)
+  })
+  it('as a hook process: one marker serves exactly one download', () => {
+    writeFileSync(once, '')
+    const log = join(tmp, 'gate.log')
+    const run = () =>
+      spawnSync(process.execPath, ['scripts/hooks/ms365-download-gate.mjs'], {
+        input: JSON.stringify({ tool_name: 'mcp__ms365__download-bytes-to-file', tool_input: { target: msg, outputPath: join(mime, 'confirm.eml') } }),
+        env: { ...process.env, MS365_DOWNLOAD_DIR: drop, MS365_MIME_DIR: mime, MS365_MIME_ONCE: once, MS365_MIME_LOG: log },
+      }).status
+    expect(run()).toBe(0)
+    expect(existsSync(once)).toBe(false)
+    expect(run()).toBe(2)
+    expect(readFileSync(log, 'utf-8').trim().split('\n')).toHaveLength(1)
+    expect(readFileSync(log, 'utf-8')).not.toContain('AAMkAD')
+  })
+  it('with a fresh marker still denies other mailboxes, folders and query strings', () => {
+    writeFileSync(once, '')
+    for (const t of [
+      '/users/u1/messages/m/$value',
+      '/me/mailFolders/inbox/messages/m/$value',
+      '/me/messages/m/$value?x=1',
+      '/me/messages/../photo/$value',
+      '/me/photo/$value',
+      'https://graph.microsoft.com/v1.0/me/messages/m/$value',
+    ]) expect(decide(t, join(mime, 'confirm.eml')).deny, t).toBe(true)
+  })
+  it('does not let .eml into the attachment drop directory', () => {
+    writeFileSync(once, '')
+    expect(decide('/me/messages/m/attachments/a/$value', join(drop, 'x.eml')).deny).toBe(true)
+    expect(decide('/me/messages/m/attachments/a/$value', join(mime, 'x.pdf')).deny).toBe(true)
   })
 })
