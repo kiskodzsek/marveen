@@ -43,6 +43,8 @@ esac
 STUB
 chmod +x "$SB/bin/curl" "$SB/sysctl"
 level() { echo "$1" > "$SB/level"; }
+# No VM unless a test says so: the host running this test may have a real one.
+export HEAVY_JOB_VM_PID=""
 
 # MEMGATE_PROC_MEMINFO points at a file that does not exist, so the Linux path
 # is skipped on any host and the sysctl stand-in is the only source.
@@ -152,6 +154,34 @@ check "the grandchild (whole process group) is gone" "$(ok -n "$GC" -a "$GC_ALIV
 [ "$GC_ALIVE" = yes ] && kill "$GC"
 check "WATCHDOG STOP is logged" "$(ok -n "$(grep 'WATCHDOG STOP: free memory 10% < 25%' "$SB/store/heavy-job.log")")"
 check "the lock is released after a watchdog stop" "$(ok ! -e "$LOCK")"
+
+echo "== a running Colima VM holds the machine (Viktor 9013 L2)"
+clean; level 70
+HEAVY_JOB_VM_PID=4242 hj --name mflux --wait 1 -- bash -c 'echo ran > "$0"' "$SB/vm1"
+check "VM running -> another heavy job is not started (75) and does not run" "$(ok "$RC" = 75 -a ! -e "$SB/vm1")" "rc=$RC $OUT"
+check "...says it is the VM, with its pid and the way out" "$(ok -n "$(echo "$OUT" | grep 'a Colima VM is running (limactl pid 4242): it holds its memory until colima stop')")" "$OUT"
+check "...and takes no lock" "$(ok ! -e "$LOCK")"
+check "the test hook leaves a WARN in heavy-job.log (Viktor I1)" "$(ok -n "$(grep "WARN test hook HEAVY_JOB_VM_PID='4242'" "$SB/store/heavy-job.log")")"
+HEAVY_JOB_VM_PID=4242 hj --name colima --allow-vm --wait 1 -- bash -c 'echo ran > "$0"' "$SB/vm2"
+check "--allow-vm (the VM's own start, the cleanup) runs past a running VM" "$(ok "$RC" = 0 -a -f "$SB/vm2")" "rc=$RC $OUT"
+level 30; HEAVY_JOB_VM_PID=4242 hj --name colima --allow-vm --wait 1 -- bash -c 'echo ran > "$0"' "$SB/vm3"
+check "--allow-vm still waits for memory (75 at 30% free)" "$(ok "$RC" = 75 -a ! -e "$SB/vm3")" "rc=$RC $OUT"
+level 70
+# The real probe: a process that looks like Lima's host agent is found.
+# No exec in the fake: exec would swap its command line for "sleep 30", and the probe would
+# then see it only if it looked before the exec (a timing race; Pulzus 10697). The fake keeps
+# its own command line and takes its sleep with it when killed.
+mkdir -p "$SB/lima"
+printf '#!/usr/bin/env bash\ntrap '"'"'kill $! 2>/dev/null; exit 0'"'"' TERM\nsleep 30 & wait\n' > "$SB/lima/limactl"; chmod +x "$SB/lima/limactl"
+"$SB/lima/limactl" hostagent --pidfile x &
+FAKE=$!; sleep 0.3
+check "the probe's pattern finds the fake host agent itself (not a real VM of the host)" \
+  "$(ok -n "$(pgrep -f '(^|/)limactl hostagent ' 2>/dev/null | grep -x "$FAKE")")" "fake=$FAKE pgrep=$(pgrep -f '(^|/)limactl hostagent ' | tr '\n' ' ')"
+OUT="$(env -u HEAVY_JOB_VM_PID HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+    HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name probe --wait 0 -- bash -c 'echo ran > "$0"' "$SB/vm4" 2>&1)"; RC=$?
+kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null
+check "...and without the hook there is no WARN" "$(ok -z "$(echo "$OUT" | grep 'WARN test hook')")" "$OUT"
+check "without the hook, a running 'limactl hostagent' is detected (75)" "$(ok "$RC" = 75 -a ! -e "$SB/vm4" -a -n "$(echo "$OUT" | grep 'a Colima VM is running (limactl pid [0-9]')")" "rc=$RC $OUT"
 
 hj --name x
 check "no command -> usage error (64)" "$(ok "$RC" = 64)" "rc=$RC"

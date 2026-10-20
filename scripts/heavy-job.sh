@@ -2,7 +2,7 @@
 # heavy-job.sh -- run ONE heavy job at a time, only with free memory, under a watchdog.
 #
 #   heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB]
-#                [--wait SEC] [--ignore-host-disk] -- <command> [args...]
+#                [--wait SEC] [--ignore-host-disk] [--allow-vm] -- <command> [args...]
 #
 # Why: the Mac mini (16 GB) panicked at 07:02:20 on 2026-10-20 ("no checkins
 # from watchdogd in 93 seconds"). In the panic stackshot free memory was 871
@@ -21,6 +21,13 @@
 #      disk cleanup (daily-cleanup.sh) needs it, since a low disk would block
 #      the one job that frees disk. Any memory, swap, load or thermal reason
 #      still blocks (Viktor 9834);
+#   2b. a running Colima/Lima VM counts as a held heavy job: other jobs wait
+#      until `colima stop`. `colima start` returns as soon as the VM is up, so
+#      the lock alone only serialised the start, while the VM kept its 6 GB
+#      for hours (Viktor 9013 L2; on 2026-10-20 one ran from 10:34 outside
+#      any lock). --allow-vm lets a job past it: the VM's own start
+#      (`heavy-job.sh --name colima --allow-vm -- colima start`) and light
+#      jobs such as the disk cleanup;
 #   3. while the job runs, a 3 s watchdog stops the WHOLE process group (TERM,
 #      then KILL after 10 s) if free memory drops below --kill-below (default
 #      25%) or the disk below --min-disk-gb. Exit 70 then, so the caller can
@@ -48,8 +55,8 @@ LOCK="$STORE/.heavy-job.lock"
 LOG="$STORE/heavy-job.log"
 POLL="${HEAVY_JOB_POLL:-3}"
 
-NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0
-usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--wait SEC] [--ignore-host-disk] -- cmd [args...]" >&2; exit 64; }
+NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0; ALLOW_VM=0
+usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--allow-vm] -- cmd [args...]" >&2; exit 64; }
 num() { [[ "${1:-}" =~ ^[0-9]+$ ]] || usage; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -59,6 +66,7 @@ while [[ $# -gt 0 ]]; do
     --min-disk-gb) [[ $# -ge 2 ]] || usage; num "$2"; MIN_DISK_GB="$2"; shift 2 ;;
     --wait)        [[ $# -ge 2 ]] || usage; num "$2"; WAIT="$2"; shift 2 ;;
     --ignore-host-disk) IGNORE_HOST_DISK=1; shift ;;
+    --allow-vm)    ALLOW_VM=1; shift ;;
     --) shift; break ;;
     *) usage ;;
   esac
@@ -98,6 +106,15 @@ host_state() {
   echo "$b (${r:-no reason})"
   return 0
 }
+
+# The pid of a running Colima/Lima VM (its `limactl hostagent`), or nothing.
+# Test hook: HEAVY_JOB_VM_PID (set and empty = no VM).
+vm_pid() {
+  if [[ -n "${HEAVY_JOB_VM_PID+x}" ]]; then echo "$HEAVY_JOB_VM_PID"; return; fi
+  pgrep -f '(^|/)limactl hostagent ' 2>/dev/null | head -1
+}
+# A stray export (e.g. from a test shell) would silently turn the VM rule off.
+[[ -n "${HEAVY_JOB_VM_PID+x}" ]] && log "WARN test hook HEAVY_JOB_VM_PID='${HEAVY_JOB_VM_PID}' overrides the VM check"
 
 # --- lock: mkdir is atomic on every filesystem we run on; flock is not on macOS ---
 have_lock=0
@@ -185,6 +202,8 @@ while :; do
     reason="free disk ${d:-?} KB < ${MIN_DISK_GB} GB"
   elif hs="$(host_state)"; [[ -n "$hs" ]]; then
     reason="host-monitor says $hs"
+  elif vm="$(vm_pid)"; (( ! ALLOW_VM )) && [[ -n "$vm" ]]; then
+    reason="a Colima VM is running (limactl pid $vm): it holds its memory until colima stop"
   elif try_lock; then
     break
   else

@@ -21,7 +21,9 @@
 # check refuses), and those would block the one job that frees disk. A memory,
 # swap, load or thermal reason in the host state still blocks it. The memory
 # floor is 20% to start / 10% to stop, below heavy-job's 40/25: the cleanup
-# itself needs little memory. A "not started" (75)
+# itself needs little memory, which is also why a running Colima VM does not
+# hold it back (--allow-vm): a VM left up for days must not stop the disk
+# cleanup. A "not started" (75)
 # writes no stamp, so the next tick tries again.
 #
 # What a run clears -- only caches the tools rebuild by themselves:
@@ -93,7 +95,7 @@ tick() {
   fi
   [[ -n "$reason" ]] || return 0
   log "TICK due ($reason)"
-  bash "$HEAVY_JOB" --name daily-cleanup --ignore-host-disk --min-disk-gb 0 \
+  bash "$HEAVY_JOB" --name daily-cleanup --ignore-host-disk --min-disk-gb 0 --allow-vm \
     --min-free 20 --kill-below 10 --wait 1800 -- bash "$HERE/daily-cleanup.sh" run
   local rc=$?
   # 0 and 1 both mean the run happened; anything else (75 not started, 70
