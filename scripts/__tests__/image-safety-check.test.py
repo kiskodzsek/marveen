@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""Tests for scripts/image-safety/check.py (card 1a4fe725, Viktor 9018, Lex 9016).
+
+Mock detectors only. The fixtures are a few bytes of filler with an image suffix:
+no real image, no photo-like content, and by design no nudity test set (Lex 9016:
+recall on child nudity is not measured, and no such test image is generated).
+
+Run: python3 scripts/__tests__/image-safety-check.test.py   (exit 0 = all green)
+"""
+import importlib.util
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SCRIPT_DIR = HERE.parent / "image-safety"
+sys.path.insert(0, str(SCRIPT_DIR))
+spec = importlib.util.spec_from_file_location("check", SCRIPT_DIR / "check.py")
+check = importlib.util.module_from_spec(spec)
+sys.modules["check"] = check
+spec.loader.exec_module(check)
+
+
+def det(name, value, threshold=0.5, calls=None):
+    def score(p):
+        if calls is not None:
+            calls.append(p.name)
+        if isinstance(value, Exception):
+            raise value
+        return value
+    return check.Detector(name, threshold, score)
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(os.path.realpath(self.tmp.name)) / "mflux"
+        self.root.mkdir()
+        self.store = Path(self.tmp.name) / "store"
+        self.sent = []
+        self.sinks = check.Sinks(
+            log_path=self.store / "image-safety.log",
+            blocklist_path=self.store / "blocklist.tsv",
+            send=lambda to, text: self.sent.append((to, text)),
+        )
+        self.inbox = self.root / check.UNSCREENED
+        self.inbox.mkdir()
+
+    def tearDown(self):
+        # mode 000 files must be readable again for cleanup
+        for dp, dn, fn in os.walk(self.tmp.name):
+            for n in dn + fn:
+                p = os.path.join(dp, n)
+                if not os.path.islink(p):
+                    os.chmod(p, 0o700)
+        self.tmp.cleanup()
+
+    def put(self, rel, data=b"\x89PNG-synthetic-filler"):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        return p
+
+    def mode(self, p):
+        return stat.S_IMODE(os.lstat(p).st_mode)
+
+
+class InboxTests(Base):
+    def test_pass_moves_image_and_sidecar_to_dest(self):
+        self.put("_unscreened/kep_seed7.png")
+        self.put("_unscreened/kep_seed7.metadata.json", b'{"prompt":"x"}')
+        rc = check.run_inbox(self.root, "out/panna", [det("a", 0.1), det("b", 0.2)], self.sinks)
+        self.assertEqual(rc, check.EXIT_OK)
+        self.assertTrue((self.root / "out/panna/kep_seed7.png").is_file())
+        self.assertTrue((self.root / "out/panna/kep_seed7.metadata.json").is_file())
+        self.assertEqual(os.listdir(self.inbox), [])
+        self.assertEqual(self.sent, [])
+        self.assertTrue((self.root / check.PASSED_LEDGER).is_file())
+
+    def test_flag_quarantines_mode_000_and_records_only_allowed_fields(self):
+        self.put("_unscreened/furdes-x_seed42.png")
+        self.put("_unscreened/furdes-x_seed42.metadata.json", b'{"prompt":"SECRET PROMPT TEXT"}')
+        rc = check.run_inbox(self.root, "out/panna", [det("a", 0.1), det("nudenet", 0.9)], self.sinks)
+        self.assertEqual(rc, check.EXIT_QUARANTINED)
+        q = self.root / check.QUARANTINE / "furdes-x_seed42.png"
+        self.assertTrue(os.path.lexists(q))
+        self.assertEqual(self.mode(q), 0)
+        self.assertEqual(self.mode(self.root / check.QUARANTINE), 0o700)
+        self.assertFalse((self.root / "out/panna/furdes-x_seed42.png").exists())
+        # sidecar kept as documentation, outside the quarantine, not next to passed images
+        self.assertTrue((self.root / check.QUARANTINE_META / "furdes-x_seed42.metadata.json").is_file())
+        log = self.sinks.log_path.read_text()
+        self.assertEqual(self.mode(self.sinks.log_path), 0o600)
+        self.assertIn("file=furdes-x_seed42.png", log)
+        self.assertIn("prompt=furdes-x", log)
+        self.assertIn("seed=42", log)
+        self.assertIn("detector=nudenet", log)
+        self.assertIn("score=0.900", log)
+        self.assertEqual(self.sinks.blocklist_path.read_text(), "furdes-x\t42\n")
+        self.assertEqual(self.mode(self.sinks.blocklist_path), 0o600)
+        self.assertEqual(sorted(t for t, _ in self.sent), ["klodel", "mira"])
+        for _, text in self.sent + [(None, log)]:
+            self.assertNotIn("SECRET PROMPT TEXT", text)
+            self.assertNotIn(str(self.root), text)  # no path / link to the content
+            self.assertNotIn("base64", text)
+
+    def test_detector_error_is_quarantine(self):
+        self.put("_unscreened/a_seed1.png")
+        rc = check.run_inbox(self.root, "out", [det("a", RuntimeError("boom"))], self.sinks)
+        self.assertEqual(rc, check.EXIT_QUARANTINED)
+        self.assertIn("score=error:RuntimeError", self.sinks.log_path.read_text())
+
+    def test_out_of_range_score_is_quarantine(self):
+        self.put("_unscreened/a_seed1.png")
+        rc = check.run_inbox(self.root, "out", [det("a", 1.7)], self.sinks)
+        self.assertEqual(rc, check.EXIT_QUARANTINED)
+        self.assertIn("error:ScoreOutOfRange", self.sinks.log_path.read_text())
+
+    def test_no_detectors_is_quarantine(self):
+        self.put("_unscreened/a_seed1.png")
+        self.assertEqual(check.run_inbox(self.root, "out", [], self.sinks), check.EXIT_QUARANTINED)
+
+    def test_later_detector_still_runs_after_a_pass(self):
+        self.put("_unscreened/a_seed1.png")
+        calls = []
+        rc = check.run_inbox(self.root, "out", [det("a", 0.0, calls=calls), det("b", 0.95, calls=calls)], self.sinks)
+        self.assertEqual(calls, ["a_seed1.png", "a_seed1.png"])
+        self.assertEqual(rc, check.EXIT_QUARANTINED)
+
+    def test_symlink_is_quarantined_not_followed(self):
+        target = self.put("elsewhere/real.png")
+        os.symlink(target, self.inbox / "link_seed3.png")
+        calls = []
+        rc = check.run_inbox(self.root, "out", [det("a", 0.0, calls=calls)], self.sinks)
+        self.assertEqual(rc, check.EXIT_QUARANTINED)
+        self.assertEqual(calls, [])  # never opened through the link
+        self.assertTrue(os.path.islink(self.root / check.QUARANTINE / "link_seed3.png"))
+        self.assertTrue(target.is_file())  # the target is untouched
+        self.assertIn("error:Symlink", self.sinks.log_path.read_text())
+
+    def test_dest_outside_root_or_into_screening_dirs_is_refused(self):
+        self.put("_unscreened/a_seed1.png")
+        for dest in ("../outside", check.QUARANTINE, check.UNSCREENED + "/x", "out/" + check.QUARANTINE):
+            self.assertEqual(check.run_inbox(self.root, dest, [det("a", 0.0)], self.sinks), check.EXIT_USAGE)
+        self.assertTrue((self.inbox / "a_seed1.png").is_file())
+
+    def test_name_collision_in_quarantine_does_not_overwrite(self):
+        self.put("_unscreened/a_seed1.png")
+        check.run_inbox(self.root, "out", [det("a", 0.9)], self.sinks)
+        self.put("_unscreened/a_seed1.png", b"second")
+        check.run_inbox(self.root, "out", [det("a", 0.9)], self.sinks)
+        names = sorted(os.listdir(self.root / check.QUARANTINE))
+        self.assertEqual(names, ["a_seed1.png", "a_seed1.png.1"])
+
+    def test_failed_message_does_not_stop_the_batch(self):
+        def bad_send(to, text):
+            raise OSError("queue down")
+        self.sinks.send = bad_send
+        self.put("_unscreened/a_seed1.png")
+        self.put("_unscreened/b_seed2.png")
+        rc = check.run_inbox(self.root, "out", [det("a", 0.9)], self.sinks)
+        self.assertEqual(rc, check.EXIT_QUARANTINED)
+        self.assertEqual(len(os.listdir(self.root / check.QUARANTINE)), 2)
+
+
+class SweepTests(Base):
+    def test_sweep_quarantines_flagged_copies_and_skips_screening_dirs(self):
+        self.put("final/fotok/x_seed5.jpg")
+        self.put("drafts/y_seed6.png")
+        self.put("_quarantine/old.png")
+        calls = []
+        rc = check.run_sweep(self.root, ["out", "final", "drafts"], [det("a", 0.9, calls=calls)], self.sinks)
+        self.assertEqual(rc, check.EXIT_QUARANTINED)
+        self.assertEqual(sorted(calls), ["x_seed5.jpg", "y_seed6.png"])
+        self.assertNotIn("old.png", calls)
+        self.assertFalse((self.root / "final/fotok/x_seed5.jpg").exists())
+
+    def test_sweep_skips_already_passed_content(self):
+        self.put("out/a_seed1.png")
+        calls = []
+        check.run_sweep(self.root, ["out"], [det("a", 0.1, calls=calls)], self.sinks)
+        check.run_sweep(self.root, ["out"], [det("a", 0.1, calls=calls)], self.sinks)
+        self.assertEqual(calls, ["a_seed1.png"])
+        # changed content is screened again
+        self.put("out/a_seed1.png", b"different bytes")
+        check.run_sweep(self.root, ["out"], [det("a", 0.1, calls=calls)], self.sinks)
+        self.assertEqual(len(calls), 2)
+
+
+class GuardTests(unittest.TestCase):
+    def test_network_is_blocked_after_block_network(self):
+        code = (
+            "import sys, socket, os; sys.path.insert(0, %r); import check; check.block_network();\n"
+            "assert os.environ['HF_HUB_OFFLINE'] == '1' and os.environ['HF_HUB_DISABLE_TELEMETRY'] == '1'\n"
+            "for f in (lambda: socket.create_connection(('127.0.0.1', 9)),\n"
+            "          lambda: socket.socket().connect(('127.0.0.1', 9))):\n"
+            "    try: f(); sys.exit('connected')\n"
+            "    except OSError as e: assert 'disabled' in str(e), e\n"
+        ) % str(SCRIPT_DIR)
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_cli_without_models_touches_nothing_and_exits_3(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t) / "mflux"
+            (root / check.UNSCREENED).mkdir(parents=True)
+            img = root / check.UNSCREENED / "a_seed1.png"
+            img.write_bytes(b"filler")
+            models = Path(t) / "empty-models"
+            models.mkdir()
+            r = subprocess.run([sys.executable, str(SCRIPT_DIR / "check.py"), "--root", str(root),
+                                "--models", str(models), "inbox", "--dest", "out"],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, check.EXIT_DETECTORS_UNAVAILABLE, r.stderr)
+            self.assertTrue(img.is_file())
+            self.assertEqual(stat.S_IMODE(img.stat().st_mode) & 0o400, 0o400)
+            self.assertFalse((root / check.QUARANTINE).exists())
+
+    def test_pickle_files_are_refused(self):
+        try:
+            import detectors  # noqa: F401  (imports only stdlib + check at module level)
+        except ImportError as e:
+            self.skipTest(f"detectors import: {e}")
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t)
+            (d / "pytorch_model.bin").write_bytes(b"x")
+            with self.assertRaises(check.DetectorError):
+                detectors._refuse_pickles(d)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)

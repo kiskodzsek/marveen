@@ -71,6 +71,10 @@ jobs:
       # over-report GROWS with every consolidation round, which is why this
       # runs here and not by hand. Hermetic: throwaway fixture dir.
       - run: python3 scripts/__tests__/memory-link-audit.test.py
+      # IMAGESAFETY1020: the image screen is fail-closed only if its quarantine,
+      # error and symlink paths stay tested. Hermetic: mock detectors, temp dirs,
+      # no model files (the real detectors need Mira's venv and are skipped).
+      - run: python3 scripts/__tests__/image-safety-check.test.py
       # MORNTIMERPARK914: the #1313 contract tests shipped without CI wiring,
       # so "CI green" said nothing about them -- the exact rot the comment
       # above warns about. All three are hermetic (stubs on PATH / CLAUDE_BIN,

@@ -307,6 +307,48 @@ export function allowlistBashSegmentAllowed(seg) {
   return true
 }
 
+// IMAGESAFETY1020 (card 1a4fe725, Viktor 9018 F3): generated images wait in an
+// `_unscreened/` directory until scripts/image-safety/check.py screens them, and a
+// flagged one goes to `_quarantine/` with mode 000. Mode 000 is no boundary -- every
+// agent runs as the same uid and could chmod it back -- so this gate is the layer
+// that keeps an agent from opening one by accident: whatever an agent reads also
+// leaves for the model provider. Matched only as a PATH COMPONENT (`/_quarantine`,
+// `_quarantine/`), so code and prose that merely name the directory (a grep for
+// the constant, a commit message) still pass. Listing names (ls, du) is allowed;
+// the file names carry only the prompt name and the seed. The generator and
+// mkdir may still write INTO _unscreened/ (that is where new images belong).
+// panna-elvetett/ and visszavonva/ are Mira's own reject dirs from before the
+// screen existed (mode 000 files, 2026-10-20); Viktor F5 puts them under the
+// same ban, untouched, until Lex decides.
+const SCREENING_DIRS = String.raw`_quarantine|_unscreened|panna-elvetett|visszavonva`
+const SCREENING_DIR_RX = new RegExp(String.raw`\/(?:${SCREENING_DIRS})(?=[\/\s'"]|$)|(?:^|[\s'"=:(])(?:${SCREENING_DIRS})\/`)
+const OTHER_SCREENING_DIR_RX = new RegExp(String.raw`\/(?:${SCREENING_DIRS.replace('_unscreened|', '')})(?=[\/\s'"]|$)|(?:^|[\s'"=:(])(?:${SCREENING_DIRS.replace('_unscreened|', '')})\/`)
+const SCREENING_LISTERS = new Set(['ls', 'du'])
+const UNSCREENED_WRITERS_RX = /^(?:mkdir|mflux-generate[\w-]*)$/
+const SCREENING_FILE_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Grep', 'Glob'])
+
+export function screeningPathMentioned(value) {
+  return SCREENING_DIR_RX.test(typeof value === 'string' ? value : JSON.stringify(value ?? ''))
+}
+
+export function screeningBashSegmentAllowed(seg) {
+  const s = String(seg ?? '').trim()
+  if (!SCREENING_DIR_RX.test(s)) return true
+  const words = s.split(/\s+/)
+  let i = 0
+  while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++ // leading VAR=x
+  const cmd = (words[i] ?? '').replace(/^.*\//, '')
+  // a writer into _unscreened/ is fine as long as no other screening dir is named
+  if (UNSCREENED_WRITERS_RX.test(cmd) && !OTHER_SCREENING_DIR_RX.test(s)) return true
+  if (!SCREENING_LISTERS.has(cmd)) return false
+  // `ls x > _quarantine/y` writes into it; `ls` piping into a reader is split
+  // into its own segment and judged there.
+  for (const m of s.matchAll(OUTPUT_REDIRECT_RX)) {
+    if (SCREENING_DIR_RX.test(m[1]) || SCREENING_DIR_RX.test(' ' + m[1])) return false
+  }
+  return true
+}
+
 function expandHome(p) {
   return p.startsWith('~/') ? join(homedir(), p.slice(2)) : p
 }
@@ -639,6 +681,11 @@ export function normalizeShellEvasion(seg) {
 export function gateDecision(toolName, toolInput, opts = {}) {
   const name = String(toolName ?? '')
   if (SELF_PACE_TOOLS.has(name)) return { deny: true }
+  // IMAGESAFETY1020: file tools, and every MCP tool (Playwright, a channel reply
+  // with an attachment), on an unscreened or quarantined image.
+  if ((SCREENING_FILE_TOOLS.has(name) || name.startsWith('mcp__')) && screeningPathMentioned(toolInput)) {
+    return { deny: true, reason: 'image-quarantine' }
+  }
   // Native file tools writing the self-schedule store would bypass any Bash regex.
   if (name === 'Write' || name === 'Edit' || name === 'MultiEdit' || name === 'NotebookEdit') {
     const fp = String(toolInput?.file_path ?? toolInput?.notebook_path ?? '')
@@ -674,6 +721,8 @@ export function gateDecision(toolName, toolInput, opts = {}) {
       if (SCHEDULE_API_RX.test(seg) && HTTP_WRITE_RX.test(seg)) return { deny: true }
       // the egress allowlist: a plain read only (EGRESSSELFEDIT824)
       if (!allowlistBashSegmentAllowed(seg)) return { deny: true, reason: 'egress-allowlist' }
+      // the image screening dirs: name listing only (IMAGESAFETY1020)
+      if (!screeningBashSegmentAllowed(seg)) return { deny: true, reason: 'image-quarantine' }
     }
     // The scheduler check is the ANCHORED one -- it fires on what sits at a
     // segment START -- so it is the one a fake segment boundary can mislead, and
@@ -723,6 +772,13 @@ const ALLOWLIST_GATE_MSG =
   'agenst (inter-agent uzenet: domain + miert); o a gazda jovahagyasaval veszi fel. ' +
   'Olvasni szabad: cat / grep / jq a fajlra (ertelmezo -- python, node -- nem).'
 
+const QUARANTINE_GATE_MSG =
+  'Kep-karanten TILTOTT (governance hard-gate, IMAGESAFETY1020). A _unscreened/ es a ' +
+  '_quarantine/ alatti kepet ugynok NEM nyitja meg (Read, Playwright, cat/open/qlmanage/sips, ' +
+  'masolas, csatolas): amit megnyitsz, az a modell-szolgaltatohoz is kimegy. A nevek listazasa ' +
+  '(ls, du) szabad. A szuro: scripts/image-safety/check.py. Kerdes eseten Kernel; a karanten ' +
+  'sorsa Lex es Patrik dontese.'
+
 function allow() { process.exit(0) }
 
 function deny(reason) {
@@ -764,7 +820,7 @@ if (isInvokedDirectly()) {
   if (reason === 'launchd-agent-mismatch' || (launchdOps && launchdOps.length)) {
     writeLaunchdOpsLog(opts, reason === 'launchd-agent-mismatch' ? [{ sub: 'MISMATCH', label: '-' }] : launchdOps)
   }
-  if (shouldDeny) deny(reason === 'egress-allowlist' ? ALLOWLIST_GATE_MSG : GATE_MSG)
+  if (shouldDeny) deny(reason === 'egress-allowlist' ? ALLOWLIST_GATE_MSG : reason === 'image-quarantine' ? QUARANTINE_GATE_MSG : GATE_MSG)
   allow()
 }
 
