@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # host-restart-watchdog.sh
 #
-# Fires once at every user-manager start (oneshot, WantedBy=default.target).
+# Fires once at every user-manager start (oneshot, WantedBy=default.target),
+# and on macOS at every login plus every 5 minutes (launchd RunAtLoad +
+# StartInterval, scripts/install-host-restart-watchdog.sh).
 # Under WSL2 the whole utility VM can shut down and re-boot (vmIdleTimeout
 # auto-shutdown, Windows sleep/resume, `wsl --shutdown`), which tears down the
 # kernel + system/user systemd + tmux + dashboard + channels all at once and is
@@ -9,6 +11,13 @@
 # kernel boot time (/proc/stat btime) and sends ONE Telegram notice that names
 # it as a host/WSL-VM restart (with an estimated downtime), so a fleet-wide
 # silence is never mistaken for a CostOps/app crash.
+#
+# macOS (Patrik TG 3775, card 1c58f629): after the 2026-10-20 07:02 kernel panic
+# the fleet was silent until 07:56 and nobody was told why. The boot time comes
+# from kern.boottime, and a panic report filed after this boot adds the panic
+# time and its first line, so the notice says what happened. With FileVault on,
+# nothing (this script included) runs before someone logs in: the notice arrives
+# as the team comes back, not when the box goes down.
 #
 # App/service crashes do NOT change btime and never trigger this script -- they
 # are reported separately by the OnFailure= drop-ins (marveen-notify@.service).
@@ -59,22 +68,37 @@ fi
 
 log() { echo "[host-restart-watchdog] $*"; }
 
+# GNU date/stat on Linux, BSD on macOS.
+fmt_epoch() { date -d "@$1" "+$2" 2>/dev/null || date -r "$1" "+$2" 2>/dev/null || echo "@$1"; }
+mtime_of() { stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || echo 0; }
+IS_DARWIN=0
+[[ "${HOSTWD_UNAME:-$(uname -s 2>/dev/null)}" == "Darwin" ]] && IS_DARWIN=1
+
 # Real WSL check -- only under WSL is a whole-VM reboot the expected surprise;
 # on a bare-metal/other Linux host a btime change is an ordinary reboot, so we
 # word the alert accordingly instead of always claiming "WSL VM restarted".
 if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null \
    || [[ -n "${WSL_DISTRO_NAME:-}" ]] || [[ -e /run/WSL ]]; then
   HOST_KIND="WSL VM"
+elif (( IS_DARWIN )); then
+  HOST_KIND="Mac"
 else
   HOST_KIND="host"
 fi
 
 # Current kernel boot epoch (changes only on a real (re)boot of the VM/host).
-# HOSTWD_PROC_STAT exists for tests only (there is no /proc to stub on macOS).
+# Linux: /proc/stat btime. macOS: kern.boottime, "{ sec = 1792475438, usec = ... } ...";
+# /usr/sbin is not on a launchd job's PATH, hence the full path.
+# HOSTWD_PROC_STAT, HOSTWD_BOOTTIME (a raw kern.boottime line) and HOSTWD_UNAME
+# exist for tests only.
 PROC_STAT="${HOSTWD_PROC_STAT:-/proc/stat}"
 btime="$(awk '/^btime/{print $2}' "$PROC_STAT" 2>/dev/null)"
+if [[ -z "${btime:-}" ]] && (( IS_DARWIN )); then
+  boottime_raw="${HOSTWD_BOOTTIME:-$(/usr/sbin/sysctl -n kern.boottime 2>/dev/null)}"
+  btime="$(printf '%s\n' "$boottime_raw" | sed -n 's/^{ *sec *= *\([0-9][0-9]*\),.*/\1/p' | head -1)"
+fi
 if [[ -z "${btime:-}" ]]; then
-  log "no btime in $PROC_STAT; nothing to do"
+  log "no boot time ($PROC_STAT btime / kern.boottime); nothing to do"
   exit 0
 fi
 
@@ -99,28 +123,56 @@ if [[ "$prev" == "$btime" ]]; then
 fi
 
 # --- host/VM restart detected (btime changed) ---
-boot_local="$(date -d "@$btime" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "@$btime")"
+boot_local="$(fmt_epoch "$btime" '%Y-%m-%d %H:%M:%S %Z')"
 
 # Estimate downtime: newest store/*.log mtime that predates this boot ~= last
 # fleet activity before the VM went down. gap = boot_time - that mtime.
 last_alive=0
 if compgen -G "$STATE_DIR/*.log" >/dev/null 2>&1; then
   for f in "$STATE_DIR"/*.log; do
-    m="$(stat -c '%Y' "$f" 2>/dev/null || echo 0)"
+    m="$(mtime_of "$f")"
     if (( m < btime && m > last_alive )); then last_alive="$m"; fi
   done
 fi
 gap_txt="ismeretlen"
 if (( last_alive > 0 )); then
   gap_min=$(( (btime - last_alive) / 60 ))
-  last_txt="$(date -d "@$last_alive" '+%H:%M:%S' 2>/dev/null || echo '?')"
+  last_txt="$(fmt_epoch "$last_alive" '%H:%M:%S')"
   gap_txt="~${gap_min} perc (utolsó aktivitás ${last_txt} előtt)"
 fi
 
-msg="Marveen ${HOST_KIND} restarted.
+if (( IS_DARWIN )); then
+  # The crash reporter files a panic report at the next boot, so one newer than
+  # this boot belongs to the crash that ended the previous one. HOSTWD_PANIC_DIR
+  # exists for tests only.
+  PANIC_DIR="${HOSTWD_PANIC_DIR:-/Library/Logs/DiagnosticReports}"
+  panic_file=""; panic_m=0
+  for f in "$PANIC_DIR"/panic-full-*.panic; do
+    [[ -f "$f" ]] || continue
+    m="$(mtime_of "$f")"
+    if (( m >= btime && m > panic_m )); then panic_file="$f"; panic_m="$m"; fi
+  done
+  panic_txt=""
+  if [[ -n "$panic_file" ]] && command -v python3 >/dev/null 2>&1; then
+    panic_txt="$(python3 -I "$INSTALL_DIR/scripts/lib/panic-summary.py" "$panic_file" 2>/dev/null | head -1)"
+  fi
+  # Downtime runs to NOW, not to the boot: the team is back when this runs
+  # (after the login), and that is the gap Patrik saw.
+  now_epoch="$(date +%s)"
+  down_txt="ismeretlen"
+  if (( last_alive > 0 )); then
+    down_txt="kb. $(( (now_epoch - last_alive) / 60 )) perc ($(fmt_epoch "$last_alive" '%H:%M') - $(fmt_epoch "$now_epoch" '%H:%M'))"
+  fi
+  msg="A gép újraindult, boot: $(fmt_epoch "$btime" '%H:%M').
+Kiesés: ${down_txt}.${panic_txt:+
+Ok: ${panic_txt}}
+A csapat visszaáll: Klodel indul elsőként, utána egyenként a többiek."
+else
+  msg="Marveen ${HOST_KIND} restarted.
 Új boot: ${boot_local}
 Becsült kiesés: ${gap_txt}
 (Ez host/VM szintű restart, NEM app-crash. A dashboard/channels app-crash külön OnFailure-értesítést küld.)"
+fi
 
 log "host restart detected: prev btime=$prev new=$btime; sending Telegram"
 
