@@ -30,6 +30,13 @@ NAME (never its text), seed, detector, score. No image, preview, base64 or link.
 Usage (inside Mira's venv, after the models are in place):
   check.py --root <mflux-root> inbox --dest out/panna
   check.py --root <mflux-root> sweep [--dirs out final drafts]
+  check.py --root <mflux-root> score --dirs final/x out/y
+
+score is read-only (Mira 9744): it prints, per image, the path under the root,
+the verdict the screen WOULD give and every detector's score, and touches
+nothing -- no move, no mode change, no log, no blocklist, no message, no passed
+ledger. It is the false-alarm measurement on already published images, where a
+sweep would pull a live sample image into the quarantine on one false flag.
 """
 from __future__ import annotations
 
@@ -389,6 +396,62 @@ def run_sweep(root: Path, dirs: list[str], detectors: list[Detector], sinks: Sin
     return run_batch(root, paths, detectors, sinks, None, passed)
 
 
+# --- read-only scoring (false-alarm measurement, Mira 9744) ------------------
+
+def score_all(path: Path, detectors: list[Detector]) -> tuple[Verdict, list[str]]:
+    """Every detector's score for one file, and the verdict screen() would give
+    (the first flag or error in detector order decides). screen() stops at the
+    first flag; a false-alarm measurement needs the scores below it too."""
+    cols: list[str] = []
+    verdict: Verdict | None = None
+    best: Verdict | None = None
+    for det in detectors:
+        try:
+            s = float(det.score(path))
+        except Exception as e:
+            cols.append(f"{det.name}=error:{type(e).__name__}")
+            verdict = verdict or Verdict(True, det.name, None, error=type(e).__name__)
+            continue
+        if not (0.0 <= s <= 1.0):
+            cols.append(f"{det.name}=error:ScoreOutOfRange")
+            verdict = verdict or Verdict(True, det.name, None, error="ScoreOutOfRange")
+            continue
+        cols.append(f"{det.name}={s:.4f}")
+        if s >= det.threshold:
+            verdict = verdict or Verdict(True, det.name, s)
+        elif best is None or s > (best.score or 0.0):
+            best = Verdict(False, det.name, s)
+    if verdict is None:
+        verdict = best or Verdict(True, "none", None, error="NoDetectors")
+    return verdict, cols
+
+
+def run_score(root: Path, dirs: list[str], detectors: list[Detector], out=None) -> int:
+    """Read-only: one line per image, nothing on disk changes (see the module
+    docstring). Exit 0 = every image would pass, 2 = some would be quarantined,
+    4 = a file failed the path check, 64 = a dir outside the root."""
+    out = out or sys.stdout
+    flagged = errors = 0
+    for rel in dirs:
+        d = root / rel
+        if not _inside(root, Path(os.path.realpath(d))):
+            print(f"image-safety: {rel} is outside the root; nothing scored", file=sys.stderr)
+            return EXIT_USAGE
+        for p in iter_images(d):
+            name = p.relative_to(root)
+            reason = check_candidate(root, p)
+            if reason:
+                errors += 1
+                print(f"{name}\terror:{reason}", file=out)
+                continue
+            v, cols = score_all(p, detectors)
+            flagged += v.flagged
+            print(f"{name}\t{'flag' if v.flagged else 'pass'}\t" + "\t".join(cols), file=out)
+    if errors:
+        return EXIT_FILE_ERRORS
+    return EXIT_QUARANTINED if flagged else EXIT_OK
+
+
 # --- real detectors (loaded only in the CLI path) ---------------------------
 
 def load_detectors(models_dir: Path) -> list[Detector]:
@@ -405,6 +468,8 @@ def main(argv: list[str] | None = None) -> int:
     pi.add_argument("--dest", required=True, help="where passing images go, relative to the root")
     ps = sub.add_parser("sweep")
     ps.add_argument("--dirs", nargs="+", default=["out", "final", "drafts"])
+    pr = sub.add_parser("score", help="read-only: print verdicts and scores, change nothing")
+    pr.add_argument("--dirs", nargs="+", required=True, help="dirs relative to the root")
     a = ap.parse_args(argv)
 
     block_network()
@@ -416,6 +481,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         print(f"image-safety: detectors unavailable ({type(e).__name__}); nothing moved", file=sys.stderr)
         return EXIT_DETECTORS_UNAVAILABLE
+    if a.mode == "score":
+        return run_score(root, a.dirs, detectors)
     sinks = Sinks()
     if a.mode == "inbox":
         return run_inbox(root, a.dest, detectors, sinks)

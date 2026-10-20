@@ -253,6 +253,89 @@ class ReviewFixTests(Base):
         self.assertEqual(sorted(names), sorted(check.SCREENING_DIRS))
 
 
+class ScoreTests(Base):
+    """The read-only score mode (Mira 9744): a false flag on a published image
+    must not move it, and nothing may be logged, blocklisted, sent or ledgered."""
+
+    def run_score(self, dirs, dets):
+        import io
+        buf = io.StringIO()
+        rc = check.run_score(self.root, dirs, dets, out=buf)
+        return rc, buf.getvalue().splitlines()
+
+    def snapshot(self):
+        out = {}
+        for dp, dn, fn in os.walk(self.tmp.name):
+            for n in dn + fn:
+                p = os.path.join(dp, n)
+                st = os.lstat(p)
+                out[os.path.relpath(p, self.tmp.name)] = (stat.S_IMODE(st.st_mode), st.st_size, st.st_mtime_ns)
+        return out
+
+    def test_a_flag_changes_nothing_on_disk_and_sends_nothing(self):
+        self.put("final/fotok/x_seed5.jpg")
+        self.put("final/fotok/x_seed5.metadata.json", b"{}")
+        self.put("out/panna/y_seed7.png")
+        before = self.snapshot()
+        rc, lines = self.run_score(["final/fotok", "out/panna"], [det("a", 0.9), det("b", 0.1)])
+        self.assertEqual(rc, check.EXIT_QUARANTINED)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.sent, [])
+        self.assertFalse(os.path.lexists(self.store))
+        self.assertFalse(os.path.lexists(self.root / check.PASSED_LEDGER))
+        self.assertFalse(os.path.lexists(self.root / check.QUARANTINE))
+        self.assertEqual(lines, ["final/fotok/x_seed5.jpg\tflag\ta=0.9000\tb=0.1000",
+                                 "out/panna/y_seed7.png\tflag\ta=0.9000\tb=0.1000"])
+
+    def test_every_score_is_printed_also_below_the_threshold(self):
+        self.put("out/panna/y_seed7.png")
+        rc, lines = self.run_score(["out/panna"], [det("a", 0.01), det("b", 0.2)])
+        self.assertEqual(rc, check.EXIT_OK)
+        self.assertEqual(lines, ["out/panna/y_seed7.png\tpass\ta=0.0100\tb=0.2000"])
+
+    def test_the_verdict_equals_what_screen_would_give(self):
+        p = self.put("out/z.png")
+        cases = [
+            [det("a", 0.9), det("b", 0.1)],
+            [det("a", 0.1), det("b", 0.9)],
+            [det("a", 0.1), det("b", 0.2)],
+            [det("a", RuntimeError("x")), det("b", 0.1)],
+            [det("a", 0.1), det("b", 1.5)],
+            [det("a", 0.6), det("b", RuntimeError("x"))],
+            [],
+        ]
+        for dets in cases:
+            v, _ = check.score_all(p, dets)
+            self.assertEqual(v, check.screen(p, dets))
+
+    def test_screening_dirs_are_not_entered_and_a_symlink_is_not_followed(self):
+        self.put(check.QUARANTINE + "/old.png")
+        self.put("out/visszavonva/r.png")
+        target = self.put("elsewhere/t.png")
+        os.symlink(target, self.root / "out/link.png")
+        calls = []
+        rc, lines = self.run_score([check.QUARANTINE, "out"], [det("a", 0.1, calls=calls)])
+        self.assertEqual(calls, [])
+        self.assertEqual(lines, ["out/link.png\terror:Symlink"])
+        self.assertEqual(rc, check.EXIT_FILE_ERRORS)
+        self.assertTrue(os.path.islink(self.root / "out/link.png"))
+
+    def test_a_dir_outside_the_root_is_refused(self):
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (outside / "o.png").write_bytes(b"x")
+        calls = []
+        rc, lines = self.run_score(["../outside"], [det("a", 0.1, calls=calls)])
+        self.assertEqual(rc, check.EXIT_USAGE)
+        self.assertEqual((calls, lines), ([], []))
+
+    def test_the_cli_requires_dirs(self):
+        r = subprocess.run([sys.executable, str(SCRIPT_DIR / "check.py"), "--root", str(self.root), "score"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--dirs", r.stderr)
+
+
 class GuardTests(unittest.TestCase):
     def test_network_is_blocked_after_block_network(self):
         code = (
