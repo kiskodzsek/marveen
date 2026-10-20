@@ -33,6 +33,11 @@
 # both files for the review.
 
 set -euo pipefail
+# Every command resolves from the system dirs only. Under sudo the caller's PATH
+# can survive, and /opt/homebrew/bin, ~/.local/bin and ~/.bun/bin are writable
+# by every agent (same uid): a planted ssh-keygen there would run as root
+# (Viktor 9534 P1). The same goes for the staging-only overrides further down.
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
 USER_NAME=""; LAN=""; PUBKEY=""; ROOT=""
 usage() { echo "usage: sudo bash $0 --user <name> --lan <cidr> --pubkey <file.pub> [--root <staging-dir>]" >&2; exit 64; }
@@ -64,12 +69,28 @@ grep -q "PRIVATE KEY" "$PUBKEY" && die "that is a PRIVATE key. The private key n
 [[ "$(grep -cv '^[[:space:]]*$' "$PUBKEY")" == "1" ]] || die "the key file must hold exactly one key"
 key_line="$(grep -v '^[[:space:]]*$' "$PUBKEY")"
 [[ "$key_line" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ .*)?$ ]] || die "only a plain ssh-ed25519 public key is accepted (no options, S2)"
-ssh-keygen -l -f "$PUBKEY" >/dev/null 2>&1 || die "ssh-keygen cannot read the key"
 
 if [[ -z "$ROOT" ]]; then
   [[ "$(id -u)" == "0" ]] || die "run with sudo (or --root <dir> to stage)"
   id "$USER_NAME" >/dev/null 2>&1 || die "no such user on this machine: $USER_NAME"
 fi
+
+# The fixed binaries and the live config. The overrides exist for the test's
+# staging run only and are ignored in live mode.
+SSHD=/usr/sbin/sshd; DROPIN_SRC=/etc/ssh/sshd_config.d; MAIN_CFG=/etc/ssh/sshd_config
+if [[ -n "$ROOT" ]]; then
+  SSHD="${SSHD_BIN:-$SSHD}"; DROPIN_SRC="${SSHD_DROPIN_DIR:-$DROPIN_SRC}"; MAIN_CFG="${SSHD_MAIN_CONFIG:-$MAIN_CFG}"
+fi
+
+# Backups and scratch live in a fresh 700 dir. Live, that dir is root's under
+# /private/var/tmp, not the caller's TMPDIR: a rollback copies the backup back
+# into /etc/ssh, so a user-writable backup would be a way in.
+if [[ -z "$ROOT" ]]; then WORK="$(mktemp -d /private/var/tmp/ssh-unlock.XXXXXX)"; else WORK="$(mktemp -d "${TMPDIR:-/tmp}/ssh-unlock.XXXXXX")"; fi
+trap 'rm -rf "$WORK"' EXIT
+
+# Validate exactly the line that will be written, not the caller's file again.
+printf '%s\n' "$key_line" > "$WORK/key.pub"
+ssh-keygen -l -f "$WORK/key.pub" >/dev/null 2>&1 || die "ssh-keygen cannot read the key"
 
 ETC="${ROOT}/etc/ssh"
 DROPIN="$ETC/sshd_config.d/010-marveen.conf"
@@ -78,9 +99,9 @@ KEYFILE="$KEYDIR/$USER_NAME"
 mkdir -p "$ETC/sshd_config.d"
 
 backup=""
-if [[ -f "$DROPIN" ]]; then backup="$(mktemp "${TMPDIR:-/tmp}/010-marveen.conf.XXXXXX")"; cp -p "$DROPIN" "$backup"; fi
+if [[ -f "$DROPIN" ]]; then backup="$WORK/010-marveen.conf.bak"; cp -p "$DROPIN" "$backup"; fi
 key_backup=""
-if [[ -f "$KEYFILE" ]]; then key_backup="$(mktemp "${TMPDIR:-/tmp}/authkeys.XXXXXX")"; cp -p "$KEYFILE" "$key_backup"; fi
+if [[ -f "$KEYFILE" ]]; then key_backup="$WORK/authkeys.bak"; cp -p "$KEYFILE" "$key_backup"; fi
 
 cat > "$DROPIN.new" <<EOF
 # Managed by marveen scripts/ssh-unlock-setup.sh (card 1c58f629, Viktor S1/S2).
@@ -119,18 +140,17 @@ rollback() {
 # Validation. Live: the real sshd and its real config. Staging: a copy of the
 # main config pointed at the staged drop-in dir and a throwaway host key, so the
 # check runs without root and measures the same parser.
-SSHD="${SSHD_BIN:-/usr/sbin/sshd}"
 if [[ -z "$ROOT" ]]; then
   if ! "$SSHD" -t; then rollback; die "sshd -t rejected the config -- rolled back, nothing changed"; fi
   T_ARGS=()
 else
   # Mirror the live drop-ins (100-macos.conf brings UsePAM yes) so the staged
   # view is the live one plus ours, not ours alone.
-  for f in "${SSHD_DROPIN_DIR:-/etc/ssh/sshd_config.d}"/*; do
+  for f in "$DROPIN_SRC"/*; do
     [[ -f "$f" && "$(basename "$f")" != "010-marveen.conf" ]] && cp "$f" "$ETC/sshd_config.d/"
   done
   main="$ROOT/sshd_config.main"
-  sed "s#^Include /etc/ssh/sshd_config.d/\*#Include $ETC/sshd_config.d/*#" "${SSHD_MAIN_CONFIG:-/etc/ssh/sshd_config}" > "$main"
+  sed "s#^Include /etc/ssh/sshd_config.d/\*#Include $ETC/sshd_config.d/*#" "$MAIN_CFG" > "$main"
   [[ -f "$ROOT/hostkey" ]] || ssh-keygen -q -t ed25519 -N '' -f "$ROOT/hostkey" >/dev/null
   T_ARGS=(-f "$main" -h "$ROOT/hostkey")
   if ! "$SSHD" -t "${T_ARGS[@]}"; then rollback; die "sshd -t rejected the staged config -- rolled back"; fi
@@ -145,6 +165,4 @@ echo "== sha256"
 shasum -a 256 "$DROPIN" "$KEYFILE"
 echo "== key"
 ssh-keygen -l -f "$KEYFILE"
-[[ -n "$backup" ]] && rm -f "$backup"
-[[ -n "$key_backup" ]] && rm -f "$key_backup"
 echo "OK. Remote Login itself is still OFF until it is switched on in System Settings (S5)."

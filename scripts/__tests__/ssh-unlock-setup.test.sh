@@ -59,6 +59,21 @@ if [ "$(id -u)" != 0 ]; then
 fi
 run --user tester;                    check "missing arguments -> usage (64)" "$(ok "$RC" = 64)"
 
+echo "== PATH and overrides (Viktor 9534 P1)"
+# Shadow every command the script calls with a fake that leaves a mark. Under
+# sudo the caller's PATH can survive, and these dirs are agent-writable.
+mkdir -p "$SB/shadow"
+for c in ssh-keygen shasum sed cp mv chmod chown mkdir mktemp grep awk cut basename id rm cat ls printf; do
+  printf '#!/bin/sh\necho "%s" >> "%s/shadow.hit"\nexit 0\n' "$c" "$SB" > "$SB/shadow/$c"; chmod +x "$SB/shadow/$c"
+done
+OUT="$(PATH="$SB/shadow:$PATH" bash "$SETUP" --user tester --lan 192.168.0.0/24 --pubkey "$SB/k.pub" --root "$SB/r10" 2>&1)"; RC=$?
+check "a shadowing PATH runs none of the fakes, and staging still works" "$(ok "$RC" = 0 -a ! -e "$SB/shadow.hit")" "rc=$RC hits=$(sort -u "$SB/shadow.hit" 2>/dev/null | tr '\n' ' ') $OUT"
+# SSHD_BIN, SSHD_DROPIN_DIR and SSHD_MAIN_CONFIG are read only inside the
+# staging-only block (between `if [[ -n "$ROOT" ]]; then` and its `fi`).
+BAD="$(awk '/^if \[\[ -n "\$ROOT" \]\]; then$/{inb=1; next} inb && /^fi$/{inb=0; next}
+  !/^[[:space:]]*#/ && /SSHD_BIN|SSHD_DROPIN_DIR|SSHD_MAIN_CONFIG/ && !inb {print NR": "$0}' "$SETUP")"
+check "the sshd/config overrides are read only in staging mode" "$(ok -z "$BAD" -a -n "$(grep -c 'SSHD_BIN' "$SETUP")")" "$BAD"
+
 echo
 echo "$((DONE-FAILS))/$DONE passed"
 [ "$FAILS" = "0" ] || exit 1
