@@ -206,6 +206,10 @@ describe('Bash: names as text (false-deny fix)', () => {
     `ls x/_quarantine | awk '{getline l < $0; print l}'`,
     'ls x/_quarantine |& xargs cat',
     'ls x/_quarantine 2>&1 | xargs cat',
+    // Viktor #5179 P4: a substitution in the filter stage opens the piped name
+    `echo ${Q} | cat $(cat)`,
+    `echo ${Q} | cat \`cat\``,
+    `echo ${Q} | cat <(cat)`,
     // L1: a heredoc of names for xargs / while read
     hd('xargs cat', Q),
     `while read f; do base64 "$f"; done <<'EOF'\n${Q}\nEOF`,

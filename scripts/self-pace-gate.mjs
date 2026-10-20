@@ -370,6 +370,9 @@ export function screeningPathMentioned(value) {
 // printer named (and `ls <dir> | xargs cat` already did). A stage that names a
 // screening dir may pipe only into filters that treat stdin as text. awk is
 // out (getline reads a named file), and so is any --files0-from/--files-from.
+// A substitution in a filter stage runs a command on the piped names (Viktor
+// #5179 P4: `echo <dir>/a.png | cat $(cat)` opens the file), so it is out too.
+const SCREENING_STAGE_SUBST_RX = /\$\(|`|[<>]\(/
 const SCREENING_TEXT_FILTERS = new Set(['grep', 'egrep', 'fgrep', 'head', 'tail', 'wc', 'sort', 'uniq', 'cut', 'tr', 'nl', 'column', 'cat'])
 
 export function screeningPipesAllowed(command) {
@@ -387,7 +390,7 @@ export function screeningPipesAllowed(command) {
       let i = 0
       while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++
       const cmd = (words[i] ?? '').replace(/^.*\//, '')
-      if (!SCREENING_TEXT_FILTERS.has(cmd) || /files0?-from/.test(st)) return false
+      if (!SCREENING_TEXT_FILTERS.has(cmd) || /files0?-from/.test(st) || SCREENING_STAGE_SUBST_RX.test(st)) return false
     }
   }
   return true
