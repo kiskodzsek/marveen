@@ -860,9 +860,17 @@ def strip_for_name(text: str) -> str:
     return NAME_MASK.sub(" ", text)
 
 
+# A marker counts only as a whole word (2026-10-20, card ac3cf99f): as a bare
+# substring "ami"/"amit" fired inside "NotramIT" and "van" inside "advance", and
+# an English reminder reached three markers and was blocked as accentless
+# Hungarian. The lookarounds use \w, which is Unicode-aware, so "már" and
+# "van-e" still count.
+_HU_MARKER_RES = [re.compile(r"(?<!\w)" + re.escape(m) + r"(?!\w)") for m in HU_MARKERS]
+
+
 def is_hungarian(text: str) -> bool:
     low = text.lower()
-    return sum(1 for m in HU_MARKERS if m in low) >= 3
+    return sum(1 for r in _HU_MARKER_RES if r.search(low)) >= 3
 
 
 # GATETG816 (2026-08-16, Marveen merese): az is_hungarian() funkcionalis szavakra
