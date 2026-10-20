@@ -89,18 +89,68 @@ host_state() {
 # --- lock: mkdir is atomic on every filesystem we run on; flock is not on macOS ---
 have_lock=0
 release() { (( have_lock )) && rm -rf "$LOCK" 2>/dev/null; have_lock=0; }
+
+# Seconds since pid $1 started (ps etime is [[dd-]hh:]mm:ss on macOS and Linux).
+proc_age() {
+  local e d=0 h=0 m=0 s=0
+  e="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')"
+  [[ "$e" == *-* ]] && { d="${e%%-*}"; e="${e#*-}"; }
+  IFS=: read -r -a p <<< "$e"
+  case "${#p[@]}" in
+    2) m="${p[0]}"; s="${p[1]}" ;;
+    3) h="${p[0]}"; m="${p[1]}"; s="${p[2]}" ;;
+    *) return 1 ;;
+  esac
+  echo $(( 10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s ))
+}
+
+# The owner line is "pid name epoch". Stale = the pid is gone (crash, kill -9,
+# reboot), or the pid is alive but started after the lock was taken, so the
+# number was reused by an unrelated process.
+owner_is_stale() {
+  local opid _n oepoch age
+  read -r opid _n oepoch <<< "$1"
+  [[ "$opid" =~ ^[0-9]+$ && "$oepoch" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$opid" 2>/dev/null || return 0
+  age="$(proc_age "$opid")" || return 1
+  (( $(date +%s) - age > oepoch + 2 ))
+}
+
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+
 try_lock() {
   if mkdir "$LOCK" 2>/dev/null; then
     echo "$$ $NAME $(date +%s)" >"$LOCK/owner"; have_lock=1; return 0
   fi
-  # Stale lock: the owner pid is gone (crash, kill -9, reboot).
-  local opid; opid="$(cut -d' ' -f1 "$LOCK/owner" 2>/dev/null)"
-  if [[ "$opid" =~ ^[0-9]+$ ]] && ! kill -0 "$opid" 2>/dev/null; then
-    log "stale lock from pid $opid removed"
-    rm -rf "$LOCK" 2>/dev/null
-    mkdir "$LOCK" 2>/dev/null && { echo "$$ $NAME $(date +%s)" >"$LOCK/owner"; have_lock=1; return 0; }
+  local seen t; seen="$(cat "$LOCK/owner" 2>/dev/null)"
+  if [[ -z "$seen" ]]; then
+    # No owner line: either it is being written right now, or the owner died
+    # between mkdir and the write. Only the second leaves it there for 60 s.
+    t="$(mtime "$LOCK")"
+    [[ "$t" =~ ^[0-9]+$ ]] && (( $(date +%s) - t > 60 )) || return 1
+  else
+    owner_is_stale "$seen" || return 1
   fi
-  return 1
+  # Takeover goes through its own mkdir mutex, and the owner is re-read inside
+  # it: two waiters that both saw the same stale owner cannot both win, and the
+  # loser cannot delete the winner's fresh lock (Viktor 9013 L1). Holding the
+  # mutex takes milliseconds, so one older than 60 s is left by a killed
+  # process and is cleared.
+  local tk="$LOCK.takeover"
+  if ! mkdir "$tk" 2>/dev/null; then
+    t="$(mtime "$tk")"
+    [[ "$t" =~ ^[0-9]+$ ]] && (( $(date +%s) - t > 60 )) && rmdir "$tk" 2>/dev/null
+    return 1
+  fi
+  if [[ "$(cat "$LOCK/owner" 2>/dev/null)" == "$seen" ]]; then
+    log "stale lock (owner: ${seen:-none}) removed"
+    rm -rf "$LOCK" 2>/dev/null
+  fi
+  if mkdir "$LOCK" 2>/dev/null; then
+    echo "$$ $NAME $(date +%s)" >"$LOCK/owner"; have_lock=1
+  fi
+  rmdir "$tk" 2>/dev/null
+  (( have_lock ))
 }
 
 child=0
@@ -133,7 +183,11 @@ while :; do
   sleep "$POLL"
 done
 
-log "START free=${MEM_FREE_PCT}% src=${MEM_SOURCE}: $*"
+# Only the command's basename goes to the log: the full argv can carry a
+# customer file path or a prompt, and a newline in it would forge a log line
+# (Viktor 9013 I1).
+cmd="$(printf '%s' "${1##*/}" | tr -c 'A-Za-z0-9._+-' '_' | cut -c1-60)"
+log "START free=${MEM_FREE_PCT}% src=${MEM_SOURCE}: $cmd"
 # Job control gives the background job its own process group, so the watchdog
 # can stop the job AND everything it spawned (panna.sh -> mflux -> python).
 set -m

@@ -98,11 +98,51 @@ kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
 hj --wait 2 -- touch "$SB/ran6"
 check "stale lock (owner pid dead) is taken over and the job runs" "$(ok "$RC" = 0 -a -f "$SB/ran6" -a ! -e "$LOCK")" "rc=$RC $OUT"
 
+# L1 (Viktor 9013): pid reuse, ownerless locks, the takeover mutex, the race.
+true & DEAD=$!; wait "$DEAD"
+clean() { rm -rf "$LOCK" "$LOCK.takeover"; }
+clean; sleep 60 & LIVE=$!
+mkdir "$LOCK"; echo "$LIVE other 1000" > "$LOCK/owner"
+hj --wait 2 -- touch "$SB/ran7"
+check "owner pid alive but started after the lock (reused pid) -> taken over" "$(ok "$RC" = 0 -a -f "$SB/ran7")" "rc=$RC $OUT"
+kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
+
+clean; mkdir "$LOCK"
+hj --wait 1 -- touch "$SB/ran8"
+check "ownerless lock younger than 60 s is left alone (75)" "$(ok "$RC" = 75 -a ! -e "$SB/ran8" -a -d "$LOCK")" "rc=$RC $OUT"
+touch -t 202001010000 "$LOCK"
+hj --wait 2 -- touch "$SB/ran9"
+check "ownerless lock older than 60 s is taken over" "$(ok "$RC" = 0 -a -f "$SB/ran9" -a ! -e "$LOCK")" "rc=$RC $OUT"
+
+clean; mkdir "$LOCK" "$LOCK.takeover"; echo "$DEAD gone 1000" > "$LOCK/owner"
+hj --wait 1 -- touch "$SB/ran10"
+check "a fresh takeover mutex blocks the takeover; the stale lock stays" "$(ok "$RC" = 75 -a ! -e "$SB/ran10" -a -n "$(grep "^$DEAD gone" "$LOCK/owner" 2>/dev/null)")" "rc=$RC $OUT"
+touch -t 202001010000 "$LOCK.takeover"
+hj --wait 3 -- touch "$SB/ran11"
+check "a takeover mutex older than 60 s is cleared, then the job runs" "$(ok "$RC" = 0 -a -f "$SB/ran11" -a ! -e "$LOCK" -a ! -e "$LOCK.takeover")" "rc=$RC $OUT"
+
+# Six waiters see the same stale owner at once; the jobs must never overlap.
+clean; mkdir "$LOCK"; echo "$DEAD gone 1000" > "$LOCK/owner"; : > "$SB/race"
+for i in 1 2 3 4 5 6; do
+  ( env HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+      HEAVY_JOB_DF_KB=99999999 bash "$HJ" --wait 30 -- bash -c 'echo S >> "$0"; sleep 0.3; echo E >> "$0"' "$SB/race" >/dev/null 2>&1 ) &
+done
+wait
+RACE="$(tr -d '\n' < "$SB/race")"
+check "six waiters on one stale lock: all six ran, never two at once" "$(ok "$RACE" = SESESESESESE)" "sequence=$RACE"
+check "no lock or takeover mutex is left behind" "$(ok ! -e "$LOCK" -a ! -e "$LOCK.takeover")"
+
+# I1 (Viktor 9013): the log keeps the command name, not its arguments.
+clean; SECRET="customer-$$.wav"
+hj --name i1 --wait 5 -- bash -c 'exit 0' "$SB/$SECRET" $'two\nSTART forged'
+check "the log has the command name only: no argument, no forged line" "$(ok "$RC" = 0 -a -z "$(grep -e "$SECRET" -e 'forged' "$SB/store/heavy-job.log")" -a -n "$(grep 'i1 .*START free=.*: bash$' "$SB/store/heavy-job.log")")" "$(tail -3 "$SB/store/heavy-job.log")"
+
 # Watchdog: the job spawns a grandchild; memory drops mid-run; both must die.
+clean
 level 70
 ( sleep 3; level 10 ) &
 T0=$(date +%s)
-hj --name wd -- bash -c 'sleep 120 & echo $! > "$0"; wait' "$SB/grandchild"
+hj --name wd --wait 5 -- bash -c 'sleep 120 & echo $! > "$0"; wait' "$SB/grandchild"
 T1=$(date +%s)
 GC="$(cat "$SB/grandchild" 2>/dev/null)"
 check "memory below --kill-below mid-run -> watchdog stop, exit 70" "$(ok "$RC" = 70)" "rc=$RC $OUT"

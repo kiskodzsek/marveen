@@ -25,8 +25,9 @@
 #     heavy-job.sh refuses to start while it says warn/critical; the fleet
 #     memory gate keeps its own memory bands for agent starts.
 #   - store/host-monitor.log: one line per band CHANGE, not per run.
-#   - entering CRITICAL (and every 30 min while it lasts): one Telegram line to
-#     the owner chat and one inter-agent message to the main agent. A failed
+#   - CRITICAL: one Telegram line to the owner chat and one inter-agent message
+#     to the main agent, at most once per 30 min counted from the last alert,
+#     even if the band left critical and came back in between. A failed
 #     Telegram send does not stamp the cooldown, so it is retried next run.
 #   - It never kills, pauses or restarts anything. Pausing non-core agents in
 #     CRITICAL is a separate, approved step, not a side effect of a monitor.
@@ -129,7 +130,10 @@ echo "$line"
 # --- CRITICAL alert, cooldown-deduped ---
 last="$(cat "$STAMP" 2>/dev/null | tr -dc '0-9')"
 tg_due=1
-if [[ -n "$last" ]] && (( NOW - last < COOLDOWN )) && [[ "${prev_band:-}" == "critical" ]]; then tg_due=0; fi
+# The cooldown runs from the last alert, whatever the band did in between: a
+# value flapping on a threshold (warn <-> critical every minute) must not page
+# the owner on every return to critical (Viktor 9013 L3).
+if [[ -n "$last" ]] && (( NOW - last < COOLDOWN )); then tg_due=0; fi
 
 msg="Mac mini KRITIKUS: ${reason}. Szabad memória ${free_pct}%, swap ${swap_pct}%, lemez ${disk_gb} GiB. Nehéz munka nem indul; nézzétek, mi fut."
 
@@ -171,7 +175,7 @@ MAIN_AGENT="${HOSTMON_MAIN_AGENT:-$( [[ -f "$INSTALL_DIR/.env" ]] && grep -E '^M
 # to the main agent on every 60 s run.
 alast="$(cat "$STAMP.agent" 2>/dev/null | tr -dc '0-9')"
 if [[ -n "${MAIN_AGENT:-}" && -f "$HERE/agent-msg.sh" ]] \
-   && ! { [[ -n "$alast" ]] && (( NOW - alast < COOLDOWN )) && [[ "${prev_band:-}" == "critical" ]]; }; then
+   && ! { [[ -n "$alast" ]] && (( NOW - alast < COOLDOWN )); }; then
   if echo "[HOST-MONITOR] ${msg}" | bash "$HERE/agent-msg.sh" host-monitor "$MAIN_AGENT" - >/dev/null 2>&1; then
     echo "$NOW" >"$STAMP.agent" 2>/dev/null
   else

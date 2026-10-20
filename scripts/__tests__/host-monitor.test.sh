@@ -83,6 +83,13 @@ NOW=$((NOW+1800)); mon 10
 check "still critical after the cooldown -> reminded once more" "$(ok "$(grep -c sendMessage "$SB/curl.log")" = 2 -a "$(wc -l < "$SB/agentmsg.log" | tr -d ' ')" = 2)"
 check "band changes are logged once each (none->ok, ok->critical)" "$(ok "$(grep -c -- '->' "$LOG")" = 2)" "$(cat "$LOG")"
 
+# L3 (Viktor 9013): flapping on the threshold inside the cooldown pages nobody.
+rm -f "$STATE" "$SB/store/.host-monitor-alert"* "$SB/curl.log" "$SB/agentmsg.log"
+mon 10; for i in 1 2 3 4 5; do NOW=$((NOW+60)); mon 20; NOW=$((NOW+60)); mon 10; done
+check "critical <-> warn flapping for 10 min -> still one Telegram, one message" "$(ok "$(grep -c sendMessage "$SB/curl.log")" = 1 -a "$(wc -l < "$SB/agentmsg.log" | tr -d ' ')" = 1)" "tg=$(grep -c sendMessage "$SB/curl.log") msg=$(wc -l < "$SB/agentmsg.log")"
+NOW=$((NOW+1800)); mon 20; NOW=$((NOW+60)); mon 10
+check "back to critical after the cooldown -> alerted again" "$(ok "$(grep -c sendMessage "$SB/curl.log")" = 2 -a "$(wc -l < "$SB/agentmsg.log" | tr -d ' ')" = 2)"
+
 rm -f "$STATE" "$SB/store/.host-monitor-alert"* "$SB/curl.log" "$SB/agentmsg.log"; touch "$SB/curl-fail"
 mon 10; NOW=$((NOW+60)); mon 10
 check "a failed Telegram send is retried on the next run (no stamp)" "$(ok "$(grep -c sendMessage "$SB/curl.log")" = 2 -a ! -f "$SB/store/.host-monitor-alert")"
