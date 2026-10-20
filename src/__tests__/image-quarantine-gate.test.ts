@@ -131,6 +131,45 @@ describe('Bash', () => {
   })
 })
 
+// Pulzus 9266: a name in a report or message is text, not a file read.
+describe('Bash: names as text (false-deny fix)', () => {
+  it.each([
+    `python3 -I cardc.py 1a4fe725 <<'EOF'\nmoved to x/_quarantine/a.png\nEOF`,
+    `python3 scripts/report.py -W ignore <<'EOF'\nx/_unscreened/a.png\nEOF`,
+    'echo "x/_quarantine/y.png"',
+    `printf '%s\\n' "x/_quarantine/y.png"`,
+    'bash /Users/klodel/marveen/scripts/agent-msg.sh kernel viktor "see x/_quarantine/a.png"',
+    `cat <<'EOF' | bash agent-msg.sh a b -\nx/_quarantine/a\nEOF`,
+  ])('allows: %s', (command) => {
+    expect(decide('Bash', { command })).toEqual({ deny: false })
+  })
+
+  it.each([
+    // the interpreter reads its code from stdin
+    `python3 - <<'EOF'\nopen('x/_quarantine/a.png').read()\nEOF`,
+    `python3 -I <<'EOF'\nopen('x/_quarantine/a.png').read()\nEOF`,
+    `python3 -m code <<'EOF'\nopen('x/_quarantine/a.png')\nEOF`,
+    `python3 -Ic 'import sys; exec(sys.stdin.read())' <<'EOF'\nopen('x/_quarantine/a.png')\nEOF`,
+    `bash -s <<'EOF'\ncat x/_quarantine/a.png\nEOF`,
+    `bash <<'EOF'\ncat x/_quarantine/a.png\nEOF`,
+    `node <<'EOF'\nrequire('fs').readFileSync('x/_quarantine/a.png')\nEOF`,
+    `ssh box cat <<'EOF'\nx/_quarantine/a.png\nEOF`,
+    // content fed into a name printer
+    'ls $(cat x/_quarantine/a.png)',
+    'echo `cat x/_quarantine/a.png`',
+    'echo "$(cat x/_quarantine/a.png)"',
+    'echo <(cat x/_quarantine/a.png)',
+    'ls x/_quarantine < x/_quarantine/a.png',
+    'bash agent-msg.sh a b - < x/_quarantine/a.png',
+    'echo hi > x/_quarantine/a.png',
+    // a script argument is still a possible read
+    'python3 script.py x/_quarantine/a.png',
+    'bash other.sh "x/_unscreened/a.png"',
+  ])('denies: %s', (command) => {
+    expect(decide('Bash', { command })).toEqual(DENY)
+  })
+})
+
 // Review P2 (Klodel 9186): the main agent does not run self-pace-gate.mjs, so the
 // same decision runs from its own hook, wired in the repo-shipped settings.
 describe('main-agent hook (scripts/hooks/image-quarantine-gate.mjs)', () => {

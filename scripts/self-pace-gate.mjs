@@ -323,6 +323,10 @@ export function allowlistBashSegmentAllowed(seg) {
 //   - MCP tools match only path-like forms (with a slash, also %-decoded), so a
 //     channel message that merely names the directory still goes out.
 //   - Listing names (ls, du) is allowed: names carry only the prompt name and seed.
+//     So is printing a name as text (echo, printf, the fleet's agent-msg.sh), so a
+//     report or a message can say where a file went (Pulzus 9266). None of them
+//     may feed a file in: a command substitution or an input redirect in the
+//     segment denies (`ls $(cat <dir>/a.png)` printed the bytes in the ls error).
 //     The generator and mkdir may write INTO _unscreened/ (new images belong there).
 // SCREENING_DIRS must equal SCREENING_DIRS in scripts/image-safety/check.py (the
 // sweep skips exactly these); a test compares the two. panna-elvetett/ and
@@ -333,7 +337,7 @@ const tokenRx = (names) => new RegExp(String.raw`(?:^|[\s'"=:(/])(?:${dirAlt(nam
 const SCREENING_TOKEN_RX = tokenRx(SCREENING_DIR_NAMES)
 const OTHER_SCREENING_TOKEN_RX = tokenRx(SCREENING_DIR_NAMES.filter((n) => n !== '_unscreened'))
 const SCREENING_PATH_RX = new RegExp(String.raw`\/(?:${dirAlt(SCREENING_DIR_NAMES)})(?=[\/\s'"]|$)|(?:^|[\s'"=:(])(?:${dirAlt(SCREENING_DIR_NAMES)})\/`, 'i')
-const SCREENING_LISTERS = new Set(['ls', 'du'])
+const SCREENING_LISTERS = new Set(['ls', 'du', 'echo', 'printf', 'agent-msg.sh'])
 const UNSCREENED_WRITERS_RX = /^(?:mkdir|mflux-generate[\w-]*)$/
 const GIT_READONLY_SUBCOMMANDS = new Set(['grep', 'log', 'diff', 'show', 'status', 'blame'])
 // `git diff --no-index --text` and `git grep --no-index -a` print the raw bytes of
@@ -368,7 +372,9 @@ export function screeningBashSegmentAllowed(seg) {
   const words = s.split(/\s+/)
   let i = 0
   while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++ // leading VAR=x
-  const cmd = (words[i] ?? '').replace(/^.*\//, '')
+  let cmd = (words[i] ?? '').replace(/^.*\//, '')
+  // `bash /path/agent-msg.sh ...`: the helper is the command, bash only runs it
+  if (/^(?:ba)?sh$/.test(cmd) && /(?:^|\/)agent-msg\.sh$/.test(words[i + 1] ?? '')) cmd = 'agent-msg.sh'
   // a writer into _unscreened/ is fine as long as no other screening dir is named
   if (UNSCREENED_WRITERS_RX.test(cmd) && !OTHER_SCREENING_TOKEN_RX.test(s)) return true
   if (cmd === 'git') {
@@ -378,6 +384,7 @@ export function screeningBashSegmentAllowed(seg) {
     return GIT_READONLY_SUBCOMMANDS.has(sub ?? '')
   }
   if (!SCREENING_LISTERS.has(cmd)) return false
+  if (/\$\(|`|<\(|(?:^|[^<])<(?!<)/.test(s)) return false // feeds content in
   // `ls x > _quarantine/y` writes into it; `ls` piping into a reader is split
   // into its own segment and judged there.
   for (const m of s.matchAll(OUTPUT_REDIRECT_RX)) {
@@ -646,10 +653,33 @@ export function stripDataPayloads(seg) {
 // remote/container executor.
 const HEREDOC_INTERPRETER_RX = /^(?:bash|sh|zsh|dash|ksh|ash|python[0-9.]*|node|nodejs|ruby|perl|php|ssh)$/
 
-function heredocOwnerRunsBody(before) {
+// Interpreter flags after which the body is still (or may be) code: inline code
+// (-c, -e, --eval, -p), a module (-m code reads stdin), bash -s, interactive -i.
+const STDIN_CODE_FLAG_RX = /^(?:-[A-Za-z]*[cemspi][A-Za-z]*|--eval|--print|--interactive)$/
+// Flags that take the next word as their value (python -W arg, -X opt).
+const VALUE_FLAGS = new Set(['-W', '-X'])
+
+// `python3 -I cardc.py X <<'EOF'` hands the body to cardc.py on stdin: the
+// interpreter reads its CODE from the file, the body is data. Only an
+// interpreter with no script operand (or `-`) reads code from stdin. Opt-in,
+// for the image-quarantine decision only (Pulzus 9266): the self-pace checks
+// keep the stricter reading, because a script may still exec what it reads.
+function scriptOperandTakesStdin(tokens) {
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]
+    if (t === '-' || STDIN_CODE_FLAG_RX.test(t)) return false
+    if (VALUE_FLAGS.has(t)) { i++; continue }
+    if (t.startsWith('-')) continue
+    return true // the first operand is a script file
+  }
+  return false
+}
+
+function heredocOwnerRunsBody(before, opts = {}) {
   // `before` is the command text up to the << redirect; the owner is the first
-  // word of the last command segment.
-  const seg = before.split(/\n|;|\|\|?|&&?|\(|\{/).pop() ?? ''
+  // word of the last command segment. Quoted text is emptied first, so a `;` in
+  // `python3 -c 'a; b' <<'EOF'` does not cut the owner off (found with 9266).
+  const seg = before.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''").split(/\n|;|\|\|?|&&?|\(|\{/).pop() ?? ''
   const tokens = seg.trim().split(/\s+/).filter(Boolean)
   // Pass-through prefixes that do not change what runs the body.
   while (tokens.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]) ||
@@ -658,13 +688,15 @@ function heredocOwnerRunsBody(before) {
   }
   if (!tokens.length) return false
   const word = tokens[0].split('/').pop()
-  if (HEREDOC_INTERPRETER_RX.test(word)) return true
+  if (HEREDOC_INTERPRETER_RX.test(word)) {
+    return !(opts.scriptStdinIsData && word !== 'ssh' && scriptOperandTakesStdin(tokens))
+  }
   // docker/podman/kubectl exec run the body through a shell in the target.
   if (['docker', 'podman', 'kubectl'].includes(word) && tokens.slice(1).includes('exec')) return true
   return false
 }
 
-export function stripHeredocBodies(command) {
+export function stripHeredocBodies(command, opts = {}) {
   const cmd = String(command ?? '')
   if (!/<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*/.test(cmd)) return cmd
   return cmd.replace(
@@ -674,7 +706,7 @@ export function stripHeredocBodies(command) {
       if (!literal && (body.includes('$(') || body.includes('`'))) return full
       // A quoted body the shell will not expand is still executed when an
       // interpreter/remote-executor owns the redirect -- keep it visible then.
-      if (heredocOwnerRunsBody(string.slice(0, offset))) return full
+      if (heredocOwnerRunsBody(string.slice(0, offset), opts)) return full
       return `${open}\n${close}`
     },
   )
@@ -803,12 +835,13 @@ export function screeningDecision(toolName, toolInput, opts = {}) {
   }
   if (name !== 'Bash') return { deny: false }
   const raw = String(toolInput?.command ?? '')
-  const safe = stripProseArguments(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw))))
+  const heredocOpts = { scriptStdinIsData: true }
+  const safe = stripProseArguments(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw, heredocOpts))))
   for (const seg of splitSegments(safe)) {
     if (!screeningBashSegmentAllowed(seg)) return { deny: true, reason: 'image-quarantine' }
   }
   const depth = (opts.depth ?? 0) + 1
-  for (const payload of wrappedPayloads(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw))))) {
+  for (const payload of wrappedPayloads(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw, heredocOpts))))) {
     if (depth > MAX_WRAP_DEPTH) return { deny: true, reason: 'image-quarantine' }
     const inner = screeningDecision('Bash', { command: payload }, { depth })
     if (inner.deny) return inner
