@@ -32,6 +32,7 @@ const PINS: Record<string, Pin> = {
   // --- not a local claude launch --------------------------------------------
   'src/web/ssh-tmux.ts': { venv: 0, exempt: 1, why: 'remote launch over ssh: a local venv path means nothing on the remote host' },
   'scripts/monitor_agents.sh': { venv: 0, exempt: 1, why: 'tmux viewer: links existing agent windows, launches no claude' },
+  'scripts/ssh-unlock-setup.sh': { venv: 0, exempt: 1, why: 'root-run sshd setup: a fixed system-dirs PATH so no agent-writable dir resolves a command (Viktor 9534 P1), launches no claude' },
   'update.sh': { venv: 0, exempt: 2, why: "the updater's pinned node for its own npm/build steps" },
   'install-macos.sh': { venv: 0, exempt: 3, why: "the installer's own PATH while installing bun/node" },
   'install-linux.sh': { venv: 0, exempt: 7, why: "the installer's own PATH, and the lines it appends to the user's shell rc" },
