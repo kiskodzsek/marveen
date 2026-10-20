@@ -157,7 +157,7 @@ const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_
 // boundary is a separate uid (H1).
 export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
 export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato'])
-export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo'])
+export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo', 'com.marveen.host-restart-watchdog'])
 export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // K1 (Viktor 3423, card ad7d3eaa): the worker runs under sandbox-exec denying writes under
   // ~/Library/CloudStorage, plus the ~/Library and ~ directory nodes so a parent rename cannot
@@ -173,6 +173,10 @@ export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // every 5 minutes. A command task would run inside the dashboard process (Viktor M2/L2), so
   // launchd it is. Bootstrap and bootout only; StartInterval runs it, nothing kickstarts it.
   'hu.myshp.vesz-kapcsolo': new Set(['b6ab84e961ebe53b3b5b6d6703c427d9ca82dc52bb5626e0bdee587b2a41586f']),
+  // Patrik TG 3775 (card 1c58f629): the macOS host-restart notice, the plist that
+  // scripts/install-host-restart-watchdog.sh writes for this install. RunAtLoad + every
+  // 5 minutes; bootstrap and bootout only, nothing kickstarts it.
+  'com.marveen.host-restart-watchdog': new Set(['3dfbb205197cf973fcf578cf6033a15ecb1687157cf403a31f7160a000d8413a']),
 }
 const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
 const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)

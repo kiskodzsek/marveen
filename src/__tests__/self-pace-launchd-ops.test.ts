@@ -120,6 +120,26 @@ describe('the takeover switch (Klodel 6082, shared/vesz-atvetel.md)', () => {
   })
 })
 
+describe('the host-restart notice (Patrik TG 3775, card 1c58f629)', () => {
+  const HW = 'com.marveen.host-restart-watchdog'
+  const hwPlist = join(agentsDir, `${HW}.plist`)
+  it('bootstrap of the approved plist and bootout pass; kickstart and a changed plist are refused', () => {
+    writeFileSync(hwPlist, readFileSync(join(__dirname, 'fixtures', `${HW}.plist`)))
+    const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${hwPlist}` }, pulzus)
+    expect(ok.deny).toBe(false)
+    expect(ok.launchdOps[0].plist_sha256).toBe('3dfbb205197cf973fcf578cf6033a15ecb1687157cf403a31f7160a000d8413a')
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${HW}` }, pulzus).deny).toBe(false)
+    expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${HW}` }, pulzus).deny).toBe(true)
+    writeFileSync(hwPlist, readFileSync(join(__dirname, 'fixtures', `${HW}.plist`), 'utf8').replace('<integer>300</integer>', '<integer>1</integer>'))
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${hwPlist}` }, pulzus).deny).toBe(true)
+  })
+  it('the same bootstrap from any other agent is refused', () => {
+    writeFileSync(hwPlist, readFileSync(join(__dirname, 'fixtures', `${HW}.plist`)))
+    const kernel = { ...pulzus, agent: 'kernel', configDirAgent: 'kernel' }
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${hwPlist}` }, kernel).deny).toBe(true)
+  })
+})
+
 describe('the invoice mover v3 and its B5 probe (Pulzus 2864, card daef6926)', () => {
   const MOV = 'hu.myshp.szamla.mozgato'
   const B5 = 'hu.myshp.szamla.b5probe'

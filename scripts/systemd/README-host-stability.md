@@ -17,6 +17,7 @@ WSL handle/terminal closes), Windows sleep/hibernate -> resume, `wsl
 | File | Role |
 |------|------|
 | `host-restart-watchdog.sh` + `marveen-host-watchdog.service` | oneshot at every user-manager start; if `/proc/stat btime` changed vs `store/.last-btime`, Telegrams "host/WSL VM restarted" with an estimated downtime. btime-change => host restart. |
+| `host-restart-watchdog.sh` + `install-host-restart-watchdog.sh` (macOS) | the launchd twin: `com.marveen.host-restart-watchdog`, at login + every 300 s; reads `kern.boottime`, and a panic report filed after the boot adds the panic time and first line to a Hungarian notice. With FileVault on it can only run after someone logs in. |
 | `unit-fail-notify.sh` + `marveen-notify@.service` | instantiated by `OnFailure=marveen-notify@%n.service` drop-ins on the dashboard/channels units; Telegrams "app-crash: <unit> FAILED". OnFailure => app crash. |
 | `marveen-channels.service` StartLimit fix | `StartLimitIntervalSec`/`StartLimitBurst` moved from `[Service]` (where systemd logged "Unknown key ... in section [Service]" and ignored them) to `[Unit]`, so the crash-loop throttle actually applies. |
 
