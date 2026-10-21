@@ -1,4 +1,4 @@
-import { statSync, readFileSync, writeFileSync } from 'node:fs'
+import { statSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
@@ -36,6 +36,7 @@ import {
   INITIAL_GUARD_STATE,
   STALE_REFRESH_REASON_PREFIX,
   HANDOFF_RESEND_REASON_PREFIX,
+  READY_TIMEOUT_MS,
   SATURATION_CREDIBLE_MIN_PCT,
   saturationBannerCredible,
   type GuardState,
@@ -68,6 +69,16 @@ export const INTERVAL_MS = 300_000
 // it types nothing (request-handoff and resend decisions stay on the full
 // sweep), and it restarts only after FAST_IDLE_CONFIRM consecutive idle
 // readings, so one idle-looking frame between two tool calls cannot cut a turn.
+//
+// CGRESUME1021 (measured 2026-10-21, Dave 13:45:52 and Kernel 13:50:32): the
+// fast round restarts, but the resume prompt was left to the full sweep, so the
+// fresh session sat at an empty prompt for 0-5 minutes (a supervisor typed the
+// resume by hand after 1.5 minutes, and the sweep's ready-timeout then sent a
+// second one). The fast round therefore also runs the await-ready step, and
+// acts ONLY on 'inject-resume' with a ready session (isSessionReadyForPrompt:
+// two idle captures). The ready-timeout injection into a busy pane stays on the
+// full sweep. The resume goes through the same anchored directive and emit
+// guard as on the sweep.
 export const FAST_INTERVAL_MS = 20_000
 export const FAST_IDLE_CONFIRM = 2
 
@@ -96,7 +107,8 @@ const SATURATION_OVERRIDE_TTL_MS = 3 * INTERVAL_MS
 
 // agent name -> guard state. In-memory: a dashboard restart re-arms every
 // agent at 'idle', which is safe -- the worst case is a repeated handoff
-// request, and cooldown prevents restart loops within a run.
+// request, and cooldown prevents restart loops within a run. The one
+// exception is await-ready after a restart that ran: see PENDING_RESUME_PATH.
 const guardStates = new Map<string, GuardState>()
 // CGGAPS1013 / Viktor 2453 L2: early cooldown exits in the current chain, per
 // agent (reset when a cooldown runs out normally). In memory, like guardStates.
@@ -154,6 +166,104 @@ function observedHighwater(name: string, model: string, observedNow: number): nu
     catch (err) { logger.warn({ err }, 'context-guard: highwater persist failed') }
   }
   return Math.max(observedNow, prior)
+}
+
+// CGRESUME1021 (measured 2026-10-21): Dave was restarted at 13:17:53 and the
+// dashboard itself restarted at 13:18:29 (a release). The await-ready state
+// lived only in guardStates, so the new dashboard re-armed Dave at 'idle' and
+// the resume prompt was never sent; the fresh session sat at an empty prompt
+// until a supervisor typed it by hand at 13:31. So the one state whose loss
+// strands a session -- await-ready after a restart that RAN -- is persisted,
+// and restored at runner start if it is still recent. Every other phase stays
+// in memory (losing it is safe, see guardStates).
+const PENDING_RESUME_PATH = join(PROJECT_ROOT, 'store', 'context-guard-pending-resume.json')
+// An entry older than this is dropped at restore instead of resumed: by then
+// the ready timeout and one full sweep have passed, and the session has been
+// working (or been resumed by hand) long enough that a "continue from your
+// handoff" prompt would land in the middle of something else.
+export const PENDING_RESUME_MAX_AGE_MS = READY_TIMEOUT_MS + INTERVAL_MS
+export interface PendingResume {
+  restartedAtMs: number
+  deadlineMs: number
+  handoffStaleMinutes: HandoffStaleness
+}
+type PendingResumeMap = Record<string, PendingResume>
+
+function readPendingResumes(): PendingResumeMap {
+  try {
+    const parsed = JSON.parse(readFileSync(PENDING_RESUME_PATH, 'utf-8'))
+    return (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed as PendingResumeMap : {}
+  } catch { return {} }
+}
+
+function writePendingResumes(map: PendingResumeMap): void {
+  try {
+    const tmp = `${PENDING_RESUME_PATH}.tmp`
+    writeFileSync(tmp, JSON.stringify(map, null, 2))
+    renameSync(tmp, PENDING_RESUME_PATH)
+  } catch (err) {
+    logger.warn({ err }, 'context-guard: pending-resume persist failed')
+  }
+}
+
+/** Record a restart that ran: the fresh session still needs its resume. */
+function recordPendingResume(name: string, state: GuardState, nowMs: number): void {
+  const map = readPendingResumes()
+  map[name] = { restartedAtMs: nowMs, deadlineMs: state.deadlineMs, handoffStaleMinutes: state.handoffStaleMinutes }
+  writePendingResumes(map)
+}
+
+/** Forget the entry once the agent is in any phase but await-ready. */
+function clearPendingResume(name: string): void {
+  const map = readPendingResumes()
+  if (!(name in map)) return
+  delete map[name]
+  writePendingResumes(map)
+}
+
+/** Every guardStates write goes through here, so the persisted entry can
+ *  never outlive the await-ready phase it describes. */
+function setGuardState(name: string, state: GuardState): void {
+  guardStates.set(name, state)
+  if (state.phase !== 'await-ready') clearPendingResume(name)
+}
+
+/**
+ * Which persisted entries a starting runner restores, as await-ready states.
+ * Pure, for the test: an entry is restored only while it is younger than
+ * PENDING_RESUME_MAX_AGE_MS and not from the future (a clock step or a
+ * hand-edited file must not pin an agent in await-ready).
+ */
+export function pendingResumesToRestore(map: PendingResumeMap, nowMs: number): Array<[string, GuardState]> {
+  const out: Array<[string, GuardState]> = []
+  for (const [name, e] of Object.entries(map)) {
+    if (!e || typeof e.restartedAtMs !== 'number' || typeof e.deadlineMs !== 'number') continue
+    const age = nowMs - e.restartedAtMs
+    if (age < 0 || age > PENDING_RESUME_MAX_AGE_MS) continue
+    const stale = e.handoffStaleMinutes
+    out.push([name, {
+      ...INITIAL_GUARD_STATE,
+      phase: 'await-ready',
+      deadlineMs: e.deadlineMs,
+      handoffStaleMinutes: typeof stale === 'number' || stale === 'unknown' ? stale : null,
+    }])
+  }
+  return out
+}
+
+function restorePendingResumes(nowMs: number): void {
+  const map = readPendingResumes()
+  const restore = pendingResumesToRestore(map, nowMs)
+  for (const [name, state] of restore) guardStates.set(name, state)
+  const kept = new Set(restore.map(([n]) => n))
+  const dropped = Object.keys(map).filter((n) => !kept.has(n))
+  if (dropped.length > 0) {
+    for (const n of dropped) delete map[n]
+    writePendingResumes(map)
+  }
+  if (restore.length > 0 || dropped.length > 0) {
+    logger.info({ restored: [...kept], dropped }, 'context-guard: pending resumes restored after a dashboard restart')
+  }
 }
 
 function sessionFor(name: string): string {
@@ -391,7 +501,7 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   const cfg = readContextGuardConfig(name)
   const state = guardStates.get(name) ?? INITIAL_GUARD_STATE
   if (state.phase !== 'await-handoff') fastIdleStreak.delete(name)
-  if (mode === 'fast' && state.phase !== 'await-handoff') return
+  if (mode === 'fast' && !FAST_ROUND_PHASES.has(state.phase)) return
 
   // Fully disarmed only when EVERY tier and the always-on saturation net are
   // off; the net alone keeps the sweep alive so a 100%-context pane (which
@@ -405,6 +515,7 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   // decideGuard ever saw the agent, with no log line to say so.
   if (!cfg.enabled && !cfg.saturationRestart && !cfg.idleFlushEnabled && !cfg.dailyHandoffEnabled) {
     guardStates.delete(name)
+    clearPendingResume(name)
     return
   }
 
@@ -535,7 +646,7 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   if (mode === 'fast') {
     const streak = paneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0
     fastIdleStreak.set(name, streak)
-    if (!fastRoundActs(decision.action, streak)) return
+    if (!fastRoundActs(decision.action, streak, inputs.sessionReady)) return
   }
   if (state.phase === 'cooldown') {
     if (decision.action !== 'none') {
@@ -588,12 +699,12 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
         { name, sinceRespawnMs: lastRespawn ? nowMs - lastRespawn : null, graceMs: MARVEEN_POST_RESPAWN_GRACE_MS },
         'context-guard: recent main respawn within grace, deferring restart (avoid restart loop / boot churn)',
       )
-      guardStates.set(name, state)
+      setGuardState(name, state)
       return
     }
   }
 
-  guardStates.set(name, decision.nextState)
+  setGuardState(name, decision.nextState)
   if (decision.action === 'none') {
     // Idle-flush non-decisions carry the measurement that blocked them
     // ("quiet for only 4m of 20m"), which is the only way to see the tier
@@ -664,7 +775,7 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
         const unclean = handoffOutcome === 'aborted-guard' || (handoffOutcome === 'sent' && sentBestEffort)
         const now = guardStates.get(name)
         if (unclean && now?.phase === 'await-handoff') {
-          guardStates.set(name, { ...now, requestUnconfirmed: true })
+          setGuardState(name, { ...now, requestUnconfirmed: true })
           logger.info({ name, outcome: handoffOutcome, bestEffort: sentBestEffort }, 'context-guard: handoff request not cleanly delivered -- one resend armed for when the pane is idle')
         }
         break
@@ -690,6 +801,9 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
           await performRestart(name)
           // The streak is over: only a rescue that actually ran clears it.
           clearRescueFailures(name)
+          // CGRESUME1021: from here on the fresh session needs its resume, and
+          // a dashboard restart must not lose that.
+          recordPendingResume(name, decision.nextState, nowMs)
         } catch (err) {
           // guardStates was advanced to the post-restart phase BEFORE this
           // switch, so a failed rescue would otherwise be filed as a completed
@@ -697,7 +811,7 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
           // resume prompt into the old saturated pane, and then sit out its
           // cooldown. Roll the state back so the next sweep re-measures and
           // retries, and never claim the restart on the message queue.
-          guardStates.set(name, INITIAL_GUARD_STATE)
+          setGuardState(name, INITIAL_GUARD_STATE)
           const { count, alert: shouldAlert } = recordRescueFailure(name, nowMs)
           logger.error({ err, name, reason: decision.reason, consecutiveFailures: count }, 'context-guard: rescue restart FAILED -- state rolled back for retry')
           // Honest and silent is still silent. A saturated pane cannot be
@@ -791,7 +905,7 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
           { emitGuard: urgentEmitRefusal },
         )
         if (resumeOutcome === 'aborted-guard') {
-          guardStates.set(name, state)
+          setGuardState(name, state)
           logger.warn({ name }, 'context-guard: resume NOT typed -- the pane holds a prompt/menu or is unreadable (emit guard); retrying next sweep')
         }
         break
@@ -906,10 +1020,11 @@ export function startContextGuardRunner(): NodeJS.Timeout {
     }
   }
   // C106C3FF: the fast round (see FAST_INTERVAL_MS). Skips while a full sweep
-  // runs; touches only agents already in await-handoff.
+  // runs; touches only agents already in await-handoff or (CGRESUME1021)
+  // await-ready.
   async function fastRound() {
     if (tickRunning) return
-    const waiting = guardSweepAgentNames().filter((n) => getHardGuardPhase(n) === 'await-handoff')
+    const waiting = guardSweepAgentNames().filter((n) => FAST_ROUND_PHASES.has(getHardGuardPhase(n)))
     if (waiting.length === 0) return
     tickRunning = true
     try {
@@ -921,13 +1036,24 @@ export function startContextGuardRunner(): NodeJS.Timeout {
       tickRunning = false
     }
   }
+  // CGRESUME1021: before the first fast round, so a restart that ran just
+  // before this dashboard started still gets its resume within ~20 s.
+  restorePendingResumes(Date.now())
   setTimeout(sweep, INITIAL_DELAY_MS)
   setInterval(fastRound, FAST_INTERVAL_MS).unref?.()
   return setInterval(sweep, INTERVAL_MS)
 }
 
-/** C106C3FF: the fast round acts on a restart decision only, and only after
- *  FAST_IDLE_CONFIRM consecutive idle readings. Pure, for the test. */
-export function fastRoundActs(action: string, idleStreak: number): boolean {
-  return action === 'restart' && idleStreak >= FAST_IDLE_CONFIRM
+/** The phases the fast round re-runs: await-handoff (C106C3FF) and
+ *  await-ready (CGRESUME1021). */
+export const FAST_ROUND_PHASES: ReadonlySet<string> = new Set(['await-handoff', 'await-ready'])
+
+/** C106C3FF: the fast round acts on a restart decision only after
+ *  FAST_IDLE_CONFIRM consecutive idle readings. CGRESUME1021: and on a resume
+ *  only into a session isSessionReadyForPrompt confirmed ready -- the
+ *  ready-timeout injection (session not ready) stays on the full sweep.
+ *  Nothing else. Pure, for the test. */
+export function fastRoundActs(action: string, idleStreak: number, sessionReady = false): boolean {
+  if (action === 'restart') return idleStreak >= FAST_IDLE_CONFIRM
+  return action === 'inject-resume' && sessionReady
 }

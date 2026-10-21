@@ -67,7 +67,7 @@ describe('M1: both guard directives are sent with the emit guard', () => {
   it('an inject-resume the guard refused does not cool down: the await-ready state is kept for a retry', () => {
     const i = runner.indexOf("resumeOutcome === 'aborted-guard'")
     expect(i).toBeGreaterThan(-1)
-    expect(runner.slice(i, i + 200)).toContain('guardStates.set(name, state)')
+    expect(runner.slice(i, i + 200)).toContain('setGuardState(name, state)')
   })
 })
 
