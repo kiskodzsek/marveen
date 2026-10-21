@@ -2,7 +2,8 @@
 # heavy-job.sh -- run ONE heavy job at a time, only with free memory, under a watchdog.
 #
 #   heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB]
-#                [--wait SEC] [--ignore-host-disk] [--allow-vm] -- <command> [args...]
+#                [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm]
+#                -- <command> [args...]
 #
 # Why: the Mac mini (16 GB) panicked at 07:02:20 on 2026-10-20 ("no checkins
 # from watchdogd in 93 seconds"). In the panic stackshot free memory was 871
@@ -20,7 +21,13 @@
 #      lets a warn/critical through when EVERY reason in it is the disk: the
 #      disk cleanup (daily-cleanup.sh) needs it, since a low disk would block
 #      the one job that frees disk. Any memory, swap, load or thermal reason
-#      still blocks (Viktor 9834);
+#      still blocks (Viktor 9834). --ignore-host-swap also lets through the
+#      WARN-level swap reason ("swap 94%"): macOS gives swap back slowly, so
+#      that warn can stand for hours while free memory is fine (2026-10-20
+#      23:5x: swap 94%, free memory 57-62%), and it kept the disk cleanup from
+#      ever starting. Free memory is still measured here (--min-free,
+#      --kill-below). The CRITICAL swap reason ("swap 95% with free memory
+#      20%") and every memory, load or thermal reason still block;
 #   2b. a running Colima/Lima VM counts as a held heavy job: other jobs wait
 #      until `colima stop`. `colima start` returns as soon as the VM is up, so
 #      the lock alone only serialised the start, while the VM kept its 6 GB
@@ -55,8 +62,8 @@ LOCK="$STORE/.heavy-job.lock"
 LOG="$STORE/heavy-job.log"
 POLL="${HEAVY_JOB_POLL:-3}"
 
-NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0; ALLOW_VM=0
-usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--allow-vm] -- cmd [args...]" >&2; exit 64; }
+NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0; IGNORE_HOST_SWAP=0; ALLOW_VM=0
+usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm] -- cmd [args...]" >&2; exit 64; }
 num() { [[ "${1:-}" =~ ^[0-9]+$ ]] || usage; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -66,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     --min-disk-gb) [[ $# -ge 2 ]] || usage; num "$2"; MIN_DISK_GB="$2"; shift 2 ;;
     --wait)        [[ $# -ge 2 ]] || usage; num "$2"; WAIT="$2"; shift 2 ;;
     --ignore-host-disk) IGNORE_HOST_DISK=1; shift ;;
+    --ignore-host-swap) IGNORE_HOST_SWAP=1; shift ;;
     --allow-vm)    ALLOW_VM=1; shift ;;
     --) shift; break ;;
     *) usage ;;
@@ -96,11 +104,17 @@ host_state() {
   [[ "$e" =~ ^[0-9]+$ ]] || return 0
   (( now - e <= ${HEAVY_JOB_STATE_MAX_AGE:-300} )) || return 0
   [[ "$b" == "warn" || "$b" == "critical" ]] || return 0
-  if (( IGNORE_HOST_DISK )) && [[ -n "$r" ]]; then
+  if (( IGNORE_HOST_DISK || IGNORE_HOST_SWAP )) && [[ -n "$r" ]]; then
     # host-monitor joins its reasons with ';' ("free disk 2 GiB;swap 80%").
+    # Only the exact warn forms pass: the critical swap reason carries
+    # " with free memory N%" and does not match.
     local x others=0; local -a parts
     IFS=';' read -r -a parts <<< "$r"
-    for x in "${parts[@]}"; do [[ "$x" == "free disk "* ]] || others=1; done
+    for x in "${parts[@]}"; do
+      if (( IGNORE_HOST_DISK )) && [[ "$x" == "free disk "* ]]; then continue; fi
+      if (( IGNORE_HOST_SWAP )) && [[ "$x" =~ ^swap\ [0-9]+%$ ]]; then continue; fi
+      others=1
+    done
     (( others )) || return 0
   fi
   echo "$b (${r:-no reason})"

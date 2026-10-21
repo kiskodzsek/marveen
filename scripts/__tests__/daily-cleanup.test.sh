@@ -78,7 +78,7 @@ check "9 GiB free, last run 30 min ago -> nothing (at most hourly)" "$(ok "$(ran
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((11 * GB)) dc tick
 check "11 GiB free, last run 2 h ago -> nothing" "$(ok "$(ran)" = 1)" "rc=$RC"
 HOUR=4 LAST= dc tick
-check "the run goes through heavy-job, past a disk-only host state, the disk floor and a running VM" "$(grep -q -- '--name daily-cleanup --ignore-host-disk --min-disk-gb 0 --allow-vm ' "$SB/hj.args" && echo 0 || echo 1)" "$(cat "$SB/hj.args" 2>/dev/null)"
+check "the run goes through heavy-job, past a disk/swap-warn host state, the disk floor and a running VM" "$(grep -q -- '--name daily-cleanup --ignore-host-disk --ignore-host-swap --min-disk-gb 0 --allow-vm ' "$SB/hj.args" && echo 0 || echo 1)" "$(cat "$SB/hj.args" 2>/dev/null)"
 
 printf '#!/bin/bash\nexit 75\n' > "$SB/hj-75"; chmod +x "$SB/hj-75"
 HOUR=4 LAST=$((NOW - 40 * H)) HJ_BIN="$SB/hj-75" dc tick
@@ -105,6 +105,29 @@ check "--ignore-host-disk: critical thermal -> blocks (75)" "$(ok "$RC" = 75 -a 
 echo "warn $(date +%s) free memory 20%" > "$SB/store/.host-state"
 rm -f "$SB/hj-e"; hjrun --ignore-host-disk -- touch "$SB/hj-e"
 check "--ignore-host-disk: memory warn -> blocks (75)" "$(ok "$RC" = 75 -a ! -e "$SB/hj-e")" "rc=$RC $OUT"
+
+echo "== --ignore-host-swap: only the warn-level swap reason passes (Pulzus 12317)"
+echo "warn $(date +%s) free disk 8 GiB;swap 94%" > "$SB/store/.host-state"
+rm -f "$SB/hj-f"; hjrun --ignore-host-disk --ignore-host-swap -- touch "$SB/hj-f"
+check "both flags: disk + swap warn (the 2026-10-20 23:5x state) -> runs" "$(ok "$RC" = 0 -a -e "$SB/hj-f")" "rc=$RC $OUT"
+rm -f "$SB/hj-g"; hjrun --ignore-host-swap -- touch "$SB/hj-g"
+check "--ignore-host-swap alone: the disk reason still blocks (75)" "$(ok "$RC" = 75 -a ! -e "$SB/hj-g")" "rc=$RC $OUT"
+echo "warn $(date +%s) swap 94%" > "$SB/store/.host-state"
+rm -f "$SB/hj-h"; hjrun --ignore-host-swap -- touch "$SB/hj-h"
+check "--ignore-host-swap: swap warn only -> runs" "$(ok "$RC" = 0 -a -e "$SB/hj-h")" "rc=$RC $OUT"
+rm -f "$SB/hj-i"; hjrun -- touch "$SB/hj-i"
+check "without the flag the same swap warn still blocks (75)" "$(ok "$RC" = 75 -a ! -e "$SB/hj-i")" "rc=$RC $OUT"
+rm -f "$SB/hj-j"; hjrun --ignore-host-swap --min-free 80 --kill-below 10 -- touch "$SB/hj-j"
+check "--ignore-host-swap: heavy-job's own memory floor still applies (70% free < 80%) -> blocks (75)" "$(ok "$RC" = 75 -a ! -e "$SB/hj-j" -a -n "$(echo "$OUT" | grep 'free memory 70% < 80%')")" "rc=$RC $OUT"
+echo "critical $(date +%s) free disk 2 GiB;swap 95% with free memory 20%" > "$SB/store/.host-state"
+rm -f "$SB/hj-k"; hjrun --ignore-host-disk --ignore-host-swap -- touch "$SB/hj-k"
+check "both flags: critical swap with low memory -> blocks (75)" "$(ok "$RC" = 75 -a ! -e "$SB/hj-k")" "rc=$RC $OUT"
+echo "warn $(date +%s) free disk 8 GiB;swap 94%;load 20.1 on 8 CPUs" > "$SB/store/.host-state"
+rm -f "$SB/hj-l"; hjrun --ignore-host-disk --ignore-host-swap -- touch "$SB/hj-l"
+check "both flags: a load reason next to them -> blocks (75)" "$(ok "$RC" = 75 -a ! -e "$SB/hj-l")" "rc=$RC $OUT"
+echo "warn $(date +%s) free memory 20%;swap 94%" > "$SB/store/.host-state"
+rm -f "$SB/hj-m"; hjrun --ignore-host-disk --ignore-host-swap -- touch "$SB/hj-m"
+check "both flags: a memory warn next to the swap -> blocks (75)" "$(ok "$RC" = 75 -a ! -e "$SB/hj-m")" "rc=$RC $OUT"
 rm -f "$SB/store/.host-state"
 
 echo "== what a run clears"
