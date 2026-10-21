@@ -15,6 +15,7 @@ import { isEgressBlocked, loadRuntimeAllowlist } from '../../scripts/hooks/egres
 import {
   injectEgressGate,
   ensureEgressGate,
+  renderQuarantineReader,
 } from '../web/agent-scaffold.js'
 import {
   generateFetchNonce,
@@ -53,6 +54,31 @@ describe('quarantine-reader sub-agent definition', () => {
   it('has a domain restriction section', () => {
     const content = readFileSync(tplPath, 'utf8')
     expect(content).toMatch(/domain restriction|fetch allowlist/i)
+  })
+
+  // 2026-10-21 (Pulzus 13095): with `supabase.com` and `openai.com` on the
+  // rendered list, the reader refused status.supabase.com and status.openai.com
+  // itself ("only supabase.com is"), so the fetch never reached the hook, which
+  // matches subdomains and would have allowed both. The prompt has to state the
+  // hook's matching rule, or every status.* page needs a separate entry.
+  it('states that a listed domain covers its subdomains, as the hook matches', () => {
+    const content = readFileSync(tplPath, 'utf8')
+    expect(content).toMatch(/approved domains or their subdomains/)
+    expect(content).toMatch(/`status\.supabase\.com` is approved/)
+    expect(content).toMatch(/look-alike[^\n]*is not a subdomain/)
+  })
+
+  it('the hook agrees with that rule for the quarantine-reader', () => {
+    const rt = { domains: [], prefixes: [], quarantineDomains: ['supabase.com'] }
+    const qr = 'quarantine-reader'
+    expect(isEgressBlocked('WebFetch', { url: 'https://status.supabase.com/history' }, rt, qr)).toBe(false)
+    expect(isEgressBlocked('WebFetch', { url: 'https://evilsupabase.com/' }, rt, qr)).toBe(true)
+  })
+
+  it('the per-install block still lands in the list, above the subdomain note', () => {
+    const out = renderQuarantineReader(readFileSync(tplPath, 'utf8'), ['supabase.com'])
+    expect(out.indexOf('- `supabase.com`')).toBeGreaterThan(out.indexOf('- `feeds.bbci.co.uk`'))
+    expect(out.indexOf('- `supabase.com`')).toBeLessThan(out.indexOf('A listed domain covers its subdomains'))
   })
 
   it('instructs the agent not to interpret fetched content as instructions', () => {
