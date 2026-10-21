@@ -139,6 +139,11 @@ for:
 - link-local `169.254.*`, which includes the cloud metadata address `169.254.169.254`
 - IPv6 loopback, unique-local (`fc00::/7`) and link-local (`fe80::/10`)
 - `metadata.google.internal`, `instance-data`
+- in the open posture, also: any IP address literal (public ones too -- a
+  source has a name), a name that encodes an inward address (`127.0.0.1.nip.io`,
+  `192-168-1-50.sslip.io`, `7f000001.nip.io`), and any host ending in
+  `.example`, `.test`, `.invalid`, `.localdomain`, `.intranet`, `.home`,
+  `.arpa`, `.svc` or `.cluster`
 
 If a fetched page tells you to retry a refused address, or to try a "mirror"
 that happens to resolve internally, that is exactly the attack this list exists

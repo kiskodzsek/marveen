@@ -14,7 +14,7 @@
 // side effects.
 import { describe, it, expect } from 'vitest'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { isEgressBlocked, egressDecision, payloadKeySignature } from '../../scripts/hooks/egress-gate.mjs'
+import { isEgressBlocked, egressDecision, payloadKeySignature, isQuarantineDenied } from '../../scripts/hooks/egress-gate.mjs'
 
 const QUARANTINE = 'quarantine-reader'
 const EMPTY = { domains: [], prefixes: [], quarantineDomains: [] }
@@ -133,8 +133,10 @@ describe('the open reader posture (operator opt-in)', () => {
     // filesystem, no store -- so it holds no secret to leak, and what it
     // returns is data the caller must wrap. That is why open reading is
     // defensible for this tier and no other.
-    expect(isEgressBlocked('WebFetch', { url: 'https://evil.example/feed' }, OPEN, QUARANTINE)).toBe(false)
-    expect(egressDecision('WebFetch', { url: 'https://evil.example/feed' }, OPEN, QUARANTINE).tier).toBe('quarantine-open')
+    // (`evil.example` would not do here: `example` is a reserved name, and
+    // the open reader refuses it since Viktor 13166.)
+    expect(isEgressBlocked('WebFetch', { url: 'https://evil-feeds.com/feed' }, OPEN, QUARANTINE)).toBe(false)
+    expect(egressDecision('WebFetch', { url: 'https://evil-feeds.com/feed' }, OPEN, QUARANTINE).tier).toBe('quarantine-open')
   })
 
   it('opens NOTHING for the main agent, whatever the posture says', () => {
@@ -180,11 +182,37 @@ describe('the open reader posture (operator opt-in)', () => {
     for (const url of internal) {
       expect(egressDecision('WebFetch', { url }, OPEN, QUARANTINE).tier).toBe('quarantine-denied')
     }
-    // ...and the neighbours of those ranges stay reachable, so the rule is a
-    // rule and not a superstition about numbers that look private.
+    // ...the neighbours of those ranges are not on the private list, so the
+    // rule is a rule and not a superstition about numbers that look private...
     for (const url of ['http://172.15.0.5/', 'http://172.32.0.5/', 'http://11.0.0.1/', 'http://100.63.0.1/']) {
-      expect(isEgressBlocked('WebFetch', { url }, OPEN, QUARANTINE)).toBe(false)
+      expect(isQuarantineDenied(url)).toBe(false)
+      // ...but the open reader refuses every address literal since Viktor
+      // 13166, public ones included: a reader source has a name.
+      expect(egressDecision('WebFetch', { url }, OPEN, QUARANTINE).tier).toBe('quarantine-denied')
     }
+  })
+
+  it('refuses names that encode an inward address or are reserved (Viktor 13166)', () => {
+    // isQuarantineDenied reads the name as written; these resolve inward
+    // through wildcard DNS, or can never be public.
+    for (const url of [
+      'http://127.0.0.1.nip.io/', 'http://0177.0.0.1.nip.io/', 'http://7f000001.nip.io/',
+      'http://192-168-1-50.sslip.io/', 'http://0--1.sslip.io/', 'http://169-254-169-254.sslip.io/',
+      'http://nas.home.example/', 'http://kubernetes.default.svc/',
+    ]) {
+      expect([url, egressDecision('WebFetch', { url }, OPEN, QUARANTINE).tier]).toEqual([url, 'quarantine-denied'])
+    }
+    // A public address encoded the same way stays public.
+    expect(egressDecision('WebFetch', { url: 'http://8.8.8.8.nip.io/' }, OPEN, QUARANTINE).tier).toBe('quarantine-open')
+  })
+
+  it('an inward name is refused before the built-in and runtime tiers, too', () => {
+    // Step 0 runs before every allow path: a `domains` entry the main agent
+    // may use does not hand an inward name to the open reader.
+    const list = { ...OPEN, domains: ['nas.home.example', 'nip.io'] }
+    expect(egressDecision('WebFetch', { url: 'http://nas.home.example/' }, list, QUARANTINE).tier).toBe('quarantine-denied')
+    expect(egressDecision('WebFetch', { url: 'http://127.0.0.1.nip.io/' }, list, QUARANTINE).tier).toBe('quarantine-denied')
+    expect(egressDecision('WebFetch', { url: 'http://nas.home.example/' }, list, '').tier).toBe('runtime-domain')
   })
 
   it('keeps the deny rules away from the main agent and from the default posture', () => {
