@@ -12,7 +12,7 @@ import {
 // @ts-expect-error -- plain .mjs hook module, no type declarations
 import * as hook from '../../scripts/hooks/egress-gate.mjs'
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { parsePublicSuffixList, buildDocument, diffRules, gitBlobId } from '../../scripts/gen-public-suffix-list.mjs'
+import { parsePublicSuffixList, buildDocument, diffRules, gitBlobId, readLicenseNotice } from '../../scripts/gen-public-suffix-list.mjs'
 
 const doc = JSON.parse(readFileSync(PUBLIC_SUFFIX_LIST_PATH, 'utf-8'))
 
@@ -37,7 +37,13 @@ afterEach(() => {
 
 describe('committed public-suffix-list.json', () => {
   it('loads in both loaders, above the minimum, with its provenance', () => {
-    expect(doc._license).toContain('Mozilla Public License, v. 2.0')
+    expect(doc._license).toEqual([
+      'This Source Code Form is subject to the terms of the Mozilla Public',
+      'License, v. 2.0. If a copy of the MPL was not distributed with this',
+      'file, You can obtain one at https://mozilla.org/MPL/2.0/.',
+    ])
+    expect(doc._license_text).toContain('LICENSES/MPL-2.0.txt')
+    expect(doc.source_url).toBe(`https://github.com/publicsuffix/list/blob/${doc.commit}/public_suffix_list.dat`)
     expect(doc.commit).toMatch(/^[0-9a-f]{40}$/)
     expect(doc.blob).toMatch(/^[0-9a-f]{40}$/)
     expect(doc.sha256).toMatch(/^[0-9a-f]{64}$/)
@@ -193,7 +199,14 @@ describe('an unusable list', () => {
 })
 
 describe('gen-public-suffix-list', () => {
+  const NOTICE = [
+    '// This Source Code Form is subject to the terms of the Mozilla Public',
+    '// License, v. 2.0. If a copy of the MPL was not distributed with this',
+    '// file, You can obtain one at https://mozilla.org/MPL/2.0/.',
+  ]
   const SAMPLE = [
+    ...NOTICE,
+    '',
     '// header comment',
     '// ===BEGIN ICANN DOMAINS===',
     'uk',
@@ -224,6 +237,14 @@ describe('gen-public-suffix-list', () => {
     const b = buildDocument(buf, { commit: 'a'.repeat(40), commitDate: '2026-10-20T10:40:47+02:00' })
     expect(JSON.stringify(a)).toBe(JSON.stringify(b))
     expect(gitBlobId(Buffer.from('hello\n'))).toBe('ce013625030ba8dba906f756967f9e9ca394464a')   // git hash-object
+  })
+
+  it('copies the license header verbatim, every line of it, and refuses an input without the MPL notice', () => {
+    expect(readLicenseNotice(SAMPLE)).toEqual(NOTICE.map((l) => l.slice(3)))
+    const extra = ['// Copyright (c) Example Contributor', ...NOTICE, '', 'rest'].join('\n')
+    expect(readLicenseNotice(extra)).toEqual(['Copyright (c) Example Contributor', ...NOTICE.map((l) => l.slice(3))])
+    expect(() => readLicenseNotice('// header comment\n\n// ===BEGIN ICANN DOMAINS===\n')).toThrow(/MPL-2.0 notice/)
+    expect(() => buildDocument(Buffer.from(SAMPLE.replace(/Mozilla Public/, 'Other Public')), { commit: 'a'.repeat(40), commitDate: 'x' })).toThrow(/MPL-2.0 notice/)
   })
 
   it('reports removed rules separately', () => {
