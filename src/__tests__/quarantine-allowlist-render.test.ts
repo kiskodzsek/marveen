@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { renderQuarantineReader, ownerAllowedDomains, quarantineReaderDomains, isPublicFetchHost } from '../web/agent-scaffold.js'
+import { renderQuarantineReader, ownerAllowedDomains, quarantineReaderDomains, isPublicFetchHost, MULTI_TENANT_SUFFIXES } from '../web/agent-scaffold.js'
+// @ts-expect-error -- plain .mjs hook script, no types
+import { MULTI_TENANT_SUFFIXES as HOOK_MULTI_TENANT_SUFFIXES } from '../../scripts/hooks/egress-gate.mjs'
 
 // The quarantine reader may only fetch from an allowlist, and that list used to
 // exist TWICE: once in this template and once in store/egress-allowlist.json,
@@ -143,6 +145,26 @@ describe('quarantineReaderDomains', () => {
   it('a missing quarantine_domains key degrades to the domains list', () => {
     writeFileSync(join(dir, 'egress-allowlist.json'), JSON.stringify({ domains: ['a.com'] }))
     expect(quarantineReaderDomains(dir)).toEqual(['a.com'])
+  })
+
+  it('drops a multi-tenant suffix or its parent at both levels, keeps a single tenant', () => {
+    // Viktor 13106: the hook ignores these entries, so the prompt must not
+    // list them either -- otherwise the reader promises a host the gate refuses.
+    writeFileSync(join(dir, 'egress-allowlist.json'), JSON.stringify({
+      domains: ['vercel.app', 'myapp.vercel.app', 'amazonaws.com'],
+      quarantine_domains: ['GitHub.io', 'team.github.io', 'supabase.co'],
+    }))
+    expect(ownerAllowedDomains(dir)).toEqual(['myapp.vercel.app'])
+    expect(quarantineReaderDomains(dir)).toEqual(['myapp.vercel.app', 'team.github.io'])
+    const out = renderQuarantineReader(TEMPLATE, quarantineReaderDomains(dir))
+    expect(out).not.toContain('- `vercel.app`')
+    expect(out).not.toContain('- `GitHub.io`')
+  })
+
+  it('carries the same multi-tenant list as the egress-gate hook', () => {
+    // The prompt and the gate drift apart the moment one list changes alone.
+    expect([...MULTI_TENANT_SUFFIXES].sort()).toEqual([...HOOK_MULTI_TENANT_SUFFIXES].sort())
+    expect(MULTI_TENANT_SUFFIXES.length).toBeGreaterThan(0)
   })
 
   it('a quarantine_domains-level grant reaches the rendered reader definition', () => {

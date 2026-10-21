@@ -215,6 +215,50 @@ describe('the open reader posture (operator opt-in)', () => {
   })
 })
 
+// Viktor 13106: a listed domain covers its subdomains, so an operator entry
+// naming a multi-tenant hosting suffix would hand over every customer's site
+// under it. Both runtime tiers ignore such an entry; a single tenant still
+// works, because its subdomains belong to the same owner.
+describe('multi-tenant suffixes in the runtime lists', () => {
+  it('an entry naming the suffix opens none of its tenants -- at either tier', () => {
+    const list = { domains: ['vercel.app'], prefixes: [], quarantineDomains: ['github.io'] }
+    expect(isEgressBlocked('WebFetch', { url: 'https://x.vercel.app/' }, list, '')).toBe(true)
+    expect(isEgressBlocked('WebFetch', { url: 'https://x.vercel.app/' }, list, QUARANTINE)).toBe(true)
+    expect(isEgressBlocked('WebFetch', { url: 'https://evil.github.io/feed' }, list, QUARANTINE)).toBe(true)
+  })
+
+  it('a single tenant is still honored, subdomains included', () => {
+    const list = { domains: ['myapp.vercel.app'], prefixes: [], quarantineDomains: ['team.github.io'] }
+    expect(isEgressBlocked('WebFetch', { url: 'https://myapp.vercel.app/x' }, list, '')).toBe(false)
+    expect(isEgressBlocked('WebFetch', { url: 'https://api.myapp.vercel.app/x' }, list, '')).toBe(false)
+    expect(isEgressBlocked('WebFetch', { url: 'https://team.github.io/feed' }, list, QUARANTINE)).toBe(false)
+    // ...and naming one tenant does not open its neighbours.
+    expect(isEgressBlocked('WebFetch', { url: 'https://other.vercel.app/x' }, list, '')).toBe(true)
+  })
+
+  it('a parent of a suffix is dropped too, case and padding notwithstanding', () => {
+    // `amazonaws.com` covers `s3.amazonaws.com`, and a bare TLD covers them all.
+    for (const entry of ['amazonaws.com', ' AmazonAWS.com ', 'app', 'com']) {
+      const list = { domains: [entry], prefixes: [], quarantineDomains: [entry] }
+      expect(isEgressBlocked('WebFetch', { url: 'https://bucket.s3.amazonaws.com/k' }, list, '')).toBe(true)
+      expect(isEgressBlocked('WebFetch', { url: 'https://bucket.s3.amazonaws.com/k' }, list, QUARANTINE)).toBe(true)
+    }
+  })
+
+  it('a sibling that merely shares a word with a suffix is not touched', () => {
+    const list = { domains: ['myvercel.app', 'aws.amazon.com'], prefixes: [], quarantineDomains: [] }
+    expect(isEgressBlocked('WebFetch', { url: 'https://myvercel.app/' }, list, '')).toBe(false)
+    expect(isEgressBlocked('WebFetch', { url: 'https://docs.aws.amazon.com/x' }, list, '')).toBe(false)
+  })
+
+  it('the multi-tenant entry is not the reason the open reader posture opens a tenant', () => {
+    // The open posture is its own operator opt-in to read any public host; the
+    // dropped entry neither widens nor narrows it.
+    const list = { ...OPEN, quarantineDomains: ['vercel.app'] }
+    expect(egressDecision('WebFetch', { url: 'https://x.vercel.app/' }, list, QUARANTINE).tier).toBe('quarantine-open')
+  })
+})
+
 describe('what a block records about the caller', () => {
   it('lists the payload field names, sorted', () => {
     const keys = payloadKeySignature({

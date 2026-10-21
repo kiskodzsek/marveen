@@ -233,6 +233,51 @@ export function isQuarantineDenied(url) {
   return false
 }
 
+// Multi-tenant hosting suffixes (Viktor 13106). Under these, each subdomain is
+// a different customer's site, so the "exact host or any subdomain" rule turns
+// one operator entry such as `vercel.app` into every app hosted there --
+// attacker-written content included. An operator entry that equals one of
+// these, or is a parent of one (`amazonaws.com` covers `s3.amazonaws.com`), is
+// ignored by both runtime tiers. A single tenant (`myapp.vercel.app`) is still
+// accepted: its subdomains belong to the same owner. The scaffold drops the
+// same entries from the reader's rendered prompt; keep the two lists equal
+// (src/web/agent-scaffold.ts MULTI_TENANT_SUFFIXES, parity test).
+// The open (denylist) reader posture is not narrowed by this list: it is an
+// operator opt-in to read any public host.
+export const MULTI_TENANT_SUFFIXES = [
+  'appspot.com',
+  'azurewebsites.net',
+  'blogspot.com',
+  'cloudfront.net',
+  'firebaseapp.com',
+  'fly.dev',
+  'github.io',
+  'gitlab.io',
+  'glitch.me',
+  'herokuapp.com',
+  'netlify.app',
+  'ngrok-free.app',
+  'ngrok.io',
+  'notion.site',
+  'onrender.com',
+  'pages.dev',
+  's3.amazonaws.com',
+  'substack.com',
+  'supabase.co',
+  'trycloudflare.com',
+  'vercel.app',
+  'web.app',
+  'webflow.io',
+  'wixsite.com',
+  'workers.dev',
+]
+
+export function opensMultiTenantSuffix(entry) {
+  const d = String(entry ?? '').trim().toLowerCase()
+  if (!d) return false
+  return MULTI_TENANT_SUFFIXES.some((s) => s === d || s.endsWith('.' + d))
+}
+
 function matchesQuarantineDomain(url, extraDomains = []) {
   let parsed
   try {
@@ -331,7 +376,7 @@ export function egressDecision(
 
   // 3. Runtime domain check: parse the URL to extract a verified hostname.
   //    URL parsing fails on non-URLs -> block (fail-safe).
-  const rtDomains = runtimeList.domains ?? []
+  const rtDomains = (runtimeList.domains ?? []).filter((d) => !opensMultiTenantSuffix(d))
   if (rtDomains.length > 0) {
     let hostname
     try {
@@ -357,7 +402,8 @@ export function egressDecision(
   //        re-check is defence in depth: step 0 already refused denied URLs,
   //        and this keeps that true even if someone later reorders the steps.
   if (String(agentType ?? '') === QUARANTINE_AGENT_TYPE) {
-    if (matchesQuarantineDomain(url, runtimeList.quarantineDomains ?? [])) {
+    const qDomains = (runtimeList.quarantineDomains ?? []).filter((d) => !opensMultiTenantSuffix(d))
+    if (matchesQuarantineDomain(url, qDomains)) {
       return { blocked: false, tier: 'quarantine' }
     }
     if (openReader) {
