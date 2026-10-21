@@ -63,11 +63,13 @@ describe('resumePrompt carries the prod-tree constraint on every variant', () =>
 
 // ORSICTX912 (2026-09-12): msg 23670 was delivered seven seconds after the
 // guard kill started, into the dying session. The queue said delivered, the
-// fresh session never looked back, and completed_at is unused (0/37 measured)
-// so the loss was invisible. The resume prompt is the fresh session's ONLY
-// context, so the re-read instruction must be present on EVERY variant, and
-// it must demand an OBSERVABLE trace (ack to the sender) -- an instruction
-// whose success cannot be observed would run into the same blindness.
+// fresh session never looked back, so the loss was invisible. The resume
+// prompt is the fresh session's ONLY context, so the re-read instruction must
+// be present on EVERY variant, and it must demand an OBSERVABLE trace -- an
+// instruction whose success cannot be observed would run into the same
+// blindness. Since 2026-10-21 (Klodel 12739) the trace is the close of the
+// row (completed_at + result), not an ack message to the sender: the acks were
+// 312 of 2926 queue rows in 20 hours, and each one woke its recipient.
 describe('resumePrompt carries the restart-window re-read on every variant', () => {
   const variants = [
     ['without a handoff', () => resumePrompt('samu', '/x/HANDOFF.md', false)],
@@ -82,10 +84,13 @@ describe('resumePrompt carries the restart-window re-read on every variant', () 
       expect(p).toContain('RESTART-ABLAK')
       // The queue re-read names the concrete endpoint, not a vague "check".
       expect(p).toContain('api/messages?agent=')
-      // The observable trace: an ack to the SENDER, required even when the
-      // item needs no work -- this is what makes the v1 measurable at all.
-      expect(p).toContain('nyugtát a feladónak')
-      expect(p).toContain('akkor is, ha nincs belőle teendő')
+      // The observable trace: the close of the row, with a result.
+      expect(p).toContain('PUT /api/messages/<id>')
+      expect(p).toContain('completed_at + result')
+      // ...and NOT an ack message, which wakes the sender for a turn.
+      expect(p).toContain('Külön nyugta-üzenetet a feladónak NE küldj')
+      expect(p).not.toContain('küldj rövid nyugtát a feladónak')
+      expect(p).not.toContain('akkor is, ha nincs belőle teendő')
     })
   }
 })
