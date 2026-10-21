@@ -123,6 +123,14 @@ check "says another agent's tree" "$(echo "$OUT" | grep -q "not in the same agen
 PROD="$SB/fleet" wa --node-modules-from "$SB/other" "$SB/fleet/agents/bob/repo" "$SB/fleet/agents/bob/repo-wt2" feat/b2
 check "a source outside agents/ into an agent's tree: exit 3" "$(ok "$RC" = 3 -a ! -e "$SB/fleet/agents/bob/repo-wt2/node_modules")" "$RC $OUT"
 
+echo "== a relative <new-path> is taken from the caller's directory, not from <main-clone>"
+mkdir -p "$SB/callerdir"
+OUT="$(cd "$SB/callerdir" && MARVEEN_PROD_TREE="$SB/no-prod" bash "$WA" "$SB/main" rel-wt feat/rel 2>&1)"; RC=$?
+check "exit 0" "$(ok "$RC" = 0)" "$RC $OUT"
+check "created under the caller's directory" "$(ok -f "$SB/callerdir/rel-wt/package-lock.json")"
+check "not under <main-clone>" "$(ok ! -e "$SB/main/rel-wt")"
+check "linked" "$(ok -L "$SB/callerdir/rel-wt/node_modules")"
+
 echo "== usage"
 wa "$SB/main" "$SB/wt1" feat/x
 check "an existing path is refused (64)" "$(ok "$RC" = 64)" "$RC"
