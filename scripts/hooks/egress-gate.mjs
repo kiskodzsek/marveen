@@ -299,9 +299,9 @@ export function isUsableRuntimeDomain(entry) {
 // `10.0.85.98` or `localhost.localdomain` there let the reader fetch inward:
 // the same prompt/gate disagreement L1 closed, one tier over. The quarantine
 // tier now applies this to the operator's entries AND to the requested host
-// before granting `quarantine`. The open posture's `quarantine-open` grant is
-// still decided by isQuarantineDenied alone. `domains` (the main agent's)
-// stays the operator's call.
+// before granting `quarantine`; the open posture applies it to every host
+// (isDeniedToOpenReader). `domains` (the main agent's) stays the operator's
+// call.
 // Keep the two copies equal (parity test in quarantine-allowlist-render).
 export function isPublicFetchHost(value) {
   const host = value.trim().toLowerCase()
@@ -433,6 +433,18 @@ function isInwardDashQuad(label) {
   return isInwardIPv4(m.slice(1).map((p) => parseInt(p, 10)))
 }
 
+// What the open reader posture refuses: the literal deny rules, plus any host
+// the reader-side filter would not list (Viktor 13166). isQuarantineDenied
+// reads the hostname as written, so wildcard-DNS names that encode an inward
+// address (`127.0.0.1.nip.io`, `192-168-1-50.sslip.io`) and reserved names
+// (`nas.home.example`) passed it. Accepted side effect: a public IP literal is
+// refused too, which a reader source has no reason to be. This is the
+// condition for switching an install to the denylist posture.
+function isDeniedToOpenReader(url) {
+  if (isQuarantineDenied(url)) return true // also the unparseable case
+  return !isPublicFetchHost(new URL(url).hostname)
+}
+
 function matchesQuarantineDomain(url, extraDomains = []) {
   let parsed
   try {
@@ -515,7 +527,7 @@ export function egressDecision(
   //    the one address the deny rules exist to refuse. An allowlist that
   //    predates the switch must not be able to re-open what the open posture
   //    walls off.
-  if (openReader && isQuarantineDenied(url)) {
+  if (openReader && isDeniedToOpenReader(url)) {
     return { blocked: true, tier: 'quarantine-denied' }
   }
 
@@ -563,7 +575,7 @@ export function egressDecision(
       return { blocked: false, tier: 'quarantine' }
     }
     if (openReader) {
-      if (!isQuarantineDenied(url)) return { blocked: false, tier: 'quarantine-open' }
+      if (!isDeniedToOpenReader(url)) return { blocked: false, tier: 'quarantine-open' }
       return { blocked: true, tier: 'quarantine-denied' }
     }
   }
