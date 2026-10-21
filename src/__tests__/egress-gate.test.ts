@@ -278,6 +278,27 @@ describe('multi-tenant suffixes in the runtime lists', () => {
     expect(isEgressBlocked('WebFetch', { url: 'http://10.0.85.98:9000/' }, list, '')).toBe(false)
   })
 
+  it('an internal or address entry in quarantine_domains opens nothing to the reader (Viktor 13125 LOW)', () => {
+    // The scaffold already left these out of the reader's prompt; the gate
+    // granted them anyway in the default posture.
+    for (const entry of ['10.0.85.98', 'nas.home.example', 'localhost.localdomain', 'printer.local', '127.0.0.1.nip.io']) {
+      const list = { domains: [], prefixes: [], quarantineDomains: [entry] }
+      expect([entry, egressDecision('WebFetch', { url: `http://${entry}/` }, list, QUARANTINE).tier]).toEqual([entry, 'none'])
+    }
+  })
+
+  it('a public quarantine_domains entry does not open an inward subdomain of it', () => {
+    // The entry is public, the host under it encodes loopback.
+    const list = { domains: [], prefixes: [], quarantineDomains: ['nip.io'] }
+    expect(egressDecision('WebFetch', { url: 'https://feeds.nip.io/rss' }, list, QUARANTINE).tier).toBe('quarantine')
+    expect(egressDecision('WebFetch', { url: 'http://127.0.0.1.nip.io/' }, list, QUARANTINE).tier).toBe('none')
+  })
+
+  it('a public quarantine_domains entry still works in the default posture', () => {
+    const list = { domains: [], prefixes: [], quarantineDomains: ['status.supabase.com'] }
+    expect(egressDecision('WebFetch', { url: 'https://status.supabase.com/history.rss' }, list, QUARANTINE).tier).toBe('quarantine')
+  })
+
   it('the multi-tenant entry is not the reason the open reader posture opens a tenant', () => {
     // The open posture is its own operator opt-in to read any public host; the
     // dropped entry neither widens nor narrows it.

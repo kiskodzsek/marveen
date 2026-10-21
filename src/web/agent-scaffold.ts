@@ -1655,6 +1655,8 @@ export function ensureImageQuarantineGate(name: string): boolean {
 // suffixes. That covers loopback, RFC1918, link-local (169.254.169.254 is the
 // cloud metadata endpoint), `localhost`, `*` and anything with a scheme, port,
 // path or space in it.
+// Mirrored in scripts/hooks/egress-gate.mjs, which applies it to the reader's
+// entries and requested host at fetch time; keep the two equal (parity test).
 export function isPublicFetchHost(value: string): boolean {
   const host = value.trim().toLowerCase()
   if (!host || host.length > 253) return false
@@ -1665,7 +1667,9 @@ export function isPublicFetchHost(value: string): boolean {
   const labels = host.split('.')
   if (labels.length < 2) return false                 // single label: localhost and friends
   if (labels.some((l) => !l || l.length > 63 || l.startsWith('-') || l.endsWith('-'))) return false
-  const INTERNAL_SUFFIX = ['local', 'internal', 'localdomain', 'lan', 'intranet', 'home', 'arpa', 'test', 'invalid', 'localhost', 'svc', 'cluster']
+  // `example` is reserved (RFC 2606, RFC 6761) and never public; before it was
+  // listed, `nas.home.example` (Viktor 13125) passed this filter.
+  const INTERNAL_SUFFIX = ['local', 'internal', 'localdomain', 'lan', 'intranet', 'home', 'arpa', 'test', 'invalid', 'localhost', 'svc', 'cluster', 'example']
   if (INTERNAL_SUFFIX.includes(labels[labels.length - 1])) return false
   // A public NAME can still resolve inward. Wildcard-DNS services (nip.io,
   // sslip.io and friends) encode the address in the name itself, so
