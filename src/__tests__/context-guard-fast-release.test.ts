@@ -161,18 +161,21 @@ describe('F1: the fast round', () => {
     expect(fastRoundActs('restart', 3)).toBe(true)
     expect(fastRoundActs('restart', 1)).toBe(false)
     expect(fastRoundActs('restart', 0)).toBe(false)
-    // It never types: request-handoff (incl. a resend) and inject-resume stay on the full sweep.
+    // request-handoff (incl. a resend) stays on the full sweep; inject-resume
+    // only into a ready session (CGRESUME1021, see context-guard-fast-resume).
     expect(fastRoundActs('request-handoff', 5)).toBe(false)
+    expect(fastRoundActs('request-handoff', 5, true)).toBe(false)
     expect(fastRoundActs('inject-resume', 5)).toBe(false)
     expect(fastRoundActs('none', 5)).toBe(false)
+    expect(fastRoundActs('none', 5, true)).toBe(false)
   })
-  it('the same decideGuard, an agent outside await-handoff is never touched, a dropped decision leaves the state alone', () => {
-    expect(runner).toContain("if (mode === 'fast' && state.phase !== 'await-handoff') return")
+  it('the same decideGuard, an agent outside the fast-round phases is never touched, a dropped decision leaves the state alone', () => {
+    expect(runner).toContain("if (mode === 'fast' && !FAST_ROUND_PHASES.has(state.phase)) return")
     const i = runner.indexOf("if (mode === 'fast') {")
     expect(i).toBeGreaterThan(runner.indexOf('const decision = decideGuard('))
-    // ...and it returns before guardStates.set(name, decision.nextState).
-    expect(i).toBeLessThan(runner.indexOf('guardStates.set(name, decision.nextState)'))
-    expect(runner.slice(i, i + 300)).toContain('if (!fastRoundActs(decision.action, streak)) return')
+    // ...and it returns before setGuardState(name, decision.nextState).
+    expect(i).toBeLessThan(runner.indexOf('setGuardState(name, decision.nextState)'))
+    expect(runner.slice(i, i + 300)).toContain('if (!fastRoundActs(decision.action, streak, inputs.sessionReady)) return')
   })
   it('the streak counts only idle readings and resets outside await-handoff', () => {
     expect(runner).toContain("const streak = paneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0")

@@ -199,13 +199,13 @@ describe('context-guard: a failed rescue is not filed as a completed one', () =>
     // guardStates.set(nextState) runs BEFORE the action switch, so without the
     // rollback the guard waits for a session it never started, prompts the old
     // saturated pane, and sits out its cooldown.
-    expect(tail).toContain('guardStates.set(name, INITIAL_GUARD_STATE)')
+    expect(tail).toContain('setGuardState(name, INITIAL_GUARD_STATE)')
     expect(tail).toContain('logger.error(')
     // The "I restarted it" notice must be unreachable on that path. Anchored on
     // the notice TEXT, not on createAgentMessage(: the failure path grew its own
     // message (the rescue-failure alert, RESCUEALERT901) and a bare call-name
     // anchor would now match that one and assert nothing.
-    expect(tail.indexOf('guardStates.set(name, INITIAL_GUARD_STATE)'))
+    expect(tail.indexOf('setGuardState(name, INITIAL_GUARD_STATE)'))
       .toBeLessThan(tail.indexOf('[CONTEXT-GUARD] Ujrainditottam'))
     expect(tail).toMatch(/rolled back[\s\S]*?\n\s*break/)
   })
