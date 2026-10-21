@@ -47,7 +47,7 @@
 
 import { readFileSync, appendFileSync, mkdirSync } from 'node:fs'
 import { realpathSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, domainToASCII } from 'node:url'
 import { dirname, join } from 'node:path'
 
 // Derive repo root from this script's location (scripts/hooks/egress-gate.mjs).
@@ -244,6 +244,8 @@ export function isQuarantineDenied(url) {
 // (src/web/agent-scaffold.ts MULTI_TENANT_SUFFIXES, parity test).
 // The open (denylist) reader posture is not narrowed by this list: it is an
 // operator opt-in to read any public host.
+// Since the vendored public suffix list (below) this is a supplement: measured
+// 2026-10-21, the PSL covers 23 of these 25, not glitch.me and substack.com.
 export const MULTI_TENANT_SUFFIXES = [
   'appspot.com',
   'azurewebsites.net',
@@ -278,6 +280,106 @@ export function opensMultiTenantSuffix(entry) {
   return MULTI_TENANT_SUFFIXES.some((s) => s === d || s.endsWith('.' + d))
 }
 
+// The Public Suffix List, vendored (Viktor 13122 L2, 13207). The hand list
+// above missed regional S3 (`s3.eu-central-1.amazonaws.com`), `r2.dev` and
+// every ICANN second-level suffix (`co.uk`, `com.au`): each passed as an
+// operator entry and opened every registrant or tenant under it. The PSL
+// answers the same question for both sections, so an entry is refused when it
+// IS a public suffix (a listed rule, or one label under a `*.` rule that no
+// `!` exception names) or is a PARENT of one (`amazonaws.com`, `kawasaki.jp`).
+// The hand list stays as a supplement for multi-tenant hosts the PSL lacks
+// (`substack.com`).
+//
+// Loaded lazily, once per process, and only when an operator entry has to be
+// judged -- a built-in prefix hit never reads it. If the file is missing,
+// unparseable, not two arrays of strings, or below PSL_MIN_RULES (a truncated
+// file must not weaken the gate quietly), the index is null and the callers
+// split by tier: the reader tier fails closed (no operator entry, no open
+// posture), the main agent's `domains` fall back to the hand list -- there the
+// filter is defence in depth on the operator's own entries, and refusing them
+// all would stop the team's real work. Either way the failure is written to
+// store/hook-errors.log and stderr.
+//
+// The file is generated (scripts/gen-public-suffix-list.mjs) and is MPL-2.0
+// licensed; keep it a separate file, do not inline it. The scaffold reads the
+// same file with a mirror of this loader (src/web/agent-scaffold.ts).
+const PUBLIC_SUFFIX_LIST_PATH = join(dirname(fileURLToPath(import.meta.url)), 'public-suffix-list.json')
+export const PSL_MIN_RULES = { icann: 6500, private: 3000 }
+
+// One line per failure, in the file scripts/hooks/hook_errlog.py writes
+// (HOOK_ERRLOG_PATH overrides the path, for tests).
+function reportHookError(message) {
+  const line = `${new Date().toISOString()} [egress-gate] ${message}\n`
+  try { process.stderr.write(line) } catch { /* nothing left to tell */ }
+  try {
+    const path = process.env.HOOK_ERRLOG_PATH || join(REPO_ROOT, 'store', 'hook-errors.log')
+    mkdirSync(dirname(path), { recursive: true })
+    appendFileSync(path, line, 'utf-8')
+  } catch { /* never let the report block the agent */ }
+}
+
+function suffixToAscii(rule) {
+  return /^[\x00-\x7f]*$/.test(rule) ? rule : domainToASCII(rule)
+}
+
+// null when the document is unusable; see the comment above.
+export function buildPublicSuffixIndex(doc) {
+  if (!doc || typeof doc !== 'object') return null
+  const idx = { suffix: new Set(), wildcard: new Set(), exception: new Set(), parent: new Set() }
+  for (const section of ['icann', 'private']) {
+    const rules = doc[section]
+    if (!Array.isArray(rules) || rules.length < PSL_MIN_RULES[section]) return null
+    for (const raw of rules) {
+      if (typeof raw !== 'string') return null
+      const kind = raw.startsWith('!') ? 'exception' : raw.startsWith('*.') ? 'wildcard' : 'suffix'
+      const body = suffixToAscii(kind === 'suffix' ? raw : raw.slice(kind === 'exception' ? 1 : 2))
+      if (!body) return null
+      idx[kind].add(body)
+      if (kind === 'exception') continue
+      // Every name an entry could cover this rule from: the proper ancestors
+      // of a suffix, and for `*.X` also X itself. Single labels are left out;
+      // the shape check refuses them already.
+      const labels = body.split('.')
+      for (let i = kind === 'wildcard' ? 0 : 1; i < labels.length - 1; i++) idx.parent.add(labels.slice(i).join('.'))
+    }
+  }
+  return idx
+}
+
+let publicSuffixCache   // undefined: not loaded yet; null: unusable
+let publicSuffixPath = PUBLIC_SUFFIX_LIST_PATH
+
+export function publicSuffixIndex() {
+  if (publicSuffixCache !== undefined) return publicSuffixCache
+  let doc
+  try {
+    doc = JSON.parse(readFileSync(publicSuffixPath, 'utf-8'))
+  } catch (e) {
+    reportHookError(`public suffix list unreadable (${publicSuffixPath}): ${String(e?.message ?? e).slice(0, 200)}; reader tier fails closed, domains use the hand list`)
+    publicSuffixCache = null
+    return null
+  }
+  publicSuffixCache = buildPublicSuffixIndex(doc)
+  if (!publicSuffixCache) {
+    reportHookError(`public suffix list has a bad shape or fewer rules than ${JSON.stringify(PSL_MIN_RULES)} (${publicSuffixPath}); reader tier fails closed, domains use the hand list`)
+  }
+  return publicSuffixCache
+}
+
+// Tests only: point the loader at another file and drop the cached index.
+export function _resetPublicSuffixIndex(path = PUBLIC_SUFFIX_LIST_PATH) {
+  publicSuffixPath = path
+  publicSuffixCache = undefined
+}
+
+export function opensPublicSuffix(entry, idx) {
+  const d = String(entry ?? '').trim().toLowerCase()
+  if (!d || !idx) return false
+  if (idx.suffix.has(d) || idx.parent.has(d)) return true
+  const dot = d.indexOf('.')
+  return dot !== -1 && idx.wildcard.has(d.slice(dot + 1)) && !idx.exception.has(d)
+}
+
 // The shape a runtime entry needs before it may match anything (Viktor 13122
 // L1): at least two labels, no empty label, no leading or trailing dot. A
 // trailing dot (`vercel.app.`) slipped past the suffix check and then matched
@@ -285,11 +387,16 @@ export function opensMultiTenantSuffix(entry) {
 // scaffold's isPublicFetchHost already refuses both, so without this the
 // prompt and the gate disagreed again. Shape only: a LAN name or an address
 // literal in `domains` is still the operator's call for the main agent.
-export function isUsableRuntimeDomain(entry) {
+// `tier` is 'reader' for quarantine_domains: without a usable public suffix
+// list that tier accepts no entry at all, while `domains` keeps the hand list.
+export function isUsableRuntimeDomain(entry, tier = 'main') {
   const d = String(entry ?? '')
   const labels = d.split('.')
   if (labels.length < 2 || labels.some((l) => l === '')) return false
-  return !opensMultiTenantSuffix(d)
+  if (opensMultiTenantSuffix(d)) return false
+  const idx = publicSuffixIndex()
+  if (!idx) return tier !== 'reader'
+  return !opensPublicSuffix(d, idx)
 }
 
 // The reader-side host filter, a mirror of isPublicFetchHost in
@@ -491,12 +598,15 @@ export function loadRuntimeAllowlist() {
   }
 }
 
-// Pure decision, with the tier that decided it.
+// The decision, with the tier that decided it.
 //
 // `runtimeList` is the decoded store/egress-allowlist.json (or any equivalent
 // object) and `agentType` is the payload's `agent_type` -- empty for a main
-// agent. Keeping file I/O out of this function makes it fully unit-testable
-// without touching the filesystem.
+// agent. The allowlist I/O stays out of this function, so it is unit-testable
+// without a store file. The one read it does is the vendored public suffix
+// list, lazily and once per process, when an operator entry or the open
+// posture has to be judged (_resetPublicSuffixIndex points it elsewhere in
+// tests).
 //
 // The tier is returned because the quarantine tier is the security-relevant
 // exception and its grants are audited: a fetch nobody can see is a hole
@@ -543,7 +653,7 @@ export function egressDecision(
 
   // 3. Runtime domain check: parse the URL to extract a verified hostname.
   //    URL parsing fails on non-URLs -> block (fail-safe).
-  const rtDomains = (runtimeList.domains ?? []).filter(isUsableRuntimeDomain)
+  const rtDomains = (runtimeList.domains ?? []).filter((d) => isUsableRuntimeDomain(d))
   if (rtDomains.length > 0) {
     let hostname
     try {
@@ -570,11 +680,15 @@ export function egressDecision(
   //        and this keeps that true even if someone later reorders the steps.
   if (String(agentType ?? '') === QUARANTINE_AGENT_TYPE) {
     const qDomains = (runtimeList.quarantineDomains ?? [])
-      .filter((d) => isUsableRuntimeDomain(d) && isPublicFetchHost(d))
+      .filter((d) => isUsableRuntimeDomain(d, 'reader') && isPublicFetchHost(d))
     if (matchesQuarantineDomain(url, qDomains) && isPublicFetchHost(new URL(url).hostname)) {
       return { blocked: false, tier: 'quarantine' }
     }
     if (openReader) {
+      // Without a usable public suffix list the reader tier fails closed
+      // (Viktor 13207): the shipped feeds above still work, the open posture
+      // does not.
+      if (!publicSuffixIndex()) return { blocked: true, tier: 'quarantine-denied' }
       if (!isDeniedToOpenReader(url)) return { blocked: false, tier: 'quarantine-open' }
       return { blocked: true, tier: 'quarantine-denied' }
     }

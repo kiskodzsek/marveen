@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync, rmSync, watchFile, unwatchFile, realpathSync } from 'node:fs'
 import { readRemovedDefaultTasks } from './scheduled-tasks-io.js'
 import { join } from 'node:path'
+import { domainToASCII } from 'node:url'
 import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, WEB_PORT, OWNER_DRIVE_FOLDER, APP_TZ, DASHBOARD_PUBLIC_URL, AGENT_API_ORIGIN, STORE_DIR } from '../config.js'
@@ -1791,7 +1792,8 @@ function isInwardDashQuad(label: string): boolean {
 // 13106). The hook ignores an operator entry that equals one of these or is a
 // parent of one (`vercel.app` would open every app hosted there), so the
 // reader's prompt must not list that entry either, or the two disagree again.
-// Keep the two lists equal; a parity test pins it.
+// Keep the two lists equal; a parity test pins it. A supplement to the public
+// suffix list below (opensPublicSuffix), for hosts the PSL lacks.
 export const MULTI_TENANT_SUFFIXES = [
   'appspot.com',
   'azurewebsites.net',
@@ -1826,13 +1828,77 @@ export function opensMultiTenantSuffix(entry: string): boolean {
   return MULTI_TENANT_SUFFIXES.some((s) => s === d || s.endsWith('.' + d))
 }
 
-export function ownerAllowedDomains(storeDir = STORE_DIR): string[] {
+// Mirror of the public suffix loader in scripts/hooks/egress-gate.mjs (Viktor
+// 13122 L2, 13207). Both read the same generated file; an operator entry that
+// IS a public suffix (ICANN or private) or a parent of one is refused by the
+// hook, so the reader's prompt must not list it either. Without a usable list
+// (missing, unparseable, wrong shape, below PSL_MIN_RULES) the prompt follows
+// the hook's split: no quarantine_domains entry (that tier fails closed), and
+// `domains` filtered by the hand list only (the hook's step 3 serves every
+// agent type). Keep the index logic and PSL_MIN_RULES equal to the hook's
+// (parity test in public-suffix-list.test.ts).
+export const PUBLIC_SUFFIX_LIST_PATH = join(PROJECT_ROOT, 'scripts', 'hooks', 'public-suffix-list.json')
+export const PSL_MIN_RULES = { icann: 6500, private: 3000 }
+
+export interface PublicSuffixIndex {
+  suffix: Set<string>
+  wildcard: Set<string>
+  exception: Set<string>
+  parent: Set<string>
+}
+
+function suffixToAscii(rule: string): string {
+  return /^[\x00-\x7f]*$/.test(rule) ? rule : domainToASCII(rule)
+}
+
+export function buildPublicSuffixIndex(doc: unknown): PublicSuffixIndex | null {
+  if (!doc || typeof doc !== 'object') return null
+  const idx: PublicSuffixIndex = { suffix: new Set(), wildcard: new Set(), exception: new Set(), parent: new Set() }
+  for (const section of ['icann', 'private'] as const) {
+    const rules = (doc as Record<string, unknown>)[section]
+    if (!Array.isArray(rules) || rules.length < PSL_MIN_RULES[section]) return null
+    for (const raw of rules) {
+      if (typeof raw !== 'string') return null
+      const kind = raw.startsWith('!') ? 'exception' : raw.startsWith('*.') ? 'wildcard' : 'suffix'
+      const body = suffixToAscii(kind === 'suffix' ? raw : raw.slice(kind === 'exception' ? 1 : 2))
+      if (!body) return null
+      idx[kind].add(body)
+      if (kind === 'exception') continue
+      const labels = body.split('.')
+      for (let i = kind === 'wildcard' ? 0 : 1; i < labels.length - 1; i++) idx.parent.add(labels.slice(i).join('.'))
+    }
+  }
+  return idx
+}
+
+export function loadPublicSuffixIndex(path = PUBLIC_SUFFIX_LIST_PATH): PublicSuffixIndex | null {
+  let idx: PublicSuffixIndex | null = null
+  try {
+    idx = buildPublicSuffixIndex(JSON.parse(readFileSync(path, 'utf-8')))
+  } catch (err) {
+    logger.warn({ err, path }, 'public suffix list unreadable: the quarantine-reader prompt lists no quarantine_domains entry')
+    return null
+  }
+  if (!idx) logger.warn({ path, min: PSL_MIN_RULES }, 'public suffix list has a bad shape or too few rules: the quarantine-reader prompt lists no quarantine_domains entry')
+  return idx
+}
+
+export function opensPublicSuffix(entry: string, idx: PublicSuffixIndex | null): boolean {
+  const d = entry.trim().toLowerCase()
+  if (!d || !idx) return false
+  if (idx.suffix.has(d) || idx.parent.has(d)) return true
+  const dot = d.indexOf('.')
+  return dot !== -1 && idx.wildcard.has(d.slice(dot + 1)) && !idx.exception.has(d)
+}
+
+export function ownerAllowedDomains(storeDir = STORE_DIR, pslPath = PUBLIC_SUFFIX_LIST_PATH): string[] {
   try {
     const raw = JSON.parse(readFileSync(join(storeDir, 'egress-allowlist.json'), 'utf-8'))
     const list = Array.isArray(raw?.domains) ? raw.domains : []
+    const psl = loadPublicSuffixIndex(pslPath)   // null: opensPublicSuffix is false, the hand list stays
     return list.filter((d: unknown): d is string => typeof d === 'string')
       .map((d: string) => d.trim())
-      .filter((d: string) => isPublicFetchHost(d) && !opensMultiTenantSuffix(d))
+      .filter((d: string) => isPublicFetchHost(d) && !opensMultiTenantSuffix(d) && !opensPublicSuffix(d, psl))
   } catch {
     return []   // no file, unreadable, or malformed: ship the template as-is
   }
@@ -1845,16 +1911,18 @@ export function ownerAllowedDomains(storeDir = STORE_DIR): string[] {
 // quarantine_domains level is honored by the hook but the reader's own prompt
 // still refuses it before a fetch is ever attempted -- which is exactly what
 // stranded a research task on 2026-08-16 (EGRESSKEY816).
-export function quarantineReaderDomains(storeDir = STORE_DIR): string[] {
-  const base = ownerAllowedDomains(storeDir)
+export function quarantineReaderDomains(storeDir = STORE_DIR, pslPath = PUBLIC_SUFFIX_LIST_PATH): string[] {
+  const base = ownerAllowedDomains(storeDir, pslPath)
   try {
     const raw = JSON.parse(readFileSync(join(storeDir, 'egress-allowlist.json'), 'utf-8'))
     const list = Array.isArray(raw?.quarantine_domains) ? raw.quarantine_domains : []
+    const psl = loadPublicSuffixIndex(pslPath)
+    if (!psl) return base
     const seen = new Set(base.map((d) => d.toLowerCase()))
     for (const d of list) {
       if (typeof d !== 'string') continue
       const host = d.trim()
-      if (!isPublicFetchHost(host) || opensMultiTenantSuffix(host) || seen.has(host.toLowerCase())) continue
+      if (!isPublicFetchHost(host) || opensMultiTenantSuffix(host) || opensPublicSuffix(host, psl) || seen.has(host.toLowerCase())) continue
       seen.add(host.toLowerCase())
       base.push(host)
     }
