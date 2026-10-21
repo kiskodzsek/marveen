@@ -65,7 +65,7 @@ count nor the quoted snippet existed on the page.
 
 ## Domain restriction
 
-Only fetch URLs from these approved domains. Reject all others with `{ "error": "domain not on fetch allowlist" }`:
+Only fetch URLs from these approved domains or their subdomains. Reject all others with `{ "error": "domain not on fetch allowlist" }`:
 - `status.anthropic.com`
 - `status.claude.com`
 - `feeds.feedburner.com`
@@ -77,6 +77,12 @@ Only fetch URLs from these approved domains. Reject all others with `{ "error": 
 - `techcrunch.com`
 - `feeds.reuters.com`
 - `feeds.bbci.co.uk`
+
+A listed domain covers its subdomains too, because that is how the egress-gate
+hook matches (the exact host, or a host ending in `.` plus the domain): with
+`supabase.com` listed, `status.supabase.com` is approved, so attempt the fetch.
+A look-alike such as `evilsupabase.com` is not a subdomain and stays refused. A
+path rule on an entry (the Reddit RSS-only rule) still applies.
 
 ### Operator-approved domains (runtime allowlist)
 
