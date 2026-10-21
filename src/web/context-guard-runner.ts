@@ -91,10 +91,35 @@ export function guardHoldCapMs(cfg: Pick<ContextGuardConfig, 'handoffTimeoutMinu
   return cfg.handoffTimeoutMinutes * 60_000 + INTERVAL_MS + GUARD_HOLD_SLACK_MS
 }
 
-/** The router's hold check: a hold (with its cap) while the agent is in await-handoff. */
+// CGHOLDREADY1021 (measured 2026-10-21, dashboard.log, Dave's restarts at 14:05,
+// 14:32, 15:04 and 15:18): the hold ended with await-handoff, so the rows it had
+// kept back were delivered 4-6 s after the fresh session started -- before the
+// fast round's resume. The session worked its inbox instead of reading as ready,
+// and got the resume from the ready-timeout path 5-8 minutes later (78 s at
+// 14:32, a short turn). Restarts with no held row resumed in ~18 s (Pulzus,
+// Viktor, Kernel). So the hold lasts through await-ready too: the resume goes in
+// first, the rows after it. The cap grows by the await-ready window (the ready
+// timeout plus the full sweep that injects on it), so a row held since
+// await-handoff is not released in the middle of the designed path.
+export function guardReadyHoldCapMs(cfg: Pick<ContextGuardConfig, 'handoffTimeoutMinutes'>): number {
+  return guardHoldCapMs(cfg) + READY_TIMEOUT_MS + INTERVAL_MS
+}
+
+/** Which hold a guard phase puts on the router, with its cap. Pure, for the test. */
+export function deliveryHoldForPhase(
+  phase: string, cfg: Pick<ContextGuardConfig, 'handoffTimeoutMinutes'>,
+): DeliveryHold | null {
+  if (phase === 'await-handoff') return { reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(cfg) }
+  if (phase === 'await-ready') return { reason: 'context-guard await-ready', maxMs: guardReadyHoldCapMs(cfg) }
+  return null
+}
+
+/** The router's hold check: a hold (with its cap) while the agent is in
+ *  await-handoff, and on through await-ready until the resume is in. */
 export function guardDeliveryHold(name: string): DeliveryHold | null {
-  if (getHardGuardPhase(name) !== 'await-handoff') return null
-  return { reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(readContextGuardConfig(name)) }
+  const phase = getHardGuardPhase(name)
+  if (phase !== 'await-handoff' && phase !== 'await-ready') return null
+  return deliveryHoldForPhase(phase, readContextGuardConfig(name))
 }
 
 // How long the dispatch gate honours one sweep's "this banner is not
@@ -994,7 +1019,8 @@ export function getHardGuardPhase(name: string): string {
 export function startContextGuardRunner(): NodeJS.Timeout {
   // GUARDHOLD1013: while an agent is asked for its handoff, the router keeps new
   // messages pending so the pane can go idle and the restart can happen (see
-  // shouldHoldForGuard in message-router.ts).
+  // shouldHoldForGuard in message-router.ts); CGHOLDREADY1021: and after the
+  // restart, until the resume is in (see guardDeliveryHold).
   setDeliveryHoldCheck(guardDeliveryHold)
   // One flag for both rounds: a full sweep and a fast round never decide the
   // same agent at the same time.

@@ -51,8 +51,11 @@ vi.mock('../web/agent-process.js', () => ({
   isSessionReadyForPrompt: async () => false,
 }))
 
-const { fastRoundActs, guardHoldCapMs, guardDeliveryHold, INTERVAL_MS, FAST_INTERVAL_MS, FAST_IDLE_CONFIRM, GUARD_HOLD_SLACK_MS } =
-  await import('../web/context-guard-runner.js')
+const {
+  fastRoundActs, guardHoldCapMs, guardReadyHoldCapMs, guardDeliveryHold, deliveryHoldForPhase,
+  INTERVAL_MS, FAST_INTERVAL_MS, FAST_IDLE_CONFIRM, GUARD_HOLD_SLACK_MS,
+} = await import('../web/context-guard-runner.js')
+const { READY_TIMEOUT_MS } = await import('../context-guard.js')
 
 const here = dirname(fileURLToPath(import.meta.url))
 const runner = readFileSync(join(here, '..', 'web', 'context-guard-runner.ts'), 'utf-8')
@@ -188,7 +191,7 @@ describe('F1: the fast round', () => {
   })
   it('the hold is still released only by the phase change (no "handoff written" shortcut)', () => {
     expect(runner).toContain('setDeliveryHoldCheck(guardDeliveryHold)')
-    expect(runner).toContain("if (getHardGuardPhase(name) !== 'await-handoff') return null")
+    expect(runner).toContain("if (phase !== 'await-handoff' && phase !== 'await-ready') return null")
   })
 })
 
@@ -205,7 +208,45 @@ describe('F3: the hold cap comes from the config', () => {
   it('today\'s fleet config (20 min) gives 27 minutes', () => {
     expect(guardHoldCapMs(DEFAULT_CONTEXT_GUARD)).toBe(27 * 60_000)
   })
-  it('no hold for an agent that is not in await-handoff', () => {
+  it('no hold for an agent that is not in await-handoff or await-ready', () => {
     expect(guardDeliveryHold('nobody')).toBeNull()
+  })
+})
+
+// CGHOLDREADY1021 (measured 2026-10-21): the rows held in await-handoff were
+// delivered 4-6 s after the restart, ahead of the resume, and the busy session
+// got its resume from the ready timeout 5-8 minutes later.
+describe('CGHOLDREADY1021: the hold lasts until the resume is in', () => {
+  it('await-handoff keeps its hold and its cap', () => {
+    expect(deliveryHoldForPhase('await-handoff', CFG)).toEqual({
+      reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(CFG),
+    })
+  })
+  it('await-ready holds too, under the cap grown by the ready window', () => {
+    expect(deliveryHoldForPhase('await-ready', CFG)).toEqual({
+      reason: 'context-guard await-ready', maxMs: guardReadyHoldCapMs(CFG),
+    })
+  })
+  it('no hold once the resume is in, nor outside the restart sequence', () => {
+    for (const phase of ['idle', 'cooldown', 'whatever']) expect(deliveryHoldForPhase(phase, CFG)).toBeNull()
+  })
+  it('invariant: the whole designed path fits under the await-ready cap, for any timeout', () => {
+    for (const t of [1, 6, 20, 45, 120, 600]) {
+      const cfg = { handoffTimeoutMinutes: t }
+      // handoff timeout + the sweep that restarts + the ready timeout + the
+      // sweep that injects on it: a row held since await-handoff is still held.
+      const designed = t * 60_000 + INTERVAL_MS + READY_TIMEOUT_MS + INTERVAL_MS
+      expect(guardReadyHoldCapMs(cfg)).toBe(guardHoldCapMs(cfg) + READY_TIMEOUT_MS + INTERVAL_MS)
+      expect(guardReadyHoldCapMs(cfg)).toBeGreaterThan(designed)
+    }
+  })
+  it('today\'s fleet config (20 min) gives 37 minutes', () => {
+    expect(guardReadyHoldCapMs(DEFAULT_CONTEXT_GUARD)).toBe(37 * 60_000)
+  })
+  it('the resume itself cannot be held: its anchor row is marked delivered and typed directly, never routed', () => {
+    const sd = readFileSync(join(here, '..', 'web', 'system-directive.ts'), 'utf-8')
+    const body = sd.slice(sd.indexOf('export async function sendSystemDirective('))
+    expect(body.indexOf('markMessageDelivered(msg.id)')).toBeGreaterThan(-1)
+    expect(body.indexOf('markMessageDelivered(msg.id)')).toBeLessThan(body.indexOf('sendPromptToSession('))
   })
 })

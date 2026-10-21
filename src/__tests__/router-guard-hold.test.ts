@@ -180,6 +180,31 @@ describe('C106C3FF: the cap rides with the hold', () => {
   })
   afterEach(() => setDeliveryHoldCheck(null))
 
+  it('CGHOLDREADY1021: a row held since await-handoff stays held into await-ready, under the larger cap', async () => {
+    let reason = 'context-guard await-handoff'
+    setDeliveryHoldCheck((agent) => (agent === 'dex' && reason ? { reason, maxMs: cap } : null))
+    const t0 = Date.now()
+    mockGetPendingMessages.mockReturnValue([row(8, 'pixel')])
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(t0)
+      await runMessageRouterTick()
+      // The restart ran: await-ready, and its cap is the handoff cap plus the ready window.
+      reason = 'context-guard await-ready'
+      cap = cap + 10 * 60_000
+      vi.setSystemTime(t0 + 10 * 60_000)
+      await runMessageRouterTick()
+      expect(mockIsReady).not.toHaveBeenCalled()
+      // The resume is in (cooldown): no hold, the row goes to the readiness gate.
+      reason = ''
+      await runMessageRouterTick()
+      expect(mockIsReady).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+      cap = 10 * 60_000
+    }
+  })
+
   it('the router fails open at the cap the guard hands it, not at a fixed constant', async () => {
     const t0 = Date.now()
     mockGetPendingMessages.mockReturnValue([row(7, 'pixel')])
