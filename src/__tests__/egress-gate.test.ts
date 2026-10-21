@@ -251,6 +251,33 @@ describe('multi-tenant suffixes in the runtime lists', () => {
     expect(isEgressBlocked('WebFetch', { url: 'https://docs.aws.amazon.com/x' }, list, '')).toBe(false)
   })
 
+  it('a trailing-dot entry is not a way around the suffix check (Viktor 13122 L1)', () => {
+    // `vercel.app.` was not equal to the suffix, so it survived the filter and
+    // then matched the trailing-dot form of every tenant.
+    const list = { domains: ['vercel.app.'], prefixes: [], quarantineDomains: ['vercel.app.'] }
+    expect(isEgressBlocked('WebFetch', { url: 'https://evil.vercel.app./' }, list, '')).toBe(true)
+    expect(isEgressBlocked('WebFetch', { url: 'https://evil.vercel.app./' }, list, QUARANTINE)).toBe(true)
+  })
+
+  it('a malformed or single-label entry matches nothing, at either tier', () => {
+    // `org` used to open every .org host (Viktor 13122 INFO).
+    for (const entry of ['org', '.example.com', 'example.com.', 'a..example.com', '']) {
+      const list = { domains: [entry], prefixes: [], quarantineDomains: [entry] }
+      for (const url of ['https://anything.org/', 'https://x.example.com/', 'https://example.com/', 'https://x.a.example.com/']) {
+        expect(isEgressBlocked('WebFetch', { url }, list, '')).toBe(true)
+        expect(isEgressBlocked('WebFetch', { url }, list, QUARANTINE)).toBe(true)
+      }
+    }
+  })
+
+  it('the shape check leaves a LAN name or an address in domains to the operator', () => {
+    // Shape only: whether the main agent may reach a box on its own network
+    // is a separate question, answered elsewhere.
+    const list = { domains: ['nas.home.example', '10.0.85.98'], prefixes: [], quarantineDomains: [] }
+    expect(isEgressBlocked('WebFetch', { url: 'http://nas.home.example/x' }, list, '')).toBe(false)
+    expect(isEgressBlocked('WebFetch', { url: 'http://10.0.85.98:9000/' }, list, '')).toBe(false)
+  })
+
   it('the multi-tenant entry is not the reason the open reader posture opens a tenant', () => {
     // The open posture is its own operator opt-in to read any public host; the
     // dropped entry neither widens nor narrows it.

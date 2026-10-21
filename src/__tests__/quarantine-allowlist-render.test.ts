@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { renderQuarantineReader, ownerAllowedDomains, quarantineReaderDomains, isPublicFetchHost, MULTI_TENANT_SUFFIXES } from '../web/agent-scaffold.js'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { MULTI_TENANT_SUFFIXES as HOOK_MULTI_TENANT_SUFFIXES } from '../../scripts/hooks/egress-gate.mjs'
+import { MULTI_TENANT_SUFFIXES as HOOK_MULTI_TENANT_SUFFIXES, isUsableRuntimeDomain } from '../../scripts/hooks/egress-gate.mjs'
 
 // The quarantine reader may only fetch from an allowlist, and that list used to
 // exist TWICE: once in this template and once in store/egress-allowlist.json,
@@ -165,6 +165,18 @@ describe('quarantineReaderDomains', () => {
     // The prompt and the gate drift apart the moment one list changes alone.
     expect([...MULTI_TENANT_SUFFIXES].sort()).toEqual([...HOOK_MULTI_TENANT_SUFFIXES].sort())
     expect(MULTI_TENANT_SUFFIXES.length).toBeGreaterThan(0)
+  })
+
+  it('never lists an entry the egress-gate hook would ignore (Viktor 13122 L1)', () => {
+    // The scaffold may be stricter than the hook (it also refuses addresses
+    // and internal names), never looser: whatever the prompt promises, the
+    // gate must honor.
+    const entries = ['a.com', 'vercel.app', 'vercel.app.', 'myapp.vercel.app', 'org', '.example.com',
+      'example.com.', 'a..example.com', 'AmazonAWS.com', 'docs.github.com', 'localhost', '10.0.0.1']
+    writeFileSync(join(dir, 'egress-allowlist.json'), JSON.stringify({ domains: entries, quarantine_domains: entries }))
+    const listed = quarantineReaderDomains(dir)
+    expect(listed).toEqual(['a.com', 'myapp.vercel.app', 'docs.github.com'])
+    for (const d of listed) expect(isUsableRuntimeDomain(d)).toBe(true)
   })
 
   it('a quarantine_domains-level grant reaches the rendered reader definition', () => {

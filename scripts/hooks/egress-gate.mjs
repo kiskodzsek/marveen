@@ -278,6 +278,20 @@ export function opensMultiTenantSuffix(entry) {
   return MULTI_TENANT_SUFFIXES.some((s) => s === d || s.endsWith('.' + d))
 }
 
+// The shape a runtime entry needs before it may match anything (Viktor 13122
+// L1): at least two labels, no empty label, no leading or trailing dot. A
+// trailing dot (`vercel.app.`) slipped past the suffix check and then matched
+// `https://evil.vercel.app./`; a single label (`org`) opened a whole TLD. The
+// scaffold's isPublicFetchHost already refuses both, so without this the
+// prompt and the gate disagreed again. Shape only: a LAN name or an address
+// literal in `domains` is still the operator's call for the main agent.
+export function isUsableRuntimeDomain(entry) {
+  const d = String(entry ?? '')
+  const labels = d.split('.')
+  if (labels.length < 2 || labels.some((l) => l === '')) return false
+  return !opensMultiTenantSuffix(d)
+}
+
 function matchesQuarantineDomain(url, extraDomains = []) {
   let parsed
   try {
@@ -376,7 +390,7 @@ export function egressDecision(
 
   // 3. Runtime domain check: parse the URL to extract a verified hostname.
   //    URL parsing fails on non-URLs -> block (fail-safe).
-  const rtDomains = (runtimeList.domains ?? []).filter((d) => !opensMultiTenantSuffix(d))
+  const rtDomains = (runtimeList.domains ?? []).filter(isUsableRuntimeDomain)
   if (rtDomains.length > 0) {
     let hostname
     try {
@@ -402,7 +416,7 @@ export function egressDecision(
   //        re-check is defence in depth: step 0 already refused denied URLs,
   //        and this keeps that true even if someone later reorders the steps.
   if (String(agentType ?? '') === QUARANTINE_AGENT_TYPE) {
-    const qDomains = (runtimeList.quarantineDomains ?? []).filter((d) => !opensMultiTenantSuffix(d))
+    const qDomains = (runtimeList.quarantineDomains ?? []).filter(isUsableRuntimeDomain)
     if (matchesQuarantineDomain(url, qDomains)) {
       return { blocked: false, tier: 'quarantine' }
     }
