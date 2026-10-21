@@ -7,6 +7,9 @@
 //   R2 -- a dashboard restart right after an agent restart lost the in-memory
 //         await-ready state, so the resume was never sent. A restart that ran
 //         is persisted, and restored at runner start while it is recent.
+//   R3 -- (Viktor 13288 INFO) the fast round never restarts an agent in
+//         await-ready: decideGuard has no restart there, and the idle streak a
+//         fast restart needs is reset in every phase but await-handoff.
 import { describe, it, expect, vi } from 'vitest'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -48,7 +51,7 @@ vi.mock('../web/agent-process.js', () => ({
   isSessionReadyForPrompt: async () => false,
 }))
 
-const { fastRoundActs, FAST_ROUND_PHASES, INTERVAL_MS, PENDING_RESUME_MAX_AGE_MS, pendingResumesToRestore } =
+const { fastRoundActs, FAST_ROUND_PHASES, FAST_IDLE_CONFIRM, INTERVAL_MS, PENDING_RESUME_MAX_AGE_MS, pendingResumesToRestore } =
   await import('../web/context-guard-runner.js')
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -146,5 +149,38 @@ describe('R2: a restart that ran survives a dashboard restart', () => {
     expect(r).toBeGreaterThan(-1)
     expect(r).toBeLessThan(start.indexOf('setTimeout(sweep, INITIAL_DELAY_MS)'))
     expect(r).toBeLessThan(start.indexOf('setInterval(fastRound, FAST_INTERVAL_MS)'))
+  })
+})
+
+describe('R3: the fast round never restarts an agent in await-ready (Viktor 13288)', () => {
+  it('decideGuard has no restart in await-ready, for any reading', () => {
+    const bools = [false, true]
+    const strict: ContextGuardConfig = { ...CFG, idleFlushEnabled: true, dailyHandoffEnabled: true, saturationRestart: true }
+    for (const running of bools) for (const sessionReady of bools) for (const paneIdle of bools)
+      for (const paneBusy of bools) for (const paneSaturated of bools) for (const dailyHandoffDue of bools)
+        for (const pct of [null, 0.1, 0.99, 1.2]) for (const deadlineMs of [NOW + READY_TIMEOUT_MS, NOW - 1]) {
+          const d = decideGuard(
+            awaitReady({ deadlineMs }),
+            inputs({ running, sessionReady, paneIdle, paneBusy, paneSaturated, dailyHandoffDue, pct }),
+            strict,
+          )
+          expect(d.action).not.toBe('restart')
+        }
+  })
+  it('a fast restart needs at least two idle readings in a row', () => {
+    expect(FAST_IDLE_CONFIRM).toBeGreaterThanOrEqual(2)
+    expect(fastRoundActs('restart', 1)).toBe(false)
+    expect(fastRoundActs('restart', 1, true)).toBe(false)
+  })
+  it('the idle streak is reset outside await-handoff, before the fast round counts it', () => {
+    const body = runner.slice(runner.indexOf('async function checkAgent('))
+    const reset = body.indexOf("if (state.phase !== 'await-handoff') fastIdleStreak.delete(name)")
+    const gate = body.indexOf("if (mode === 'fast' && !FAST_ROUND_PHASES.has(state.phase)) return")
+    const count = body.indexOf("const streak = paneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0")
+    expect(reset).toBeGreaterThan(-1)
+    expect(gate).toBeGreaterThan(reset)
+    expect(count).toBeGreaterThan(gate)
+    // No other write raises the streak between the reset and the count.
+    expect(body.slice(reset, count).split('fastIdleStreak.set(').length).toBe(1)
   })
 })
