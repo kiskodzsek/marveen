@@ -85,6 +85,8 @@ jobs:
       - run: bash scripts/__tests__/morning-timer-park.test.sh
       - run: bash scripts/__tests__/userbot-arming-gate.test.sh
       - run: bash scripts/__tests__/supabase-q-token-hiding.test.sh
+      # WORKTREEADD1021: throwaway git repos in a temp dir, no network.
+      - run: bash scripts/__tests__/worktree-add.test.sh
       # REPLAYTOOL924: the reply-tool naming in the ledger hooks had tests that
       # only ran by hand, so a green PR said nothing about them. All three are
       # hermetic (LEDGER_DB_PATH on a throwaway DB, temp dirs).
