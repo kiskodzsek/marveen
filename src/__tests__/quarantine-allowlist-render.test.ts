@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { renderQuarantineReader, ownerAllowedDomains, quarantineReaderDomains, isPublicFetchHost, MULTI_TENANT_SUFFIXES } from '../web/agent-scaffold.js'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { MULTI_TENANT_SUFFIXES as HOOK_MULTI_TENANT_SUFFIXES, isUsableRuntimeDomain } from '../../scripts/hooks/egress-gate.mjs'
+import { MULTI_TENANT_SUFFIXES as HOOK_MULTI_TENANT_SUFFIXES, isUsableRuntimeDomain, isPublicFetchHost as hookIsPublicFetchHost } from '../../scripts/hooks/egress-gate.mjs'
 
 // The quarantine reader may only fetch from an allowlist, and that list used to
 // exist TWICE: once in this template and once in store/egress-allowlist.json,
@@ -323,5 +323,30 @@ describe('renderQuarantineReader anchoring', () => {
     ].join('\n')
     const out = renderQuarantineReader(tpl, ['claude.com'])
     expect(out.indexOf('- `claude.com`')).toBeLessThan(out.indexOf('## Output format'))
+  })
+})
+
+// The hook carries its own copy of isPublicFetchHost (a hook cannot import the
+// TypeScript build). The two must answer every host the same way, or the
+// prompt and the gate disagree again (Viktor 13125 LOW).
+describe('isPublicFetchHost parity with the egress-gate hook', () => {
+  const corpus = [
+    'claude.com', 'docs.claude.com', 'feeds.bbci.co.uk', 'api.example.co.uk', '123.example.com',
+    'deadbeef.example.com', '134744072.nip.io', '8.8.8.8.nip.io', '2001-db8--1.sslip.io', 'abc-def.example.com',
+    '127.0.0.1', '10.0.85.98', '169.254.169.254', 'localhost', 'localhost.localdomain', 'nas.home.example',
+    'nas.home', 'printer.local', 'db.internal', 'box.lan', 'kubernetes.default.svc', 'redis.ns.cluster',
+    '127.0.0.1.nip.io', '0177.0.0.1.nip.io', '2130706433.nip.io', '7f000001.nip.io', '192-168-1-50.sslip.io',
+    '0--1.sslip.io', 'fe80--1.sslip.io', '-a.com', 'a-.com', '.a.com', 'a.com.', 'a..com', 'org', '*',
+    '*.claude.com', 'claude.com:8080', 'https://claude.com', 'claude com', '', 'x'.repeat(64) + '.com',
+  ]
+
+  it('answers every host in the corpus the same way as the scaffold', () => {
+    for (const h of corpus) expect([h, hookIsPublicFetchHost(h)]).toEqual([h, isPublicFetchHost(h)])
+  })
+
+  it('refuses the reserved example TLD in both copies', () => {
+    expect(isPublicFetchHost('nas.home.example')).toBe(false)
+    expect(hookIsPublicFetchHost('nas.home.example')).toBe(false)
+    expect(isPublicFetchHost('example.com')).toBe(true)
   })
 })
