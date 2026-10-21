@@ -59,6 +59,8 @@ done
 MAIN="$1"; NEW="$2"; BRANCH="$3"; START="${4:-HEAD}"
 [[ -n "$MAIN" && -n "$NEW" && -n "$BRANCH" ]] || usage
 git -C "$MAIN" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "worktree-add: not a git work tree: $MAIN" >&2; exit 64; }
+# git -C "$MAIN" resolves a relative path against <main-clone>, not the caller's directory.
+[[ "$NEW" == /* ]] || NEW="$PWD/$NEW"
 [[ -e "$NEW" ]] && { echo "worktree-add: already exists: $NEW" >&2; exit 64; }
 
 if git -C "$MAIN" show-ref --verify --quiet "refs/heads/$BRANCH"; then
@@ -69,6 +71,7 @@ fi
 rc=$?
 [[ $rc -eq 0 ]] || exit "$rc"
 NEW="$(phys "$NEW")"
+[[ -n "$NEW" ]] || { echo "worktree-add: the new worktree cannot be resolved" >&2; exit 64; }
 
 not_linked() { echo "worktree-add: $NEW created, node_modules NOT linked: $1" >&2; echo "  own install, under the gate: heavy-job.sh --name npm-ci -- npm ci" >&2; exit 3; }
 
