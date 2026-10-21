@@ -1783,13 +1783,52 @@ function isInwardDashQuad(label: string): boolean {
   return isInwardIPv4(m.slice(1).map((p) => parseInt(p, 10)))
 }
 
+// Mirror of MULTI_TENANT_SUFFIXES in scripts/hooks/egress-gate.mjs (Viktor
+// 13106). The hook ignores an operator entry that equals one of these or is a
+// parent of one (`vercel.app` would open every app hosted there), so the
+// reader's prompt must not list that entry either, or the two disagree again.
+// Keep the two lists equal; a parity test pins it.
+export const MULTI_TENANT_SUFFIXES = [
+  'appspot.com',
+  'azurewebsites.net',
+  'blogspot.com',
+  'cloudfront.net',
+  'firebaseapp.com',
+  'fly.dev',
+  'github.io',
+  'gitlab.io',
+  'glitch.me',
+  'herokuapp.com',
+  'netlify.app',
+  'ngrok-free.app',
+  'ngrok.io',
+  'notion.site',
+  'onrender.com',
+  'pages.dev',
+  's3.amazonaws.com',
+  'substack.com',
+  'supabase.co',
+  'trycloudflare.com',
+  'vercel.app',
+  'web.app',
+  'webflow.io',
+  'wixsite.com',
+  'workers.dev',
+]
+
+export function opensMultiTenantSuffix(entry: string): boolean {
+  const d = entry.trim().toLowerCase()
+  if (!d) return false
+  return MULTI_TENANT_SUFFIXES.some((s) => s === d || s.endsWith('.' + d))
+}
+
 export function ownerAllowedDomains(storeDir = STORE_DIR): string[] {
   try {
     const raw = JSON.parse(readFileSync(join(storeDir, 'egress-allowlist.json'), 'utf-8'))
     const list = Array.isArray(raw?.domains) ? raw.domains : []
     return list.filter((d: unknown): d is string => typeof d === 'string')
       .map((d: string) => d.trim())
-      .filter((d: string) => isPublicFetchHost(d))
+      .filter((d: string) => isPublicFetchHost(d) && !opensMultiTenantSuffix(d))
   } catch {
     return []   // no file, unreadable, or malformed: ship the template as-is
   }
@@ -1811,7 +1850,7 @@ export function quarantineReaderDomains(storeDir = STORE_DIR): string[] {
     for (const d of list) {
       if (typeof d !== 'string') continue
       const host = d.trim()
-      if (!isPublicFetchHost(host) || seen.has(host.toLowerCase())) continue
+      if (!isPublicFetchHost(host) || opensMultiTenantSuffix(host) || seen.has(host.toLowerCase())) continue
       seen.add(host.toLowerCase())
       base.push(host)
     }
