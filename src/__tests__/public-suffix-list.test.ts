@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   buildPublicSuffixIndex as scaffoldBuild, loadPublicSuffixIndex, opensPublicSuffix as scaffoldOpens,
-  PSL_MIN_RULES as SCAFFOLD_MIN, PUBLIC_SUFFIX_LIST_PATH, quarantineReaderDomains,
+  ownerAllowedDomains, PSL_MIN_RULES as SCAFFOLD_MIN, PUBLIC_SUFFIX_LIST_PATH, quarantineReaderDomains,
 } from '../web/agent-scaffold.js'
 // @ts-expect-error -- plain .mjs hook module, no type declarations
 import * as hook from '../../scripts/hooks/egress-gate.mjs'
@@ -175,6 +175,8 @@ describe('an unusable list', () => {
       expect(q('https://status.anthropic.com/history.rss', { quarantineDomains: [] }).blocked).toBe(false)   // shipped feed
       expect(q('https://docs.stripe.com/x', { quarantineDomains: [], quarantinePosture: 'denylist' }).blocked).toBe(true)
       expect(hook.egressDecision('WebFetch', { url: 'https://docs.stripe.com/x' }, { domains: ['docs.stripe.com'] }, '').blocked).toBe(false)
+      // the reader skips step 3 too (Viktor 13226 LOW): the hand list is the main agent's fallback only
+      expect(q('https://docs.stripe.com/x', { domains: ['docs.stripe.com'] }).blocked).toBe(true)
 
       expect(existsSync(log)).toBe(true)
       expect(readFileSync(log, 'utf-8')).toContain('[egress-gate] public suffix list unreadable')
@@ -183,15 +185,18 @@ describe('an unusable list', () => {
     }
   })
 
-  it('the reader prompt follows the hook: no quarantine_domains entry, domains by the hand list', () => {
+  it('the reader prompt follows the hook: no quarantine_domains entry and no domains entry', () => {
     const dir = tmp()
     try {
       writeFileSync(join(dir, 'egress-allowlist.json'), JSON.stringify({ domains: ['docs.stripe.com'], quarantine_domains: ['support.stripe.com'] }))
       expect(quarantineReaderDomains(dir)).toEqual(['docs.stripe.com', 'support.stripe.com'])
-      expect(quarantineReaderDomains(dir, join(dir, 'does-not-exist.json'))).toEqual(['docs.stripe.com'])
+      // Viktor 13226 LOW: without the list the hook skips step 3 for the reader, so the prompt lists neither
+      expect(quarantineReaderDomains(dir, join(dir, 'does-not-exist.json'))).toEqual([])
+      // the main agent's view keeps the hand list
+      expect(ownerAllowedDomains(dir, join(dir, 'does-not-exist.json'))).toEqual(['docs.stripe.com'])
       writeFileSync(join(dir, 'egress-allowlist.json'), JSON.stringify({ domains: ['co.uk', 'vercel.app'] }))
       expect(quarantineReaderDomains(dir)).toEqual([])
-      expect(quarantineReaderDomains(dir, join(dir, 'does-not-exist.json'))).toEqual(['co.uk'])   // the hook's step 3 takes it too
+      expect(quarantineReaderDomains(dir, join(dir, 'does-not-exist.json'))).toEqual([])
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

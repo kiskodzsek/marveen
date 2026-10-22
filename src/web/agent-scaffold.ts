@@ -1911,13 +1911,17 @@ export function ownerAllowedDomains(storeDir = STORE_DIR, pslPath = PUBLIC_SUFFI
 // quarantine_domains level is honored by the hook but the reader's own prompt
 // still refuses it before a fetch is ever attempted -- which is exactly what
 // stranded a research task on 2026-08-16 (EGRESSKEY816).
+//
+// Without a usable public suffix list the hook gives the reader neither step
+// (Viktor 13226 LOW), so the prompt lists neither: the hand list is the main
+// agent's fallback, not the reader's.
 export function quarantineReaderDomains(storeDir = STORE_DIR, pslPath = PUBLIC_SUFFIX_LIST_PATH): string[] {
+  const psl = loadPublicSuffixIndex(pslPath)
+  if (!psl) return []
   const base = ownerAllowedDomains(storeDir, pslPath)
   try {
     const raw = JSON.parse(readFileSync(join(storeDir, 'egress-allowlist.json'), 'utf-8'))
     const list = Array.isArray(raw?.quarantine_domains) ? raw.quarantine_domains : []
-    const psl = loadPublicSuffixIndex(pslPath)
-    if (!psl) return base
     const seen = new Set(base.map((d) => d.toLowerCase()))
     for (const d of list) {
       if (typeof d !== 'string') continue

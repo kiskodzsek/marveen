@@ -215,13 +215,12 @@ describe('the open reader posture (operator opt-in)', () => {
     expect(egressDecision('WebFetch', { url: 'http://nas.home.example/' }, list, '').tier).toBe('runtime-domain')
   })
 
-  it('keeps the deny rules away from the main agent and from the default posture', () => {
+  it('keeps the deny rules away from the main agent', () => {
     // The main agent may still reach its own dashboard through the built-in
-    // prefixes, and so may the DEFAULT-posture reader (its prompt never asks
-    // for internal addresses, and the owner's rule is that the default
-    // changes for no one).
+    // prefixes. The default-posture reader may not any more (Viktor 13226 LOW,
+    // next block): its prompt lists localhost as always refused.
     expect(isEgressBlocked('WebFetch', { url: 'http://localhost:3420/api/memories' }, OPEN, '')).toBe(false)
-    expect(isEgressBlocked('WebFetch', { url: 'http://localhost:3420/api/memories' }, EMPTY, QUARANTINE)).toBe(false)
+    expect(isEgressBlocked('WebFetch', { url: 'http://localhost:3420/api/memories' }, EMPTY, QUARANTINE)).toBe(true)
   })
 
   it('reddit: the RSS path still matches by name, and the rest opens like any public site', () => {
@@ -247,6 +246,49 @@ describe('the open reader posture (operator opt-in)', () => {
 // naming a multi-tenant hosting suffix would hand over every customer's site
 // under it. Both runtime tiers ignore such an entry; a single tenant still
 // works, because its subdomains belong to the same owner.
+describe('the reader reaches no inward host through the every-agent steps (Viktor 13226 LOW)', () => {
+  // Steps 1-3 (built-in prefixes, runtime prefixes, domains) are every agent
+  // type's. Before, a default-posture reader reached the built-in Ollama and
+  // dashboard and any LAN entry in `domains`; its own prompt says "always
+  // refused, in every posture".
+  const inward = [
+    'http://localhost:11434/api/tags',
+    'http://127.0.0.1:11434/api/tags',
+    'http://localhost:3420/api/memories',
+    'http://127.0.0.1:3420/api/memories',
+  ]
+  for (const posture of [EMPTY, OPEN]) {
+    const name = posture === OPEN ? 'open' : 'default'
+    it(`refuses the built-in localhost prefixes to the reader (${name} posture), keeps them for the main agent`, () => {
+      for (const url of inward) {
+        expect([url, isEgressBlocked('WebFetch', { url }, posture, QUARANTINE)]).toEqual([url, true])
+        expect([url, isEgressBlocked('WebFetch', { url }, posture, '')]).toEqual([url, false])
+      }
+    })
+  }
+
+  it('keeps a public built-in prefix for the reader', () => {
+    expect(egressDecision('WebFetch', { url: 'https://api.github.com/repos/a/b' }, EMPTY, QUARANTINE).tier).toBe('builtin')
+  })
+
+  it('refuses an inward runtime prefix or domain to the reader only', () => {
+    const list = { ...EMPTY, prefixes: ['http://10.0.85.98/feed/'], domains: ['10.0.85.98', 'nas.home.example', 'docs.stripe.com'] }
+    for (const url of ['http://10.0.85.98/feed/x', 'http://10.0.85.98/other', 'http://nas.home.example/x', 'http://media.nas.home.example/x']) {
+      expect([url, isEgressBlocked('WebFetch', { url }, list, QUARANTINE)]).toEqual([url, true])
+      expect([url, isEgressBlocked('WebFetch', { url }, list, '')]).toEqual([url, false])
+    }
+    // a public `domains` entry still opens for the reader, as the scaffold lists it
+    expect(egressDecision('WebFetch', { url: 'https://docs.stripe.com/x' }, list, QUARANTINE).tier).toBe('runtime-domain')
+    expect(egressDecision('WebFetch', { url: 'https://app.billingo.hu/document-access/x' },
+      { ...EMPTY, prefixes: ['https://app.billingo.hu/document-access/'] }, QUARANTINE).tier).toBe('runtime-prefix')
+  })
+
+  it('refuses an unparseable URL to the reader before the prefix steps', () => {
+    expect(isEgressBlocked('WebFetch', { url: 'not a url' }, { ...EMPTY, prefixes: ['not a'] }, QUARANTINE)).toBe(true)
+    expect(isEgressBlocked('WebFetch', { url: 'not a url' }, { ...EMPTY, prefixes: ['not a'] }, '')).toBe(false)
+  })
+})
+
 describe('multi-tenant suffixes in the runtime lists', () => {
   it('an entry naming the suffix opens none of its tenants -- at either tier', () => {
     const list = { domains: ['vercel.app'], prefixes: [], quarantineDomains: ['github.io'] }
