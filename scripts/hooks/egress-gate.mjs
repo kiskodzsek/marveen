@@ -625,8 +625,21 @@ export function egressDecision(
   const url = String(toolInput?.url ?? '')
   if (!url) return { blocked: false, tier: 'no-url' }
 
-  const openReader = String(agentType ?? '') === QUARANTINE_AGENT_TYPE
-    && (runtimeList.quarantinePosture ?? 'allowlist') === 'denylist'
+  const isReader = String(agentType ?? '') === QUARANTINE_AGENT_TYPE
+  const openReader = isReader && (runtimeList.quarantinePosture ?? 'allowlist') === 'denylist'
+  // The reader's steps 1-3 need a public host, in every posture (Viktor 13226
+  // LOW). Those steps are every agent type's, so in the allowlist posture the
+  // reader reached the built-in Ollama and dashboard on localhost, and a LAN
+  // name or address in `domains`, while its own prompt lists localhost and
+  // private addresses as "always refused". The main agent keeps them.
+  let readerPublicHost = true
+  if (isReader) {
+    try {
+      readerPublicHost = isPublicFetchHost(new URL(url).hostname)
+    } catch {
+      readerPublicHost = false
+    }
+  }
 
   // 0. Reader deny rules, BEFORE every allow path -- in the denylist posture
   //    only, so the default posture stays byte-identical to the pre-switch
@@ -645,16 +658,18 @@ export function egressDecision(
   //    includes the trailing slash so a prefix-extension attack is impossible,
   //    e.g. 'https://api.github.com.evil.com/' does not start with
   //    'https://api.github.com/').
-  if (ALLOWED_PREFIXES.some((prefix) => url.startsWith(prefix))) return { blocked: false, tier: 'builtin' }
+  if (readerPublicHost && ALLOWED_PREFIXES.some((prefix) => url.startsWith(prefix))) return { blocked: false, tier: 'builtin' }
 
   // 2. Runtime prefix check.
   const rtPrefixes = runtimeList.prefixes ?? []
-  if (rtPrefixes.some((p) => url.startsWith(p))) return { blocked: false, tier: 'runtime-prefix' }
+  if (readerPublicHost && rtPrefixes.some((p) => url.startsWith(p))) return { blocked: false, tier: 'runtime-prefix' }
 
   // 3. Runtime domain check: parse the URL to extract a verified hostname.
   //    URL parsing fails on non-URLs -> block (fail-safe).
+  //    The reader skips this step without a usable public suffix list, as it
+  //    does quarantine_domains: the hand list is the main agent's fallback only.
   const rtDomains = (runtimeList.domains ?? []).filter((d) => isUsableRuntimeDomain(d))
-  if (rtDomains.length > 0) {
+  if (rtDomains.length > 0 && !(isReader && (!readerPublicHost || !publicSuffixIndex()))) {
     let hostname
     try {
       hostname = new URL(url).hostname
@@ -678,7 +693,7 @@ export function egressDecision(
   //    (b) anything else -- allowed UNLESS the deny rules catch it. The
   //        re-check is defence in depth: step 0 already refused denied URLs,
   //        and this keeps that true even if someone later reorders the steps.
-  if (String(agentType ?? '') === QUARANTINE_AGENT_TYPE) {
+  if (isReader) {
     const qDomains = (runtimeList.quarantineDomains ?? [])
       .filter((d) => isUsableRuntimeDomain(d, 'reader') && isPublicFetchHost(d))
     if (matchesQuarantineDomain(url, qDomains) && isPublicFetchHost(new URL(url).hostname)) {
