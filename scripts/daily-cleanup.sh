@@ -46,6 +46,13 @@
 #            Only Claude Code project dirs (the name starts with "-"); other
 #            dirs there (bash-edit-diff, Claude Code's own) are left alone.
 #            Symlinks are not followed; nothing outside that tree is touched.
+#   release-runs  ops/release/runs/<run>: src/ when the run's last ledger entry
+#            is DAILY_CLEANUP_RELEASE_DAYS (default 3) days old, src.tar.gz
+#            only when the run is that old AND closed (deployed, covered or
+#            merge-stopped); every *.json stays. The release engine unpacks
+#            src/ from the tarball each time and reads a tarball only for the
+#            run it is executing (Pulzus 14571). Rules and reasons:
+#            scripts/release-runs-prune.py.
 # Not here, on purpose: worktrees and their node_modules, models (whisper,
 # Hugging Face, mflux), the Colima disk, ms-playwright. Those belong to an
 # agent or are in use; the morning report lists them for their owners.
@@ -60,7 +67,7 @@
 #
 # Test hooks: DAILY_CLEANUP_NOW (epoch), DAILY_CLEANUP_HOUR (00-23),
 # DAILY_CLEANUP_DF_KB (free disk KB), DAILY_CLEANUP_SCRATCH_ROOT,
-# DAILY_CLEANUP_HEAVY_JOB (the wrapper), MARVEEN_STORE.
+# DAILY_CLEANUP_HEAVY_JOB (the wrapper), DAILY_CLEANUP_RELEASE_DIR, MARVEEN_STORE.
 
 set -uo pipefail
 
@@ -72,6 +79,8 @@ LOW_GB="${DAILY_CLEANUP_LOW_GB:-10}"
 SCRATCH_DAYS="${DAILY_CLEANUP_SCRATCH_DAYS:-7}"
 SCRATCH_ROOT="${DAILY_CLEANUP_SCRATCH_ROOT:-/private/tmp/claude-$(id -u)}"
 HEAVY_JOB="${DAILY_CLEANUP_HEAVY_JOB:-$HERE/heavy-job.sh}"
+RELEASE_DIR="${DAILY_CLEANUP_RELEASE_DIR:-$HERE/../ops/release}"
+RELEASE_DAYS="${DAILY_CLEANUP_RELEASE_DAYS:-3}"
 
 mkdir -p "$STORE" 2>/dev/null
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG" 2>/dev/null; }
@@ -141,6 +150,21 @@ clean_scratch() {
   log "STEP scratch removed=$n disk_delta_mb=$(( (after - before) / 1024 ))"
 }
 
+# The release engine's run directories: the age and closed-ness come from the
+# ledger, so the decision is in Python (scripts/release-runs-prune.py).
+clean_release_runs() {
+  local before after out rc
+  if [[ ! -d "$RELEASE_DIR/runs" || -L "$RELEASE_DIR/runs" ]]; then log "STEP release-runs skipped: no $RELEASE_DIR/runs"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then log "STEP release-runs skipped: python3 not installed"; return; fi
+  before="$(free_kb)"
+  echo "== release-runs: src/ and closed tarballs of runs idle for ${RELEASE_DAYS} days under $RELEASE_DIR/runs"
+  out="$(python3 -I "$HERE/release-runs-prune.py" --release-dir "$RELEASE_DIR" --days "$RELEASE_DAYS" --now "$(now)")"; rc=$?
+  echo "$out"
+  (( rc == 0 )) || FAILED=1
+  after="$(free_kb)"
+  log "STEP release-runs rc=$rc $(echo "$out" | tail -1) disk_delta_mb=$(( (after - before) / 1024 ))"
+}
+
 run() {
   exec >"$STORE/daily-cleanup.last-run.txt" 2>&1
   log "RUN start free_gb=$(( $(free_kb) / 1048576 ))"
@@ -149,6 +173,7 @@ run() {
   step pip pip3 pip3 cache purge
   step go go go clean -cache
   clean_scratch
+  clean_release_runs
   log "RUN end free_gb=$(( $(free_kb) / 1048576 )) failed=$FAILED"
   return "$FAILED"
 }
