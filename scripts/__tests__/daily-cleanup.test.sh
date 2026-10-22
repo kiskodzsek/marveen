@@ -3,8 +3,8 @@
 # heavy-job.sh --ignore-host-disk, and the macOS launchd installer (card 1c58f629).
 #
 # Every tool a run calls (brew, npm, pip3, go) is a stub that only records its
-# argv; HOME, the store and the scratch root are inside a sandbox. Nothing here
-# touches a real cache or the real store.
+# argv; HOME, the store, the scratch root and the release dir are inside a
+# sandbox. Nothing here touches a real cache, the real store or ops/release.
 #
 # Run:  bash scripts/__tests__/daily-cleanup.test.sh
 set -uo pipefail
@@ -49,6 +49,7 @@ dc() {
   OUT="$(env -i PATH="$SB/bin:/usr/bin:/bin" HOME="$SB/home" MARVEEN_STORE="$SB/store" \
       DAILY_CLEANUP_NOW="$NOW" DAILY_CLEANUP_HOUR="${HOUR:-12}" DAILY_CLEANUP_DF_KB="${DF_KB:-$((50 * GB))}" \
       DAILY_CLEANUP_SCRATCH_ROOT="$SB/scratch" DAILY_CLEANUP_HEAVY_JOB="${HJ_BIN:-$SB/hj-stub}" \
+      DAILY_CLEANUP_RELEASE_DIR="${REL_DIR:-$SB/no-release}" \
       HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 HEAVY_JOB_DF_KB="${HJ_DF:-99999999}" HEAVY_JOB_VM_PID= \
       MEMGATE_PROC_MEMINFO="$SB/no-such" MEMGATE_SYSCTL="$SB/sysctl" \
       ${STUB_ENV:-} bash "$DC" "$@" 2>&1)"; RC=$?
@@ -158,6 +159,44 @@ check "a symlinked session and project are not followed: their target stays" "$(
 check "a non-project dir (bash-edit-diff), even if idle, is not touched" "$(ok -f "$S/bash-edit-diff/oldhash/f")"
 check "files at the top of the scratch root are not touched" "$(ok -f "$S/topfile")"
 check "...logged: removed=1" "$(ok -n "$(grep 'STEP scratch removed=1 ' "$SB/store/daily-cleanup.log")")" "$(grep scratch "$SB/store/daily-cleanup.log")"
+
+echo "== release runs (Pulzus 14571)"
+R="$SB/release"; RR="$R/runs"; mkdir -p "$RR" "$SB/rel-outside/src"; echo x > "$SB/rel-outside/src/f"
+iso() { python3 -c 'import datetime as d,sys; print(d.datetime.fromtimestamp(int(sys.argv[1]), d.timezone.utc).isoformat())' "$1"; }
+D=86400; OLD="$(iso $((NOW - 5 * D)))"; NEW="$(iso $((NOW - D)))"
+mkrun() { mkdir -p "$RR/$1/src/sub"; echo x > "$RR/$1/src/sub/f"; echo t > "$RR/$1/src.tar.gz"; echo '{}' > "$RR/$1/state.json"; echo '{}' > "$RR/$1/merge.json"; }
+for r in 20330101-000000-aaa1 20330101-000000-aaa2 20330101-000000-aaa3 20330101-000000-aaa4 20330101-000000-aaa5 20330101-000000-aaa6; do mkrun "$r"; done
+mkdir -p "$RR/20330101-000000-aaa7"; ln -s "$SB/rel-outside/src" "$RR/20330101-000000-aaa7/src"; echo t > "$RR/20330101-000000-aaa7/src.tar.gz"
+mkdir -p "$RR/notarun/src"; echo x > "$RR/notarun/src/f"
+{
+  echo "{\"run_id\":\"20330101-000000-aaa1\",\"step\":\"merged\",\"ts\":\"$OLD\"}"
+  echo "{\"run_id\":\"20330101-000000-aaa1\",\"step\":\"deployed\",\"ts\":\"$OLD\"}"
+  echo "{\"run_id\":\"20330101-000000-aaa2\",\"step\":\"merged\",\"ts\":\"$OLD\"}"
+  echo "{\"run_id\":\"20330101-000000-aaa2\",\"step\":\"migration_applied\",\"ts\":\"$OLD\"}"
+  echo "{\"run_id\":\"20330101-000000-aaa3\",\"step\":\"deployed\",\"ts\":\"$NEW\"}"
+  echo "{\"run_id\":\"20330101-000000-aaa4\",\"step\":\"deploy_stopped\",\"ts\":\"$OLD\"}"
+  echo "{\"run_id\":\"20330101-000000-aaa5\",\"step\":\"deployed\",\"ts\":\"$OLD\"}"
+  echo 'not json'
+  echo "{\"run_id\":\"20330101-000000-aaa5\",\"step\":\"release_token_note\",\"ts\":\"$NEW\"}"
+  echo "{\"run_id\":\"20330101-000000-aaa7\",\"step\":\"deployed\",\"ts\":\"$OLD\"}"
+  echo "{\"run_id\":\"notarun\",\"step\":\"deployed\",\"ts\":\"$OLD\"}"
+} > "$R/ledger.jsonl"
+REL_DIR="$R" LAST= dc run
+check "closed run, last entry 5 days old: src/ and the tarball go" "$(ok ! -e "$RR/20330101-000000-aaa1/src" -a ! -e "$RR/20330101-000000-aaa1/src.tar.gz")" "$(ls "$RR/20330101-000000-aaa1")"
+check "...its *.json stay (audit)" "$(ok -f "$RR/20330101-000000-aaa1/state.json" -a -f "$RR/20330101-000000-aaa1/merge.json")"
+check "merged + migrated but not deployed, 5 days: src/ goes, the tarball stays" "$(ok ! -e "$RR/20330101-000000-aaa2/src" -a -f "$RR/20330101-000000-aaa2/src.tar.gz")"
+check "closed run, last entry 1 day old: both stay" "$(ok -f "$RR/20330101-000000-aaa3/src/sub/f" -a -f "$RR/20330101-000000-aaa3/src.tar.gz")"
+check "deploy_stopped only (a resume reads the tarball): the tarball stays, src/ goes" "$(ok -f "$RR/20330101-000000-aaa4/src.tar.gz" -a ! -e "$RR/20330101-000000-aaa4/src")"
+check "the age is the LAST ledger entry: an old deploy with a 1-day-old note stays" "$(ok -f "$RR/20330101-000000-aaa5/src/sub/f" -a -f "$RR/20330101-000000-aaa5/src.tar.gz")"
+check "a run with no ledger entry is not touched" "$(ok -f "$RR/20330101-000000-aaa6/src/sub/f" -a -f "$RR/20330101-000000-aaa6/src.tar.gz")"
+check "a symlinked src/ is left, and its target is not touched" "$(ok -L "$RR/20330101-000000-aaa7/src" -a -f "$SB/rel-outside/src/f" -a ! -e "$RR/20330101-000000-aaa7/src.tar.gz")"
+check "a directory not named like a run id is not touched" "$(ok -f "$RR/notarun/src/f")"
+check "...rc 0, logged with the counts" "$(ok "$RC" = 0 -a -n "$(grep 'STEP release-runs rc=0 removed_src=3 removed_tar=2 kept_open=2 ' "$SB/store/daily-cleanup.log")")" "rc=$RC $(grep release-runs "$SB/store/daily-cleanup.log" | tail -1)"
+mv "$R/ledger.jsonl" "$R/ledger.off"; mkrun 20330101-000000-aab1
+REL_DIR="$R" LAST= dc run
+check "no readable ledger: nothing removed, the step fails (rc 1)" "$(ok "$RC" = 1 -a -f "$RR/20330101-000000-aab1/src/sub/f" -a -n "$(grep 'STEP release-runs rc=1 stop: the ledger cannot be read' "$SB/store/daily-cleanup.log")")" "rc=$RC $(grep release-runs "$SB/store/daily-cleanup.log" | tail -1)"
+LAST= dc run
+check "no release dir: the step is skipped and logged, rc 0" "$(ok "$RC" = 0 -a -n "$(grep "STEP release-runs skipped: no $SB/no-release/runs" "$SB/store/daily-cleanup.log")")" "rc=$RC"
 
 echo "== install-daily-cleanup.sh (macOS launchd)"
 FAKEHOME="$SB/ihome"; mkdir -p "$FAKEHOME" "$SB/ubin"
