@@ -40,6 +40,7 @@ be read (then nothing is removed) or a removal failed.
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import re
 import shutil
@@ -76,6 +77,9 @@ def main(argv):
     ap.add_argument("--now", type=float, default=None)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
+    # Below a day, the run being executed would lose its src/ (Viktor 14590 INFO 1).
+    if not (math.isfinite(args.days) and args.days >= 1):
+        ap.error("--days must be at least 1")
 
     runs_dir = os.path.join(args.release_dir, "runs")
     ledger = os.path.join(args.release_dir, "ledger.jsonl")

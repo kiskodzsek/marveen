@@ -195,6 +195,12 @@ check "...rc 0, logged with the counts" "$(ok "$RC" = 0 -a -n "$(grep 'STEP rele
 mv "$R/ledger.jsonl" "$R/ledger.off"; mkrun 20330101-000000-aab1
 REL_DIR="$R" LAST= dc run
 check "no readable ledger: nothing removed, the step fails (rc 1)" "$(ok "$RC" = 1 -a -f "$RR/20330101-000000-aab1/src/sub/f" -a -n "$(grep 'STEP release-runs rc=1 stop: the ledger cannot be read' "$SB/store/daily-cleanup.log")")" "rc=$RC $(grep release-runs "$SB/store/daily-cleanup.log" | tail -1)"
+mv "$R/ledger.off" "$R/ledger.jsonl"; echo "{\"run_id\":\"20330101-000000-aab1\",\"step\":\"deployed\",\"ts\":\"$OLD\"}" >> "$R/ledger.jsonl"
+for days in 0 -1 0.5 nan; do
+  REL_DIR="$R" LAST= STUB_ENV="DAILY_CLEANUP_RELEASE_DAYS=$days" dc run
+  check "DAILY_CLEANUP_RELEASE_DAYS=$days is refused: nothing removed, the step fails (rc 2)" "$(ok "$RC" = 1 -a -f "$RR/20330101-000000-aab1/src/sub/f" -a -f "$RR/20330101-000000-aab1/src.tar.gz" -a -n "$(grep 'STEP release-runs rc=2 ' "$SB/store/daily-cleanup.log" | tail -1)")" "rc=$RC $(grep release-runs "$SB/store/daily-cleanup.log" | tail -1)"
+  printf '' > "$SB/store/daily-cleanup.log"
+done
 LAST= dc run
 check "no release dir: the step is skipped and logged, rc 0" "$(ok "$RC" = 0 -a -n "$(grep "STEP release-runs skipped: no $SB/no-release/runs" "$SB/store/daily-cleanup.log")")" "rc=$RC"
 
