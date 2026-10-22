@@ -41,6 +41,15 @@ describe('who gets a brief', () => {
     // next -- and a failed start is exactly when something else might.
     expect(shouldBriefAfterStart({ fresh: true }, { ok: false })).toBe(false)
   })
+
+  it('says nothing when the caller brings its own resume prompt', () => {
+    // The context guard types a fuller resume directive (handoff, cards, hot
+    // memories, restart window). The brief on top of it doubled the first
+    // turn: 10 of 12 briefed sessions, 10-15 .. 10-16, got both.
+    expect(shouldBriefAfterStart({ fresh: true, brief: false }, { ok: true })).toBe(false)
+    // Only an explicit false opts out: every other fresh door keeps the brief.
+    expect(shouldBriefAfterStart({ fresh: true, brief: true }, { ok: true })).toBe(true)
+  })
 })
 
 describe('scheduleRecoveryBrief', () => {
@@ -145,5 +154,11 @@ describe('the brief is scheduled where fresh sessions are created', () => {
     // after moving it here would type the brief twice on that one path.
     const monitor = readFileSync(join(__dirname, '../web/channel-monitor.ts'), 'utf-8')
     expect(monitor).not.toContain('scheduleRecoveryBrief(')
+  })
+
+  it('the context guard opts out, because its inject-resume is the recovery prompt', () => {
+    const guard = readFileSync(join(__dirname, '../web/context-guard-runner.ts'), 'utf-8')
+    expect(guard).toContain('restartAgentProcess(name, { fresh: true, brief: false })')
+    expect(guard).not.toMatch(/restartAgentProcess\(name, \{ fresh: true \}\)/)
   })
 })
