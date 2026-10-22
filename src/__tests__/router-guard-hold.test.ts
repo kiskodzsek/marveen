@@ -100,6 +100,21 @@ describe('shouldHoldForGuard (pure)', () => {
   it('fails open at the cap', () => {
     expect(shouldHoldForGuard('await-handoff', 'pixel', 1_000, 1_000 + MAX, MAX)).toBe(false)
   })
+  it('a Marabel watchdog alert is never held (from klodel, "[WATCHDOG] " prefix)', () => {
+    for (const phase of ['context-guard await-handoff', 'context-guard await-ready']) {
+      expect(shouldHoldForGuard(phase, 'klodel', undefined, 0, MAX, '[WATCHDOG] 🔴 A Marabel nem elérhető')).toBe(false)
+      expect(shouldHoldForGuard(phase, 'klodel', 1_000, 2_000, MAX, '[WATCHDOG] ✅ helyreállt')).toBe(false)
+    }
+  })
+  it('anything else that looks like it is still held', () => {
+    const p = 'context-guard await-handoff'
+    expect(shouldHoldForGuard(p, 'pulzus', undefined, 0, MAX, '[WATCHDOG] x')).toBe(true)   // not the watchdog's sender
+    expect(shouldHoldForGuard(p, 'klodel', undefined, 0, MAX, 'Fwd: [WATCHDOG] x')).toBe(true)   // prefix only
+    expect(shouldHoldForGuard(p, 'klodel', undefined, 0, MAX, '[WATCHDOG]x')).toBe(true)
+    expect(shouldHoldForGuard(p, 'klodel', undefined, 0, MAX, '[watchdog] x')).toBe(true)
+    expect(shouldHoldForGuard(p, 'klodel', undefined, 0, MAX, 'ping')).toBe(true)
+    expect(shouldHoldForGuard(p, 'klodel', undefined, 0, MAX)).toBe(true)
+  })
 })
 
 describe('router tick under a guard hold', () => {
@@ -131,6 +146,20 @@ describe('router tick under a guard hold', () => {
     mockGetPendingMessages.mockReturnValue([row(3, 'system')])
     await runMessageRouterTick()
     expect(mockIsReady).toHaveBeenCalledTimes(1)
+  })
+
+  it('a watchdog alert goes through in both phases; the same text from a peer is held', async () => {
+    for (const p of ['context-guard await-handoff', 'context-guard await-ready']) {
+      vi.clearAllMocks()
+      phase = p
+      mockGetPendingMessages.mockReturnValue([{ ...row(31, 'klodel'), content: '[WATCHDOG] 🔴 A Marabel nem elérhető' }])
+      await runMessageRouterTick()
+      expect([p, mockIsReady.mock.calls.length]).toEqual([p, 1])
+      vi.clearAllMocks()
+      mockGetPendingMessages.mockReturnValue([{ ...row(32, 'pixel'), content: '[WATCHDOG] 🔴 A Marabel nem elérhető' }])
+      await runMessageRouterTick()
+      expect([p, mockIsReady.mock.calls.length]).toEqual([p, 0])
+    }
   })
 
   it('the held row is delivered normally once the phase ends', async () => {

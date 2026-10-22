@@ -388,10 +388,22 @@ export function setDeliveryHoldCheck(check: ((agent: string) => DeliveryHold | n
   deliveryHoldCheck = check
 }
 
+// A Marabel watchdog alert (ops/marabel-watchdog.sh: from klodel, "[WATCHDOG] "
+// prefix) is not held either. The KIESÉS runbook needs Klodel and Pulzus in the
+// first minutes, and a hold can add up to the phase deadline (await-handoff up
+// to handoffTimeoutMinutes, await-ready about 10 min). If the row lands in a
+// session that is about to restart, the restart prompt's RESTART-ABLAK read-back
+// picks it up again. The prefix is not authentication (the dashboard token is
+// shared): a forged row only gets the normal, pre-hold delivery back.
+const WATCHDOG_FROM = 'klodel'
+const WATCHDOG_PREFIX = '[WATCHDOG] '
+
 export function shouldHoldForGuard(
   holdReason: string | null, fromAgent: string, heldSinceMs: number | undefined, nowMs: number, maxMs: number,
+  content = '',
 ): boolean {
   if (holdReason == null || fromAgent === 'system') return false
+  if (fromAgent === WATCHDOG_FROM && content.startsWith(WATCHDOG_PREFIX)) return false
   return heldSinceMs === undefined || nowMs - heldSinceMs < maxMs
 }
 
@@ -783,7 +795,7 @@ export async function runMessageRouterTick(): Promise<void> {
         const holdReason = hold?.reason ?? null
         const held = guardHeldSince.get(msg.id)
         const heldSince = held?.since
-        if (hold && shouldHoldForGuard(holdReason, msg.from_agent, heldSince, now, hold.maxMs)) {
+        if (hold && shouldHoldForGuard(holdReason, msg.from_agent, heldSince, now, hold.maxMs, msg.content ?? '')) {
           if (held === undefined) {
             guardHeldSince.set(msg.id, { since: now, maxMs: hold.maxMs })
             logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, holdReason, capMs: hold.maxMs },
