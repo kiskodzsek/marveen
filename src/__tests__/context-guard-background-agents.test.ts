@@ -109,6 +109,13 @@ describe('backgroundAgentCount', () => {
     expect(backgroundAgentCount('')).toBe(0)
   })
 
+  it('prose quoting the sentence is not the Claude Code line (Viktor 16178)', () => {
+    const quoted = FINISHED.replace('⏺ Done.', '⏺ Dave wrote: Waiting for 4 background agents to finish')
+    expect(backgroundAgentCount(quoted)).toBe(0)
+    const trailing = FINISHED.replace('⏺ Done.', '✻ Waiting for 4 background agents to finish, said the log')
+    expect(backgroundAgentCount(trailing)).toBe(0)
+  })
+
   it('a Waiting line far up in the scrollback is history, not a live signal', () => {
     const old = [
       '✻ Waiting for 2 background agents to finish',

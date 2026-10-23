@@ -160,7 +160,9 @@ export function stripAgentPanel(pane: string): string {
 
 // "✻ Waiting for 4 background agents to finish": the line Claude Code draws
 // above the input box while the main thread is idle and background agents run.
-const WAITING_FOR_AGENTS_RX = /Waiting for (\d+) background agents? to finish/
+// Anchored to the whole line and its leading glyph (the spinner set), so the
+// agent's own prose quoting the sentence is not a signal (Viktor 16178).
+const WAITING_FOR_AGENTS_RX = /^\s*[·✢✳✶✻✽*]\s+Waiting for (\d+) background agents? to finish\s*$/
 const WAITING_LINE_MAX_DISTANCE = 6
 
 /**
