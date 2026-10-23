@@ -2863,3 +2863,84 @@ describe('key-sending detectors: the dialog chrome must be the live last line', 
     expect(detectsBlockingMenu([...MENU, '  Opus 5.5 | ctx 22%'].join('\n'), 'last-line')).toBe(false)
   })
 })
+
+// ---------------------------------------------------------------------------
+// The background-agent panel under the footer (Klodel 14978, Patrik TG 6242).
+//
+// While a background agent runs, Claude Code draws one row per agent BELOW the
+// mode footer, after one blank row, the main thread first. The footer was then
+// not the last line, and an idle pane with an empty box read 'unknown': the
+// router held dave's messages ~25 min. The shape below is the bottom of a
+// verbatim `tmux capture-pane -p` of the dave pane, 2026-10-23 10:4x, the prose
+// replaced; on main it read 'unknown'.
+// ---------------------------------------------------------------------------
+describe('detectPaneState: background-agent panel under the footer', () => {
+  const panel = (footer: string, rows: string[], above = '✻ Waiting for 2 background agents to finish') =>
+    [
+      '⏺ The report is in the HANDOFF.',
+      '',
+      above,
+      '',
+      SEP,
+      '❯ ',
+      SEP,
+      '  Opus 5.5 (1M context) | ctx 44% | 5h 40% | 7d 11%',
+      footer,
+      '',
+      ...rows,
+      '',
+    ].join('\n')
+  const ROWS = [
+    '  ⏺ main',
+    '  ◯ general-purpose  Listing local orders for admin… 18m 45s · ↓ 360.1k tokens',
+    '  ◯ general-purpose  Reading buildLifeStoryBook in …  1m 18s · ↓ 151.5k tokens',
+  ]
+
+  it('reads an empty box above the panel as idle (the measured dave shape)', () => {
+    const pane = panel('  ⏵⏵ bypass permissions on · install gh for PR status · 2 shells', ROWS)
+    expect(detectPaneState(pane)).toBe('idle')
+    expect(isReadyForPrompt(pane)).toBe(true)
+  })
+
+  it('reads the plain pill footer with one agent row as idle', () => {
+    expect(detectPaneState(panel('  ⏵⏵ bypass permissions on · 1 shell', ROWS.slice(0, 2), '✻ Waiting for 1 background agent to finish'))).toBe('idle')
+  })
+
+  it('a notice segment between the mode and the pill, without a panel, is idle too', () => {
+    const pane = panel('  ⏵⏵ bypass permissions on · install gh for PR status · 2 shells', [])
+    expect(detectPaneState(pane)).toBe('idle')
+  })
+
+  it('a running turn above the panel stays busy, however long the panel', () => {
+    const many = [ROWS[0], ...Array.from({ length: 12 }, (_, i) => `  ◯ general-purpose  Task ${i} … 1m ${i}s · ↓ 1.${i}k tokens`)]
+    const busy = panel('  ⏵⏵ bypass permissions on · esc to interrupt', many, '✻ Cogitating… (1m 16s · ↓ 4.0k tokens)')
+    expect(detectPaneState(busy)).toBe('busy')
+    // The footer-only busy signal alone, pushed off the 5-line window by the panel before this fix.
+    const escOnly = panel('  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt', many, '')
+    expect(detectPaneState(escOnly)).toBe('busy')
+  })
+
+  it('parked text in the box above the panel is typing, not idle', () => {
+    const pane = panel('  ⏵⏵ bypass permissions on · 2 shells', ROWS).replace('❯ \n', '❯ half-typed reply\n')
+    expect(detectPaneState(pane)).toBe('typing')
+    expect(isReadyForPrompt(pane)).toBe(false)
+  })
+
+  it('cuts nothing that is not the panel: no main row, not under a footer, or a quoted panel above a shell', () => {
+    // Agent rows without the main row first.
+    expect(detectPaneState(panel('  ⏵⏵ bypass permissions on · 2 shells', ROWS.slice(1)))).toBe('unknown')
+    // A panel-shaped block under prose, no footer above it.
+    const quoted = ['The panel looked like this:', '', ...ROWS, '', 'klodel@host ~ % '].join('\n')
+    expect(detectPaneState(quoted)).toBe('unknown')
+    const quotedTail = ['  ⏵⏵ bypass permissions on · 1 shell', '', ...ROWS].join('\n')
+    expect(detectPaneState(quotedTail)).toBe('unknown')
+    // A wider gap than the measured one blank row (+1 slack).
+    const gap = panel('  ⏵⏵ bypass permissions on · 2 shells', ['', '', ...ROWS])
+    expect(detectPaneState(gap)).toBe('unknown')
+  })
+
+  it('the notice segment does not loosen the box condition', () => {
+    const noBox = ['some report', '─'.repeat(30), '  ⏵⏵ bypass permissions on · install gh for PR status · 2 shells'].join('\n')
+    expect(detectPaneState(noBox)).toBe('unknown')
+  })
+})

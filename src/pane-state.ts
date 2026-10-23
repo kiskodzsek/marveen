@@ -97,12 +97,66 @@ const IDLE_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\)| �
 // live input box (two separators around a ❯ row) just above it (see
 // idleFooterIndex). A pill quoted in scrollback or printed by a plain shell
 // does not sit there.
-const IDLE_TASK_PILL_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on · (?:\S+ )?(?:\d+ [A-Za-z][\w ,-]*?|dreaming|auto-mode scan|memory import(?: \d+\/\d+)?)[ \t]*$/
+//
+// A notice may sit between the mode and the pill as its own `·` segment:
+// `⏵⏵ bypass permissions on · install gh for PR status · 2 shells` (measured
+// 2026-10-23 on the dave pane, Klodel 14978). Up to two such segments, each
+// without a `·` of its own; the input-box condition below is unchanged.
+const IDLE_TASK_PILL_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on · (?:[^·\n]{1,60} · ){0,2}(?:\S+ )?(?:\d+ [A-Za-z][\w ,-]*?|dreaming|auto-mode scan|memory import(?: \d+\/\d+)?)[ \t]*$/
 
 // How far above the bare pill footer the input box's bottom separator may sit.
 // The box is followed by an optional statusline row (`Opus 5.5 | ctx 22% ...`)
 // and then the footer, so 3 rows leaves one row of slack.
 const PILL_FOOTER_MAX_SEP_DISTANCE = 3
+
+// The background-agent panel. While a background agent runs, Claude Code draws
+// one row per agent UNDER the mode footer, the main thread first:
+//
+//   ⏵⏵ bypass permissions on · 1 shell
+//
+//   ⏺ main
+//   ◯ general-purpose  Testing concurrent make_order … 15m 44s · ↓ 323.8k tokens
+//
+// So the footer is no longer the last non-blank line, idleFooterIndex found no
+// footer, and an idle pane with an empty ❯ box read 'unknown': the router held
+// every message until the agent ended. Measured 2026-10-23 10:4x on the dave
+// pane ("Waiting for 1 background agent to finish", empty box): 'unknown', 4
+// messages held ~25 min (Patrik TG 6242/6251, Klodel 14978).
+//
+// The panel is cut off before any window is measured, so the footer is the last
+// line again and the 12/5-line busy windows are not pushed off a live spinner by
+// a long panel. Only a block that starts with the `main` row, sits under a
+// mode-footer line (one blank row between them, measured; at most
+// AGENT_PANEL_MAX_GAP) and holds nothing but panel rows is cut; everything else is
+// left as it is, and the footer and input-box checks still decide idleness.
+const AGENT_PANEL_ROW_RX = /^\s+[⏺◯●○◉◎]\s+\S/
+const AGENT_PANEL_MAIN_RX = /^\s+[⏺◯●○◉◎]\s+main\s*$/
+const AGENT_PANEL_MAX_ROWS = 20
+const AGENT_PANEL_MAX_GAP = 2
+const AGENT_PANEL_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: ·| \(shift\+tab|\s*$)|\? for shortcuts|esc to interrupt/
+
+/** The lines without a background-agent panel under the footer (see above); the same array if there is none. */
+function withoutAgentPanel(lines: string[]): string[] {
+  let end = lines.length
+  while (end > 0 && lines[end - 1].trim() === '') end--
+  let start = end
+  while (start > 0 && end - start < AGENT_PANEL_MAX_ROWS && AGENT_PANEL_ROW_RX.test(lines[start - 1])) {
+    start--
+    if (AGENT_PANEL_MAIN_RX.test(lines[start])) break
+  }
+  if (start === end || !AGENT_PANEL_MAIN_RX.test(lines[start])) return lines
+  let footer = start - 1
+  while (footer >= 0 && start - 1 - footer < AGENT_PANEL_MAX_GAP && lines[footer].trim() === '') footer--
+  if (footer < 0 || !AGENT_PANEL_FOOTER_RX.test(lines[footer])) return lines
+  return lines.slice(0, footer + 1)
+}
+
+/** The pane text without a background-agent panel under the footer. */
+export function stripAgentPanel(pane: string): string {
+  const lines = pane.split('\n')
+  const kept = withoutAgentPanel(lines)
+  return kept === lines ? pane : kept.join('\n')
+}
 
 // Index of the live idle footer line, or -1. Both footer shapes are accepted
 // only as the LIVE footer, the last non-blank line of the pane; the bare pill
@@ -126,6 +180,8 @@ const PILL_FOOTER_MAX_SEP_DISTANCE = 3
 //     (model consent, first-run gates, menu Escape): a stricter footer test
 //     would let quoted dialog text through to a keystroke.
 function idleFooterIndex(lines: string[]): number {
+  // A background-agent panel below the footer is not part of it; the index stays valid in `lines`.
+  lines = withoutAgentPanel(lines)
   let last = lines.length - 1
   while (last >= 0 && lines[last].trim() === '') last--
   if (last < 0) return -1
@@ -1273,6 +1329,9 @@ export function detectPaneState(
   opts: DetectPaneStateOptions = {},
 ): PaneState {
   if (!pane || !pane.trim()) return 'unknown'
+  // Before every window below: a background-agent panel would push the footer
+  // off the last line and a live spinner off the busy windows (see withoutAgentPanel).
+  pane = stripAgentPanel(pane)
 
   const paneLines = pane.split('\n')
 
