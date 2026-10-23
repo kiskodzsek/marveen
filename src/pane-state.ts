@@ -158,6 +158,43 @@ export function stripAgentPanel(pane: string): string {
   return kept === lines ? pane : kept.join('\n')
 }
 
+// "✻ Waiting for 4 background agents to finish": the line Claude Code draws
+// above the input box while the main thread is idle and background agents run.
+const WAITING_FOR_AGENTS_RX = /Waiting for (\d+) background agents? to finish/
+const WAITING_LINE_MAX_DISTANCE = 6
+
+/**
+ * How many background agents the pane shows running, 0 when none.
+ *
+ * Not a pane state: the router must still see an idle box above the panel as
+ * idle (Klodel 14978), but a RESTART kills every background agent with the
+ * session. Measured 2026-10-23 21:14 on dave (Patrik TG 6938, Klodel 16131): the
+ * pane read idle after #82, the context-guard restarted it, and four subagents
+ * started a minute earlier were lost before they committed. So the guard asks
+ * this separately and treats a non-zero answer as busy.
+ *
+ * Two signals, the larger wins, so either one alone is enough: the agent rows of
+ * the panel under the footer (the main row excluded), and the "Waiting for N
+ * background agents" line just above the input box.
+ */
+export function backgroundAgentCount(pane: string): number {
+  if (!pane) return 0
+  const lines = pane.split('\n')
+  const kept = withoutAgentPanel(lines)
+  const rows = lines.slice(kept.length)
+    .filter((l) => AGENT_PANEL_ROW_RX.test(l) && !AGENT_PANEL_MAIN_RX.test(l)).length
+  let waiting = 0
+  let box = kept.length - 1
+  while (box >= 0 && !/^❯/.test(kept[box])) box--
+  if (box > 0) {
+    for (let i = box - 1; i >= Math.max(0, box - WAITING_LINE_MAX_DISTANCE); i--) {
+      const m = WAITING_FOR_AGENTS_RX.exec(kept[i])
+      if (m) { waiting = Number(m[1]); break }
+    }
+  }
+  return Math.max(rows, waiting)
+}
+
 // Index of the live idle footer line, or -1. Both footer shapes are accepted
 // only as the LIVE footer, the last non-blank line of the pane; the bare pill
 // additionally needs the whole live input box just above it (see above).

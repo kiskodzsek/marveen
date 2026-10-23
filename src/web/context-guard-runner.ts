@@ -19,7 +19,7 @@ import { sendSystemDirective } from './system-directive.js'
 import { urgentEmitRefusal, setDeliveryHoldCheck, type DeliveryHold } from './message-router.js'
 import { notifyChannel } from '../notify.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
-import { detectPaneState, paneShowsContextSaturation, paneShowsContextSaturationHardError } from '../pane-state.js'
+import { backgroundAgentCount, detectPaneState, paneShowsContextSaturation, paneShowsContextSaturationHardError, type PaneState } from '../pane-state.js'
 import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir } from './active-model.js'
 import { readContextGuardConfig } from './context-guard-store.js'
 import { localMidnightMs } from '../auto-restart.js'
@@ -142,6 +142,9 @@ const earlyBlockLogged = new Set<string>()
 // C106C3FF: consecutive fast-round readings of an idle pane, per agent in
 // await-handoff. Cleared whenever the agent is seen in any other phase.
 const fastIdleStreak = new Map<string, number>()
+// Agents whose "background agents running, restarts defer" line is already
+// logged; cleared when the panel is gone, so each stretch is logged once.
+const bgAgentDeferLogged = new Set<string>()
 
 // agent name -> when the daily-handoff tier last fired (ms). Seeded on first
 // sight WITHOUT firing, so a slot that already passed before the dashboard
@@ -573,7 +576,13 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   // 'busy' (positively mid-turn -- restarts defer). A pane that is neither
   // (error banner, modal, unknown surface) is treated as NOT busy, so a
   // wedged pane still gets the restart that is its only way out.
-  const paneState = pane !== null ? detectPaneState(pane) : 'unknown'
+  const { paneState, guardPaneState, bgAgents } = guardPaneSignals(pane)
+  if (bgAgents > 0 && paneState !== 'busy' && !bgAgentDeferLogged.has(name)) {
+    bgAgentDeferLogged.add(name)
+    logger.info({ name, bgAgents, paneState }, 'context-guard: background agents running -- the pane counts as busy, restarts defer until they finish')
+  } else if (bgAgents === 0) {
+    bgAgentDeferLogged.delete(name)
+  }
 
   // The pane banner and the calibrated measurement are TWO signals about one
   // fact, and this sweep is the only place that holds both. Reconciling them
@@ -639,8 +648,8 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
     // an unconfigured agent would arm tiers that are quiet there today. The
     // credibility check above therefore reads measuredPct directly.
     pct: cfg.enabled ? measuredPct : null,
-    paneIdle: paneState === 'idle',
-    paneBusy: paneState === 'busy',
+    paneIdle: guardPaneState === 'idle',
+    paneBusy: guardPaneState === 'busy',
     sessionReady,
     handoffMtime: needPct ? handoffMtime(name) : null,
     // Already reconciled with the measurement above, so decideGuard itself
@@ -672,7 +681,7 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   const decision = decideGuard(state, earlyBlocked ? { ...inputs, pct: null } : inputs, cfg)
 
   if (mode === 'fast') {
-    const streak = paneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0
+    const streak = guardPaneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0
     fastIdleStreak.set(name, streak)
     if (!fastRoundActs(decision.action, streak, inputs.sessionReady)) return
   }
@@ -1076,6 +1085,20 @@ export function startContextGuardRunner(): NodeJS.Timeout {
 /** The phases the fast round re-runs: await-handoff (C106C3FF) and
  *  await-ready (CGRESUME1021). */
 export const FAST_ROUND_PHASES: ReadonlySet<string> = new Set(['await-handoff', 'await-ready'])
+
+/**
+ * The pane as the guard reads it. A background agent dies with the session
+ * (Patrik TG 6938, Klodel 16131: four dave subagents lost at 21:15 because the
+ * empty box above their panel read idle, which is right for the router since
+ * #82). For the guard a running background agent is work in flight: busy, never
+ * idle, so every restart path defers exactly as it does for a live turn. The
+ * saturation net is a separate signal and still fires.
+ */
+export function guardPaneSignals(pane: string | null): { paneState: PaneState; guardPaneState: PaneState; bgAgents: number } {
+  const paneState: PaneState = pane !== null ? detectPaneState(pane) : 'unknown'
+  const bgAgents = pane !== null ? backgroundAgentCount(pane) : 0
+  return { paneState, guardPaneState: bgAgents > 0 ? 'busy' : paneState, bgAgents }
+}
 
 /** C106C3FF: the fast round acts on a restart decision only after
  *  FAST_IDLE_CONFIRM consecutive idle readings. CGRESUME1021: and on a resume

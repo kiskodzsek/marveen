@@ -181,7 +181,7 @@ describe('F1: the fast round', () => {
     expect(runner.slice(i, i + 300)).toContain('if (!fastRoundActs(decision.action, streak, inputs.sessionReady)) return')
   })
   it('the streak counts only idle readings and resets outside await-handoff', () => {
-    expect(runner).toContain("const streak = paneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0")
+    expect(runner).toContain("const streak = guardPaneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0")
     expect(runner).toContain("if (state.phase !== 'await-handoff') fastIdleStreak.delete(name)")
   })
   it('a full sweep and a fast round never run at the same time', () => {
