@@ -185,7 +185,8 @@ export function readFableSnapshot(
  * idle agent's numbers age while the others burn the window. The rule, per
  * kind: drop a reading whose window has already reset, take the LATEST window
  * still open, and within it the HIGHEST percentage (the same rule as
- * scripts/usage-alert/usage_alert.py). A missing five_hour means "no window
+ * scripts/usage-alert/usage_alert.py); between equal readings, the youngest
+ * numbers (see fresher). A missing five_hour means "no window
  * open" (it disappears at its reset and returns with the next API response).
  * Freshness travels with the data, and it is the age of the NUMBERS, not of
  * the file: alive_at ticks every minute on an idle agent while its readings
@@ -240,7 +241,8 @@ export function readModQuotaSnapshot(
       const resetsAt = Math.floor(Date.parse(r.resetsAt) / 1000)
       if (!Number.isFinite(resetsAt) || resetsAt <= nowSec) continue
       const cur = best[r.kind]
-      if (!cur || resetsAt > cur.resetsAt || (resetsAt === cur.resetsAt && r.percentUsed > cur.pct)) {
+      if (!cur || resetsAt > cur.resetsAt || (resetsAt === cur.resetsAt && (r.percentUsed > cur.pct
+        || (r.percentUsed === cur.pct && fresher(dataSec, cur.dataSec))))) {
         best[r.kind] = { pct: r.percentUsed, resetsAt, agent, dataSec }
       }
     }
@@ -261,6 +263,17 @@ export function readModQuotaSnapshot(
     source: 'mod',
     sourceAgents: [...new Set(picks.map((p) => p.agent))],
   }
+}
+
+/**
+ * Between two sources reading the same window at the same percentage, the
+ * one whose numbers are younger; an unknown time counts as the oldest. Without
+ * it the first file read won, so one long-idle agent turned the whole fleet
+ * stale while another showed the same number fresh (Klodel 16471/16482: the
+ * 2026-10-24 15:16 "vak" switch, dave 6h idle, pulzus 29 s fresher).
+ */
+function fresher(a: number | null, b: number | null): boolean {
+  return a !== null && (b === null || a > b)
 }
 
 /**
