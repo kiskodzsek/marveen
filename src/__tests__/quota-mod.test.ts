@@ -132,6 +132,25 @@ describe('readModQuotaSnapshot', () => {
     expect(readModQuotaSnapshot(dir, NOW).ageSec).toBe(7200)
   })
 
+  it('between equal readings the younger numbers win, whatever order the files come in (Klodel 16482)', () => {
+    // 2026-10-24 15:16: the first file (dave, 6h idle) won the tie and turned the fleet stale
+    source('a-idle', [week(62)], { turnAgoSec: 6 * 3600 + 75 })
+    source('z-fresh', [week(62)], { turnAgoSec: 6 * 3600 - 30 })
+    const q = readModQuotaSnapshot(dir, NOW, 21600)
+    expect(q.sevenDay?.sourceAgent).toBe('z-fresh')
+    expect(q).toMatchObject({ ageSec: 6 * 3600 - 30, status: 'ok' })
+  })
+
+  it('a known age beats an unknown one at the same reading; a higher reading still beats a younger one', () => {
+    source('a-restarted', [week(62)], { turnAgoSec: null })
+    source('z-known', [week(62)], { turnAgoSec: 600 })
+    expect(readModQuotaSnapshot(dir, NOW)).toMatchObject({ ageSec: 600, status: 'ok' })
+    source('a-restarted', [week(63)], { turnAgoSec: null })
+    const q = readModQuotaSnapshot(dir, NOW)
+    expect(q.sevenDay).toMatchObject({ usedPercentage: 63, sourceAgent: 'a-restarted' })
+    expect(q.status).toBe('stale')
+  })
+
   it('no state files at all -> missing / no-file; files without readings -> no-rate-limits', () => {
     expect(readModQuotaSnapshot(join(dir, 'nope'), NOW)).toMatchObject({ status: 'missing', reason: 'no-file' })
     expect(readModQuotaSnapshot(dir, NOW)).toMatchObject({ status: 'missing', reason: 'no-file' })
