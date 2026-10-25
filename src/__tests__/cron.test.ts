@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { cronMatchesNow, cronDueBetween, computeNextRun, resolveCronTz } from '../web/cron.js'
+import { cronMatchesNow, cronDueBetween, cronPrevOccurrence, computeNextRun, resolveCronTz, isRepeatedWallClock } from '../web/cron.js'
 
 // Regression for the 2026-07-13..15 silent scheduler outage: fixed-time cron
 // tasks (reggeli-napindito "30 7 * * *", dream-engine "7 2 * * *") stopped
@@ -193,5 +193,54 @@ describe('computeNextRun honours the passed timezone', () => {
     expect(computeNextRun('30 7 * * *', 'Europe/Budapest')).toBe(
       Math.floor(Date.parse('2026-07-16T05:30:00Z') / 1000),
     )
+  })
+})
+
+describe('DST fall-back: a fixed-time cron runs once (DSTFALLBACK1025)', () => {
+  // 2026-10-25 Europe/Budapest: 03:00 CEST -> 02:00 CET, so 02:07 local is
+  // 00:07Z (first pass) and again 01:07Z (second pass). dream-engine
+  // ("7 2 * * *") fired at both.
+  const TZ = 'Europe/Budapest'
+  const MIN = 60_000
+  const at = (iso: string) => Date.parse(iso)
+  // Walk one-minute ticks over [startIso, endIso] like the runner does and
+  // collect every occurrence a tick reports.
+  const fires = (cron: string, startIso: string, endIso: string) => {
+    const out: string[] = []
+    for (let t = at(startIso); t < at(endIso); t += MIN) {
+      const o = cronPrevOccurrence(cron, t, t + MIN, TZ)
+      if (o != null) out.push(new Date(o).toISOString().slice(11, 16))
+    }
+    return out
+  }
+
+  it('detects the second pass of the repeated hour, and only that', () => {
+    expect(isRepeatedWallClock(at('2026-10-25T01:07:00Z'), TZ)).toBe(true)
+    expect(isRepeatedWallClock(at('2026-10-25T00:07:00Z'), TZ)).toBe(false)
+    expect(isRepeatedWallClock(at('2026-10-25T02:07:00Z'), TZ)).toBe(false)
+    expect(isRepeatedWallClock(at('2026-03-29T01:30:00Z'), TZ)).toBe(false) // spring forward
+  })
+
+  it('"7 2 * * *" fires at the first 02:07 only', () => {
+    expect(fires('7 2 * * *', '2026-10-24T23:00:00Z', '2026-10-25T03:00:00Z')).toEqual(['00:07'])
+  })
+
+  it('a catch-up window that missed the first pass still fires it once', () => {
+    // scheduler down 23:50Z..01:30Z: one tick covers both passes
+    expect(cronPrevOccurrence('7 2 * * *', at('2026-10-24T23:50:00Z'), at('2026-10-25T01:30:00Z'), TZ))
+      .toBe(at('2026-10-25T00:07:00Z'))
+    // ...and the window right after the second pass finds nothing new
+    expect(cronPrevOccurrence('7 2 * * *', at('2026-10-25T01:06:00Z'), at('2026-10-25T01:08:00Z'), TZ)).toBeNull()
+  })
+
+  it('an interval cron keeps running through both passes', () => {
+    expect(fires('*/20 * * * *', '2026-10-24T23:59:00Z', '2026-10-25T01:59:00Z'))
+      .toEqual(['00:00', '00:20', '00:40', '01:00', '01:20', '01:40'])
+    expect(fires('0 */2 * * *', '2026-10-24T23:59:00Z', '2026-10-25T01:59:00Z')).toEqual(['00:00', '01:00'])
+  })
+
+  it('a fixed hour outside the repeated hour is untouched, and so is a normal day', () => {
+    expect(fires('30 3 * * *', '2026-10-25T00:00:00Z', '2026-10-25T03:00:00Z')).toEqual(['02:30'])
+    expect(fires('7 2 * * *', '2026-10-25T23:00:00Z', '2026-10-26T02:00:00Z')).toEqual(['01:07'])
   })
 })
