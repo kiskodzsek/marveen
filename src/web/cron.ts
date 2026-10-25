@@ -122,11 +122,43 @@ export function cronPrevOccurrence(cron: string, fromMs: number, toMs: number, t
     // currentDate one ms past toMs makes the window a true half-open (fromMs,
     // toMs], so a boundary occurrence fires exactly once, never twice.
     const expr = CronExpressionParser.parse(cron, { tz, currentDate: new Date(toMs + 1) })
-    const prev = expr.prev().getTime()
+    let prev = expr.prev().getTime()
+    // DSTFALLBACK1025: when the clock falls back, the repeated hour's wall
+    // clock happens twice, and prev() returns BOTH passes of a fixed-hour cron
+    // ("7 2 * * *" fired 2026-10-25 at 00:07Z and again at 01:07Z; next() only
+    // yields the first). A fixed-time job runs once per wall-clock time, as in
+    // Vixie cron: the second pass is mapped back onto the first, so a tick
+    // that already covered the first finds nothing new, and a catch-up window
+    // that missed the first still fires it once. A cron whose hour field is a
+    // wildcard or a step ("*/20 * * * *", "0 */2 * * *") measures elapsed
+    // time and keeps running in both passes.
+    if (hasFixedHour(cron) && isRepeatedWallClock(prev, tz)) prev -= HOUR_MS
     return prev > fromMs ? prev : null
   } catch {
     return null
   }
+}
+
+const HOUR_MS = 3_600_000
+
+/** The cron's hour field names fixed hours (not `*` or a `*` step). */
+function hasFixedHour(cron: string): boolean {
+  const fields = cron.trim().split(/\s+/)
+  const hour = fields.length === 6 ? fields[2] : fields[1]
+  return hour !== undefined && !hour.startsWith('*')
+}
+
+/**
+ * `ms` is the second pass of a fall-back hour in `tz`: the same wall-clock
+ * minute already happened one hour earlier. Every zone the fleet runs in
+ * shifts by one hour; a zone with a 30-minute shift (Lord Howe) is not
+ * detected and keeps the old behaviour.
+ */
+export function isRepeatedWallClock(ms: number, tz: string): boolean {
+  const wall = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  })
+  return wall.format(new Date(ms)) === wall.format(new Date(ms - HOUR_MS))
 }
 
 // Back-compat shim faithful to the old fixed-window semantics -- "did an
