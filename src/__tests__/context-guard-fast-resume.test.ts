@@ -176,7 +176,7 @@ describe('R3: the fast round never restarts an agent in await-ready (Viktor 1328
     const body = runner.slice(runner.indexOf('async function checkAgent('))
     const reset = body.indexOf("if (state.phase !== 'await-handoff') fastIdleStreak.delete(name)")
     const gate = body.indexOf("if (mode === 'fast' && !FAST_ROUND_PHASES.has(state.phase)) return")
-    const count = body.indexOf("const streak = paneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0")
+    const count = body.indexOf("const streak = guardPaneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0")
     expect(reset).toBeGreaterThan(-1)
     expect(gate).toBeGreaterThan(reset)
     expect(count).toBeGreaterThan(gate)
