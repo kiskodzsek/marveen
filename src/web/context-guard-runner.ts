@@ -35,6 +35,8 @@ import {
   IDLE_FLUSH_REASON_PREFIX,
   INITIAL_GUARD_STATE,
   STALE_REFRESH_REASON_PREFIX,
+  BG_RELEASE_REASON_PREFIX,
+  BG_REFRESH_REASON_PREFIX,
   HANDOFF_RESEND_REASON_PREFIX,
   READY_TIMEOUT_MS,
   SATURATION_CREDIBLE_MIN_PCT,
@@ -142,6 +144,9 @@ const earlyBlockLogged = new Set<string>()
 // C106C3FF: consecutive fast-round readings of an idle pane, per agent in
 // await-handoff. Cleared whenever the agent is seen in any other phase.
 const fastIdleStreak = new Map<string, number>()
+/** KLODEL18385: consecutive fast rounds whose main thread read idle while
+ *  background agents ran (the guard's own reading is busy then). */
+const fastMainIdleStreak = new Map<string, number>()
 // Agents whose "background agents running, restarts defer" line is already
 // logged; cleared when the panel is gone, so each stretch is logged once.
 const bgAgentDeferLogged = new Set<string>()
@@ -377,6 +382,31 @@ export function staleRefreshHandoffPrompt(staleMinutes: number, handoffPath: str
   )
 }
 
+/**
+ * KLODEL18385: the release of a main thread that wrote its handoff and stopped,
+ * while its background agents defer the restart. It must lift the STOP in so
+ * many words -- a plain message did not (dave, 2026-10-28 08:09) -- and keep the
+ * two things that make the release safe: no new background agent (it would
+ * defer the restart again), and the handoff refresh that comes afterwards.
+ */
+export function bgDeferredContinuePrompt(bgAgents: number, handoffPath: string): string {
+  return (
+    `[CONTEXT-GUARD] A HANDOFF.md-d megvan (${handoffPath}), de ${bgAgents} háttér-subagented még fut, ` +
+    `és az újraindítás megvárja őket (az újraindítás leállítaná őket). Addig NEM kell állnod: ` +
+    `a korábbi "ÁLLJ MEG" erre az időre feloldva, folytasd a munkát a HANDOFF.md Next Steps szerint. ` +
+    `Új háttér-subagentet most NE indíts. Ha a subagentek végeztek, a rendszer kéri a HANDOFF.md frissítését, utána újraindít.`
+  )
+}
+
+/** KLODEL18385: the released thread's agents are done; the handoff predates the release. */
+export function bgDeferredRefreshPrompt(handoffPath: string): string {
+  return (
+    `[CONTEXT-GUARD] A háttér-subagentjeid végeztek. A HANDOFF.md-d a feloldás előtti állapotot írja le. ` +
+    `EGYETLEN dolgod ebben a körben: frissítsd itt: ${handoffPath} úgy, hogy a feloldás óta végzett munkát és a subagentek eredményét is tartalmazza ` +
+    `(mi dőlt el, mi került leadásra, mi a következő lépés). Utána ÁLLJ MEG -- a rendszer friss kontextussal újraindít és ebből folytatod.`
+  )
+}
+
 export function resumePrompt(
   name: string,
   handoffPath: string,
@@ -532,6 +562,7 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   const cfg = readContextGuardConfig(name)
   const state = guardStates.get(name) ?? INITIAL_GUARD_STATE
   if (state.phase !== 'await-handoff') fastIdleStreak.delete(name)
+  if (state.phase !== 'await-handoff') fastMainIdleStreak.delete(name)
   if (mode === 'fast' && !FAST_ROUND_PHASES.has(state.phase)) return
 
   // Fully disarmed only when EVERY tier and the always-on saturation net are
@@ -669,6 +700,8 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
     // The fast round only ever sees await-handoff, so it passes eligible=false
     // here: the record is kept (armed) or forgotten (disarmed), exactly as the
     // full sweep would do, and nothing is ever due from a fast round.
+    backgroundAgents: bgAgents,
+    mainIdle: paneState === 'idle',
     dailyHandoffDue: applyDailyHandoffSweep(lastDailyHandoff, name, cfg, running && state.phase === 'idle', localMidnightMs(nowMs), nowMs),
   }
 
@@ -683,7 +716,9 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   if (mode === 'fast') {
     const streak = guardPaneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0
     fastIdleStreak.set(name, streak)
-    if (!fastRoundActs(decision.action, streak, inputs.sessionReady)) return
+    const mainStreak = bgAgents > 0 && paneState === 'idle' ? (fastMainIdleStreak.get(name) ?? 0) + 1 : 0
+    fastMainIdleStreak.set(name, mainStreak)
+    if (!fastRoundActs(decision.action, streak, inputs.sessionReady) && !fastRoundBgActs(decision, streak, mainStreak)) return
   }
   if (state.phase === 'cooldown') {
     if (decision.action !== 'none') {
@@ -784,7 +819,11 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
         const handoffOutcome = await sendSystemDirective(
           name,
           session,
-          promptReason.startsWith(STALE_REFRESH_REASON_PREFIX)
+          promptReason.startsWith(BG_RELEASE_REASON_PREFIX)
+            ? bgDeferredContinuePrompt(bgAgents, handoffPathFor(name))
+            : promptReason.startsWith(BG_REFRESH_REASON_PREFIX)
+            ? bgDeferredRefreshPrompt(handoffPathFor(name))
+            : promptReason.startsWith(STALE_REFRESH_REASON_PREFIX)
             // The handoff exists but went stale while we waited for an idle
             // pane; ask for a refresh, not a first write.
             ? staleRefreshHandoffPrompt(((sm) => typeof sm === 'number' ? sm : 0)(handoffStaleMinutes(inputs)), handoffPathFor(name))
@@ -1108,4 +1147,20 @@ export function guardPaneSignals(pane: string | null): { paneState: PaneState; g
 export function fastRoundActs(action: string, idleStreak: number, sessionReady = false): boolean {
   if (action === 'restart') return idleStreak >= FAST_IDLE_CONFIRM
   return action === 'inject-resume' && sessionReady
+}
+
+/** KLODEL18385: the background-agent release and its refresh are the two
+ *  handoff requests the fast round sends, both after FAST_IDLE_CONFIRM idle
+ *  readings -- the release counting the main thread's own box (the agents keep
+ *  the guard's reading busy), the refresh the guard's. Without this an idle main
+ *  thread waits for the 5-minute sweep. Pure, for the test. */
+export function fastRoundBgActs(
+  decision: { action: string; reason: string },
+  idleStreak: number,
+  mainIdleStreak: number,
+): boolean {
+  if (decision.action !== 'request-handoff') return false
+  if (decision.reason.startsWith(BG_RELEASE_REASON_PREFIX)) return mainIdleStreak >= FAST_IDLE_CONFIRM
+  if (decision.reason.startsWith(BG_REFRESH_REASON_PREFIX)) return idleStreak >= FAST_IDLE_CONFIRM
+  return false
 }
