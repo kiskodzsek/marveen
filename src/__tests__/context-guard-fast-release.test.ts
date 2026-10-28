@@ -178,7 +178,7 @@ describe('F1: the fast round', () => {
     expect(i).toBeGreaterThan(runner.indexOf('const decision = decideGuard('))
     // ...and it returns before setGuardState(name, decision.nextState).
     expect(i).toBeLessThan(runner.indexOf('setGuardState(name, decision.nextState)'))
-    expect(runner.slice(i, i + 300)).toContain('if (!fastRoundActs(decision.action, streak, inputs.sessionReady)) return')
+    expect(runner.slice(i, i + 500)).toContain('if (!fastRoundActs(decision.action, streak, inputs.sessionReady) && !fastRoundBgActs(decision, streak, mainStreak)) return')
   })
   it('the streak counts only idle readings and resets outside await-handoff', () => {
     expect(runner).toContain("const streak = guardPaneState === 'idle' ? (fastIdleStreak.get(name) ?? 0) + 1 : 0")

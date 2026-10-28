@@ -13,6 +13,9 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { backgroundAgentCount, detectPaneState } from '../pane-state.js'
 import {
+  BG_REFRESH_REASON_PREFIX,
+  BG_RELEASE_REASON_PREFIX,
+  bgReleaseCapPct,
   decideGuard,
   DEFAULT_CONTEXT_GUARD,
   INITIAL_GUARD_STATE,
@@ -47,7 +50,7 @@ vi.mock('../web/agent-process.js', () => ({
   isSessionReadyForPrompt: async () => false,
 }))
 
-const { guardPaneSignals } = await import('../web/context-guard-runner.js')
+const { guardPaneSignals, fastRoundBgActs, bgDeferredContinuePrompt, bgDeferredRefreshPrompt } = await import('../web/context-guard-runner.js')
 
 const here = dirname(fileURLToPath(import.meta.url))
 const runner = readFileSync(join(here, '..', 'web', 'context-guard-runner.ts'), 'utf-8')
@@ -180,5 +183,124 @@ describe('decideGuard on the guard reading of the 21:14 pane', () => {
   it('the saturation net still fires: a full context cannot wait for them', () => {
     const s = requested()
     expect(decideGuard(s, inputs({ nowMs: NOW + 60_000, paneSaturated: true }), CFG).action).toBe('restart')
+  })
+})
+
+// KLODEL18385 (Patrik TG 8933): the restart waits for the agents, but the main
+// thread need not. Measured on dave, 2026-10-28: idle 6m43s (07:07-07:14) and
+// 10+ minutes from 08:07, the handoff written, two agents running, the last
+// directive it had heard "ÁLLJ MEG"; Klodel's plain message did not lift it.
+describe('the main thread is released while its background agents defer the restart', () => {
+  const CFG: ContextGuardConfig = { ...DEFAULT_CONTEXT_GUARD, enabled: true, actPct: 0.7, hardPct: 0.97 }
+  const NOW = 1_000_000_000
+  const HANDOFF = NOW + 60_000
+  // The guard reading of DAVE_2114 (busy) plus the raw reading of the main box (idle).
+  const inputs = (o: Partial<GuardInputs> = {}): GuardInputs => ({
+    nowMs: NOW + 2 * 60_000, pct: 0.76, running: true,
+    paneIdle: false, paneBusy: true, backgroundAgents: 2, mainIdle: true,
+    sessionReady: false, handoffMtime: HANDOFF, paneSaturated: false, dailyHandoffDue: false,
+    contextTokens: null, idleMs: 60_000, ...o,
+  })
+  const requested = (): GuardState => {
+    const d = decideGuard(INITIAL_GUARD_STATE, inputs({ nowMs: NOW, handoffMtime: null, backgroundAgents: 0, mainIdle: false }), CFG)
+    expect(d.action).toBe('request-handoff')
+    return d.nextState
+  }
+  const released = (): GuardState => {
+    const d = decideGuard(requested(), inputs(), CFG)
+    expect(d.action).toBe('request-handoff')
+    expect(d.reason.startsWith(BG_RELEASE_REASON_PREFIX)).toBe(true)
+    return d.nextState
+  }
+
+  it('handoff written, main box idle, agents running: one release, and the handoff on disk no longer counts', () => {
+    const s = released()
+    expect(s.bgReleased).toBe(true)
+    expect(s.handoffMtimeAtRequest).toBe(HANDOFF)
+    expect(s.phase).toBe('await-handoff')
+    // Once: the next sweeps with the same reading do nothing.
+    expect(decideGuard(s, inputs({ nowMs: NOW + 3 * 60_000 }), CFG).action).toBe('none')
+    expect(decideGuard(s, inputs({ nowMs: s.deadlineMs + 1, mainIdle: false }), CFG).action).toBe('none')
+  })
+
+  it('no release mid-turn, before the handoff, without agents, or at the cap', () => {
+    const s = requested()
+    expect(decideGuard(s, inputs({ mainIdle: false }), CFG).action).toBe('none')
+    expect(decideGuard(s, inputs({ handoffMtime: null }), CFG).action).toBe('none')
+    expect(decideGuard(s, inputs({ backgroundAgents: 0, mainIdle: false, paneIdle: false, paneBusy: true }), CFG).action).toBe('none')
+    expect(bgReleaseCapPct(CFG)).toBeCloseTo(0.835)
+    expect(decideGuard(s, inputs({ pct: 0.84 }), CFG).action).toBe('none')
+  })
+
+  it('a released thread that reaches the cap is told to stop again, once', () => {
+    const s = released()
+    const d = decideGuard(s, inputs({ nowMs: NOW + 9 * 60_000, pct: 0.84, mainIdle: false }), CFG)
+    expect(d.action).toBe('request-handoff')
+    // No release/refresh prefix: the runner sends the critical STOP prompt.
+    expect(d.reason.startsWith(BG_RELEASE_REASON_PREFIX) || d.reason.startsWith(BG_REFRESH_REASON_PREFIX)).toBe(false)
+    expect(d.nextState.bgRestopSent).toBe(true)
+    expect(decideGuard(d.nextState, inputs({ nowMs: NOW + 10 * 60_000, pct: 0.86 }), CFG).action).toBe('none')
+  })
+
+  it('the agents done and the thread idle: one refresh with a fresh deadline, then the restart on the new handoff', () => {
+    const s = released()
+    const late = s.deadlineMs + 5 * 60_000
+    const idle = { backgroundAgents: 0, mainIdle: true, paneIdle: true, paneBusy: false }
+    const r = decideGuard(s, inputs({ nowMs: late, ...idle }), CFG)
+    expect(r.action).toBe('request-handoff')
+    expect(r.reason.startsWith(BG_REFRESH_REASON_PREFIX)).toBe(true)
+    expect(r.nextState.deadlineMs).toBe(late + CFG.handoffTimeoutMinutes * 60_000)
+    // Not a second time while it writes.
+    expect(decideGuard(r.nextState, inputs({ nowMs: late + 60_000, ...idle }), CFG).action).toBe('none')
+    const written = decideGuard(r.nextState, inputs({ nowMs: late + 2 * 60_000, ...idle, handoffMtime: late + 90_000, idleMs: 30_000 }), CFG)
+    expect(written.action).toBe('restart')
+  })
+
+  it('a thread that rewrote its handoff itself restarts as soon as the agents are done', () => {
+    const s = released()
+    const d = decideGuard(s, inputs({
+      nowMs: NOW + 12 * 60_000, backgroundAgents: 0, paneIdle: true, paneBusy: false,
+      handoffMtime: NOW + 11 * 60_000, idleMs: 60_000,
+    }), CFG)
+    expect(d.action).toBe('restart')
+  })
+
+  it('a released thread that never writes again restarts at the refresh deadline', () => {
+    const s = released()
+    const idle = { backgroundAgents: 0, mainIdle: true, paneIdle: true, paneBusy: false }
+    const r = decideGuard(s, inputs({ nowMs: NOW + 30 * 60_000, ...idle }), CFG)
+    expect(r.reason.startsWith(BG_REFRESH_REASON_PREFIX)).toBe(true)
+    expect(decideGuard(r.nextState, inputs({ nowMs: r.nextState.deadlineMs + 1, ...idle }), CFG).action).toBe('restart')
+  })
+
+  it('the saturation net still outranks all of it', () => {
+    const s = released()
+    expect(decideGuard(s, inputs({ paneSaturated: true }), CFG).action).toBe('restart')
+  })
+
+  it('the fast round sends the release after two idle main readings, the refresh after two idle guard readings', () => {
+    const release = { action: 'request-handoff', reason: `${BG_RELEASE_REASON_PREFIX}: x` }
+    const refresh = { action: 'request-handoff', reason: `${BG_REFRESH_REASON_PREFIX}: x` }
+    expect(fastRoundBgActs(release, 0, 1)).toBe(false)
+    expect(fastRoundBgActs(release, 0, 2)).toBe(true)
+    expect(fastRoundBgActs(refresh, 1, 5)).toBe(false)
+    expect(fastRoundBgActs(refresh, 2, 0)).toBe(true)
+    expect(fastRoundBgActs({ action: 'request-handoff', reason: 'act threshold' }, 5, 5)).toBe(false)
+    expect(fastRoundBgActs({ action: 'restart', reason: `${BG_RELEASE_REASON_PREFIX}: x` }, 5, 5)).toBe(false)
+  })
+
+  it('the prompts lift the STOP in words, forbid a new agent, and announce the refresh', () => {
+    const p = bgDeferredContinuePrompt(2, '/x/HANDOFF.md')
+    expect(p).toContain('[CONTEXT-GUARD]')
+    expect(p).toContain('2 háttér-subagented')
+    expect(p).toContain('feloldva')
+    expect(p).toContain('Új háttér-subagentet most NE indíts')
+    expect(bgDeferredRefreshPrompt('/x/HANDOFF.md')).toContain('ÁLLJ MEG')
+    // The runner picks them by prefix, ahead of the stale-refresh wording, and feeds the raw main reading.
+    const i = runner.indexOf('promptReason.startsWith(BG_RELEASE_REASON_PREFIX)')
+    expect(i).toBeGreaterThan(-1)
+    expect(i).toBeLessThan(runner.indexOf('promptReason.startsWith(STALE_REFRESH_REASON_PREFIX)'))
+    expect(runner).toContain("mainIdle: paneState === 'idle'")
+    expect(runner).toContain('backgroundAgents: bgAgents')
   })
 })

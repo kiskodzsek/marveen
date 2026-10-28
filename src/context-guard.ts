@@ -304,6 +304,13 @@ export interface GuardState {
   requestUnconfirmed?: boolean
   /** Resends already sent in THIS await-handoff (bounded by MAX_HANDOFF_RESENDS). */
   handoffResendCount?: number
+  /** KLODEL18385: the main thread was told it may go on working while its
+   *  background agents defer the restart. Once per await-handoff. */
+  bgReleased?: boolean
+  /** ...and told to stop again because its context reached bgReleaseCapPct. Once. */
+  bgRestopSent?: boolean
+  /** ...and, the agents done, asked to refresh its handoff before the restart. Once. */
+  bgRefreshSent?: boolean
 }
 
 export const INITIAL_GUARD_STATE: GuardState = {
@@ -423,6 +430,13 @@ export interface GuardInputs {
    *  midnight and the last-served stamp -- neither of which belongs in this
    *  clock-free module's decision function. */
   dailyHandoffDue: boolean
+  /** Background agents running in the pane (backgroundAgentCount). They make
+   *  the pane busy for the guard (#84); optional so a caller that never reads
+   *  the pane (and every older fixture) means "none". */
+  backgroundAgents?: number
+  /** The main thread's own input box is idle, read WITHOUT the background
+   *  agents (the raw pane state). Only meaningful with backgroundAgents > 0. */
+  mainIdle?: boolean
 }
 
 /**
@@ -468,6 +482,29 @@ export const HANDOFF_RESEND_REASON_PREFIX = 'handoff-resend'
  * timeout remains the fallback for that.
  */
 export const MAX_HANDOFF_RESENDS = 1
+
+/**
+ * KLODEL18385 (Patrik TG 8933): the handoff is written, the main thread has
+ * stopped as told, and the restart waits for its background agents (#84), which
+ * may run for many minutes. Measured on dave, 2026-10-28: the main thread stood
+ * idle 6m43s (07:07-07:14) and again 10+ minutes from 08:07, because the last
+ * thing it heard was "ÁLLJ MEG" and a plain message from Klodel did not lift it.
+ * The restart cannot keep the agents (they live in the session's own process),
+ * so the guard lifts the STOP once, through the authenticated directive.
+ */
+export const BG_RELEASE_REASON_PREFIX = 'bg-deferred-release'
+
+/** The released thread's agents have finished and its handoff predates the
+ *  release: one refresh request, with a fresh handoff deadline, then the restart. */
+export const BG_REFRESH_REASON_PREFIX = 'bg-deferred-refresh'
+
+/** Above this context fraction the main thread is not released, and a released
+ *  one is told to stop again: halfway between actPct and hardPct, so working on
+ *  never walks a session into the hard threshold, where the restart would wait
+ *  for the agents anyway and only the saturation net (which kills them) is left. */
+export function bgReleaseCapPct(cfg: ContextGuardConfig): number {
+  return (cfg.actPct + cfg.hardPct) / 2
+}
 
 /**
  * Whether the daily tier can actually fire for this config.
@@ -846,6 +883,57 @@ export function decideGuard(
             : 'handoff written',
           staleMin,
         )
+      }
+      // KLODEL18385: while background agents defer the restart, the main thread
+      // need not stand idle. Released once, below the cap; told to stop again
+      // at the cap; asked for a refreshed handoff once the agents are done.
+      const bgAgents = inputs.backgroundAgents ?? 0
+      const overCap = inputs.pct !== null && inputs.pct >= bgReleaseCapPct(cfg)
+      if (state.bgReleased && !state.bgRestopSent && overCap) {
+        const reason = `context at the background-release cap after the release -- asking the main thread to stop again`
+        return {
+          action: 'request-handoff',
+          reason,
+          nextState: {
+            ...state,
+            bgRestopSent: true,
+            handoffMtimeAtRequest: inputs.handoffMtime,
+            requestReason: reason,
+            requestUnconfirmed: false,
+          },
+        }
+      }
+      if (handoffWritten && bgAgents > 0 && inputs.mainIdle === true && !state.bgReleased && !overCap) {
+        const reason = `${BG_RELEASE_REASON_PREFIX}: handoff written, ${bgAgents} background agent(s) still running -- the main thread may go on until they finish`
+        return {
+          action: 'request-handoff',
+          reason,
+          nextState: {
+            ...state,
+            bgReleased: true,
+            // The handoff on disk will be stale once the thread works on: only a
+            // write after this point counts.
+            handoffMtimeAtRequest: inputs.handoffMtime,
+            requestReason: reason,
+            requestUnconfirmed: false,
+          },
+        }
+      }
+      if (state.bgReleased && !state.bgRefreshSent && bgAgents === 0 && inputs.paneIdle && !handoffWritten) {
+        const reason = `${BG_REFRESH_REASON_PREFIX}: the background agents finished -- requesting a handoff refresh before the restart`
+        return {
+          action: 'request-handoff',
+          reason,
+          nextState: {
+            ...state,
+            bgRefreshSent: true,
+            // The original deadline passed while the agents ran; the refresh
+            // gets the same time a first request does.
+            deadlineMs: nowMs + cfg.handoffTimeoutMinutes * 60_000,
+            requestReason: reason,
+            requestUnconfirmed: false,
+          },
+        }
       }
       // Same mid-turn deferral as the idle-phase hard tier: neither the hard
       // threshold nor the handoff timeout may cut a live turn. The deadline
