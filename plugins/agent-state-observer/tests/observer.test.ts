@@ -35,7 +35,7 @@ function engine(on: any, opts: Opts = {}) {
   const r = opts.results ?? {}
   on('session.start', ($: any, e: { cwd: string }) => r['session.start'] ?? ({ cwd: e.cwd }))
   on('turn.start', ($: any, e: { turnId: string }) => r['turn.start'] ?? ({ turnId: e.turnId }))
-  on('tool.check', () => ({ decision: 'ask', reason: 'gate', hook: 'PreToolUse' }))
+  on('tool.check', () => r['tool.check'] ?? ({ decision: 'ask', reason: 'gate', hook: 'PreToolUse' }))
   on('turn.complete', () => r['turn.complete'] ?? ({ text: '' }))
   on('session.measure', () => r['session.measure'] ?? ({ changed: [] }))
   on('session.end', () => r['session.end'] ?? ({ sessionId: 'sess-1' }))
@@ -87,6 +87,24 @@ test('a subagent turn ending does not mark the agent idle', async ($: any, on: a
   await start($)
   await turn($)
   await done($, { turnId: 't9', agentId: 'sub-1' })
+  await settle()
+  expect(last(writes).state).toBe('working')
+})
+
+// ROUTERHOLD1028 (card d480512c): a background agent's tool calls kept an idle
+// main thread reading 'working', and the panel-or precheck skipped it.
+test('a subagent tool call does not mark an idle main loop working; a main-loop call does', async ($: any, on: any) => {
+  // The engine allows the calls, so the permission check moves nothing.
+  const writes = engine(on, { results: { 'tool.check': { decision: 'allow' } } })
+  await start($)
+  await turn($)
+  await done($)
+  await settle()
+  expect(last(writes).state).toBe('idle')
+  await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'sub-1' })
+  await settle()
+  expect(last(writes).state).toBe('idle')
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
   await settle()
   expect(last(writes).state).toBe('working')
 })

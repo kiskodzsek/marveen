@@ -200,7 +200,12 @@ export const register: Register = on => {
   })
 
   on('tool.call', async ($, e, next) => {
-    move($, 'working', { tool: String(e.tool), reason: 'tool.call' })
+    // ROUTERHOLD1028 (card d480512c): a subagent's call (agentId set, the
+    // ToolCallInput's AgentLoop) is not the main loop working. A background
+    // agent's calls kept an idle main thread reading 'working', so the panel-or
+    // precheck skipped it while six messages to it waited (dave, 2026-10-28).
+    // Same filter as turn.complete below.
+    if (!e.agentId) move($, 'working', { tool: String(e.tool), reason: 'tool.call' })
     return next(e)
   })
 
