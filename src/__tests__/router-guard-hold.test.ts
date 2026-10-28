@@ -17,6 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 const mockGetPendingMessages = vi.fn()
 const mockIsReady = vi.fn(async (..._a: unknown[]) => false)
 const mockMarkFailed = vi.fn((..._a: unknown[]) => true)
+const mockCreateSystemMessage = vi.fn((..._a: unknown[]) => ({ id: 998 }))
 
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
@@ -40,6 +41,7 @@ vi.mock('../db.js', () => ({
   markPendingFederatedFailed: (..._a: unknown[]) => true,
   setMessageResult: (..._a: unknown[]) => true,
   createAgentMessage: (..._a: unknown[]) => ({ id: 999 }),
+  createSystemMessage: (...a: unknown[]) => mockCreateSystemMessage(...a),
   stampMessageTrace: (..._a: unknown[]) => false,
   upsertOtelSpan: (..._a: unknown[]) => undefined,
   closeOtelSpan: (..._a: unknown[]) => false,
@@ -75,7 +77,7 @@ vi.mock('../web/main-agent.js', () => ({
   MAIN_CHANNELS_SESSION: 'orin-channels',
 }))
 
-const { runMessageRouterTick, setDeliveryHoldCheck, shouldHoldForGuard } =
+const { runMessageRouterTick, setDeliveryHoldCheck, shouldHoldForGuard, formatDeliveryHeldAlert, GUARD_HOLD_ALERT_MS } =
   await import('../web/message-router.js')
 
 // The cap now comes with the hold (C106C3FF); any value works for the tick tests.
@@ -266,5 +268,133 @@ describe('C106C3FF: the cap rides with the hold', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+// ROUTERHOLD1028 (card d480512c, Patrik TG 9207): six rows to dave were held for
+// the whole background-agent wait on 2026-10-28 and nobody was told; the hold
+// sits before the readiness gate, so [session-stuck] never saw them.
+describe('ROUTERHOLD1028: a long hold is told to the main agent, once per episode', () => {
+  const HOLD = { reason: 'context-guard await-handoff', maxMs: GUARD_HOLD_MAX_MS, detail: 'main thread re-stopped at the background-release cap' }
+
+  describe('formatDeliveryHeldAlert (pure)', () => {
+    it('nothing before the oldest row passes GUARD_HOLD_ALERT_MS', () => {
+      expect(GUARD_HOLD_ALERT_MS).toBe(10 * 60_000)
+      expect(formatDeliveryHeldAlert('eve', 'orin', [0, 5_000], GUARD_HOLD_ALERT_MS, HOLD)).toBeNull()
+      expect(formatDeliveryHeldAlert('eve', 'orin', [], GUARD_HOLD_ALERT_MS * 3, HOLD)).toBeNull()
+    })
+    it('names the agent, the count, the oldest age and the reason', () => {
+      const t = formatDeliveryHeldAlert('eve', 'orin', [60_000, 0], 12 * 60_000 + 1, HOLD)
+      expect(t).not.toBeNull()
+      expect(t!.startsWith('[delivery-held] ')).toBe(true)
+      expect(t).toContain("Agent 'eve'")
+      expect(t).toContain('2 message(s) held')
+      expect(t).toContain('the oldest for 12 min')
+      expect(t).toContain('context-guard await-handoff (main thread re-stopped at the background-release cap)')
+      expect(t).toContain('27 min per row')
+    })
+    it('never about the main agent itself', () => {
+      expect(formatDeliveryHeldAlert('orin', 'orin', [0], GUARD_HOLD_ALERT_MS * 2, HOLD)).toBeNull()
+    })
+  })
+
+  describe('the tick', () => {
+    let holding = true
+    const erow = (id: number) => ({ id, from_agent: 'pixel', to_agent: 'eve', content: 'ping', created_at: Math.floor(Date.now() / 1000) })
+    const alerts = () => mockCreateSystemMessage.mock.calls.filter((c) => String(c[1]).startsWith('[delivery-held]'))
+    beforeEach(() => {
+      vi.clearAllMocks()
+      holding = true
+      setDeliveryHoldCheck((agent) => (agent === 'eve' && holding ? HOLD : null))
+    })
+    // End the episode, so the next test starts with the alert re-armed.
+    afterEach(async () => {
+      holding = false
+      mockGetPendingMessages.mockReturnValue([])
+      await runMessageRouterTick()
+      setDeliveryHoldCheck(null)
+      vi.useRealTimers()
+    })
+
+    it('alerts once past 10 minutes, not twice in the same episode, and again in a new one', async () => {
+      const t0 = Date.now()
+      vi.useFakeTimers()
+      vi.setSystemTime(t0)
+      mockGetPendingMessages.mockReturnValue([erow(41)])
+      await runMessageRouterTick()
+      vi.setSystemTime(t0 + 5 * 60_000)
+      mockGetPendingMessages.mockReturnValue([erow(41), erow(42)])
+      await runMessageRouterTick()
+      vi.setSystemTime(t0 + GUARD_HOLD_ALERT_MS)
+      await runMessageRouterTick()
+      expect(alerts()).toHaveLength(0)
+
+      vi.setSystemTime(t0 + GUARD_HOLD_ALERT_MS + 1_000)
+      await runMessageRouterTick()
+      expect(alerts()).toHaveLength(1)
+      const [to, text] = alerts()[0]!
+      expect(to).toBe('orin')
+      expect(text).toContain("Agent 'eve': 2 message(s) held")
+      expect(text).toContain('the oldest for 10 min')
+      // Still held: the rows are not delivered and the alert is not repeated.
+      expect(mockIsReady).not.toHaveBeenCalled()
+      vi.setSystemTime(t0 + 20 * 60_000)
+      await runMessageRouterTick()
+      expect(alerts()).toHaveLength(1)
+
+      // The hold ends (e.g. the guard releases the main thread): the rows go on
+      // to the readiness gate, and the episode is over.
+      holding = false
+      await runMessageRouterTick()
+      expect(mockIsReady).toHaveBeenCalled()
+
+      // A new episode (the re-stop): a new row, a new alert after 10 minutes.
+      holding = true
+      const t1 = t0 + 21 * 60_000
+      vi.setSystemTime(t1)
+      mockGetPendingMessages.mockReturnValue([erow(43)])
+      await runMessageRouterTick()
+      vi.setSystemTime(t1 + GUARD_HOLD_ALERT_MS + 1_000)
+      await runMessageRouterTick()
+      expect(alerts()).toHaveLength(2)
+      expect(alerts()[1]![1]).toContain('1 message(s) held')
+    })
+
+    it('an episode that ends with no row left to notice it still re-arms the alert', async () => {
+      const t0 = Date.now()
+      vi.useFakeTimers()
+      vi.setSystemTime(t0)
+      mockGetPendingMessages.mockReturnValue([erow(51)])
+      await runMessageRouterTick()
+      vi.setSystemTime(t0 + GUARD_HOLD_ALERT_MS + 1_000)
+      await runMessageRouterTick()
+      expect(alerts()).toHaveLength(1)
+      // The row leaves the queue (delivered elsewhere), then the hold ends with
+      // nothing pending for eve.
+      mockGetPendingMessages.mockReturnValue([])
+      holding = false
+      await runMessageRouterTick()
+      holding = true
+      const t1 = t0 + 15 * 60_000
+      vi.setSystemTime(t1)
+      mockGetPendingMessages.mockReturnValue([erow(52)])
+      await runMessageRouterTick()
+      vi.setSystemTime(t1 + GUARD_HOLD_ALERT_MS + 1_000)
+      await runMessageRouterTick()
+      expect(alerts()).toHaveLength(2)
+    })
+
+    it('a row that left the queue is not counted', async () => {
+      const t0 = Date.now()
+      vi.useFakeTimers()
+      vi.setSystemTime(t0)
+      mockGetPendingMessages.mockReturnValue([erow(61), erow(62)])
+      await runMessageRouterTick()
+      mockGetPendingMessages.mockReturnValue([erow(62)])
+      vi.setSystemTime(t0 + GUARD_HOLD_ALERT_MS + 1_000)
+      await runMessageRouterTick()
+      expect(alerts()).toHaveLength(1)
+      expect(alerts()[0]![1]).toContain('1 message(s) held')
+    })
   })
 })

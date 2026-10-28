@@ -354,6 +354,9 @@ export function shouldAbandon(sessionExists: boolean, ageMs: number, windowMs: n
 // gets it after the restart -- which also closes the restart-window loss (a message
 // delivered into the dying session's last minutes). `system` rows are exempt: the
 // guard's own directives (handoff refresh, resume) ride that sender.
+// ROUTERHOLD1028: not while the guard has released the main thread for its
+// background agents (guardDeliveryHold returns no hold then), and a hold that
+// outlives GUARD_HOLD_ALERT_MS is told to the main agent ([delivery-held]).
 //
 // The guard registers the check (setDeliveryHoldCheck) instead of this module
 // importing the guard runner: the runner already imports this module, and an
@@ -367,11 +370,19 @@ export interface DeliveryHold {
   reason: string
   /** Fail-open cap for this hold (ms), counted from the first held tick. */
   maxMs: number
+  /** ROUTERHOLD1028: optional detail for the [delivery-held] alert (which STOP
+   *  the hold serves), so the router never reads the guard's state itself. */
+  detail?: string
 }
 let deliveryHoldCheck: ((agent: string) => DeliveryHold | null) | null = null
-// msg id -> first tick it was held, and the cap in force at the last look.
-const guardHeldSince = new Map<number, { since: number; maxMs: number }>()
+// msg id -> first tick it was held, the cap in force at the last look, and the
+// recipient (ROUTERHOLD1028: the per-agent count and age of the alert).
+const guardHeldSince = new Map<number, { since: number; maxMs: number; agent: string }>()
 const guardHoldCapLogged = new Set<number>()
+// ROUTERHOLD1028: agents whose current hold episode was already alerted. An
+// episode lasts while the guard keeps a hold on the agent (await-handoff on
+// through await-ready is ONE episode); it ends when the check returns no hold.
+const guardHoldAlerted = new Set<string>()
 
 // Drop bookkeeping for rows that left the queue while held or over the cap (they
 // never come back to the check that would delete them). Called once per tick.
@@ -382,6 +393,44 @@ function pruneGuardHolds(nowMs: number): void {
       guardHoldCapLogged.delete(id)
     }
   }
+  // ROUTERHOLD1028: an episode can end with no row left to notice it (every
+  // held row went out at the cap), so the alert flag is re-checked here too.
+  for (const agent of guardHoldAlerted) {
+    if (!deliveryHoldCheck || deliveryHoldCheck(agent) == null) guardHoldAlerted.delete(agent)
+  }
+}
+
+// ---- [delivery-held] escalation (ROUTERHOLD1028) ----
+// card d480512c, Patrik TG 9207 ("ez soha többet ne forduljon elő"): on
+// 2026-10-28 six rows to dave were held for the whole background-agent wait and
+// nobody was told -- the hold sits BEFORE the readiness gate on purpose, so the
+// [session-stuck] escalation never sees a held row. A hold that outlives
+// GUARD_HOLD_ALERT_MS therefore goes to the main agent's inbox, once per agent
+// per hold episode (guardHoldAlerted), through the same createSystemMessage
+// path as [session-stuck].
+export const GUARD_HOLD_ALERT_MS = 10 * 60_000
+
+/**
+ * Pure: the [delivery-held] alert text, or null when none is due (nothing
+ * held, the oldest row not yet past GUARD_HOLD_ALERT_MS, or the main agent
+ * itself). The once-per-episode rule is the caller's (guardHoldAlerted).
+ *
+ * @param heldSinceMs First-held tick of every row currently held for `agent`.
+ */
+export function formatDeliveryHeldAlert(
+  agent: string,
+  mainAgentId: string,
+  heldSinceMs: number[],
+  nowMs: number,
+  hold: DeliveryHold,
+): string | null {
+  if (agent === mainAgentId || heldSinceMs.length === 0) return null
+  const oldestMs = nowMs - Math.min(...heldSinceMs)
+  if (oldestMs <= GUARD_HOLD_ALERT_MS) return null
+  const why = hold.detail ? `${hold.reason} (${hold.detail})` : hold.reason
+  return `[delivery-held] Agent '${agent}': ${heldSinceMs.length} message(s) held by the router, the oldest for ${Math.round(oldestMs / 60_000)} min. ` +
+    `Hold reason: ${why}. Each held row goes out when the hold ends, or at the fail-open cap (${Math.round(hold.maxMs / 60_000)} min per row). ` +
+    `Not a wedged session: do not restart on this alert alone. One alert per hold episode.`
 }
 
 export function setDeliveryHoldCheck(check: ((agent: string) => DeliveryHold | null) | null): void {
@@ -628,6 +677,8 @@ export async function runMessageRouterTick(): Promise<void> {
     const pending = selectTickWindow(localPending, MAX_MESSAGES_PER_TICK, MAIN_AGENT_ID)
     const now = Date.now()
     pruneGuardHolds(now)
+    // ROUTERHOLD1028: a held row still counts only while it is still queued.
+    const localPendingIds = new Set(localPending.map((m) => m.id))
     // ---- update absent/present tracking for all receivers in this tick ----
     // Rebuild the stuck-detector's view of which agents are absent RIGHT NOW.
     // Shared across all messages to the same agent (one sessionExistsOnHost call
@@ -797,16 +848,36 @@ export async function runMessageRouterTick(): Promise<void> {
         const heldSince = held?.since
         if (hold && shouldHoldForGuard(holdReason, msg.from_agent, heldSince, now, hold.maxMs, msg.content ?? '')) {
           if (held === undefined) {
-            guardHeldSince.set(msg.id, { since: now, maxMs: hold.maxMs })
+            guardHeldSince.set(msg.id, { since: now, maxMs: hold.maxMs, agent: msg.to_agent })
             logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, holdReason, capMs: hold.maxMs },
               'message-router: holding delivery until the context-guard restart')
           } else {
             held.maxMs = hold.maxMs
           }
+          // ROUTERHOLD1028: see formatDeliveryHeldAlert. Rows past the cap are
+          // being delivered, not held, so they do not count.
+          if (!guardHoldAlerted.has(msg.to_agent)) {
+            const heldSinceMs: number[] = []
+            for (const [id, h] of guardHeldSince) {
+              if (h.agent === msg.to_agent && localPendingIds.has(id) && !guardHoldCapLogged.has(id)) heldSinceMs.push(h.since)
+            }
+            const alert = formatDeliveryHeldAlert(msg.to_agent, MAIN_AGENT_ID, heldSinceMs, now, hold)
+            if (alert) {
+              guardHoldAlerted.add(msg.to_agent)
+              try {
+                createSystemMessage(MAIN_AGENT_ID, alert)
+                logger.warn({ to: msg.to_agent, heldCount: heldSinceMs.length, oldestHeldMs: now - Math.min(...heldSinceMs), holdReason, detail: hold.detail ?? null },
+                  'delivery-held surfaced to orchestrator')
+              } catch (err) {
+                logger.warn({ err, agent: msg.to_agent }, 'Failed to enqueue delivery-held notification')
+              }
+            }
+          }
           continue
         }
         if (holdReason == null) {
           guardHeldSince.delete(msg.id)
+          guardHoldAlerted.delete(msg.to_agent)
         } else if (heldSince !== undefined && !guardHoldCapLogged.has(msg.id)) {
           // Over the cap: the entry is KEPT, so a row that is still not deliverable
           // (busy pane) is not re-held for another full cap on the next tick.
