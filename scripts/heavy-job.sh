@@ -27,7 +27,14 @@
 #      23:5x: swap 94%, free memory 57-62%), and it kept the disk cleanup from
 #      ever starting. Free memory is still measured here (--min-free,
 #      --kill-below). The CRITICAL swap reason ("swap 95% with free memory
-#      20%") and every memory, load or thermal reason still block;
+#      20%") and every memory, load or thermal reason still block. Since
+#      2026-10-30 (Patrik TG 11833, card 1350a5e6) the WARN-level swap reason
+#      passes WITHOUT the flag too whenever free memory is >= --min-free: on
+#      2026-10-28 host-monitor sat 13.7 h on a swap-only warn, with 31-64%
+#      free memory at each warn entry (store/host-monitor.log). The swap reason
+#      is checked after the free-memory floor, so in practice it no longer
+#      blocks on its own. --ignore-host-swap stays for the
+#      callers that pass it (same effect);
 #   2b. a running Colima/Lima VM counts as a held heavy job: other jobs wait
 #      until `colima stop`. `colima start` returns as soon as the VM is up, so
 #      the lock alone only serialised the start, while the VM kept its 6 GB
@@ -104,7 +111,11 @@ host_state() {
   [[ "$e" =~ ^[0-9]+$ ]] || return 0
   (( now - e <= ${HEAVY_JOB_STATE_MAX_AGE:-300} )) || return 0
   [[ "$b" == "warn" || "$b" == "critical" ]] || return 0
-  if (( IGNORE_HOST_DISK || IGNORE_HOST_SWAP )) && [[ -n "$r" ]]; then
+  # The swap warn alone says nothing the free-memory floor does not: it passes
+  # whenever free memory (measured this poll, before this check) is >= --min-free.
+  local swap_ok=$IGNORE_HOST_SWAP
+  [[ "${MEM_FREE_PCT:-}" =~ ^[0-9]+$ ]] && (( MEM_FREE_PCT >= MIN_FREE )) && swap_ok=1
+  if (( IGNORE_HOST_DISK || swap_ok )) && [[ -n "$r" ]]; then
     # host-monitor joins its reasons with ';' ("free disk 2 GiB;swap 80%").
     # Only the exact warn forms pass: the critical swap reason carries
     # " with free memory N%" and does not match.
@@ -112,7 +123,7 @@ host_state() {
     IFS=';' read -r -a parts <<< "$r"
     for x in "${parts[@]}"; do
       if (( IGNORE_HOST_DISK )) && [[ "$x" == "free disk "* ]]; then continue; fi
-      if (( IGNORE_HOST_SWAP )) && [[ "$x" =~ ^swap\ [0-9]+%$ ]]; then continue; fi
+      if (( swap_ok )) && [[ "$x" =~ ^swap\ [0-9]+%$ ]]; then continue; fi
       others=1
     done
     (( others )) || return 0
