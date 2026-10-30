@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """transcript-gzip.py -- gzip the agents' old Claude Code session transcripts in place.
 
-    transcript-gzip.py --install-dir DIR [--home DIR] [--days N] [--min-free-gb G]
-                       [--lsof PATH] [--now EPOCH] [--dry-run]
+    transcript-gzip.py --install-dir DIR [--home DIR] [--days N] [--expire-days N]
+                       [--min-free-gb G] [--lsof PATH] [--now EPOCH] [--dry-run]
 
 Why (card c310dd1b, Klodel 21739, 2026-10-30): the session transcripts were
 6.9 GB of the full data volume (Dave 3.6, Pulzus 1.6). Gzipping the ones older
@@ -27,9 +27,20 @@ skipped, not failed.
 The cost, accepted by Klodel 21739: a gzipped session can no longer be resumed
 (`claude --resume` does not read .gz). `gunzip <file>` brings it back.
 
-Output: one "gzip <path>" line per file, then one summary line
-"gzipped=N mb_before=A mb_after=B open=O exists=E". Exit 0, 1 when a gzip failed (the
-rest still ran), 2 on bad arguments.
+Expiry (Lex 21777, GDPR Art. 5(1)(c) and (e)): gzipping only changes the
+format, so a *.jsonl.gz may not outlive the transcript it came from. Claude Code
+deletes a *.jsonl after cleanupPeriodDays (default 30 in the installed 2.1.312,
+not set in any settings.json here) but never looks at a .gz, so this script
+deletes every *.jsonl.gz older than --expire-days (default 30, at least --days)
+under the same roots, with unlink: no trash, no move. The age is the original
+session's last change: gzip keeps the mtime, and a .gz is never touched again.
+Neither the free-disk floor nor a missing lsof stops the expiry: it only
+frees space, and a .gz is not written by any session.
+
+Output: one "gzip <path>" or "expire <path>" line per file, then one summary
+line "gzipped=N mb_before=A mb_after=B open=O exists=E expired=X mb_expired=M".
+Exit 0, 1 when a gzip or a delete failed (the rest still ran), 2 on bad
+arguments.
 """
 import argparse
 import glob
@@ -78,6 +89,7 @@ def main():
     parser.add_argument("--install-dir", required=True)
     parser.add_argument("--home", default=os.path.expanduser("~"))
     parser.add_argument("--days", type=float, default=7)
+    parser.add_argument("--expire-days", type=float, default=30)
     parser.add_argument("--min-free-gb", type=float, default=3)
     parser.add_argument("--lsof", default="/usr/sbin/lsof")
     parser.add_argument("--now", type=float, default=None)
@@ -86,21 +98,46 @@ def main():
     if args.days < 2:
         print("stop: --days must be at least 2 (today's and yesterday's transcripts stay)")
         return 2
+    if args.expire_days < args.days:
+        print("stop: --expire-days must be at least --days (a .gz may not go before it was made)")
+        return 2
     now = args.now if args.now is not None else time.time()
     opened = open_files(args.lsof)
-    if opened is None:
-        print(f"stop: lsof unavailable ({args.lsof}): nothing gzipped")
-        print("gzipped=0 mb_before=0 mb_after=0 open=0 exists=0")
-        return 0
+    gzip_ok = opened is not None
+    if not gzip_ok:
+        print(f"stop: lsof unavailable ({args.lsof}): nothing gzipped (the expiry goes on)")
 
-    gzipped = failed = busy = exists = 0
-    before = after = 0
+    gzipped = failed = busy = exists = expired = 0
+    before = after = expired_bytes = 0
+
+    def summary():
+        return (f"gzipped={gzipped} mb_before={before // 2**20} mb_after={after // 2**20} open={busy} exists={exists}"
+                f" expired={expired} mb_expired={expired_bytes // 2**20}")
+
     for root in roots(os.path.realpath(args.install_dir), args.home):
         for dirpath, dirs, files in os.walk(root, followlinks=False):
             dirs[:] = [d for d in dirs if d != "memory" and not os.path.islink(os.path.join(dirpath, d))]
             for name in files:
                 path = os.path.join(dirpath, name)
-                if not name.endswith(".jsonl") or os.path.islink(path):
+                if name.endswith(".jsonl.gz") and not os.path.islink(path):
+                    try:
+                        st = os.lstat(path)
+                    except OSError:
+                        continue
+                    if st.st_mtime > now - args.expire_days * 86400:
+                        continue
+                    print(f"expire {path}")
+                    if not args.dry_run:
+                        try:
+                            os.unlink(path)
+                        except OSError:
+                            print(f"failed {path}")
+                            failed = 1
+                            continue
+                    expired += 1
+                    expired_bytes += st.st_size
+                    continue
+                if not gzip_ok or not name.endswith(".jsonl") or os.path.islink(path):
                     continue
                 try:
                     st = os.lstat(path)
@@ -115,17 +152,18 @@ def main():
                     exists += 1
                     continue
                 if shutil.disk_usage(dirpath).free < args.min_free_gb * 1024 ** 3:
-                    print(f"stop: under {args.min_free_gb:g} GiB free")
-                    print(f"gzipped={gzipped} mb_before={before // 2**20} mb_after={after // 2**20} open={busy} exists={exists}")
-                    return failed
-                print(f"gzip {path}")
+                    print(f"stop gzip: under {args.min_free_gb:g} GiB free (the expiry goes on)")
+                    gzip_ok = False
+                    continue
                 if args.dry_run:
+                    print(f"gzip {path}")
                     gzipped += 1
                     before += st.st_size
                     continue
                 if not still_closed(args.lsof, path, now - args.days * 86400):
                     busy += 1
                     continue
+                print(f"gzip {path}")
                 if subprocess.run(["gzip", "-9", "--", path], capture_output=True).returncode == 0 and os.path.exists(path + ".gz"):
                     gzipped += 1
                     before += st.st_size
@@ -133,7 +171,7 @@ def main():
                 else:
                     print(f"failed {path}")
                     failed = 1
-    print(f"gzipped={gzipped} mb_before={before // 2**20} mb_after={after // 2**20} open={busy} exists={exists}")
+    print(summary())
     return failed
 
 

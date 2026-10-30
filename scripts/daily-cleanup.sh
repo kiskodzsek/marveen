@@ -71,7 +71,9 @@
 #            agents/*/.claude-config/projects and ~/.claude/projects) older
 #            than DAILY_CLEANUP_TRANSCRIPT_DAYS (default 7) days, gzipped in
 #            place when no process has them open; such a session can no longer
-#            be resumed, gunzip brings it back (Klodel 21739).
+#            be resumed, gunzip brings it back (Klodel 21739). A *.jsonl.gz
+#            older than DAILY_CLEANUP_TRANSCRIPT_EXPIRE_DAYS (default 30, as
+#            Claude Code's own cleanupPeriodDays) is deleted (Lex 21777).
 #            Rules and reasons: scripts/transcript-gzip.py.
 # Not here, on purpose: unmerged worktrees, node_modules, models (whisper,
 # Hugging Face, mflux), the Colima disk, ms-playwright. Those belong to an
@@ -106,6 +108,7 @@ INSTALL_DIR="${DAILY_CLEANUP_INSTALL_DIR:-$HERE/..}"
 WORKTREE_DAYS="${DAILY_CLEANUP_WORKTREE_DAYS:-3}"
 CACHE_HOURS="${DAILY_CLEANUP_CACHE_HOURS:-24}"
 TRANSCRIPT_DAYS="${DAILY_CLEANUP_TRANSCRIPT_DAYS:-7}"
+TRANSCRIPT_EXPIRE_DAYS="${DAILY_CLEANUP_TRANSCRIPT_EXPIRE_DAYS:-30}"
 LSOF="${DAILY_CLEANUP_LSOF:-/usr/sbin/lsof}"
 ALERT_GB="${DAILY_CLEANUP_ALERT_GB:-20}"
 ALERT_COOLDOWN="${DAILY_CLEANUP_ALERT_COOLDOWN:-21600}"
@@ -240,14 +243,14 @@ clean_worktrees() {
   log "STEP worktrees rc=$rc $(echo "$out" | tail -1) disk_delta_mb=$(( (after - before) / 1024 ))"
 }
 
-# Old session transcripts, gzipped in place (scripts/transcript-gzip.py).
+# Old session transcripts, gzipped in place; expired .gz deleted (scripts/transcript-gzip.py).
 clean_transcripts() {
   local before after out rc
   if ! command -v gzip >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then log "STEP transcripts skipped: gzip or python3 not installed"; return; fi
   before="$(free_kb)"
-  echo "== transcripts: *.jsonl idle for ${TRANSCRIPT_DAYS} days, gzipped in place"
+  echo "== transcripts: *.jsonl idle for ${TRANSCRIPT_DAYS} days gzipped in place, *.jsonl.gz older than ${TRANSCRIPT_EXPIRE_DAYS} days deleted"
   out="$(python3 -I "$HERE/transcript-gzip.py" --install-dir "$INSTALL_DIR" --home "$HOME" --days "$TRANSCRIPT_DAYS" \
-    --lsof "$LSOF" --now "$(now)")"; rc=$?
+    --expire-days "$TRANSCRIPT_EXPIRE_DAYS" --lsof "$LSOF" --now "$(now)")"; rc=$?
   echo "$out"
   (( rc == 0 )) || FAILED=1
   after="$(free_kb)"
