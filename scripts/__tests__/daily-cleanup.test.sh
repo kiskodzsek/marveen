@@ -287,7 +287,11 @@ TP="$I/agents/a/.claude-config/projects/-x"; HP="$SB/home/.claude/projects/-y"
 mkdir -p "$TP/sess/subagents" "$TP/memory" "$HP" "$I/agents/b/.claude-config"
 for f in "$TP/late.jsonl" "$TP/dup.jsonl" "$TP/old.jsonl" "$TP/recent.jsonl" "$TP/sess/subagents/s.jsonl" "$TP/memory/m.jsonl" "$TP/notes.md" "$TP/open.jsonl" "$HP/main.jsonl"; do printf '{"a":1}\n%.0s' $(seq 1 200) > "$f"; done
 touch -t 203305170000 "$TP/recent.jsonl"   # a day before NOW (2033): stays
-echo kept > "$TP/dup.jsonl.gz"   # a gunzip -k by hand left the .gz: skipped, not failed
+echo kept > "$TP/dup.jsonl.gz"; touch -t 203305170000 "$TP/dup.jsonl.gz"   # a gunzip -k by hand left the .gz: skipped, not failed
+touch -t 203304010000 "$TP/old.jsonl"   # 47 days before NOW: the .gz keeps this mtime
+echo x > "$TP/exp.jsonl.gz"; echo x > "$TP/sess/subagents/exp2.jsonl.gz"   # mtime today (2026), years before NOW: expired
+echo x > "$TP/fresh.jsonl.gz"; touch -t 203305010000 "$TP/fresh.jsonl.gz"   # 17 days before NOW: stays
+echo x > "$TP/memory/m.jsonl.gz"; echo x > "$SB/outside.jsonl.gz"; ln -s "$SB/outside.jsonl.gz" "$TP/link.jsonl.gz"
 ln -s "$I/agents/a/.claude-config/projects" "$I/agents/b/.claude-config/projects"   # the same dir twice: once
 echo "$TP/open.jsonl" > "$SB/cwds"; echo "$(cd "$TP" && pwd -P)/late.jsonl" > "$SB/late"   # resumed while the run goes (lsof prints resolved paths)
 INST="$I" LAST= dc run
@@ -299,12 +303,24 @@ check "opened after the run's first look (the per-file lsof right before the gzi
 check "open (lsof): stays" "$(ok -f "$TP/open.jsonl")"
 check "a .gz already there: the .jsonl is skipped, both stay" "$(ok -f "$TP/dup.jsonl" -a "$(cat "$TP/dup.jsonl.gz")" = kept)"
 check "memory/ and non-jsonl files are never touched" "$(ok -f "$TP/memory/m.jsonl" -a -f "$TP/notes.md")"
+check "the .gz keeps the original's mtime (the expiry counts from the session, not the gzip; Lex 21777)" "$(ok "$(python3 -c 'import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$TP/old.jsonl.gz")" = "$(python3 -c 'import time; print(int(time.mktime((2033,4,1,0,0,0,0,0,-1))))')")"
+check "a .jsonl.gz older than 30 days is deleted, in a session dir too (Lex 21777)" "$(ok ! -e "$TP/exp.jsonl.gz" -a ! -e "$TP/sess/subagents/exp2.jsonl.gz")"
+check "...a younger one stays; memory/ and a symlinked .gz (and its target) are never touched" "$(ok -f "$TP/fresh.jsonl.gz" -a -f "$TP/memory/m.jsonl.gz" -a -L "$TP/link.jsonl.gz" -a -f "$SB/outside.jsonl.gz")"
+check "...counted in the log line" "$(ok -n "$(echo "$TL" | grep ' expired=2 mb_expired=0 ')")" "$TL"
 check "...rc 0, logged with the counts; a symlinked projects dir is walked once" "$(ok "$RC" = 0 -a -n "$(echo "$TL" | grep 'rc=0 gzipped=3 .* open=2 exists=1 ')")" "rc=$RC $TL"
 : > "$SB/cwds"; printf '{"a":1}\n' > "$TP/old2.jsonl"
 INST="$I" LSOF_BIN="$SB/no-lsof" LAST= dc run
 check "lsof unavailable: nothing gzipped, said so, rc 0" "$(ok "$RC" = 0 -a -f "$TP/old2.jsonl" -a -n "$(grep 'stop: lsof unavailable' "$SB/store/daily-cleanup.last-run.txt")")" "rc=$RC"
 INST="$I" LAST= STUB_ENV="DAILY_CLEANUP_TRANSCRIPT_DAYS=1" dc run
 check "DAILY_CLEANUP_TRANSCRIPT_DAYS=1 is refused: nothing gzipped, the step fails" "$(ok "$RC" = 1 -a -f "$TP/old2.jsonl" -a -n "$(grep 'STEP transcripts rc=2 ' "$SB/store/daily-cleanup.log")")" "rc=$RC"
+echo x > "$TP/exp3.jsonl.gz"
+INST="$I" LAST= STUB_ENV="DAILY_CLEANUP_TRANSCRIPT_EXPIRE_DAYS=5" dc run
+check "DAILY_CLEANUP_TRANSCRIPT_EXPIRE_DAYS under the gzip age is refused: nothing deleted, the step fails" "$(ok "$RC" = 1 -a -f "$TP/exp3.jsonl.gz" -a -f "$TP/old2.jsonl")" "rc=$RC"
+TG() { python3 -I "$ROOT/scripts/transcript-gzip.py" --install-dir "$I" --home "$SB/home" --lsof "$SB/lsof" --now "$NOW" "$@" 2>&1; }
+O="$(TG --dry-run)"
+check "--dry-run: the expired .gz is listed, not deleted" "$(ok -f "$TP/exp3.jsonl.gz" -a -n "$(echo "$O" | grep "^expire .*/-x/exp3.jsonl.gz$")")" "$O"
+O="$(TG --min-free-gb 999999)"
+check "under the free-disk floor: no gzip, but the expiry goes on (it only frees space)" "$(ok ! -e "$TP/exp3.jsonl.gz" -a -f "$TP/old2.jsonl" -a -n "$(echo "$O" | grep 'stop gzip: under')" -a -n "$(echo "$O" | grep 'gzipped=0 .* expired=1 ')")" "$O"
 
 echo "== the low-disk alert (Klodel 21709)"
 rm -f "$SB/msgs" "$SB/store/.daily-cleanup.alert"
