@@ -85,7 +85,7 @@ export function readFleetQuota(nowSec: number): QuotaSnapshot {
 }
 
 export interface SeatQuota {
-  /** quotaPlanKey: own:<agent>, plan:<id> or dir:<hash>. */
+  /** quotaPlanKey: own:<agent>, plan:<id>, dir:<hash> or tok:<hash>. */
   key: string
   /** Display names of the agents on this seat, for the strip's label. */
   label: string
