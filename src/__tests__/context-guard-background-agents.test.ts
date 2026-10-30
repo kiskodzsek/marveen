@@ -50,7 +50,10 @@ vi.mock('../web/agent-process.js', () => ({
   isSessionReadyForPrompt: async () => false,
 }))
 
-const { guardPaneSignals, fastRoundBgActs, bgDeferredContinuePrompt, bgDeferredRefreshPrompt } = await import('../web/context-guard-runner.js')
+const {
+  guardPaneSignals, fastRoundBgActs, bgDeferredContinuePrompt, bgDeferredRefreshPrompt,
+  deliveryHoldForPhase, bgReleaseWindowOpen, guardHoldCapMs, guardReadyHoldCapMs,
+} = await import('../web/context-guard-runner.js')
 
 const here = dirname(fileURLToPath(import.meta.url))
 const runner = readFileSync(join(here, '..', 'web', 'context-guard-runner.ts'), 'utf-8')
@@ -302,5 +305,53 @@ describe('the main thread is released while its background agents defer the rest
     expect(i).toBeLessThan(runner.indexOf('promptReason.startsWith(STALE_REFRESH_REASON_PREFIX)'))
     expect(runner).toContain("mainIdle: paneState === 'idle'")
     expect(runner).toContain('backgroundAgents: bgAgents')
+  })
+
+  // ROUTERHOLD1028 (card d480512c, Patrik TG 9207): dave, 2026-10-28, released
+  // 12:17:16, re-stopped 12:24:33; six rows held throughout, because the router
+  // hold followed the phase (still await-handoff) and not the release.
+  describe('ROUTERHOLD1028: the router hold follows the release, not only the phase', () => {
+    it('released, not re-stopped: no hold, though the phase is still await-handoff', () => {
+      const s = released()
+      expect(s.phase).toBe('await-handoff')
+      expect(bgReleaseWindowOpen(s)).toBe(true)
+      expect(deliveryHoldForPhase(s.phase, CFG, s)).toBeNull()
+    })
+
+    it('re-stopped at the cap: the hold is back, with its cap and the reason in detail', () => {
+      const d = decideGuard(released(), inputs({ nowMs: NOW + 9 * 60_000, pct: 0.84, mainIdle: false }), CFG)
+      expect(d.nextState.bgRestopSent).toBe(true)
+      expect(bgReleaseWindowOpen(d.nextState)).toBe(false)
+      expect(deliveryHoldForPhase(d.nextState.phase, CFG, d.nextState)).toEqual({
+        reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(CFG),
+        detail: 'main thread re-stopped at the background-release cap',
+      })
+    })
+
+    it('the agents done and the refresh requested ("ÁLLJ MEG"): the hold is back', () => {
+      const s = released()
+      const idle = { backgroundAgents: 0, mainIdle: true, paneIdle: true, paneBusy: false }
+      const r = decideGuard(s, inputs({ nowMs: s.deadlineMs + 60_000, ...idle }), CFG)
+      expect(r.reason.startsWith(BG_REFRESH_REASON_PREFIX)).toBe(true)
+      expect(deliveryHoldForPhase(r.nextState.phase, CFG, r.nextState)).toMatchObject({
+        reason: 'context-guard await-handoff', detail: 'background agents done, handoff refresh requested',
+      })
+    })
+
+    it('before any release (the first STOP), the GUARDHOLD1013 hold is unchanged', () => {
+      const s = requested()
+      expect(deliveryHoldForPhase(s.phase, CFG, s)).toEqual({ reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(CFG) })
+      expect(deliveryHoldForPhase('await-handoff', CFG)).toEqual({ reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(CFG) })
+    })
+
+    it('await-ready holds whatever the release flags say (CGHOLDREADY1021)', () => {
+      const flags = { bgReleased: true, bgRestopSent: false, bgRefreshSent: false }
+      expect(deliveryHoldForPhase('await-ready', CFG, flags)).toEqual({ reason: 'context-guard await-ready', maxMs: guardReadyHoldCapMs(CFG) })
+      for (const phase of ['idle', 'cooldown']) expect(deliveryHoldForPhase(phase, CFG, flags)).toBeNull()
+    })
+
+    it('the runner hands the guard state to the hold, not the phase alone', () => {
+      expect(runner).toContain('deliveryHoldForPhase(phase, readContextGuardConfig(name), state)')
+    })
   })
 })

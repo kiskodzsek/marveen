@@ -107,21 +107,55 @@ export function guardReadyHoldCapMs(cfg: Pick<ContextGuardConfig, 'handoffTimeou
   return guardHoldCapMs(cfg) + READY_TIMEOUT_MS + INTERVAL_MS
 }
 
-/** Which hold a guard phase puts on the router, with its cap. Pure, for the test. */
+// ROUTERHOLD1028 (card d480512c, Patrik TG 9207): the KLODEL18385 release told
+// the main thread to go on working while its background agents defer the
+// restart, but the phase stays await-handoff, so the hold above stayed too: the
+// released thread worked with no inbox. Measured on dave, 2026-10-28
+// (dashboard.log): released 12:17:16, re-stopped 12:24:33 (87% >= the 83.5%
+// cap), six rows (18689-18707) held throughout. The GUARDHOLD1013 reason (every
+// delivered row keeps a thread that should be idle busy) does not hold while
+// the guard itself has lifted the STOP, so the window between the release and
+// the next STOP-type request is unheld. The re-stop (bgRestopSent) and the
+// post-agents refresh (bgRefreshSent, "EGYETLEN dolgod ... ÁLLJ MEG") put the
+// hold back: from there on delivering pushes towards the hard threshold and the
+// saturation net, which kills the agents. Pure, for the test.
+export function bgReleaseWindowOpen(
+  state: Pick<GuardState, 'bgReleased' | 'bgRestopSent' | 'bgRefreshSent'> | null | undefined,
+): boolean {
+  return !!state?.bgReleased && !state.bgRestopSent && !state.bgRefreshSent
+}
+
+/** Which hold a guard phase puts on the router, with its cap. Pure, for the test.
+ *  `state` (ROUTERHOLD1028): the guard state of that phase, for the background
+ *  release window; absent = no release, the phase alone decides. */
 export function deliveryHoldForPhase(
   phase: string, cfg: Pick<ContextGuardConfig, 'handoffTimeoutMinutes'>,
+  state?: Pick<GuardState, 'bgReleased' | 'bgRestopSent' | 'bgRefreshSent'> | null,
 ): DeliveryHold | null {
-  if (phase === 'await-handoff') return { reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(cfg) }
+  if (phase === 'await-handoff') {
+    if (bgReleaseWindowOpen(state)) return null
+    // ROUTERHOLD1028: the router's [delivery-held] alert says which STOP the
+    // hold is serving, so the reader does not have to open the guard log.
+    const detail = state?.bgRestopSent
+      ? 'main thread re-stopped at the background-release cap'
+      : state?.bgRefreshSent
+        ? 'background agents done, handoff refresh requested'
+        : undefined
+    return { reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(cfg), ...(detail ? { detail } : {}) }
+  }
   if (phase === 'await-ready') return { reason: 'context-guard await-ready', maxMs: guardReadyHoldCapMs(cfg) }
   return null
 }
 
 /** The router's hold check: a hold (with its cap) while the agent is in
- *  await-handoff, and on through await-ready until the resume is in. */
+ *  await-handoff -- except while the guard has released the main thread for its
+ *  background agents (ROUTERHOLD1028) -- and on through await-ready until the
+ *  resume is in. */
 export function guardDeliveryHold(name: string): DeliveryHold | null {
-  const phase = getHardGuardPhase(name)
+  const state = guardStates.get(name)
+  const phase = state?.phase ?? 'idle'
   if (phase !== 'await-handoff' && phase !== 'await-ready') return null
-  return deliveryHoldForPhase(phase, readContextGuardConfig(name))
+  return deliveryHoldForPhase(phase, readContextGuardConfig(name), state)
 }
 
 // How long the dispatch gate honours one sweep's "this banner is not
