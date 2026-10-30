@@ -101,9 +101,11 @@ echo "== heavy-job.sh reads the state"
 export HEAVY_JOB_VM_PID=""  # no VM: the host running this test may have a real one
 hj() { echo 70 > "$SB/level"; OUT="$(env MEMGATE_PROC_MEMINFO="$SB/no-such" MEMGATE_SYSCTL="$SB/sysctl" HEAVY_JOB_DF_KB=99999999 HEAVY_JOB_POLL=1 \
     bash "$SB/scripts/heavy-job.sh" --wait 0 -- touch "$1" 2>&1)"; RC=$?; }
-echo "warn $(date +%s) swap 80%" > "$STATE"; hj "$SB/hj1"
+echo "warn $(date +%s) load 20.1 on 8 CPUs" > "$STATE"; hj "$SB/hj1"
 check "fresh warn state -> heavy job not started (75)" "$(ok "$RC" = 75 -a ! -e "$SB/hj1")" "rc=$RC $OUT"
-check "...and says why" "$(ok -n "$(echo "$OUT" | grep 'host-monitor says warn (swap 80%)')")" "$OUT"
+check "...and says why" "$(ok -n "$(echo "$OUT" | grep 'host-monitor says warn (load 20.1 on 8 CPUs)')")" "$OUT"
+echo "warn $(date +%s) swap 80%" > "$STATE"; hj "$SB/hj1s"
+check "fresh swap-only warn, free memory 70% >= --min-free -> the job runs (Patrik TG 11833)" "$(ok "$RC" = 0 -a -e "$SB/hj1s")" "rc=$RC $OUT"
 echo "warn $(( $(date +%s) - 900 )) swap 80%" > "$STATE"; hj "$SB/hj2"
 check "stale state (15 min) is ignored -> the job runs" "$(ok "$RC" = 0 -a -e "$SB/hj2")" "rc=$RC $OUT"
 echo "ok $(date +%s) " > "$STATE"; hj "$SB/hj3"
