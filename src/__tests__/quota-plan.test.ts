@@ -40,6 +40,18 @@ describe('quotaPlanKey', () => {
     expect(quotaPlanKey('b', { claudeConfigDir: '/Users/x/.claude-b' })).toBe(key)
     expect(quotaPlanKey('c', { claudeConfigDir: '/Users/x/.claude-c' })).not.toBe(key)
   })
+  it('an own setup-token file is a seat, keyed by the hashed path, shared by whoever points at it', () => {
+    // 2fb86ef2: such an agent counted as fleet, and its own seat's numbers raised the fleet's.
+    const key = quotaPlanKey('dave', { oauthTokenFile: '/Users/x/.secrets/dave-token' })
+    expect(key).toMatch(/^tok:[0-9a-f]{8}$/)
+    expect(key).not.toContain('/Users')
+    expect(quotaPlanKey('pixel', { oauthTokenFile: '/Users/x/.secrets/dave-token' })).toBe(key)
+    expect(quotaPlanKey('lex', { oauthTokenFile: '/Users/x/.secrets/lex-token' })).not.toBe(key)
+    // a token file and a config dir at the same path are still two different seats
+    expect(quotaPlanKey('a', { claudeConfigDir: '/p' })).not.toBe(quotaPlanKey('a', { oauthTokenFile: '/p' }))
+    // the launcher refuses a token file next to own_team, a plan or a config dir; the key follows those
+    expect(quotaPlanKey('dave', { authMode: 'own_team', oauthTokenFile: '/t' })).toBe('own:dave')
+  })
   it('everything else draws from the fleet', () => {
     expect(quotaPlanKey('a', {})).toBe('fleet')
     expect(quotaPlanKey('a', { authMode: 'shared', claudePlan: null, claudeConfigDir: null })).toBe('fleet')
@@ -71,6 +83,26 @@ describe('readModQuotaSnapshot with an agent filter', () => {
     expect(seat.fiveHour).toBeNull()
   })
 
+  it('names every agent reporting the seat, not only the winner of each window (Klodel 21626)', () => {
+    source('pulzus', 18, 32)
+    source('kernel', 19, 32)
+    source('lex', 19, 32)
+    const fleet = readModQuotaSnapshot(dir, NOW)
+    expect(fleet.sourceAgents?.length).toBeLessThanOrEqual(2)
+    expect(fleet.reportingAgents).toEqual(['kernel', 'lex', 'pulzus'])
+    // a filtered-out agent is not a reporter of this seat
+    expect(readModQuotaSnapshot(dir, NOW, undefined, (a) => a !== 'lex').reportingAgents).toEqual(['kernel', 'pulzus'])
+  })
+
+  it('a reading of a window already reset does not make its agent a reporter', () => {
+    source('kernel', 19, 32)
+    writeFileSync(join(dir, 'bella.json'), JSON.stringify({
+      agent: 'bella', state: 'ended', alive_at: (NOW - 900000) * 1000,
+      usage: { rateLimits: [{ kind: 'seven_day', percentUsed: 81, resetsAt: iso(NOW - 86400) }] },
+    }))
+    expect(readModQuotaSnapshot(dir, NOW).reportingAgents).toEqual(['kernel'])
+  })
+
   it('without a filter every file counts, as before', () => {
     source('bella', 5, 78)
     source('dave', 95, 97)
@@ -87,6 +119,9 @@ describe('the wiring', () => {
     expect(SRC).toMatch(/quota,\s*quotaSeats,\s*quotaFable,/)
     expect(SRC).toMatch(/readModQuotaSnapshot\(STATE_OBSERVER_STATE_DIR, nowSec, maxAgeSec, \(a\) => agents\.includes\(a\)\)/)
     expect(SRC).toMatch(/authMode: readAgentAuthMode\(a\)/)
+    expect(SRC).toMatch(/oauthTokenFile: readAgentOauthTokenFilePath\(a\)/)
+    // only a valid setting counts: an invalid one refuses the launch, so the agent runs on no seat
+    expect(SRC).toMatch(/setting\.state === 'set' \? setting\.path : null/)
   })
 
   it('the overview page renders the seats and has the container for them', () => {
@@ -97,7 +132,7 @@ describe('the wiring', () => {
   it('the seat messages exist in both languages', () => {
     for (const lang of ['hu', 'en']) {
       const L = read(`../../web/lang/${lang}.js`)
-      for (const key of ['overview.quota.seat', 'overview.quota.seat_none']) expect(L, `${lang}: ${key}`).toContain(`'${key}'`)
+      for (const key of ['overview.quota.seat', 'overview.quota.seat_none', 'overview.quota.reporting']) expect(L, `${lang}: ${key}`).toContain(`'${key}'`)
     }
   })
 })

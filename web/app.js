@@ -12333,6 +12333,7 @@ function renderQuotaStrip(q, fable) {
   note.hidden = true
   note.className = 'quota-strip-note'
   age.textContent = ''
+  age.title = ''
 
   if (!q || q.status === 'missing') {
     const reason = q && q.reason ? q.reason : 'no-file'
@@ -12370,6 +12371,13 @@ function renderQuotaStrip(q, fable) {
       ? t('overview.quota.source_mod', { agent: agents[0] })
       : t('overview.quota.source_mod_many', { n: agents.length })
     age.textContent += (age.textContent ? ' · ' : '') + label
+    // Klodel 21626: the source names only each window's winner; say how many
+    // agents report this same seat, so one name does not read as "only one".
+    const reporting = Array.isArray(q.reportingAgents) ? q.reportingAgents : []
+    if (reporting.length > agents.length) {
+      age.textContent += ' · ' + t('overview.quota.reporting', { n: reporting.length })
+      age.title = reporting.join(', ')
+    }
   } else if (q.source === 'statusline') {
     age.textContent += (age.textContent ? ' · ' : '') + t('overview.quota.source_statusline')
   }

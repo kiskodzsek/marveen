@@ -12,6 +12,7 @@ import { isAgentRunning } from '../agent-process.js'
 import { json, jsonMaybeGzip } from '../http-helpers.js'
 import { readQuotaSnapshot, DEFAULT_MAX_AGE_SEC, readFableSnapshot, DEFAULT_FABLE_MAX_AGE_SEC, readModQuotaSnapshot, chooseQuotaSnapshot, quotaPlanKey, type QuotaSnapshot } from '../quota.js'
 import { STATE_OBSERVER_STATE_DIR } from '../state-observer.js'
+import { resolveOauthTokenFileSetting } from '../agent-oauth-token-file.js'
 import type { RouteContext } from './types.js'
 
 // Count "real" user turns (operator prompts, Telegram messages) in every
@@ -100,9 +101,21 @@ function agentQuotaKeys(): Map<string, string> {
       authMode: readAgentAuthMode(a),
       claudePlan: readAgentClaudePlan(a),
       claudeConfigDir: readAgentClaudeConfigDir(a),
+      oauthTokenFile: readAgentOauthTokenFilePath(a),
     }))
   }
   return keys
+}
+
+/**
+ * The agent's own setup-token path, when the setting is valid. An invalid one
+ * refuses the launch (agent-oauth-token-file.ts), so it never runs on any seat.
+ */
+function readAgentOauthTokenFilePath(agent: string): string | null {
+  let raw = '{}'
+  try { raw = readFileSync(join(agentDir(agent), 'agent-config.json'), 'utf-8') } catch { /* no config: unset */ }
+  const setting = resolveOauthTokenFileSetting(raw)
+  return setting.state === 'set' ? setting.path : null
 }
 
 /**

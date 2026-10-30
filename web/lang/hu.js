@@ -54,6 +54,7 @@ window._i18n.hu = {
   'overview.quota.source_mod':      'forrás: {agent} munkamenete',
   'overview.quota.source_statusline': 'forrás: státuszsor',
   'overview.quota.source_mod_many': 'forrás: {n} ágens munkamenete',
+  'overview.quota.reporting':       '{n} ágens jelenti ugyanezt a keretet',
   'overview.quota.measured_now':    'friss mérés',
   'overview.quota.stale_mod':       'Ezek a számok régiek: a megfigyelt munkamenetek azóta nem kaptak API-választ, közben egy másik munkamenet már fogyaszthatta a keretet.',
   'overview.quota.stale_mod_unknown': 'Ezeknek a számoknak nem tudjuk a korát (a munkamenet újraindulása óta még nem volt lezárt köre), ezért inkább elavultnak tekintjük őket.',
