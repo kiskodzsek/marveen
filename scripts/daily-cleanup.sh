@@ -15,6 +15,12 @@
 #   - catch-up: the last run is >= 30 h old (the Mac was off or busy at night);
 #   - the disk gate: free disk < DAILY_CLEANUP_LOW_GB (default 10 GiB, the
 #     host-monitor WARN line) and the last run is >= 1 h old.
+# Every tick, after a run if one was due: free disk under
+# DAILY_CLEANUP_ALERT_GB (default 20 GiB, Klodel 21709) sends one inter-agent
+# message to DAILY_CLEANUP_ALERT_TO (default: pulzus and the main agent), at
+# most once per DAILY_CLEANUP_ALERT_COOLDOWN seconds (default 6 h). The
+# host-monitor pages only at CRITICAL (3 GiB): this is the earlier warning,
+# while there is still room to decide what goes.
 # The run goes through heavy-job.sh: one heavy job at a time, and only with
 # free memory. --ignore-host-disk and --min-disk-gb 0, because a low disk puts
 # host-monitor into warn or critical (and below 3 GiB heavy-job's own disk
@@ -42,7 +48,8 @@
 #   pip    pip3 cache purge
 #   go     go clean -cache
 #   scratch  /private/tmp/claude-<uid>/<project>/<session> directories with no
-#            file changed for DAILY_CLEANUP_SCRATCH_DAYS (default 7) days.
+#            file changed for DAILY_CLEANUP_SCRATCH_DAYS (default 2) days
+#            (7 until 2026-10-30; Klodel 21709: trial shots past 2 days go).
 #            Only Claude Code project dirs (the name starts with "-"); other
 #            dirs there (bash-edit-diff, Claude Code's own) are left alone.
 #            Symlinks are not followed; nothing outside that tree is touched.
@@ -53,7 +60,20 @@
 #            src/ from the tarball each time and reads a tarball only for the
 #            run it is executing (Pulzus 14571). Rules and reasons:
 #            scripts/release-runs-prune.py.
-# Not here, on purpose: worktrees and their node_modules, models (whisper,
+#   worktrees  merged, clean, idle (DAILY_CLEANUP_WORKTREE_DAYS, default 3)
+#            worktrees of the agents' clones, by `git worktree remove`, and
+#            the build caches (.next, .turbo, ...) of trees idle for
+#            DAILY_CLEANUP_CACHE_HOURS (default 24); never a busy tree (a
+#            process has its cwd in it), one another tree's node_modules
+#            links into, or one under a path in store/daily-cleanup.keep.
+#            Rules and reasons: scripts/worktree-prune.py (card c310dd1b).
+#   transcripts  the agents' Claude Code session transcripts (*.jsonl under
+#            agents/*/.claude-config/projects and ~/.claude/projects) older
+#            than DAILY_CLEANUP_TRANSCRIPT_DAYS (default 7) days, gzipped in
+#            place when no process has them open; such a session can no longer
+#            be resumed, gunzip brings it back (Klodel 21739).
+#            Rules and reasons: scripts/transcript-gzip.py.
+# Not here, on purpose: unmerged worktrees, node_modules, models (whisper,
 # Hugging Face, mflux), the Colima disk, ms-playwright. Those belong to an
 # agent or are in use; the morning report lists them for their owners.
 #
@@ -67,7 +87,8 @@
 #
 # Test hooks: DAILY_CLEANUP_NOW (epoch), DAILY_CLEANUP_HOUR (00-23),
 # DAILY_CLEANUP_DF_KB (free disk KB), DAILY_CLEANUP_SCRATCH_ROOT,
-# DAILY_CLEANUP_HEAVY_JOB (the wrapper), DAILY_CLEANUP_RELEASE_DIR, MARVEEN_STORE.
+# DAILY_CLEANUP_HEAVY_JOB (the wrapper), DAILY_CLEANUP_RELEASE_DIR, MARVEEN_STORE,
+# DAILY_CLEANUP_INSTALL_DIR, DAILY_CLEANUP_LSOF, DAILY_CLEANUP_AGENT_MSG.
 
 set -uo pipefail
 
@@ -76,11 +97,20 @@ STORE="${MARVEEN_STORE:-$HERE/../store}"
 STAMP="$STORE/.daily-cleanup.last"
 LOG="$STORE/daily-cleanup.log"
 LOW_GB="${DAILY_CLEANUP_LOW_GB:-10}"
-SCRATCH_DAYS="${DAILY_CLEANUP_SCRATCH_DAYS:-7}"
+SCRATCH_DAYS="${DAILY_CLEANUP_SCRATCH_DAYS:-2}"
 SCRATCH_ROOT="${DAILY_CLEANUP_SCRATCH_ROOT:-/private/tmp/claude-$(id -u)}"
 HEAVY_JOB="${DAILY_CLEANUP_HEAVY_JOB:-$HERE/heavy-job.sh}"
 RELEASE_DIR="${DAILY_CLEANUP_RELEASE_DIR:-$HERE/../ops/release}"
 RELEASE_DAYS="${DAILY_CLEANUP_RELEASE_DAYS:-3}"
+INSTALL_DIR="${DAILY_CLEANUP_INSTALL_DIR:-$HERE/..}"
+WORKTREE_DAYS="${DAILY_CLEANUP_WORKTREE_DAYS:-3}"
+CACHE_HOURS="${DAILY_CLEANUP_CACHE_HOURS:-24}"
+TRANSCRIPT_DAYS="${DAILY_CLEANUP_TRANSCRIPT_DAYS:-7}"
+LSOF="${DAILY_CLEANUP_LSOF:-/usr/sbin/lsof}"
+ALERT_GB="${DAILY_CLEANUP_ALERT_GB:-20}"
+ALERT_COOLDOWN="${DAILY_CLEANUP_ALERT_COOLDOWN:-21600}"
+ALERT_STAMP="$STORE/.daily-cleanup.alert"
+AGENT_MSG="${DAILY_CLEANUP_AGENT_MSG:-$HERE/agent-msg.sh}"
 
 mkdir -p "$STORE" 2>/dev/null
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG" 2>/dev/null; }
@@ -106,15 +136,43 @@ tick() {
   elif (( kb < LOW_GB * 1024 * 1024 && age >= 3600 )); then
     reason="disk gate: $(( kb / 1048576 )) GiB free"
   fi
-  [[ -n "$reason" ]] || return 0
-  log "TICK due ($reason)"
-  bash "$HEAVY_JOB" --name daily-cleanup --ignore-host-disk --ignore-host-swap --min-disk-gb 0 --allow-vm \
-    --min-free 20 --kill-below 10 --wait 1800 -- bash "$HERE/daily-cleanup.sh" run
-  local rc=$?
-  # 0 and 1 both mean the run happened; anything else (75 not started, 70
-  # stopped by the watchdog) leaves the stamp, so the next tick retries.
-  if (( rc == 0 || rc == 1 )); then now >"$STAMP"; fi
+  local rc=0
+  if [[ -n "$reason" ]]; then
+    log "TICK due ($reason)"
+    bash "$HEAVY_JOB" --name daily-cleanup --ignore-host-disk --ignore-host-swap --min-disk-gb 0 --allow-vm \
+      --min-free 20 --kill-below 10 --wait 1800 -- bash "$HERE/daily-cleanup.sh" run
+    rc=$?
+    # 0 and 1 both mean the run happened; anything else (75 not started, 70
+    # stopped by the watchdog) leaves the stamp, so the next tick retries.
+    if (( rc == 0 || rc == 1 )); then now >"$STAMP"; fi
+  fi
+  alert_low_disk
   return "$rc"
+}
+
+# The early warning (Klodel 21709): after the cleanup has done what it safely
+# can, a disk still under ALERT_GB needs a person to decide what else goes.
+alert_low_disk() {
+  local kb gb last to sent=0 recipients main
+  kb="$(free_kb)"
+  (( kb < ALERT_GB * 1024 * 1024 )) || return 0
+  last="$(cat "$ALERT_STAMP" 2>/dev/null)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( $(now) - last >= ALERT_COOLDOWN )) || return 0
+  gb=$(( kb / 1048576 ))
+  # The main agent's id, as host-monitor.sh reads it: only that one line of .env.
+  main=""
+  [[ -f "$INSTALL_DIR/.env" ]] && main="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
+  recipients="${DAILY_CLEANUP_ALERT_TO:-pulzus $main}"
+  local ran ran_at="még nem futott"
+  ran="$(cat "$STAMP" 2>/dev/null)"
+  [[ "$ran" =~ ^[0-9]+$ ]] && ran_at="$(date -r "$ran" '+%m-%d %H:%M' 2>/dev/null || echo "$ran")"
+  local msg="[DAILY-CLEANUP] A lemezen ${gb} GiB szabad, a ${ALERT_GB} GiB-os jelzési szint alatt. Az automatikus takarítás utolsó futása: ${ran_at} (store/daily-cleanup.log). Ami még nagy, azt csak a gazdája döntheti el: be nem olvasztott worktree, out/, modellek, transcriptek."
+  for to in $recipients; do
+    if echo "$msg" | bash "$AGENT_MSG" daily-cleanup "$to" - >/dev/null 2>&1; then sent=1; else log "ALERT to $to FAILED"; fi
+  done
+  # Only a delivered alert starts the cooldown: a failed one is tried again next tick.
+  (( sent )) && now >"$ALERT_STAMP"
+  log "ALERT low disk ${gb} GiB < ${ALERT_GB} sent=$sent to=${recipients}"
 }
 
 FAILED=0
@@ -165,6 +223,37 @@ clean_release_runs() {
   log "STEP release-runs rc=$rc $(echo "$out" | tail -1) disk_delta_mb=$(( (after - before) / 1024 ))"
 }
 
+# Merged, idle worktrees and idle build caches: the checks (merged, clean,
+# not busy, not linked) are in Python (scripts/worktree-prune.py).
+clean_worktrees() {
+  local before after out rc keep="$STORE/daily-cleanup.keep"
+  if ! command -v git >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then log "STEP worktrees skipped: git or python3 not installed"; return; fi
+  # Run from a worktree copy of the scripts, git would still list the live trees.
+  if [[ ! -d "$INSTALL_DIR/.git" || -L "$INSTALL_DIR/.git" ]]; then log "STEP worktrees skipped: $INSTALL_DIR is not a clone's main tree"; return; fi
+  before="$(free_kb)"
+  echo "== worktrees: merged and idle for ${WORKTREE_DAYS} days, build caches idle for ${CACHE_HOURS} h, under $INSTALL_DIR/agents"
+  out="$(python3 -I "$HERE/worktree-prune.py" --install-dir "$INSTALL_DIR" --days "$WORKTREE_DAYS" --cache-hours "$CACHE_HOURS" \
+    --keep-file "$keep" --lsof "$LSOF" --now "$(now)")"; rc=$?
+  echo "$out"
+  (( rc == 0 )) || FAILED=1
+  after="$(free_kb)"
+  log "STEP worktrees rc=$rc $(echo "$out" | tail -1) disk_delta_mb=$(( (after - before) / 1024 ))"
+}
+
+# Old session transcripts, gzipped in place (scripts/transcript-gzip.py).
+clean_transcripts() {
+  local before after out rc
+  if ! command -v gzip >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then log "STEP transcripts skipped: gzip or python3 not installed"; return; fi
+  before="$(free_kb)"
+  echo "== transcripts: *.jsonl idle for ${TRANSCRIPT_DAYS} days, gzipped in place"
+  out="$(python3 -I "$HERE/transcript-gzip.py" --install-dir "$INSTALL_DIR" --home "$HOME" --days "$TRANSCRIPT_DAYS" \
+    --lsof "$LSOF" --now "$(now)")"; rc=$?
+  echo "$out"
+  (( rc == 0 )) || FAILED=1
+  after="$(free_kb)"
+  log "STEP transcripts rc=$rc $(echo "$out" | tail -1) disk_delta_mb=$(( (after - before) / 1024 ))"
+}
+
 run() {
   exec >"$STORE/daily-cleanup.last-run.txt" 2>&1
   log "RUN start free_gb=$(( $(free_kb) / 1048576 ))"
@@ -174,6 +263,8 @@ run() {
   step go go go clean -cache
   clean_scratch
   clean_release_runs
+  clean_worktrees
+  clean_transcripts
   log "RUN end free_gb=$(( $(free_kb) / 1048576 )) failed=$FAILED"
   return "$FAILED"
 }
