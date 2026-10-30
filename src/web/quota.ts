@@ -55,6 +55,12 @@ export interface QuotaSnapshot {
   source?: 'statusline' | 'mod'
   /** The agents whose sessions the mod readings came from, one per window (source 'mod' only). */
   sourceAgents?: string[]
+  /**
+   * Every agent of this subscription with a reading of a window still open (source 'mod' only).
+   * sourceAgents names the winner of each window; this says who else reports the same seat, so
+   * one name there does not read as "only this agent sends samples" (Klodel 21626).
+   */
+  reportingAgents?: string[]
 }
 
 function readWindow(raw: unknown, nowSec: number): QuotaWindow | null {
@@ -207,7 +213,7 @@ export function readModQuotaSnapshot(
   maxAgeSec: number = DEFAULT_MAX_AGE_SEC,
   include?: (agent: string) => boolean,
 ): QuotaSnapshot {
-  const empty = { ageSec: null, maxAgeSec, fiveHour: null, sevenDay: null, source: 'mod' as const, sourceAgents: [] }
+  const empty = { ageSec: null, maxAgeSec, fiveHour: null, sevenDay: null, source: 'mod' as const, sourceAgents: [], reportingAgents: [] }
   let names: string[]
   try {
     names = readdirSync(dir).filter((n) => n.endsWith('.json'))
@@ -217,6 +223,7 @@ export function readModQuotaSnapshot(
   type Pick = { pct: number; resetsAt: number; agent: string; dataSec: number | null }
   const best: Record<'five_hour' | 'seven_day', Pick | null> = { five_hour: null, seven_day: null }
   let sources = 0
+  const reporting = new Set<string>()
   for (const name of names) {
     let d: {
       agent?: unknown; alive_at?: unknown; updated_at?: unknown; state?: unknown
@@ -240,6 +247,7 @@ export function readModQuotaSnapshot(
       if (typeof r.percentUsed !== 'number' || !Number.isFinite(r.percentUsed) || typeof r.resetsAt !== 'string') continue
       const resetsAt = Math.floor(Date.parse(r.resetsAt) / 1000)
       if (!Number.isFinite(resetsAt) || resetsAt <= nowSec) continue
+      reporting.add(agent)
       const cur = best[r.kind]
       if (!cur || resetsAt > cur.resetsAt || (resetsAt === cur.resetsAt && (r.percentUsed > cur.pct
         || (r.percentUsed === cur.pct && fresher(dataSec, cur.dataSec))))) {
@@ -250,6 +258,7 @@ export function readModQuotaSnapshot(
   if (sources === 0) return { status: 'missing', reason: 'no-file', ...empty }
   const picks = [best.five_hour, best.seven_day].filter((p): p is Pick => p !== null)
   if (picks.length === 0) return { status: 'missing', reason: 'no-rate-limits', ...empty }
+  const reportingAgents = [...reporting].sort()
   const known = picks.every((p) => p.dataSec !== null)
   const ageSec = known ? Math.max(0, nowSec - Math.min(...picks.map((p) => p.dataSec as number))) : null
   const window = (p: Pick | null): QuotaWindow | null =>
@@ -262,6 +271,7 @@ export function readModQuotaSnapshot(
     sevenDay: window(best.seven_day),
     source: 'mod',
     sourceAgents: [...new Set(picks.map((p) => p.agent))],
+    reportingAgents,
   }
 }
 
@@ -329,6 +339,11 @@ export function chooseQuotaSnapshot(statusLine: QuotaSnapshot, mod: QuotaSnapsho
  *   the same directory -> dir:<first 8 hex of sha256(path)> (the key goes out
  *   on /api/overview, and a local path, user name included, has no business
  *   there -- Viktor L1; the label comes from the agent names anyway)
+ * - an oauthTokenFile (2fb86ef2): its own setup-token, shared by whoever points
+ *   at the same file -> tok:<first 8 hex of sha256(path)>. The PATH is hashed,
+ *   never the token: this runs on every overview request and has no business
+ *   reading a secret. Without this key such an agent counted as fleet, and its
+ *   own seat's 95% raised the fleet's number and braked the fleet.
  * - anything else (including the main agent) -> fleet
  *
  * own_team wins over the other two: it is the explicit "not the fleet's
@@ -338,11 +353,14 @@ export interface AgentQuotaIdentity {
   authMode?: string | null
   claudePlan?: string | null
   claudeConfigDir?: string | null
+  /** The agent-config oauthTokenFile path, only when the setting is valid ('set'). */
+  oauthTokenFile?: string | null
 }
 
 export function quotaPlanKey(agent: string, id: AgentQuotaIdentity): string {
   if (id.authMode === 'own_team') return `own:${agent}`
   if (id.claudePlan) return `plan:${id.claudePlan}`
   if (id.claudeConfigDir) return `dir:${createHash('sha256').update(id.claudeConfigDir).digest('hex').slice(0, 8)}`
+  if (id.oauthTokenFile) return `tok:${createHash('sha256').update(id.oauthTokenFile).digest('hex').slice(0, 8)}`
   return 'fleet'
 }
