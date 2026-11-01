@@ -24,8 +24,10 @@ trap 'rm -rf "$SB"' EXIT
 mkdir -p "$SB/scripts/lib" "$SB/store" "$SB/bin" "$SB/tg"
 cp "$ROOT/scripts/host-monitor.sh" "$ROOT/scripts/heavy-job.sh" "$SB/scripts/"
 cp "$ROOT/scripts/lib/mem-read.sh" "$ROOT/scripts/lib/send-telegram.sh" "$SB/scripts/lib/"
+# Like POST /api/messages: only a registered fleet agent may be the sender (403 otherwise).
 cat > "$SB/scripts/agent-msg.sh" <<STUB
 #!/usr/bin/env bash
+case "\$1" in mainbot|pulzus) ;; *) echo "403 unknown agent '\$1'" >> "$SB/agentmsg.rejected"; exit 1 ;; esac
 echo "\$1 -> \$2: \$(cat)" >> "$SB/agentmsg.log"
 STUB
 cat > "$SB/bin/curl" <<STUB
@@ -76,7 +78,7 @@ rm -f "$STATE" "$SB/store/.host-monitor-alert"* "$SB/curl.log" "$SB/agentmsg.log
 mon 60; mon 10
 check "entering critical -> one Telegram send" "$(ok "$(grep -c sendMessage "$SB/curl.log" 2>/dev/null)" = 1)"
 check "the alert text names the reason" "$(ok -n "$(grep 'free memory 10%' "$SB/curl.log")")"
-check "entering critical -> one message to the main agent" "$(ok "$(grep -c 'host-monitor -> mainbot: \[HOST-MONITOR\]' "$SB/agentmsg.log" 2>/dev/null)" = 1)"
+check "entering critical -> one message to the main agent, from its own registered id (Pulzus 23225)" "$(ok "$(grep -c 'mainbot -> mainbot: \[HOST-MONITOR\]' "$SB/agentmsg.log" 2>/dev/null)" = 1 -a ! -s "$SB/agentmsg.rejected")" "$(cat "$SB/agentmsg.rejected" 2>/dev/null)"
 NOW=$((NOW+600)); mon 10
 check "still critical inside the cooldown -> no new Telegram, no new message" "$(ok "$(grep -c sendMessage "$SB/curl.log")" = 1 -a "$(wc -l < "$SB/agentmsg.log" | tr -d ' ')" = 1)"
 NOW=$((NOW+1800)); mon 10
