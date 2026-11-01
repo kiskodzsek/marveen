@@ -90,6 +90,14 @@ check "unreadable memory -> not started (fail-closed, 75)" "$(ok "$RC" = 75 -a !
 
 level 70; DF_KB=1000 hj --wait 0 -- touch "$SB/ran4"
 check "disk below --min-disk-gb -> not started (75)" "$(ok "$RC" = 75 -a ! -e "$SB/ran4")" "rc=$RC $OUT"
+GIB=1048576
+level 70; DF_KB=$((4 * GIB + GIB / 2)) hj --wait 0 -- touch "$SB/ran4b"
+check "4.5 GiB free < the 5 GiB default floor -> not started (75), 024b8ac4" "$(ok "$RC" = 75 -a ! -e "$SB/ran4b")" "rc=$RC $OUT"
+level 70; DF_KB=$((5 * GIB + GIB / 2)) hj --wait 0 -- touch "$SB/ran4c"
+check "5.5 GiB free -> started" "$(ok "$RC" = 0 -a -e "$SB/ran4c")" "rc=$RC $OUT"
+level 70; DF_KB=$((4 * GIB + GIB / 2)) hj --wait 0 --min-disk-gb 3 -- touch "$SB/ran4d"
+check "--min-disk-gb 3 still lets a job start at 4.5 GiB" "$(ok "$RC" = 0 -a -e "$SB/ran4d")" "rc=$RC $OUT"
+check "a disk test hook leaves a WARN in heavy-job.log" "$(ok -n "$(grep 'WARN test hook HEAVY_JOB_DF_KB overrides the disk reading' "$SB/store/heavy-job.log")")"
 
 sleep 60 & LIVE=$!
 mkdir "$LOCK"; echo "$LIVE other $(date +%s)" > "$LOCK/owner"
@@ -155,6 +163,26 @@ check "the grandchild (whole process group) is gone" "$(ok -n "$GC" -a "$GC_ALIV
 check "WATCHDOG STOP is logged" "$(ok -n "$(grep 'WATCHDOG STOP: free memory 10% < 25%' "$SB/store/heavy-job.log")")"
 check "the lock is released after a watchdog stop" "$(ok ! -e "$LOCK")"
 
+# Disk watchdog: started at 5.5 GiB; dropping to 4 GiB (below the start floor, above the
+# 3 GiB kill floor) must NOT stop the job; dropping to 2 GiB must (024b8ac4).
+clean; level 70
+echo $((5 * GIB + GIB / 2)) > "$SB/dfkb"
+( sleep 2; echo $((4 * GIB)) > "$SB/dfkb" ) &
+hjf() { OUT="$(env HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+      HEAVY_JOB_DF_KB_FILE="$SB/dfkb" bash "$HJ" "$@" 2>&1)"; RC=$?; }
+hjf --name dk1 --wait 0 -- bash -c 'sleep 5; echo done > "$0"' "$SB/dk1"
+check "disk 5.5 -> 4 GiB mid-run (above the 3 GiB kill floor): the job finishes (rc 0)" "$(ok "$RC" = 0 -a -e "$SB/dk1")" "rc=$RC $OUT"
+wait
+echo $((5 * GIB + GIB / 2)) > "$SB/dfkb"
+( sleep 2; echo $((2 * GIB)) > "$SB/dfkb" ) &
+hjf --name dk2 --wait 0 -- bash -c 'sleep 30; echo done > "$0"' "$SB/dk2"
+check "disk 5.5 -> 2 GiB mid-run: watchdog stop, exit 70, job did not finish" "$(ok "$RC" = 70 -a ! -e "$SB/dk2")" "rc=$RC $OUT"
+check "...logged against the 3 GiB kill floor" "$(ok -n "$(grep 'WATCHDOG STOP: free disk [0-9]* KB < 3 GB' "$SB/store/heavy-job.log")")" "$(grep 'WATCHDOG STOP' "$SB/store/heavy-job.log" | tail -1)"
+wait
+echo $((GIB / 2)) > "$SB/dfkb"
+hjf --name dk3 --wait 0 --min-disk-gb 0 -- bash -c 'sleep 3; echo done > "$0"' "$SB/dk3"
+check "--min-disk-gb 0 (the disk cleanup): no disk floor while running either, the job finishes at 0.5 GiB" "$(ok "$RC" = 0 -a -e "$SB/dk3")" "rc=$RC $OUT"
+
 echo "== a running Colima VM holds the machine (Viktor 9013 L2)"
 clean; level 70
 HEAVY_JOB_VM_PID=4242 hj --name mflux --wait 1 -- bash -c 'echo ran > "$0"' "$SB/vm1"
@@ -180,7 +208,7 @@ check "the probe's pattern finds the fake host agent itself (not a real VM of th
 OUT="$(env -u HEAVY_JOB_VM_PID HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
     HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name probe --wait 0 -- bash -c 'echo ran > "$0"' "$SB/vm4" 2>&1)"; RC=$?
 kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null
-check "...and without the hook there is no WARN" "$(ok -z "$(echo "$OUT" | grep 'WARN test hook')")" "$OUT"
+check "...and without the hook there is no WARN" "$(ok -z "$(echo "$OUT" | grep 'WARN test hook HEAVY_JOB_VM_PID')")" "$OUT"
 check "without the hook, a running 'limactl hostagent' is detected (75)" "$(ok "$RC" = 75 -a ! -e "$SB/vm4" -a -n "$(echo "$OUT" | grep 'a Colima VM is running (limactl pid [0-9]')")" "rc=$RC $OUT"
 
 hj --name x

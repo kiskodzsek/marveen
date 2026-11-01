@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # daily-cleanup.sh -- clear the regenerable caches once a day, and earlier when the disk runs low.
 #
-#   daily-cleanup.sh tick    # launchd calls this every hour; it decides whether a run is due
+#   daily-cleanup.sh tick    # launchd calls this every 2 minutes; it decides whether a run is due
 #   daily-cleanup.sh run     # the cleanup itself (tick starts it under heavy-job.sh)
 #
 # Why (card 1c58f629): the Mac mini panicked at 07:02 on 2026-10-20. That
@@ -14,7 +14,9 @@
 #   - the nightly run: the last run is >= 20 h old and the local hour is 03-05;
 #   - catch-up: the last run is >= 30 h old (the Mac was off or busy at night);
 #   - the disk gate: free disk < DAILY_CLEANUP_LOW_GB (default 10 GiB, the
-#     host-monitor WARN line) and the last run is >= 1 h old.
+#     host-monitor WARN line) and the last run is >= DAILY_CLEANUP_GATE_SECS old
+#     (default 1 h; the launchd unit sets 10 min: on 2026-10-31 the disk filled
+#     in 11 minutes, Patrik TG 12573).
 # Every tick, after a run if one was due: free disk under
 # DAILY_CLEANUP_ALERT_GB (default 20 GiB, Klodel 21709) sends one inter-agent
 # message to DAILY_CLEANUP_ALERT_TO (default: pulzus and the main agent), at
@@ -99,6 +101,9 @@ STORE="${MARVEEN_STORE:-$HERE/../store}"
 STAMP="$STORE/.daily-cleanup.last"
 LOG="$STORE/daily-cleanup.log"
 LOW_GB="${DAILY_CLEANUP_LOW_GB:-10}"
+# How long a disk-gate run waits after the last run (Patrik TG 12573, 2026-10-31: the disk filled in 11 minutes).
+# The default stays an hour; the launchd unit sets 600 (install-daily-cleanup.sh, 2-minute tick).
+GATE_SECS="${DAILY_CLEANUP_GATE_SECS:-3600}"
 SCRATCH_DAYS="${DAILY_CLEANUP_SCRATCH_DAYS:-2}"
 SCRATCH_ROOT="${DAILY_CLEANUP_SCRATCH_ROOT:-/private/tmp/claude-$(id -u)}"
 HEAVY_JOB="${DAILY_CLEANUP_HEAVY_JOB:-$HERE/heavy-job.sh}"
@@ -136,7 +141,7 @@ tick() {
     reason="nightly"
   elif (( age >= 30 * 3600 )); then
     reason="catch-up"
-  elif (( kb < LOW_GB * 1024 * 1024 && age >= 3600 )); then
+  elif (( kb < LOW_GB * 1024 * 1024 && age >= GATE_SECS )); then
     reason="disk gate: $(( kb / 1048576 )) GiB free"
   fi
   local rc=0

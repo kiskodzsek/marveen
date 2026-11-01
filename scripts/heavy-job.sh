@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # heavy-job.sh -- run ONE heavy job at a time, only with free memory, under a watchdog.
 #
-#   heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB]
+#   heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--kill-disk-gb GB]
 #                [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm]
 #                -- <command> [args...]
 #
@@ -15,7 +15,8 @@
 #
 #   1. a single machine-wide lock (store/.heavy-job.lock): one heavy job at a time;
 #   2. start only when free memory >= --min-free (default 40%), the data
-#      volume has >= --min-disk-gb (default 3) free, and a fresh
+#      volume has >= --min-disk-gb (default 5; it was 3 until card 024b8ac4:
+#      on 2026-10-31 the disk filled in 11 minutes, Patrik TG 12573) free, and a fresh
 #      store/.host-state (host-monitor.sh) is not warn/critical; otherwise wait up to --wait
 #      seconds (default 600), then give up with exit 75. --ignore-host-disk
 #      lets a warn/critical through when EVERY reason in it is the disk: the
@@ -44,7 +45,9 @@
 #      jobs such as the disk cleanup;
 #   3. while the job runs, a 3 s watchdog stops the WHOLE process group (TERM,
 #      then KILL after 10 s) if free memory drops below --kill-below (default
-#      25%) or the disk below --min-disk-gb. Exit 70 then, so the caller can
+#      25%) or the disk below --kill-disk-gb (default 3, never above
+#      --min-disk-gb: a job started at 5.1 GiB must not die on its first
+#      100 MB, and --min-disk-gb 0 means no disk floor at all). Exit 70 then, so the caller can
 #      tell "the watchdog stopped it" from the job's own failure.
 #
 # Unreadable memory = do not start (exit 75). This is deliberately the
@@ -58,7 +61,8 @@
 #
 # Every start/stop/refusal is one line in store/heavy-job.log.
 # Test hooks: MEMGATE_PROC_MEMINFO / MEMGATE_SYSCTL (lib/mem-read.sh),
-# HEAVY_JOB_STORE (state dir), HEAVY_JOB_DF_KB (fixed free-disk KB),
+# HEAVY_JOB_STORE (state dir), HEAVY_JOB_DF_KB (fixed free-disk KB), HEAVY_JOB_DF_KB_FILE
+# (free-disk KB read from a file at every check),
 # HEAVY_JOB_POLL (seconds between checks, default 3).
 
 set -uo pipefail
@@ -69,8 +73,8 @@ LOCK="$STORE/.heavy-job.lock"
 LOG="$STORE/heavy-job.log"
 POLL="${HEAVY_JOB_POLL:-3}"
 
-NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0; IGNORE_HOST_SWAP=0; ALLOW_VM=0
-usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm] -- cmd [args...]" >&2; exit 64; }
+NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=5; KILL_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0; IGNORE_HOST_SWAP=0; ALLOW_VM=0
+usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--kill-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm] -- cmd [args...]" >&2; exit 64; }
 num() { [[ "${1:-}" =~ ^[0-9]+$ ]] || usage; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -78,6 +82,7 @@ while [[ $# -gt 0 ]]; do
     --min-free)    [[ $# -ge 2 ]] || usage; num "$2"; MIN_FREE="$2"; shift 2 ;;
     --kill-below)  [[ $# -ge 2 ]] || usage; num "$2"; KILL_BELOW="$2"; shift 2 ;;
     --min-disk-gb) [[ $# -ge 2 ]] || usage; num "$2"; MIN_DISK_GB="$2"; shift 2 ;;
+    --kill-disk-gb) [[ $# -ge 2 ]] || usage; num "$2"; KILL_DISK_GB="$2"; shift 2 ;;
     --wait)        [[ $# -ge 2 ]] || usage; num "$2"; WAIT="$2"; shift 2 ;;
     --ignore-host-disk) IGNORE_HOST_DISK=1; shift ;;
     --ignore-host-swap) IGNORE_HOST_SWAP=1; shift ;;
@@ -96,10 +101,15 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$NAME pid=$$] $*" >>"$LOG" 2>/dev/nu
 . "$HERE/lib/mem-read.sh" || { echo "heavy-job: cannot load lib/mem-read.sh" >&2; exit 75; }
 
 disk_free_kb() {
+  # Test hooks: a fixed value, or a file read at every call (so a test can drop the disk mid-run).
+  if [[ -n "${HEAVY_JOB_DF_KB_FILE:-}" ]]; then cat "$HEAVY_JOB_DF_KB_FILE" 2>/dev/null; return; fi
   if [[ -n "${HEAVY_JOB_DF_KB:-}" ]]; then echo "$HEAVY_JOB_DF_KB"; return; fi
   df -Pk "$STORE" 2>/dev/null | awk 'NR==2{print $4}'
 }
 MIN_DISK_KB=$(( MIN_DISK_GB * 1024 * 1024 ))
+# The watchdog floor is the lower of the two (see the header, point 3).
+(( KILL_DISK_GB <= MIN_DISK_GB )) || KILL_DISK_GB=$MIN_DISK_GB
+KILL_DISK_KB=$(( KILL_DISK_GB * 1024 * 1024 ))
 
 # host-monitor.sh's verdict (store/.host-state): a FRESH warn/critical blocks
 # the start (it also covers swap, load and heat, which this script does not
@@ -140,6 +150,7 @@ vm_pid() {
 }
 # A stray export (e.g. from a test shell) would silently turn the VM rule off.
 [[ -n "${HEAVY_JOB_VM_PID+x}" ]] && log "WARN test hook HEAVY_JOB_VM_PID='${HEAVY_JOB_VM_PID}' overrides the VM check"
+[[ -n "${HEAVY_JOB_DF_KB_FILE:-}${HEAVY_JOB_DF_KB:-}" ]] && log "WARN test hook HEAVY_JOB_DF_KB${HEAVY_JOB_DF_KB_FILE:+_FILE} overrides the disk reading"
 
 # --- lock: mkdir is atomic on every filesystem we run on; flock is not on macOS ---
 have_lock=0
@@ -260,8 +271,8 @@ while kill -0 "$child" 2>/dev/null; do
     stopped="memory unreadable while running"
   elif (( MEM_FREE_PCT < KILL_BELOW )); then
     stopped="free memory ${MEM_FREE_PCT}% < ${KILL_BELOW}%"
-  elif d="$(disk_free_kb)"; [[ "$d" =~ ^[0-9]+$ ]] && (( d < MIN_DISK_KB )); then
-    stopped="free disk ${d} KB < ${MIN_DISK_GB} GB"
+  elif d="$(disk_free_kb)"; [[ "$d" =~ ^[0-9]+$ ]] && (( d < KILL_DISK_KB )); then
+    stopped="free disk ${d} KB < ${KILL_DISK_GB} GB"
   fi
   if [[ -n "$stopped" ]]; then
     kill -TERM -- "-$child" 2>/dev/null

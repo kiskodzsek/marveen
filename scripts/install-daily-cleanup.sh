@@ -3,15 +3,24 @@
 #
 # Installs the launchd job that runs scripts/daily-cleanup.sh on macOS: the
 # regenerable caches (brew, npm, pip, go, idle agent scratch) cleared once a
-# night, and earlier when free disk drops below 10 GiB (card 1c58f629).
+# night, and earlier when free disk drops below 10 GiB (card 1c58f629;
+# 2-minute tick and 10-minute gate since card 024b8ac4).
 #
 # Period:
-#   StartInterval 3600   -> one tick an hour; daily-cleanup.sh tick decides
-#                           whether a run is due (nightly 03-05, catch-up after
-#                           30 h, or the disk gate), so a missed or extra tick
-#                           does no harm
+#   StartInterval 120    -> one tick every 2 minutes; daily-cleanup.sh tick
+#                           decides whether a run is due (nightly 03-05,
+#                           catch-up after 30 h, or the disk gate), so a missed
+#                           or extra tick does no harm. A tick that is not due
+#                           only reads the stamp and df.
+#   DAILY_CLEANUP_GATE_SECS 600 -> the disk gate may run again 10 minutes after
+#                           the last run (the script default is an hour). On
+#                           2026-10-31 19:2x-19:41 the disk went from ~9 GiB to
+#                           full in 11 minutes (Patrik TG 12573, card 024b8ac4):
+#                           an hourly tick and an hourly gate could not keep up.
+#   DAILY_CLEANUP_WORKTREE_DAYS 1 -> merged idle worktrees go after 1 day,
+#                           not 3 (same incident, Klodel's live fix 19:48).
 #   RunAtLoad true       -> a tick at every login, so a low disk after a
-#                           reboot does not wait an hour
+#                           reboot does not wait for the first interval
 #
 # Output: the script logs one line per step to store/daily-cleanup.log and
 # keeps the tools' output of the last run in store/daily-cleanup.last-run.txt.
@@ -70,7 +79,7 @@ cat > "$PLIST" <<PLIST_EOF
   <key>RunAtLoad</key>
   <true/>
   <key>StartInterval</key>
-  <integer>3600</integer>
+  <integer>120</integer>
   <key>StandardOutPath</key>
   <string>/dev/null</string>
   <key>StandardErrorPath</key>
@@ -85,6 +94,10 @@ cat > "$PLIST" <<PLIST_EOF
     <string>$(id -un)</string>
     <key>TZ</key>
     <string>Europe/Budapest</string>
+    <key>DAILY_CLEANUP_GATE_SECS</key>
+    <string>600</string>
+    <key>DAILY_CLEANUP_WORKTREE_DAYS</key>
+    <string>1</string>
     <key>MARVEEN_STORE</key>
     <string>$PROJECT_DIR/store</string>
   </dict>
