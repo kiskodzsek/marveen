@@ -15,7 +15,7 @@
   <key>RunAtLoad</key>
   <true/>
   <key>StartInterval</key>
-  <integer>3600</integer>
+  <integer>120</integer>
   <key>StandardOutPath</key>
   <string>/dev/null</string>
   <key>StandardErrorPath</key>
@@ -30,6 +30,10 @@
     <string>klodel</string>
     <key>TZ</key>
     <string>Europe/Budapest</string>
+    <key>DAILY_CLEANUP_GATE_SECS</key>
+    <string>600</string>
+    <key>DAILY_CLEANUP_WORKTREE_DAYS</key>
+    <string>1</string>
     <key>MARVEEN_STORE</key>
     <string>/Users/klodel/marveen/store</string>
   </dict>

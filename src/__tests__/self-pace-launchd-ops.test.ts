@@ -167,10 +167,10 @@ describe('the daily cache cleanup (card 1c58f629)', () => {
     writeFileSync(dcPlist, readFileSync(join(__dirname, 'fixtures', `${DC}.plist`)))
     const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${dcPlist}` }, pulzus)
     expect(ok.deny).toBe(false)
-    expect(ok.launchdOps[0].plist_sha256).toBe('fab4d3ac7d4fa8903363faf728d9defa091d662f267de0cec425e4f77cd4df51')
+    expect(ok.launchdOps[0].plist_sha256).toBe('cb3687ae1864abe8557a04143571a9ff32fe09c13972f1b387898c782346f70a')
     expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${DC}` }, pulzus).deny).toBe(false)
     expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${DC}` }, pulzus).deny).toBe(true)
-    writeFileSync(dcPlist, readFileSync(join(__dirname, 'fixtures', `${DC}.plist`), 'utf8').replace('<integer>3600</integer>', '<integer>1</integer>'))
+    writeFileSync(dcPlist, readFileSync(join(__dirname, 'fixtures', `${DC}.plist`), 'utf8').replace('<integer>120</integer>', '<integer>1</integer>'))
     expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${dcPlist}` }, pulzus).deny).toBe(true)
   })
   it('the same bootstrap from any other agent is refused', () => {

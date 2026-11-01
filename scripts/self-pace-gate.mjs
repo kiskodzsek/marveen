@@ -182,9 +182,10 @@ export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // kickstarts it.
   'com.marveen.host-monitor': new Set(['b78d3543c82c1c5f12287ae7b15c1cf59d00b2bd393a2f1d25fd463f2a303086']),
   // Card 1c58f629 (Klodel 9767): the daily cache cleanup, the plist that
-  // scripts/install-daily-cleanup.sh writes for this install. RunAtLoad + an hourly tick;
+  // scripts/install-daily-cleanup.sh writes for this install. RunAtLoad + a 2-minute tick,
+  // 10-minute disk gate, 1-day worktree age (card 024b8ac4, the 2026-10-31 full disk);
   // bootstrap and bootout only, nothing kickstarts it.
-  'com.marveen.daily-cleanup': new Set(['fab4d3ac7d4fa8903363faf728d9defa091d662f267de0cec425e4f77cd4df51']),
+  'com.marveen.daily-cleanup': new Set(['cb3687ae1864abe8557a04143571a9ff32fe09c13972f1b387898c782346f70a']),
 }
 const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
 const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)

@@ -87,6 +87,10 @@ HOUR=12 LAST=$((NOW - 1800)) DF_KB=$((9 * GB)) dc tick
 check "9 GiB free, last run 30 min ago -> nothing (at most hourly)" "$(ok "$(ran)" = 1)" "rc=$RC"
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((11 * GB)) dc tick
 check "11 GiB free, last run 2 h ago -> nothing" "$(ok "$(ran)" = 1)" "rc=$RC"
+HOUR=12 LAST=$((NOW - 660)) DF_KB=$((9 * GB)) STUB_ENV="DAILY_CLEANUP_GATE_SECS=600" dc tick
+check "DAILY_CLEANUP_GATE_SECS=600 (the launchd unit): 9 GiB free, last run 11 min ago -> disk-gate run" "$(ran)" "rc=$RC"
+HOUR=12 LAST=$((NOW - 540)) DF_KB=$((9 * GB)) STUB_ENV="DAILY_CLEANUP_GATE_SECS=600" dc tick
+check "...last run 9 min ago -> nothing" "$(ok "$(ran)" = 1)" "rc=$RC"
 HOUR=4 LAST= dc tick
 check "the run goes through heavy-job, past a disk/swap-warn host state, the disk floor and a running VM" "$(grep -q -- '--name daily-cleanup --ignore-host-disk --ignore-host-swap --min-disk-gb 0 --allow-vm ' "$SB/hj.args" && echo 0 || echo 1)" "$(cat "$SB/hj.args" 2>/dev/null)"
 
@@ -366,7 +370,8 @@ check "the installer writes the plist and does not load it" "$(ok "$RC" = 0 -a -
 if command -v plutil >/dev/null 2>&1; then
   check "the plist is valid" "$(plutil -lint "$P" >/dev/null 2>&1 && echo 0 || echo 1)" "$(plutil -lint "$P" 2>&1)"
 fi
-check "the plist ticks this script at load and every hour, with the install's store" "$(grep -A3 ProgramArguments "$P" | grep -q "<string>$ROOT/scripts/daily-cleanup.sh</string>" && grep -A4 ProgramArguments "$P" | grep -q '<string>tick</string>' && grep -A1 RunAtLoad "$P" | grep -q '<true/>' && grep -A1 StartInterval "$P" | grep -q '<integer>3600</integer>' && grep -A1 MARVEEN_STORE "$P" | grep -q "<string>$ROOT/store</string>" && echo 0 || echo 1)" "$(cat "$P" 2>/dev/null)"
+check "the plist ticks this script at load and every 2 minutes, with the install's store" "$(grep -A3 ProgramArguments "$P" | grep -q "<string>$ROOT/scripts/daily-cleanup.sh</string>" && grep -A4 ProgramArguments "$P" | grep -q '<string>tick</string>' && grep -A1 RunAtLoad "$P" | grep -q '<true/>' && grep -A1 StartInterval "$P" | grep -q '<integer>120</integer>' && grep -A1 MARVEEN_STORE "$P" | grep -q "<string>$ROOT/store</string>" && echo 0 || echo 1)" "$(cat "$P" 2>/dev/null)"
+check "...with the 10-minute disk gate and the 1-day worktree age (024b8ac4)" "$(grep -A1 DAILY_CLEANUP_GATE_SECS "$P" | grep -q '<string>600</string>' && grep -A1 DAILY_CLEANUP_WORKTREE_DAYS "$P" | grep -q '<string>1</string>' && echo 0 || echo 1)" "$(cat "$P" 2>/dev/null)"
 check "stdout is dropped, stderr kept in the store" "$(grep -A1 StandardOutPath "$P" | grep -q '<string>/dev/null</string>' && grep -A1 StandardErrorPath "$P" | grep -q "<string>$ROOT/store/daily-cleanup.err.log</string>" && echo 0 || echo 1)"
 OUT="$(PATH="$SB/ubin:$PATH" HOME="$FAKEHOME" bash "$ROOT/scripts/install-daily-cleanup.sh" --load 2>&1)"; RC=$?
 check "there is no --load path: any option is refused (64) and nothing is loaded" "$(ok "$RC" = 64 -a ! -f "$SB/launchctl.calls")" "rc=$RC $OUT"
