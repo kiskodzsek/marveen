@@ -176,7 +176,10 @@ MAIN_AGENT="${HOSTMON_MAIN_AGENT:-$( [[ -f "$INSTALL_DIR/.env" ]] && grep -E '^M
 alast="$(cat "$STAMP.agent" 2>/dev/null | tr -dc '0-9')"
 if [[ -n "${MAIN_AGENT:-}" && -f "$HERE/agent-msg.sh" ]] \
    && ! { [[ -n "$alast" ]] && (( NOW - alast < COOLDOWN )); }; then
-  if echo "[HOST-MONITOR] ${msg}" | bash "$HERE/agent-msg.sh" host-monitor "$MAIN_AGENT" - >/dev/null 2>&1; then
+  # From the main agent's own id: POST /api/messages refuses an unregistered `from`
+  # ("host-monitor": 18 x 403 in store/agent-msg-failures.log, Pulzus 23225). The
+  # [HOST-MONITOR] prefix says who wrote it.
+  if echo "[HOST-MONITOR] ${msg}" | bash "$HERE/agent-msg.sh" "$MAIN_AGENT" "$MAIN_AGENT" - >/dev/null 2>&1; then
     echo "$NOW" >"$STAMP.agent" 2>/dev/null
   else
     echo "$(date '+%Y-%m-%d %H:%M:%S') inter-agent message to ${MAIN_AGENT} FAILED" >>"$LOG" 2>/dev/null

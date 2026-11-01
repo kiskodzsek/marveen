@@ -20,7 +20,9 @@
 # Every tick, after a run if one was due: free disk under
 # DAILY_CLEANUP_ALERT_GB (default 20 GiB, Klodel 21709) sends one inter-agent
 # message to DAILY_CLEANUP_ALERT_TO (default: pulzus and the main agent), at
-# most once per DAILY_CLEANUP_ALERT_COOLDOWN seconds (default 6 h). The
+# most once per DAILY_CLEANUP_ALERT_COOLDOWN seconds (default 6 h); after a
+# send no recipient took, the next try waits DAILY_CLEANUP_ALERT_RETRY (15 min).
+# The sender is the main agent's id (DAILY_CLEANUP_ALERT_FROM overrides). The
 # host-monitor pages only at CRITICAL (3 GiB): this is the earlier warning,
 # while there is still room to decide what goes.
 # The run goes through heavy-job.sh: one heavy job at a time, and only with
@@ -117,6 +119,9 @@ TRANSCRIPT_EXPIRE_DAYS="${DAILY_CLEANUP_TRANSCRIPT_EXPIRE_DAYS:-30}"
 LSOF="${DAILY_CLEANUP_LSOF:-/usr/sbin/lsof}"
 ALERT_GB="${DAILY_CLEANUP_ALERT_GB:-20}"
 ALERT_COOLDOWN="${DAILY_CLEANUP_ALERT_COOLDOWN:-21600}"
+# After a send where no recipient took the message: wait this long before the next try (Pulzus 23225:
+# with the 2-minute tick, an always-failing send cost two ~4 s calls every 2 minutes).
+ALERT_RETRY="${DAILY_CLEANUP_ALERT_RETRY:-900}"
 ALERT_STAMP="$STORE/.daily-cleanup.alert"
 AGENT_MSG="${DAILY_CLEANUP_AGENT_MSG:-$HERE/agent-msg.sh}"
 
@@ -166,21 +171,33 @@ alert_low_disk() {
   (( kb < ALERT_GB * 1024 * 1024 )) || return 0
   last="$(cat "$ALERT_STAMP" 2>/dev/null)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
   (( $(now) - last >= ALERT_COOLDOWN )) || return 0
+  last="$(cat "$ALERT_STAMP.retry" 2>/dev/null)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( $(now) - last >= ALERT_RETRY )) || return 0
   gb=$(( kb / 1048576 ))
   # The main agent's id, as host-monitor.sh reads it: only that one line of .env.
   main=""
   [[ -f "$INSTALL_DIR/.env" ]] && main="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
   recipients="${DAILY_CLEANUP_ALERT_TO:-pulzus $main}"
+  # The sender must be a registered fleet agent id: POST /api/messages refuses any other
+  # `from` with 403 (Pulzus 23225: from "daily-cleanup" failed 918 times since 10-30 19:53,
+  # so no alert ever arrived). The main agent's id, as backup.sh and the Marabel watchdog
+  # send; the [DAILY-CLEANUP] prefix in the text says who really wrote it.
+  local from="${DAILY_CLEANUP_ALERT_FROM:-$main}"
   local ran ran_at="még nem futott"
   ran="$(cat "$STAMP" 2>/dev/null)"
   [[ "$ran" =~ ^[0-9]+$ ]] && ran_at="$(date -r "$ran" '+%m-%d %H:%M' 2>/dev/null || echo "$ran")"
   local msg="[DAILY-CLEANUP] A lemezen ${gb} GiB szabad, a ${ALERT_GB} GiB-os jelzési szint alatt. Az automatikus takarítás utolsó futása: ${ran_at} (store/daily-cleanup.log). Ami még nagy, azt csak a gazdája döntheti el: be nem olvasztott worktree, out/, modellek, transcriptek."
+  if [[ -z "$from" ]]; then
+    log "ALERT low disk ${gb} GiB < ${ALERT_GB} NOT sent: no sender id (MAIN_AGENT_ID not in $INSTALL_DIR/.env, DAILY_CLEANUP_ALERT_FROM unset)"
+    now >"$ALERT_STAMP.retry"
+    return 0
+  fi
   for to in $recipients; do
-    if echo "$msg" | bash "$AGENT_MSG" daily-cleanup "$to" - >/dev/null 2>&1; then sent=1; else log "ALERT to $to FAILED"; fi
+    if echo "$msg" | bash "$AGENT_MSG" "$from" "$to" - >/dev/null 2>&1; then sent=1; else log "ALERT to $to FAILED"; fi
   done
-  # Only a delivered alert starts the cooldown: a failed one is tried again next tick.
-  (( sent )) && now >"$ALERT_STAMP"
-  log "ALERT low disk ${gb} GiB < ${ALERT_GB} sent=$sent to=${recipients}"
+  # A delivered alert starts the full cooldown; a send nobody took waits ALERT_RETRY.
+  if (( sent )); then now >"$ALERT_STAMP"; rm -f "$ALERT_STAMP.retry"; else now >"$ALERT_STAMP.retry"; fi
+  log "ALERT low disk ${gb} GiB < ${ALERT_GB} sent=$sent from=${from} to=${recipients}"
 }
 
 FAILED=0

@@ -34,7 +34,8 @@ done
 printf '#!/bin/bash\nif [ "$1" = "-t" ]; then cat "%s/cwds" "%s/late" 2>/dev/null | grep -qxF -- "$3" && { echo 1; exit 0; }; exit 1; fi\necho p1\nwhile IFS= read -r d; do echo "n$d"; done < "%s/cwds"\n' "$SB" "$SB" "$SB" > "$SB/lsof"; chmod +x "$SB/lsof"
 : > "$SB/cwds"
 # agent-msg.sh stand-in: records "<from> <to> <stdin>" a line; exit $STUB_RC_msg.
-printf '#!/bin/bash\necho "$1 $2 $(cat)" >> "%s/msgs"\nexit "${STUB_RC_msg:-0}"\n' "$SB" > "$SB/agent-msg-stub"; chmod +x "$SB/agent-msg-stub"
+# Like POST /api/messages: only a registered fleet agent may be the sender (403 otherwise; Pulzus 23225).
+printf '#!/bin/bash\ncase "$1" in klodel|pulzus|kernel) ;; *) echo "403 $1" >> "%s/msgs.rejected"; exit 1 ;; esac\necho "$1 $2 $(cat)" >> "%s/msgs"\nexit "${STUB_RC_msg:-0}"\n' "$SB" "$SB" > "$SB/agent-msg-stub"; chmod +x "$SB/agent-msg-stub"
 # The wrapper stand-in: records its argv, then runs the command after --.
 cat > "$SB/hj-stub" <<STUB
 #!/usr/bin/env bash
@@ -340,23 +341,41 @@ O="$(TG --min-free-gb 999999)"
 check "under the free-disk floor: no gzip, but the expiry goes on (it only frees space)" "$(ok ! -e "$TP/exp3.jsonl.gz" -a -f "$TP/old2.jsonl" -a -n "$(echo "$O" | grep 'stop gzip: under')" -a -n "$(echo "$O" | grep 'gzipped=0 .* expired=1 ')")" "$O"
 
 echo "== the low-disk alert (Klodel 21709)"
-rm -f "$SB/msgs" "$SB/store/.daily-cleanup.alert"
+rm -f "$SB/msgs" "$SB/msgs.rejected" "$SB/store/.daily-cleanup.alert"*
+# The sender comes from the install's .env, as in production (MAIN_AGENT_ID).
+mkdir -p "$SB/inst-alert"; echo 'MAIN_AGENT_ID=klodel' > "$SB/inst-alert/.env"; INST="$SB/inst-alert"
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) dc tick
-check "15 GiB free, no run due -> one message to each of pulzus and klodel" "$(ok "$(grep -c '^daily-cleanup ' "$SB/msgs" 2>/dev/null)" = 2 -a -n "$(grep '^daily-cleanup pulzus \[DAILY-CLEANUP\] A lemezen 15 GiB szabad' "$SB/msgs")" -a -n "$(grep '^daily-cleanup klodel ' "$SB/msgs")")" "$(cat "$SB/msgs" 2>/dev/null)"
+check "15 GiB free, no run due -> one message to each of pulzus and klodel, from the registered main agent" "$(ok "$(grep -c '^klodel ' "$SB/msgs" 2>/dev/null)" = 2 -a -n "$(grep '^klodel pulzus \[DAILY-CLEANUP\] A lemezen 15 GiB szabad' "$SB/msgs")" -a -n "$(grep '^klodel klodel ' "$SB/msgs")" -a ! -s "$SB/msgs.rejected")" "$(cat "$SB/msgs" "$SB/msgs.rejected" 2>/dev/null)"
 check "...and the cooldown stamp is set" "$(ok "$(cat "$SB/store/.daily-cleanup.alert" 2>/dev/null)" = "$NOW")"
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) dc tick
-check "again within 6 h -> nothing more" "$(ok "$(grep -c '^daily-cleanup ' "$SB/msgs")" = 2)"
+check "again within 6 h -> nothing more" "$(ok "$(grep -c '^klodel ' "$SB/msgs")" = 2)"
 echo $((NOW - 7 * H)) > "$SB/store/.daily-cleanup.alert"
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) dc tick
-check "7 h after the last one -> sent again" "$(ok "$(grep -c '^daily-cleanup ' "$SB/msgs")" = 4)"
+check "7 h after the last one -> sent again" "$(ok "$(grep -c '^klodel ' "$SB/msgs")" = 4)"
 rm -f "$SB/msgs" "$SB/store/.daily-cleanup.alert"
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((21 * GB)) dc tick
 check "21 GiB free -> no alert" "$(ok ! -f "$SB/msgs")"
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((9 * GB)) dc tick
-check "9 GiB free: the disk-gate run first, then the alert" "$(ok "$(ran)" = 0 -a "$(grep -c '^daily-cleanup ' "$SB/msgs" 2>/dev/null)" = 2)" "$(cat "$SB/msgs" 2>/dev/null)"
+check "9 GiB free: the disk-gate run first, then the alert" "$(ok "$(ran)" = 0 -a "$(grep -c '^klodel ' "$SB/msgs" 2>/dev/null)" = 2)" "$(cat "$SB/msgs" 2>/dev/null)"
 rm -f "$SB/msgs" "$SB/store/.daily-cleanup.alert"
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) STUB_ENV="STUB_RC_msg=1" dc tick
-check "a failed send: no cooldown stamp (next tick retries), logged" "$(ok ! -f "$SB/store/.daily-cleanup.alert" -a -n "$(grep 'ALERT to pulzus FAILED' "$SB/store/daily-cleanup.log")")"
+check "a failed send: no 6 h cooldown stamp, a retry stamp instead, logged" "$(ok ! -f "$SB/store/.daily-cleanup.alert" -a "$(cat "$SB/store/.daily-cleanup.alert.retry" 2>/dev/null)" = "$NOW" -a -n "$(grep 'ALERT to pulzus FAILED' "$SB/store/daily-cleanup.log")")"
+rm -f "$SB/msgs"
+NOW=$((NOW + 600)) HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) dc tick
+check "...10 min later: no new try (Pulzus 23225: not every 2-minute tick)" "$(ok ! -f "$SB/msgs")" "$(cat "$SB/msgs" 2>/dev/null)"
+SAVE=$NOW; NOW=$((NOW + 960))
+HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) dc tick
+check "...16 min later: tried again, delivered, the retry stamp is gone" "$(ok "$(grep -c '^klodel ' "$SB/msgs" 2>/dev/null)" = 2 -a ! -f "$SB/store/.daily-cleanup.alert.retry" -a "$(cat "$SB/store/.daily-cleanup.alert" 2>/dev/null)" = "$NOW")" "$(cat "$SB/msgs" 2>/dev/null)"
+NOW=$SAVE
+rm -f "$SB/msgs" "$SB/store/.daily-cleanup.alert"*
+HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) STUB_ENV="DAILY_CLEANUP_ALERT_FROM=daily-cleanup" dc tick
+check "an unregistered sender is refused like the API does: nothing delivered, retry stamp, logged" "$(ok ! -f "$SB/msgs" -a -s "$SB/msgs.rejected" -a -f "$SB/store/.daily-cleanup.alert.retry" -a -n "$(grep 'sent=0 from=daily-cleanup' "$SB/store/daily-cleanup.log")")" "$(tail -2 "$SB/store/daily-cleanup.log")"
+rm -f "$SB/msgs" "$SB/msgs.rejected" "$SB/store/.daily-cleanup.alert"*
+INST="$SB/no-install"
+HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) dc tick
+check "no MAIN_AGENT_ID and no DAILY_CLEANUP_ALERT_FROM: not sent, said so, retry stamp" "$(ok ! -f "$SB/msgs" -a -f "$SB/store/.daily-cleanup.alert.retry" -a -n "$(grep 'NOT sent: no sender id' "$SB/store/daily-cleanup.log")")" "$(tail -2 "$SB/store/daily-cleanup.log")"
+rm -f "$SB/store/.daily-cleanup.alert"*
+INST="$SB/inst-alert"
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) STUB_ENV="DAILY_CLEANUP_ALERT_GB=10" dc tick
 check "DAILY_CLEANUP_ALERT_GB=10: 15 GiB free is fine" "$(ok ! -f "$SB/store/.daily-cleanup.alert")"
 
