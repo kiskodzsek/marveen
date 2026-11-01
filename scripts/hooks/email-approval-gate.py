@@ -86,7 +86,8 @@ STANDING_PATH = os.path.join(STORE_DIR, "email-standing-recipients.json")
 WINDOW_S = int(os.environ.get("EMAIL_APPROVAL_WINDOW_S", "1800"))
 
 sys.path.insert(0, _HERE)
-from email_extract import (collect_email_envelope, ms365_class)  # noqa: E402
+from email_extract import (collect_email_envelope, collect_ms365_envelope,  # noqa: E402
+                           ms365_class)
 
 # GMAILCONNECTOR914: the claude.ai Gmail connector's send-shaped tools carry
 # neither word (mcp__claude_ai_Gmail__send_message / reply / forward), so the
@@ -507,7 +508,13 @@ def summarize(env: dict) -> str:
     to = ", ".join(env["to"]) or "(nincs)"
     cc = ", ".join(env["cc"]) or "-"
     head = env["text"].replace("\n", " ")[:120]
-    return f"Cimzett: {to} | CC: {cc} | Szoveg eleje: {head}"
+    line = f"Cimzett: {to} | CC: {cc} | Szoveg eleje: {head}"
+    if env.get("bcc"):
+        line += f" | BCC: {', '.join(env['bcc'])}"
+    atts = env.get("attachments") or []
+    if atts:
+        line += " | Mellekletek: " + ", ".join(f"{a['name']} (sha256 {a['sha256'][:12]})" for a in atts)
+    return line
 
 
 def main():
@@ -545,6 +552,14 @@ def main():
     else:
         sys.exit(0)
 
+    _decide(lambda: collect_email_envelope(tool, tool_input), content_anchor)
+
+
+def _decide(env_fn, anchor_fn):
+    """The level switch and the level-2 decision, shared by the PreToolUse hook
+    (main) and the send-draft CLI (draft_main). Exits 0 (allow) or 2 (deny).
+    env_fn builds the envelope only once the level needs it; anchor_fn turns it
+    into the content anchor."""
     level, note = read_email_level()
     prefix = f"({note})\n" if note else ""
     if level >= 3:
@@ -556,7 +571,7 @@ def main():
              "emelese a store/autonomy-config.json-ban a gazda dontese.")
 
     # level 2: CHECK-BEFORE-SEND
-    env = collect_email_envelope(tool, tool_input)
+    env = env_fn()
     if env["unreadable_reason"]:
         deny(prefix +
              f"A level nem horgonyozhato: {env['unreadable_reason']}.\n"
@@ -627,7 +642,7 @@ def main():
             f"mehet. Minden mas cimzett tovabbra is jovahagyas-koteles. {note}"}))
         sys.exit(0)
 
-    anchor = content_anchor(env)
+    anchor = anchor_fn(env)
     try:
         verdict, detail = find_and_consume(anchor)
     except Exception as exc:  # noqa: BLE001 -- DB unreachable is fail-closed, not no-right
@@ -649,7 +664,8 @@ def main():
     }
     deny(prefix +
          f"email_send level 2 (CHECK-BEFORE-SEND). {reasons[verdict]}\n"
-         f"Tartalom-horgony (sha256; to+cc+bcc+targy+torzs): {anchor}\n"
+         f"Tartalom-horgony (sha256; to+cc+bcc+targy+torzs"
+         f"{'+mellekletek' if env.get('attachments') else ''}): {anchor}\n"
          f"{summarize(env)}\n"
          "Jovahagyas kerese: POST /api/approvals a sajat agent_id-ddal, "
          'category="email_send", content_hash=a fenti horgony, action_description='
@@ -663,8 +679,88 @@ def main():
          "a kapu sajat korlatja, es egy korlatot nem a korlatozott old fel.")
 
 
+# --- SEND-DRAFT (card a43a18b9, Klodel 23265) -------------------------------
+# ops/mail-attach/send-draft.mjs sends an EXISTING klodel@ draft, attachments
+# included, with POST /me/messages/{id}/send. A script run through Bash is not
+# seen by this hook as a send, so the script calls the SAME decision here, as
+# a CLI, before its one send call: python3 email-approval-gate.py
+# --draft-envelope, the draft's envelope as JSON on stdin. Exit 0 = send, 2 = no.
+# The envelope is read by the SAME ms365 extractor as send-mail (bare ASCII
+# addresses, no control characters in names, text = body + subject), and the
+# anchor adds the attachments, each as {name, sha256} of its bytes, sorted, and
+# only when there is at least one: a letter without attachments anchors exactly
+# like the same letter through send-mail. An approval therefore pins the files,
+# not just their names: a swapped PDF changes the anchor.
+DRAFT_ENVELOPE_FLAG = "--draft-envelope"
+_DRAFT_TOP_KEYS = {"toRecipients", "ccRecipients", "bccRecipients", "subject", "body", "attachments"}
+_DRAFT_MAX_ATTACHMENTS = 50
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _draft_attachments(raw):
+    """(sorted [{name, sha256}], unreadable_reason)."""
+    if raw is None:
+        return [], None
+    if not isinstance(raw, list) or len(raw) > _DRAFT_MAX_ATTACHMENTS:
+        return [], f"az attachments nem lista, vagy tobb mint {_DRAFT_MAX_ATTACHMENTS} elem"
+    out = []
+    for item in raw:
+        if not isinstance(item, dict) or set(item) != {"name", "sha256"}:
+            return [], "egy melleklet nem pontosan {name, sha256} alaku"
+        name, digest = item["name"], item["sha256"]
+        if not isinstance(name, str) or not name.strip() or len(name) > 255 \
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+            return [], "egy melleklet neve ures, tul hosszu vagy vezerlokaraktert tartalmaz"
+        if not isinstance(digest, str) or not _SHA256_RE.match(digest):
+            return [], "egy melleklet sha256-ja nem 64 kisbetus hex"
+        out.append({"name": name, "sha256": digest})
+    return sorted(out, key=lambda a: (a["name"], a["sha256"])), None
+
+
+def collect_draft_envelope(obj):
+    """The envelope of a draft (Graph message fields + attachment digests), or
+    one with unreadable_reason set (the caller denies)."""
+    empty = {"to": [], "cc": [], "bcc": [], "text": "", "attachments": []}
+    if not isinstance(obj, dict):
+        return {**empty, "unreadable_reason": "send-draft: a boritek nem JSON objektum"}
+    extra = set(obj) - _DRAFT_TOP_KEYS
+    if extra:
+        return {**empty, "unreadable_reason": f"send-draft: ismeretlen mezo ({', '.join(sorted(extra))})"}
+    attachments, reason = _draft_attachments(obj.get("attachments"))
+    if reason:
+        return {**empty, "unreadable_reason": "send-draft: " + reason}
+    message = {k: obj[k] for k in ("toRecipients", "ccRecipients", "bccRecipients", "subject", "body") if k in obj}
+    env = collect_ms365_envelope({"body": {"Message": message, "SaveToSentItems": True}})
+    if env.get("unreadable_reason"):
+        env["unreadable_reason"] = env["unreadable_reason"].replace("ms365 send-mail:", "send-draft:", 1)
+    env["attachments"] = attachments
+    return env
+
+
+def draft_anchor(env: dict) -> str:
+    """content_anchor plus the attachments, only when there are any."""
+    fields = {"to": env["to"], "cc": env["cc"], "text": env["text"]}
+    if env.get("bcc"):
+        fields["bcc"] = env["bcc"]
+    if env.get("attachments"):
+        fields["attachments"] = env["attachments"]
+    canon = json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def draft_main():
+    try:
+        obj = json.load(sys.stdin)
+    except Exception:
+        deny("send-draft: a boritek nem ertelmezheto JSON -- fail-closed.")
+    env = collect_draft_envelope(obj)
+    _decide(lambda: env, draft_anchor)
+
+
 if __name__ == "__main__":
     try:
+        if sys.argv[1:] == [DRAFT_ENVELOPE_FLAG]:
+            draft_main()
         main()
     except SystemExit:
         raise
