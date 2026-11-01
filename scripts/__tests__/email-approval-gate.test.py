@@ -968,6 +968,85 @@ with tempfile.TemporaryDirectory() as td:
     check("control: the host's own sqlite3 really executes the replacement expression",
           sqlite3.connect(":memory:").execute(f"SELECT {NOW_S}").fetchone()[0] > 1_700_000_000)
 
+# --- SEND-DRAFT CLI (--draft-envelope, card a43a18b9) ----------------------
+def run_draft(store, envelope, raw=None):
+    env = dict(os.environ, EMAIL_APPROVAL_GATE_STORE=store, EMAIL_APPROVAL_WINDOW_S=str(WINDOW),
+               OUTGOING_COPY_GATE_RULES=os.path.join(store, "no-rules.json"))
+    data = raw if raw is not None else json.dumps(envelope).encode()
+    proc = subprocess.run([sys.executable, GATE, "--draft-envelope"], input=data, capture_output=True, env=env)
+    return proc.returncode, proc.stdout.decode(), proc.stderr.decode()
+
+
+def draft_env(to="ugyfel@example.invalid", cc=None, bcc=None, atts=None, subject="TIG 2026-10",
+              body="<p>Csatolom.</p>"):
+    obj = {"toRecipients": [{"emailAddress": {"address": to}}], "subject": subject,
+           "body": {"contentType": "html", "content": body}}
+    if cc:
+        obj["ccRecipients"] = [{"emailAddress": {"address": cc}}]
+    if bcc:
+        obj["bccRecipients"] = [{"emailAddress": {"address": bcc}}]
+    if atts is not None:
+        obj["attachments"] = atts
+    return obj
+
+
+PDF_A = {"name": "TIG.pdf", "sha256": "a" * 64}
+PDF_B = {"name": "TIG.pdf", "sha256": "b" * 64}
+
+with tempfile.TemporaryDirectory() as td:
+    store = make_store(os.path.join(td, "d1"), level=2)
+    code, _, err = run_draft(store, draft_env(atts=[PDF_A]))
+    anchor = anchor_from_stderr(err)
+    check("send-draft: level 2 without approval is DENIED, with the anchor and the attachment in the message",
+          code == 2 and anchor and "TIG.pdf" in err and "mellekletek" in err, f"exit={code} err={err[:300]}")
+    approve(store, anchor)
+    code, _, err = run_draft(store, draft_env(atts=[PDF_B]))
+    check("send-draft: the same letter with a SWAPPED attachment (other sha256) is DENIED", code == 2, f"exit={code}")
+    code, _, err = run_draft(store, draft_env(atts=[PDF_A, PDF_B]))
+    check("send-draft: an EXTRA attachment is DENIED", code == 2, f"exit={code}")
+    code, _, err = run_draft(store, draft_env(atts=[]))
+    check("send-draft: the same letter WITHOUT the attachment is DENIED", code == 2, f"exit={code}")
+    code, _, err = run_draft(store, draft_env(atts=[PDF_A], bcc="x@example.invalid"))
+    check("send-draft: an added bcc is DENIED", code == 2, f"exit={code}")
+    code, out, err = run_draft(store, draft_env(atts=[PDF_A]))
+    check("send-draft: the approved letter with the approved attachment is ALLOWED", code == 0, f"exit={code} err={err[:200]}")
+    code, _, err = run_draft(store, draft_env(atts=[PDF_A]))
+    check("send-draft: the approval is one-shot, a second send is DENIED", code == 2 and "MAR FEL LETT" in err, f"exit={code}")
+
+    # Without attachments the draft anchors exactly like the same letter via ms365 send-mail.
+    store = make_store(os.path.join(td, "d2"), level=2)
+    _, _, err_draft = run_draft(store, draft_env())
+    send_mail = {"tool_name": "mcp__ms365__send-mail", "tool_input": {"body": {"SaveToSentItems": True, "Message": {
+        "toRecipients": [{"emailAddress": {"address": "ugyfel@example.invalid"}}], "subject": "TIG 2026-10",
+        "body": {"contentType": "html", "content": "<p>Csatolom.</p>"}}}}}
+    _, _, err_mail = run_gate(store, send_mail)
+    check("send-draft: no attachments -> the same anchor as ms365 send-mail",
+          anchor_from_stderr(err_draft) and anchor_from_stderr(err_draft) == anchor_from_stderr(err_mail),
+          f"{anchor_from_stderr(err_draft)} vs {anchor_from_stderr(err_mail)}")
+
+    # Fail-closed shapes.
+    bad = [
+        ("non-JSON stdin", None, b"{nope"),
+        ("unknown top-level field (replyTo)", {**draft_env(), "replyTo": [{"emailAddress": {"address": "x@y.hu"}}]}, None),
+        ("attachment with an extra key", draft_env(atts=[{**PDF_A, "size": 1}]), None),
+        ("attachment sha256 not hex", draft_env(atts=[{"name": "a.pdf", "sha256": "Z" * 64}]), None),
+        ("attachment name with a control char", draft_env(atts=[{"name": "a\n.pdf", "sha256": "a" * 64}]), None),
+        ("a comment in the address", draft_env(to="ugyfel@example.invalid (x@evil.hu)"), None),
+        ("no recipient", {"subject": "x", "body": {"contentType": "text", "content": "y"}}, None),
+        ("a list instead of an object", [], None),
+    ]
+    for what, obj, raw in bad:
+        store = make_store(os.path.join(td, "d3" + str(abs(hash(what)))), level=2)
+        code, _, err = run_draft(store, obj, raw)
+        check(f"send-draft fail-closed: {what} -> exit 2", code == 2, f"exit={code}")
+
+    store = make_store(os.path.join(td, "d4"), level=1)
+    code, _, _ = run_draft(store, draft_env(atts=[PDF_A]))
+    check("send-draft: level 1 is a hard deny", code == 2, f"exit={code}")
+    store = make_store(os.path.join(td, "d5"), level=3)
+    code, _, _ = run_draft(store, draft_env(atts=[PDF_A]))
+    check("send-draft: level 3 allows", code == 0, f"exit={code}")
+
 print()
 if failed:
     print(f"{len(failed)} FAILED: {failed}", file=sys.stderr)
