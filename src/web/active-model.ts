@@ -125,6 +125,45 @@ function sameBytes(file: string, at: number, want: Buffer): boolean {
   return got.equals(want)
 }
 
+/**
+ * The transcript of the LIVE session in a project dir: the one whose last conversation line (a top-level `user` or
+ * `assistant` entry with a timestamp) is the newest. Null when the dir holds no transcript.
+ *
+ * Not simply the newest mtime (card 3bbf80ca, measured 2026-11-03 on pulzus): an OLD transcript's mtime moved to
+ * 07:42:00 with no byte appended (its last line stayed 2026-11-02 14:06), so at every :45 sweep of an idle agent
+ * the old file was the "newest", and the guard read that session's last usage, 219 338 tokens = 73% of the agent's
+ * 300k limit, against a live session of ~75k (25%). Result: a "~73% critical" handoff and a restart every hour,
+ * all night, on an idle agent. A transcript's mtime says when something touched the FILE, not when its session
+ * last spoke (the same lesson as GATEMTIME922 below, there for bookkeeping lines inside the live file).
+ *
+ * The files are tried in mtime order and the scan stops as soon as no later file can win: a conversation line is
+ * never newer than its file's mtime, so once the best timestamp found is at least the next file's mtime the rest
+ * are older. In the normal case that is one tail read of the newest file. A file with no conversation line (an
+ * empty or bookkeeping-only start) ranks by its mtime, so a fresh session still beats the heavy one it replaced:
+ * the context reader then answers null for it, as before, instead of the old session's size.
+ */
+const LIVE_TRANSCRIPT_MAX_CANDIDATES = 8
+function liveTranscriptIn(dir: string): { file: string; mtimeMs: number } | null {
+  const byMtime = readdirSync(dir)
+    .filter(f => f.endsWith('.jsonl'))
+    .map(f => ({ file: join(dir, f), mtimeMs: statSync(join(dir, f)).mtimeMs }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  // One transcript has no rival: no scan at all.
+  if (byMtime.length <= 1) return byMtime[0] ?? null
+  let best: { file: string; mtimeMs: number; rank: number } | null = null
+  for (const cand of byMtime.slice(0, LIVE_TRANSCRIPT_MAX_CANDIDATES)) {
+    if (best && best.rank >= cand.mtimeMs) break
+    const lastTurn = lastAnswerInTranscript<number>('live-turn', cand.file, (entry) => {
+      if (entry?.type !== 'user' && entry?.type !== 'assistant') return undefined
+      const at = typeof entry?.timestamp === 'string' ? Date.parse(entry.timestamp) : NaN
+      return Number.isFinite(at) ? at : undefined
+    })
+    const rank = lastTurn ?? cand.mtimeMs
+    if (!best || rank > best.rank) best = { ...cand, rank }
+  }
+  return best ? { file: best.file, mtimeMs: best.mtimeMs } : null
+}
+
 // Test hooks: the bytes the backward scans have read so far, and a reset of the remembered scans.
 export function transcriptScanBytesReadForTests(): number { return scanBytesRead }
 export function resetTranscriptScansForTests(): void { scans.clear(); scanBytesRead = 0; cache.clear(); ctxCache.clear() }
@@ -275,11 +314,13 @@ const ctxCache = new Map<string, { value: number | null; expiresAt: number }>()
 // Current context size of the live session, in tokens. Claude Code records a
 // `usage` object on each assistant turn; the context that gets re-read every
 // turn is input_tokens + cache_read_input_tokens + cache_creation_input_tokens
-// (output_tokens is the new reply, not context). We scan the newest transcript
+// (output_tokens is the new reply, not context). We scan the live session's
+// transcript (liveTranscriptIn: the newest conversation, not the newest mtime)
 // from the end for the last turn carrying a usage and sum those three. Returns
 // null when there is no transcript / no usage yet (fresh session). This is what
 // the dashboard surfaces so the operator can see a session growing heavy and
-// decide to restart it.
+// decide to restart it, and what the context guard and the restart gate
+// threshold on.
 export function readContextTokensFromProjectDir(workingDir: string, configDir?: string): number | null {
   const now = Date.now()
   const cacheKey = `${workingDir}:${configDir ?? ''}`
@@ -289,12 +330,9 @@ export function readContextTokensFromProjectDir(workingDir: string, configDir?: 
   try {
     const dir = projectsDirFor(workingDir, configDir)
     if (existsSync(dir)) {
-      const jsonls = readdirSync(dir)
-        .filter(f => f.endsWith('.jsonl'))
-        .map(f => ({ f, mtime: statSync(join(dir, f)).mtimeMs }))
-        .sort((a, b) => b.mtime - a.mtime)
-      if (jsonls.length > 0) {
-        value = lastAnswerInTranscript<number>('context-tokens', join(dir, jsonls[0].f), (entry) => {
+      const live = liveTranscriptIn(dir)
+      if (live) {
+        value = lastAnswerInTranscript<number>('context-tokens', live.file, (entry) => {
           const u = entry?.message?.usage
           if (!u || typeof u !== 'object') return undefined
           const inp = Number(u.input_tokens) || 0
@@ -327,9 +365,12 @@ export function readContextTokensFromProjectDir(workingDir: string, configDir?: 
  * this with a live-work signal -- the guard uses paneIdle -- and never treat a
  * stale mtime on its own as "finished".
  *
- * The mtime is already computed inside readContextTokensFromProjectDir to pick
- * the newest file; this exposes it rather than recomputing the selection
- * differently, so the two always describe the SAME transcript.
+ * It is the newest mtime of ANY transcript in the dir, which is not always the
+ * transcript readContextTokensFromProjectDir reads: an old file whose mtime
+ * moved (card 3bbf80ca) makes this reading too recent. For its callers that is
+ * the safe side -- the session looks less quiet than it is, so an idle tier
+ * waits longer -- unlike a token count read from the wrong session, which
+ * restarted an idle agent every hour.
  */
 export function readTranscriptMtimeFromProjectDir(workingDir: string, configDir?: string): number | null {
   try {
