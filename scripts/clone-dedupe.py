@@ -17,7 +17,13 @@ Rules:
   - not modified for --min-age-min minutes, so a render or a download still being written is left alone;
   - two files are the same only when their size AND sha256 match; the clone is written next to the
     target as <name>.clonetmp, its sha256 checked again, then moved over the target in one rename
-    (os.replace). The target's mode and times are kept (cp -p). On any error the target is untouched.
+    (os.replace). The target's own mode, atime and mtime are put on the clone before the rename
+    (cp -p would carry the SOURCE's: a 0600 target must not become 0644, and an age rule must not
+    see the source's mtime; Viktor 25425). Right before the rename the target is stat'ed again: if
+    its size or mtime changed since the scan, it is skipped (a file written just now keeps its new
+    content). On any error the target is untouched.
+  - database, journal and lock files (*.db, *.sqlite*, *-wal, *-shm, *-journal, *.lock) are never
+    touched: a rename under an open handle would orphan what the writer still holds.
   - a group already sharing blocks gives back nothing; df before/after is the honest measure,
     the "MB" count printed here is the logical size of the replaced copies.
 
@@ -33,6 +39,7 @@ import sys
 import time
 
 SKIP_DIRS = {"node_modules", ".git", ".next"}
+SKIP_SUFFIXES = (".clonetmp", ".db", ".sqlite", ".sqlite3", "-wal", "-shm", "-journal", ".lock")
 
 
 def sha256(path):
@@ -51,7 +58,7 @@ def candidates(roots, min_bytes, cutoff):
         for base, dirs, files in os.walk(root):
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not os.path.islink(os.path.join(base, d))]
             for name in files:
-                if name.endswith(".clonetmp"):
+                if name.endswith(SKIP_SUFFIXES):
                     continue
                 path = os.path.join(base, name)
                 try:
@@ -60,8 +67,32 @@ def candidates(roots, min_bytes, cutoff):
                     continue
                 if not os.path.isfile(path) or os.path.islink(path) or st.st_size < min_bytes or st.st_mtime > cutoff:
                     continue
-                by_size[st.st_size].append(path)
+                by_size[st.st_size].append((path, st.st_mtime_ns))
     return by_size
+
+
+class Changed(Exception):
+    """The target was written between the scan and the rename; it is skipped, not a failure."""
+
+
+def replace_with_clone(source, target, digest, size, mtime_ns):
+    """Put a clone of source in target's place, with target's mode and times. Raises Changed or OSError."""
+    tmp = target + ".clonetmp"
+    try:
+        subprocess.run(["cp", "-c", source, tmp], check=True, capture_output=True)
+        if sha256(tmp) != digest:
+            raise OSError("sha256 mismatch after clone")
+        st = os.stat(target)
+        if st.st_size != size or st.st_mtime_ns != mtime_ns:
+            raise Changed("changed since the scan")
+        os.chmod(tmp, st.st_mode & 0o7777)
+        os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+        os.replace(tmp, target)
+    except subprocess.CalledProcessError as error:
+        raise OSError(f"cp -c failed: {error.returncode}") from error
+    finally:
+        if os.path.lexists(tmp):
+            os.remove(tmp)
 
 
 def main():
@@ -75,12 +106,13 @@ def main():
     now = args.now if args.now is not None else time.time()
     by_size = candidates(args.root, int(args.min_mb * 1024 * 1024), now - args.min_age_min * 60)
 
-    groups = cloned = failed = logical = 0
-    for size, paths in sorted(by_size.items()):
-        if len(paths) < 2:
+    groups = cloned = failed = skipped = logical = 0
+    for size, entries in sorted(by_size.items()):
+        if len(entries) < 2:
             continue
         by_hash = collections.defaultdict(list)
-        for path in sorted(paths):
+        mtimes = dict(entries)
+        for path in sorted(mtimes):
             try:
                 by_hash[sha256(path)].append(path)
             except OSError:
@@ -96,20 +128,17 @@ def main():
                     cloned += 1
                     logical += size
                     continue
-                tmp = target + ".clonetmp"
                 try:
-                    subprocess.run(["cp", "-c", "-p", source, tmp], check=True, capture_output=True)
-                    if sha256(tmp) != digest:
-                        raise OSError("sha256 mismatch after clone")
-                    os.replace(tmp, target)
+                    replace_with_clone(source, target, digest, size, mtimes[target])
                     cloned += 1
                     logical += size
-                except (OSError, subprocess.CalledProcessError) as error:
+                except Changed as why:
+                    print(f"skip {target}: {why}")
+                    skipped += 1
+                except OSError as error:
                     print(f"failed {target}: {error}")
                     failed = 1
-                    if os.path.lexists(tmp):
-                        os.remove(tmp)
-    print(f"groups={groups} cloned={cloned} failed={failed} logical_mb={logical >> 20}")
+    print(f"groups={groups} cloned={cloned} failed={failed} skipped={skipped} logical_mb={logical >> 20}")
     return failed
 
 

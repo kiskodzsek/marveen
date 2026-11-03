@@ -3,6 +3,7 @@
 #
 #   heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--kill-disk-gb GB]
 #                [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm]
+#                [--vm-max-swap-pct PCT] [--vm-min-disk-gb GB]
 #                -- <command> [args...]
 #
 # Why: the Mac mini (16 GB) panicked at 07:02:20 on 2026-10-20 ("no checkins
@@ -50,6 +51,13 @@
 #      any lock). --allow-vm lets a job past it: the VM's own start
 #      (`heavy-job.sh --name colima --allow-vm -- colima start`) and light
 #      jobs such as the disk cleanup;
+#   2c. a VM START (the command is colima or limactl with a `start` argument) also
+#      needs swap use <= --vm-max-swap-pct (default 80) and free disk >= 10 GiB
+#      (--vm-min-disk-gb). On 2026-11-03 16:41 the VM was started again minutes
+#      after it had been stopped by hand at 11 GB swap and 0.9 GiB free disk, and
+#      the Mac panicked at 16:56:57 (shared/cleanup-1103/panic-1103-elemzes.md,
+#      Klodel 25411). --allow-vm does not lift this; mem-relief.sh stops a VM that
+#      was started outside this script;
 #   3. while the job runs, a 3 s watchdog stops the WHOLE process group (TERM,
 #      then KILL after 10 s) if free memory drops below --kill-below (default
 #      25%) or the disk below --kill-disk-gb (default 3, never above
@@ -80,8 +88,8 @@ LOCK="$STORE/.heavy-job.lock"
 LOG="$STORE/heavy-job.log"
 POLL="${HEAVY_JOB_POLL:-3}"
 
-NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=5; KILL_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0; IGNORE_HOST_SWAP=0; ALLOW_VM=0
-usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--kill-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm] -- cmd [args...]" >&2; exit 64; }
+NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=5; KILL_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0; IGNORE_HOST_SWAP=0; ALLOW_VM=0; VM_MAX_SWAP_PCT=80; VM_MIN_DISK_GB=10
+usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--kill-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm] [--vm-max-swap-pct PCT] [--vm-min-disk-gb GB] -- cmd [args...]" >&2; exit 64; }
 num() { [[ "${1:-}" =~ ^[0-9]+$ ]] || usage; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -94,6 +102,8 @@ while [[ $# -gt 0 ]]; do
     --ignore-host-disk) IGNORE_HOST_DISK=1; shift ;;
     --ignore-host-swap) IGNORE_HOST_SWAP=1; shift ;;
     --allow-vm)    ALLOW_VM=1; shift ;;
+    --vm-max-swap-pct) [[ "${2:-}" =~ ^[0-9]+$ ]] || usage; VM_MAX_SWAP_PCT="$2"; shift 2 ;;
+    --vm-min-disk-gb)  [[ "${2:-}" =~ ^[0-9]+$ ]] || usage; VM_MIN_DISK_GB="$2"; shift 2 ;;
     --) shift; break ;;
     *) usage ;;
   esac
@@ -159,6 +169,26 @@ vm_pid() {
   if [[ -n "${HEAVY_JOB_VM_PID+x}" ]]; then echo "$HEAVY_JOB_VM_PID"; return; fi
   pgrep -f '(^|/)limactl hostagent ' 2>/dev/null | head -1
 }
+# Is this job a VM start (point 2c)? colima/limactl as the command, `start` among its arguments.
+VM_START=0
+case "${1##*/}" in colima|limactl) for a in "${@:2}"; do [[ "$a" == start ]] && VM_START=1; done ;; esac
+# Swap use in percent, or nothing when it cannot be read. Test hook: HEAVY_JOB_SWAP_PCT.
+swap_pct() {
+  if [[ -n "${HEAVY_JOB_SWAP_PCT+x}" ]]; then echo "$HEAVY_JOB_SWAP_PCT"; return; fi
+  if [[ -r /proc/meminfo ]]; then
+    awk '/^SwapTotal:/{t=$2}/^SwapFree:/{f=$2}END{if(t>0)printf "%d",(t-f)*100/t; else print 0}' /proc/meminfo
+  else
+    "${MEMGATE_SYSCTL:-/usr/sbin/sysctl}" -n vm.swapusage 2>/dev/null | awk '{t=$3;u=$6;gsub(/M/,"",t);gsub(/M/,"",u);if(t>0)printf "%d",u*100/t; else print 0}'
+  fi
+}
+# Why a VM start must wait, or nothing. $1: the free disk in KB, measured this poll.
+vm_start_block() {
+  local sp; sp="$(swap_pct)"
+  if [[ ! "$sp" =~ ^[0-9]+$ ]]; then echo "VM start: swap unreadable"; return; fi
+  if (( sp > VM_MAX_SWAP_PCT )); then echo "VM start: swap ${sp}% > ${VM_MAX_SWAP_PCT}%"; return; fi
+  if (( $1 < VM_MIN_DISK_GB * 1024 * 1024 )); then echo "VM start: free disk $(( $1 / 1048576 )) GiB < ${VM_MIN_DISK_GB} GiB"; fi
+}
+[[ -n "${HEAVY_JOB_SWAP_PCT+x}" ]] && log "WARN test hook HEAVY_JOB_SWAP_PCT='${HEAVY_JOB_SWAP_PCT}' overrides the swap reading"
 # A stray export (e.g. from a test shell) would silently turn the VM rule off.
 [[ -n "${HEAVY_JOB_VM_PID+x}" ]] && log "WARN test hook HEAVY_JOB_VM_PID='${HEAVY_JOB_VM_PID}' overrides the VM check"
 [[ -n "${HEAVY_JOB_DF_KB_FILE:-}${HEAVY_JOB_DF_KB:-}" ]] && log "WARN test hook HEAVY_JOB_DF_KB${HEAVY_JOB_DF_KB_FILE:+_FILE} overrides the disk reading"
@@ -251,6 +281,8 @@ while :; do
     reason="host-monitor says $hs"
   elif vm="$(vm_pid)"; (( ! ALLOW_VM )) && [[ -n "$vm" ]]; then
     reason="a Colima VM is running (limactl pid $vm): it holds its memory until colima stop"
+  elif vb="$( (( VM_START )) && vm_start_block "$d")"; [[ -n "$vb" ]]; then
+    reason="$vb (colima stop / the dev servers first; see mem-relief.sh)"
   elif try_lock; then
     break
   else
