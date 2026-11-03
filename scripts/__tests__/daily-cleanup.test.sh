@@ -60,6 +60,7 @@ dc() {
       DAILY_CLEANUP_RELEASE_DIR="${REL_DIR:-$SB/no-release}" \
       DAILY_CLEANUP_INSTALL_DIR="${INST:-$SB/no-install}" DAILY_CLEANUP_LSOF="${LSOF_BIN:-$SB/lsof}" \
       DAILY_CLEANUP_AGENT_MSG="$SB/agent-msg-stub" DAILY_CLEANUP_ALERT_TO="${ALERT_TO:-pulzus klodel}" \
+      DAILY_CLEANUP_SWAP_MB="${SWAP_MB:-0}" DAILY_CLEANUP_PS="${PS_FILE:-$SB/no-ps}" \
       HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 HEAVY_JOB_DF_KB="${HJ_DF:-99999999}" HEAVY_JOB_VM_PID= \
       MEMGATE_PROC_MEMINFO="$SB/no-such" MEMGATE_SYSCTL="$SB/sysctl" \
       ${STUB_ENV:-} bash "$DC" "$@" 2>&1)"; RC=$?
@@ -308,6 +309,78 @@ check "lsof unavailable: nothing removed, said so" "$(ok -d "$A/wt-merged2" -a -
 INST="$A/wt-merged2" LAST= dc run
 check "the install dir is a worktree, not a main tree: the step is skipped, rc 0" "$(ok "$RC" = 0 -a -d "$A/wt-merged2" -a -n "$(grep "STEP worktrees skipped: $A/wt-merged2 is not a clone's main tree" "$SB/store/daily-cleanup.log")")" "rc=$RC"
 check "no install dir: skipped (the other steps' tests above rely on it)" "$(ok -n "$(grep "STEP worktrees skipped: $SB/no-install is not a clone's main tree" "$SB/store/daily-cleanup.log")")"
+
+echo "== the disk emergency (Klodel 25381, card 152400f3)"
+# Young (a source change 2 h before NOW: under the 24 h cache rule, over the 1 h emergency one), unmerged,
+# clean trees with a real node_modules and a .next.
+YOUNG="$(date -r $((NOW - 2 * H)) +%Y%m%d%H%M)"
+for w in em-idle em-busy em-dirty em-target em-linker em-fresh; do
+  G -C "$I" worktree add -b "b-$w" "$A/wt-$w" origin/main
+  echo "$w" > "$A/wt-$w/u" && G -C "$A/wt-$w" add u && G -C "$A/wt-$w" commit -m "$w"
+  mkdir -p "$A/wt-$w/node_modules/pkg" "$A/wt-$w/.next/cache"; echo m > "$A/wt-$w/node_modules/pkg/i.js"; touch -t "$YOUNG" "$A/wt-$w/u"
+done
+touch -t "$(date -r $((NOW - 600)) +%Y%m%d%H%M)" "$A/wt-em-fresh/u"
+rm -rf "$A/wt-em-linker/node_modules"; ln -s "$A/wt-em-target/node_modules" "$A/wt-em-linker/node_modules"
+echo changed >> "$A/wt-em-dirty/u"; touch -t "$YOUNG" "$A/wt-em-dirty/u"
+echo "$A/wt-em-busy" > "$SB/cwds"
+INST="$I" LAST= DF_KB=$((20 * GB)) dc run
+check "20 GiB free: a young tree keeps its .next and node_modules (not an emergency)" "$(ok -d "$A/wt-em-idle/.next" -a -d "$A/wt-em-idle/node_modules" -a -z "$(grep 'emergency=1' "$SB/store/daily-cleanup.log")")"
+INST="$I" LAST= DF_KB=$((5 * GB)) dc run
+check "5 GiB free: the run says emergency" "$(ok -n "$(grep 'RUN start free_gb=5 emergency=1 (< 7 GiB)' "$SB/store/daily-cleanup.log")")" "$(grep 'RUN start' "$SB/store/daily-cleanup.log" | tail -1)"
+check "...a young, clean, idle tree loses its .next and its own node_modules; the tree and its branch stay" "$(ok -d "$A/wt-em-idle" -a -f "$A/wt-em-idle/u" -a ! -e "$A/wt-em-idle/.next" -a ! -e "$A/wt-em-idle/node_modules")" "$(grep em-idle "$SB/store/daily-cleanup.last-run.txt")"
+check "...a busy tree keeps both" "$(ok -d "$A/wt-em-busy/.next" -a -f "$A/wt-em-busy/node_modules/pkg/i.js")"
+check "...a tree with a tracked change keeps its node_modules (its .next goes)" "$(ok -f "$A/wt-em-dirty/node_modules/pkg/i.js" -a ! -e "$A/wt-em-dirty/.next")"
+check "...a node_modules another tree links to stays; the linking tree keeps its symlink" "$(ok -f "$A/wt-em-target/node_modules/pkg/i.js" -a -L "$A/wt-em-linker/node_modules")"
+check "...the install's own .next is untouched" "$(ok -f "$I/.next/cache/b")"
+check "...a tree edited 10 min ago keeps both (the 1 h floor)" "$(ok -d "$A/wt-em-fresh/.next" -a -d "$A/wt-em-fresh/node_modules")"
+: > "$SB/cwds"
+# Scratch: 14 h idle goes only in an emergency (the 12 h rule), 1 h idle never.
+S="$SB/scratch"; mkdir -p "$S/-projE/s14" "$S/-projE/s1"; echo x > "$S/-projE/s14/f"; echo x > "$S/-projE/s1/f"
+touch -t "$(date -v-14H +%Y%m%d%H%M)" "$S/-projE/s14/f" "$S/-projE/s14"; touch -t "$(date -v-1H +%Y%m%d%H%M)" "$S/-projE/s1/f" "$S/-projE/s1"
+LAST= DF_KB=$((20 * GB)) dc run
+check "20 GiB free: a scratch session idle for 14 h stays (2-day rule)" "$(ok -d "$S/-projE/s14")"
+LAST= DF_KB=$((5 * GB)) dc run
+check "5 GiB free: the 14 h one goes, the 1 h one stays" "$(ok ! -e "$S/-projE/s14" -a -f "$S/-projE/s1/f")"
+# Dedupe: two identical 2 MB files, one in shared/, one in an agent's out/.
+mkdir -p "$I/shared/x" "$I/agents/a/out/y"; head -c 2097152 /dev/urandom > "$I/shared/x/p.png"; cp "$I/shared/x/p.png" "$I/agents/a/out/y/p.png"
+echo small > "$I/shared/x/s.txt"; cp "$I/shared/x/s.txt" "$I/agents/a/out/y/s.txt"
+touch -t 202001010000 "$I/shared/x/p.png" "$I/agents/a/out/y/p.png"
+H1="$(shasum -a 256 < "$I/shared/x/p.png")"
+NL=$(wc -l < "$SB/store/daily-cleanup.log")
+INST="$I" LAST= DF_KB=$((20 * GB)) dc run
+check "20 GiB free: no dedupe step" "$(ok -z "$(tail -n +$((NL + 1)) "$SB/store/daily-cleanup.log" | grep 'STEP dedupe')")"
+INST="$I" LAST= DF_KB=$((5 * GB)) dc run
+check "5 GiB free: the identical pair becomes one clone, logged" "$(ok -n "$(grep 'STEP dedupe rc=0 groups=1 cloned=1 failed=0' "$SB/store/daily-cleanup.log")")" "$(grep 'STEP dedupe' "$SB/store/daily-cleanup.log" | tail -1)"
+check "...both paths still there, byte for byte, the old mtime kept, no .clonetmp left" "$(ok "$(shasum -a 256 < "$I/agents/a/out/y/p.png")" = "$H1" -a "$(shasum -a 256 < "$I/shared/x/p.png")" = "$H1" -a "$(stat -f %Sm -t %Y "$I/agents/a/out/y/p.png")" = 2020 -a -z "$(find "$I" -name '*.clonetmp')")"
+touch "$I/agents/a/out/y/p.png" "$I/shared/x/p.png"
+python3 -I "$ROOT/scripts/clone-dedupe.py" --root "$I/shared" --root "$I/agents/a/out" > "$SB/dd.out"
+check "clone-dedupe: a file changed within the hour is left alone" "$(ok -n "$(grep 'groups=0 cloned=0' "$SB/dd.out")")" "$(cat "$SB/dd.out")"
+
+echo "== the swap guard (Klodel 25387)"
+mkdir -p "$SB/inst-swap"; echo 'MAIN_AGENT_ID=klodel' > "$SB/inst-swap/.env"
+cat > "$SB/ps.txt" <<'PS'
+    1     0 /sbin/launchd
+  500     1 /opt/homebrew/bin/limactl hostagent --pidfile /Users/x/.colima/_lima/colima/ha.pid
+  501     1 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+  600     1 /bin/zsh -c source /Users/x/marveen/agents/dave/.claude-config/shell-snapshots/snap.sh && eval 'npx next dev -p 3495'
+  601   600 npm exec next dev --webpack -H localhost -p 3495
+  602   601 node /Users/x/marveen/agents/dave/repos/wt-fekvo-foto/node_modules/.bin/next dev --webpack -H localhost -p 3495
+  603   602 next-server (v16.4.1)
+PS
+rm -f "$SB/msgs" "$SB/store/.daily-cleanup.swap-alert"
+INST="$SB/inst-swap" LAST=$((NOW - 2 * H)) SWAP_MB=12000 PS_FILE="$SB/ps.txt" dc tick
+check "swap 11 GB > 9: the owner (dave) and the main agent are told" "$(ok "$(grep -c '^klodel dave ' "$SB/msgs" 2>/dev/null)" = 1 -a "$(grep -c '^klodel klodel ' "$SB/msgs" 2>/dev/null)" = 1)" "$(cat "$SB/msgs" 2>/dev/null)"
+check "...the text names the VM once and the dev server with its port and tree" "$(ok "$(grep '^klodel dave ' "$SB/msgs" | grep -o 'Colima VM' | wc -l | tr -d ' ')" = 1 -a -n "$(grep '^klodel dave ' "$SB/msgs" | grep 'next dev :3495 /Users/x/marveen/agents/dave/repos/wt-fekvo-foto (dave, pid 602)')")" "$(grep '^klodel dave ' "$SB/msgs")"
+check "...the cooldown stamp is set, logged" "$(ok "$(cat "$SB/store/.daily-cleanup.swap-alert" 2>/dev/null)" = "$NOW" -a -n "$(grep 'ALERT swap 12000 MB > 9 GB sent=1' "$SB/store/daily-cleanup.log")")"
+rm -f "$SB/msgs"
+INST="$SB/inst-swap" LAST=$((NOW - 2 * H)) SWAP_MB=12000 PS_FILE="$SB/ps.txt" STUB_ENV="DAILY_CLEANUP_NOW=$((NOW + 600))" dc tick
+check "...10 min later: no second alert (30 min cooldown)" "$(ok ! -f "$SB/msgs")"
+rm -f "$SB/msgs" "$SB/store/.daily-cleanup.swap-alert"
+INST="$SB/inst-swap" LAST=$((NOW - 2 * H)) SWAP_MB=8000 PS_FILE="$SB/ps.txt" dc tick
+check "swap 7.8 GB: no alert" "$(ok ! -f "$SB/msgs" -a ! -f "$SB/store/.daily-cleanup.swap-alert")"
+INST="$SB/inst-swap" LAST=$((NOW - 2 * H)) SWAP_MB=12000 PS_FILE="$SB/no-ps" dc tick
+check "no VM and no dev server: the main agent still hears it, 'nincs VM vagy next dev'" "$(ok -n "$(grep '^klodel klodel .*nincs VM vagy next dev' "$SB/msgs" 2>/dev/null)" -a -z "$(grep '^klodel dave ' "$SB/msgs" 2>/dev/null)")" "$(cat "$SB/msgs" 2>/dev/null)"
+rm -f "$SB/msgs" "$SB/store/.daily-cleanup.swap-alert"
 
 echo "== transcripts (Klodel 21739)"
 TP="$I/agents/a/.claude-config/projects/-x"; HP="$SB/home/.claude/projects/-y"

@@ -79,7 +79,24 @@
 #            older than DAILY_CLEANUP_TRANSCRIPT_EXPIRE_DAYS (default 30, as
 #            Claude Code's own cleanupPeriodDays) is deleted (Lex 21777).
 #            Rules and reasons: scripts/transcript-gzip.py.
-# Not here, on purpose: unmerged worktrees, node_modules, models (whisper,
+# Emergency (Klodel 25381, card 152400f3): when a run starts under DAILY_CLEANUP_EMERGENCY_GB
+# (default 7 GiB) free, it also takes what is rebuildable but young. 2026-11-03 16:40 the run at
+# 0 GiB freed 1 MB, because every rule above waited for age, while the same kinds of files freed
+# by hand gave back 2.9 GiB:
+#   scratch    session dirs idle for DAILY_CLEANUP_SCRATCH_EMERGENCY_HOURS (default 12) instead of days;
+#   worktrees  build caches of trees idle for DAILY_CLEANUP_CACHE_EMERGENCY_HOURS (default 1, the
+#            floor worktree-prune.py allows), and the real node_modules of a clean, idle, not-main
+#            tree no other tree links into (worktree-prune.py --node-modules; npm ci brings it back);
+#   dedupe     byte-identical files (>= 1 MB, untouched for DAILY_CLEANUP_DEDUPE_MIN_AGE_MIN,
+#            default 60) under shared/ and agents/*/out become APFS clones: lossless, every path
+#            stays (scripts/clone-dedupe.py).
+# Swap guard (Klodel 25387), every tick: swap above DAILY_CLEANUP_SWAP_ALERT_GB (default 9 GB)
+# names the Colima VM and the next dev servers with their owners (scripts/swap-culprits.py) and
+# tells those owners and the main agent, at most once per DAILY_CLEANUP_SWAP_COOLDOWN (30 min).
+# On this Mac the swap files share the APFS container with the data: 2026-11-03 16:09-16:42 the
+# swap grew from 8 to 14.8 GB and the free disk fell from 13 GiB to 365 MiB with no file growing.
+#
+# Not here, on purpose: unmerged worktrees, node_modules (outside an emergency), models (whisper,
 # Hugging Face, mflux), the Colima disk, ms-playwright. Those belong to an
 # agent or are in use; the morning report lists them for their owners.
 #
@@ -94,7 +111,8 @@
 # Test hooks: DAILY_CLEANUP_NOW (epoch), DAILY_CLEANUP_HOUR (00-23),
 # DAILY_CLEANUP_DF_KB (free disk KB), DAILY_CLEANUP_SCRATCH_ROOT,
 # DAILY_CLEANUP_HEAVY_JOB (the wrapper), DAILY_CLEANUP_RELEASE_DIR, MARVEEN_STORE,
-# DAILY_CLEANUP_INSTALL_DIR, DAILY_CLEANUP_LSOF, DAILY_CLEANUP_AGENT_MSG.
+# DAILY_CLEANUP_INSTALL_DIR, DAILY_CLEANUP_LSOF, DAILY_CLEANUP_AGENT_MSG,
+# DAILY_CLEANUP_SWAP_MB (swap used, MB), DAILY_CLEANUP_PS (a `ps -axo pid=,ppid=,command=` file).
 
 set -uo pipefail
 
@@ -124,6 +142,20 @@ ALERT_COOLDOWN="${DAILY_CLEANUP_ALERT_COOLDOWN:-21600}"
 ALERT_RETRY="${DAILY_CLEANUP_ALERT_RETRY:-900}"
 ALERT_STAMP="$STORE/.daily-cleanup.alert"
 AGENT_MSG="${DAILY_CLEANUP_AGENT_MSG:-$HERE/agent-msg.sh}"
+# The disk emergency (Klodel 25381, card 152400f3, 2026-11-03: 365 MiB free at 16:3x, and the run at
+# 16:40 freed 1 MB because every rule waited for age): under EMERGENCY_GB the run also takes what is
+# rebuildable but young. See "Emergency" in the header.
+EMERGENCY_GB="${DAILY_CLEANUP_EMERGENCY_GB:-7}"
+SCRATCH_EMERGENCY_HOURS="${DAILY_CLEANUP_SCRATCH_EMERGENCY_HOURS:-12}"
+# worktree-prune.py refuses a cache age under 1 h (a tree edited a minute ago is somebody's work).
+CACHE_EMERGENCY_HOURS="${DAILY_CLEANUP_CACHE_EMERGENCY_HOURS:-1}"
+DEDUPE_MIN_AGE_MIN="${DAILY_CLEANUP_DEDUPE_MIN_AGE_MIN:-60}"
+EMERGENCY=0
+# The swap guard (Klodel 25387): swap above SWAP_ALERT_GB names the VM and the dev servers and tells
+# their owners; at most once per SWAP_COOLDOWN seconds.
+SWAP_ALERT_GB="${DAILY_CLEANUP_SWAP_ALERT_GB:-9}"
+SWAP_COOLDOWN="${DAILY_CLEANUP_SWAP_COOLDOWN:-1800}"
+SWAP_STAMP="$STORE/.daily-cleanup.swap-alert"
 
 mkdir -p "$STORE" 2>/dev/null
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG" 2>/dev/null; }
@@ -160,6 +192,7 @@ tick() {
     if (( rc == 0 || rc == 1 )); then now >"$STAMP"; fi
   fi
   alert_low_disk
+  alert_swap
   return "$rc"
 }
 
@@ -200,6 +233,43 @@ alert_low_disk() {
   log "ALERT low disk ${gb} GiB < ${ALERT_GB} sent=$sent from=${from} to=${recipients}"
 }
 
+# Swap in MB (used), 0 when unreadable. Test hook: DAILY_CLEANUP_SWAP_MB.
+swap_used_mb() {
+  local v="${DAILY_CLEANUP_SWAP_MB:-}"
+  [[ -n "$v" ]] || v="$(/usr/sbin/sysctl -n vm.swapusage 2>/dev/null | sed -n 's/.*used = \([0-9]*\)[.0-9]*M.*/\1/p')"
+  [[ "$v" =~ ^[0-9]+$ ]] && echo "$v" || echo 0
+}
+
+# The swap guard (Klodel 25387, card 152400f3): on this Mac the swap files live on the same APFS
+# container as the data, so a swap that grows eats the free disk; 2026-11-03 16:09-16:42 it went
+# from 8 to 14.8 GB and the disk from 13 GiB to 365 MiB with no file growing. The usual cause is a
+# VM or a dev server: name them (scripts/swap-culprits.py) and tell their owners and the main agent.
+alert_swap() {
+  local mb last main from list owners to sent=0 recipients
+  mb="$(swap_used_mb)"
+  (( mb > SWAP_ALERT_GB * 1024 )) || return 0
+  last="$(cat "$SWAP_STAMP" 2>/dev/null)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( $(now) - last >= SWAP_COOLDOWN )) || return 0
+  main=""
+  [[ -f "$INSTALL_DIR/.env" ]] && main="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
+  from="${DAILY_CLEANUP_ALERT_FROM:-$main}"
+  list="$(python3 -I "$HERE/swap-culprits.py" ${DAILY_CLEANUP_PS:+--ps "$DAILY_CLEANUP_PS"} 2>/dev/null)"
+  owners="$(echo "$list" | awk -F'\t' '$1!="" && $1!="-"{print $1}' | sort -u | tr '\n' ' ')"
+  recipients="$(echo "${DAILY_CLEANUP_SWAP_ALERT_TO:-$owners $main}" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
+  local what
+  what="$(echo "$list" | awk -F'\t' 'NF>=3{printf "%s%s (%s, pid %s)", (n++?"; ":""), $3, ($1=="-"?"gazda ismeretlen":$1), $2}')"
+  local msg="[DAILY-CLEANUP] A swap $(( mb / 1024 )) GB, a ${SWAP_ALERT_GB} GB-os jelzési szint fölött; a swap a lemezről fogy (szabad: $(( $(free_kb) / 1048576 )) GiB). Gyanúsítottak: ${what:-nincs VM vagy next dev}. Ami nem kell, állítsd le most (colima stop, a nem használt dev szerver)."
+  if [[ -z "$from" ]]; then
+    log "ALERT swap ${mb} MB NOT sent: no sender id"
+    now >"$SWAP_STAMP"; return 0
+  fi
+  for to in $recipients; do
+    if echo "$msg" | bash "$AGENT_MSG" "$from" "$to" - >/dev/null 2>&1; then sent=1; else log "ALERT swap to $to FAILED"; fi
+  done
+  now >"$SWAP_STAMP"
+  log "ALERT swap ${mb} MB > ${SWAP_ALERT_GB} GB sent=$sent to=${recipients}suspects=$(echo "$list" | wc -l | tr -d ' ')"
+}
+
 FAILED=0
 step() {
   local name="$1" tool="$2"; shift 2
@@ -220,12 +290,14 @@ clean_scratch() {
   local before after d n=0
   if [[ ! -d "$SCRATCH_ROOT" || -L "$SCRATCH_ROOT" ]]; then log "STEP scratch skipped: no $SCRATCH_ROOT"; return; fi
   before="$(free_kb)"
-  echo "== scratch: session dirs under $SCRATCH_ROOT idle for ${SCRATCH_DAYS} days"
+  local age=(-mtime "-$SCRATCH_DAYS") label="${SCRATCH_DAYS} days"
+  (( EMERGENCY )) && { age=(-mmin "-$(( SCRATCH_EMERGENCY_HOURS * 60 ))"); label="${SCRATCH_EMERGENCY_HOURS} h (emergency)"; }
+  echo "== scratch: session dirs under $SCRATCH_ROOT idle for $label"
   while IFS= read -r d; do
     case "$d" in "$SCRATCH_ROOT"/-*/*) ;; *) continue ;; esac
     case "$d" in */../*|*/..|*/./*) continue ;; esac
     [[ -d "$d" && ! -L "$d" ]] || continue
-    [[ -z "$(find "$d" -xdev -mtime "-$SCRATCH_DAYS" -print 2>/dev/null | head -1)" ]] || continue
+    [[ -z "$(find "$d" -xdev "${age[@]}" -print 2>/dev/null | head -1)" ]] || continue
     echo "remove $d"
     rm -rf -- "$d" && n=$(( n + 1 ))
   done < <(find "$SCRATCH_ROOT" -xdev -mindepth 2 -maxdepth 2 -type d 2>/dev/null)
@@ -256,13 +328,33 @@ clean_worktrees() {
   # Run from a worktree copy of the scripts, git would still list the live trees.
   if [[ ! -d "$INSTALL_DIR/.git" || -L "$INSTALL_DIR/.git" ]]; then log "STEP worktrees skipped: $INSTALL_DIR is not a clone's main tree"; return; fi
   before="$(free_kb)"
-  echo "== worktrees: merged and idle for ${WORKTREE_DAYS} days, build caches idle for ${CACHE_HOURS} h, under $INSTALL_DIR/agents"
-  out="$(python3 -I "$HERE/worktree-prune.py" --install-dir "$INSTALL_DIR" --days "$WORKTREE_DAYS" --cache-hours "$CACHE_HOURS" \
-    --keep-file "$keep" --lsof "$LSOF" --now "$(now)")"; rc=$?
+  local hours="$CACHE_HOURS" extra=()
+  (( EMERGENCY )) && { hours="$CACHE_EMERGENCY_HOURS"; extra=(--node-modules); }
+  echo "== worktrees: merged and idle for ${WORKTREE_DAYS} days, build caches idle for ${hours} h${extra[*]:+, node_modules of clean idle trees (emergency)}, under $INSTALL_DIR/agents"
+  out="$(python3 -I "$HERE/worktree-prune.py" --install-dir "$INSTALL_DIR" --days "$WORKTREE_DAYS" --cache-hours "$hours" \
+    --keep-file "$keep" --lsof "$LSOF" --now "$(now)" ${extra[@]+"${extra[@]}"})"; rc=$?
   echo "$out"
   (( rc == 0 )) || FAILED=1
   after="$(free_kb)"
   log "STEP worktrees rc=$rc $(echo "$out" | tail -1) disk_delta_mb=$(( (after - before) / 1024 ))"
+}
+
+# Emergency only: byte-identical files in shared/ and agents/*/out become APFS clones (lossless,
+# every path stays; scripts/clone-dedupe.py).
+clean_dedupe() {
+  local before after out rc roots=()
+  (( EMERGENCY )) || return 0
+  [[ -d "$INSTALL_DIR/shared" ]] && roots+=(--root "$INSTALL_DIR/shared")
+  local d
+  for d in "$INSTALL_DIR"/agents/*/out; do [[ -d "$d" && ! -L "$d" ]] && roots+=(--root "$d"); done
+  (( ${#roots[@]} )) || { log "STEP dedupe skipped: no shared/ or agents/*/out"; return; }
+  before="$(free_kb)"
+  echo "== dedupe: identical files untouched for ${DEDUPE_MIN_AGE_MIN} min become clones (emergency)"
+  out="$(python3 -I "$HERE/clone-dedupe.py" "${roots[@]}" --min-age-min "$DEDUPE_MIN_AGE_MIN")"; rc=$?
+  echo "$out"
+  (( rc == 0 )) || FAILED=1
+  after="$(free_kb)"
+  log "STEP dedupe rc=$rc $(echo "$out" | tail -1) disk_delta_mb=$(( (after - before) / 1024 ))"
 }
 
 # Old session transcripts, gzipped in place; expired .gz deleted (scripts/transcript-gzip.py).
@@ -281,7 +373,8 @@ clean_transcripts() {
 
 run() {
   exec >"$STORE/daily-cleanup.last-run.txt" 2>&1
-  log "RUN start free_gb=$(( $(free_kb) / 1048576 ))"
+  (( $(free_kb) < EMERGENCY_GB * 1024 * 1024 )) && EMERGENCY=1
+  log "RUN start free_gb=$(( $(free_kb) / 1048576 ))$( (( EMERGENCY )) && echo " emergency=1 (< ${EMERGENCY_GB} GiB)")"
   step brew brew env HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_ANALYTICS=1 brew cleanup -s --prune=all
   step npm npm npm cache clean --force
   step pip pip3 pip3 cache purge
@@ -289,6 +382,7 @@ run() {
   clean_scratch
   clean_release_runs
   clean_worktrees
+  clean_dedupe
   clean_transcripts
   log "RUN end free_gb=$(( $(free_kb) / 1048576 )) failed=$FAILED"
   return "$FAILED"
