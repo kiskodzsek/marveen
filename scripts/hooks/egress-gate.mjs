@@ -49,6 +49,8 @@ import { readFileSync, appendFileSync, mkdirSync } from 'node:fs'
 import { realpathSync } from 'node:fs'
 import { fileURLToPath, domainToASCII } from 'node:url'
 import { dirname, join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { lookup as dnsLookup } from 'node:dns/promises'
 
 // Derive repo root from this script's location (scripts/hooks/egress-gate.mjs).
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -165,10 +167,15 @@ const QUARANTINE_DOMAINS = [
 // must wrap before use. The main agent's own WebFetch path is unaffected by
 // the switch in either position.
 //
-// What the deny rules below must stop in the open posture is therefore NOT
-// exfiltration but SSRF: a poisoned page talking the caller into aiming the
-// reader at our own network. Hence literal internal hosts, internal-only name
-// suffixes, and private/link-local/loopback address literals.
+// What the deny rules below must stop in the open posture is SSRF: a poisoned
+// page talking the caller into aiming the reader at our own network. Hence
+// literal internal hosts, internal-only name suffixes, and private/link-local/
+// loopback address literals. The reader holding nothing does NOT close
+// exfiltration, though (Viktor 24670 Q1): the caller composes the URL, so the
+// URL itself can carry data out. The open branch therefore also limits the
+// URL's shape and refuses collector hosts (openReaderShapeViolation), resolves
+// the host once (openReaderResolvesInward), and logs every grant without the
+// query (ALLOWED_QUARANTINE_OPEN).
 const QUARANTINE_DENY_HOSTS = new Set([
   'localhost',
   'localhost.localdomain',
@@ -552,6 +559,127 @@ function isDeniedToOpenReader(url) {
   return !isPublicFetchHost(new URL(url).hostname)
 }
 
+// The open posture's second risk is not SSRF but the URL itself (Viktor 24670
+// Q1): the reader holds nothing, but its CALLER writes the URL, and a
+// prompt-injected caller can put context into it (`https://x.tld/?d=<data>`).
+// The allowlist posture closed that by naming the hosts; the open one cannot,
+// so it limits what a URL can carry and refuses the hosts whose whole purpose
+// is to catch requests. Applied to the open branch (`quarantine-open`) only:
+// the shipped feeds and operator-named reader domains keep their old shape.
+export const OPEN_READER_MAX_URL = 300
+export const OPEN_READER_MAX_QUERY = 120
+
+// Request catchers, out-of-band (OAST) collectors, tunnels and paste sites:
+// exact host or any subdomain. Viktor 24670 Q1(d), plus the collector domains
+// of the same tools (oastify.com is Burp's, loca.lt localtunnel's).
+export const OPEN_READER_COLLECTOR_HOSTS = [
+  'webhook.site',
+  'pipedream.net',
+  'requestbin.com',
+  'requestbin.net',
+  'requestcatcher.com',
+  'interact.sh',
+  'interactsh.com',
+  'burpcollaborator.net',
+  'oastify.com',
+  'ngrok.io',
+  'ngrok-free.app',
+  'ngrok.app',
+  'trycloudflare.com',
+  'loca.lt',
+  'localtunnel.me',
+  'serveo.net',
+  'pastebin.com',
+  'transfer.sh',
+  'canarytokens.com',
+  'canarytokens.org',
+  'beeceptor.com',
+  'hookbin.com',
+  'hooks.slack.com',
+]
+
+// Hosts that are fine to read but whose given paths deliver a message to
+// someone (bot APIs, incoming webhooks).
+const OPEN_READER_COLLECTOR_PATHS = [
+  { host: 'api.telegram.org', path: /^\/bot/i },
+  { host: 'discord.com', path: /^\/api\/(v\d+\/)?webhooks/i },
+  { host: 'discordapp.com', path: /^\/api\/(v\d+\/)?webhooks/i },
+]
+
+const hostIs = (host, d) => host === d || host.endsWith('.' + d)
+
+// Why a URL may not leave through the open branch, or null. The reason names
+// a rule, never a value, so it is safe to log.
+export function openReaderShapeViolation(url) {
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return 'unparseable'
+  }
+  if (String(url).length > OPEN_READER_MAX_URL) return 'url-too-long'
+  if (parsed.search.replace(/^\?/, '').length > OPEN_READER_MAX_QUERY) return 'query-too-long'
+  if (parsed.username || parsed.password) return 'userinfo'
+  // WHATWG URL drops a default port (":443" on https), so '' is 80/443.
+  if (parsed.port && parsed.port !== '80' && parsed.port !== '443') return 'port'
+  const host = parsed.hostname.toLowerCase()
+  if (OPEN_READER_COLLECTOR_HOSTS.some((d) => hostIs(host, d))) return 'collector-host'
+  // Every interactsh server answers on an `oast.<tld>` name (oast.pro, oast.fun, ...).
+  if (/(^|\.)oast\.[a-z]{2,}$/.test(host)) return 'collector-host'
+  if (OPEN_READER_COLLECTOR_PATHS.some((r) => hostIs(host, r.host) && r.path.test(parsed.pathname))) return 'collector-path'
+  return null
+}
+
+// A logged stand-in for a URL from the open branch (Viktor 24670 Q2): the
+// query can carry exactly what Q1 is about, so it is never written -- only
+// its length and a short hash, so repeats are still visible. The path is cut.
+export function openReaderLogFields(url) {
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return { host: '', path: '', pathLen: 0, queryLen: 0, queryHash: '', b64like: false }
+  }
+  const query = parsed.search.replace(/^\?/, '')
+  return {
+    host: parsed.hostname.toLowerCase(),
+    path: parsed.pathname.slice(0, 60),
+    pathLen: parsed.pathname.length,
+    queryLen: query.length,
+    queryHash: query ? createHash('sha256').update(query).digest('hex').slice(0, 8) : '',
+    // A long unbroken base64/hex-like value is how encoded data looks (Q1(e)): flagged, not blocked.
+    b64like: /[A-Za-z0-9+/=_-]{32,}/.test(decodeURIComponentSafe(query)),
+  }
+}
+
+function decodeURIComponentSafe(s) {
+  try { return decodeURIComponent(s) } catch { return s }
+}
+
+// Q3: a public NAME whose A/AAAA record is loopback or private passes every
+// literal check above. The hook resolves the host once, for the open branch
+// only, and refuses if any address is inward. Fails closed: a name that does
+// not resolve could not be fetched anyway, and a timeout is not a pass. The
+// time-window rebinding (a record that changes between this lookup and the
+// fetch) stays open; that cannot be closed at the hook layer.
+export async function openReaderResolvesInward(host, lookup = dnsLookup, timeoutMs = 2500) {
+  let timer
+  try {
+    const addrs = await Promise.race([
+      lookup(host, { all: true, verbatim: true }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), timeoutMs) }),
+    ])
+    const list = Array.isArray(addrs) ? addrs : [addrs]
+    if (!list.length) return 'dns-empty'
+    if (list.some((a) => isPrivateIPv4(String(a.address)) || isPrivateIPv6(String(a.address)))) return 'resolves-private'
+    return null
+  } catch (e) {
+    return e instanceof Error && e.message === 'timeout' ? 'dns-timeout' : 'dns-failed'
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 function matchesQuarantineDomain(url, extraDomains = []) {
   let parsed
   try {
@@ -704,8 +832,10 @@ export function egressDecision(
       // (Viktor 13207): the shipped feeds above still work, the open posture
       // does not.
       if (!publicSuffixIndex()) return { blocked: true, tier: 'quarantine-denied' }
-      if (!isDeniedToOpenReader(url)) return { blocked: false, tier: 'quarantine-open' }
-      return { blocked: true, tier: 'quarantine-denied' }
+      if (isDeniedToOpenReader(url)) return { blocked: true, tier: 'quarantine-denied' }
+      const shape = openReaderShapeViolation(url)
+      if (shape) return { blocked: true, tier: 'quarantine-denied', reason: shape }
+      return { blocked: false, tier: 'quarantine-open' }
     }
   }
 
@@ -771,6 +901,23 @@ function logLine(kind, url, detail, keys = '', agentType = '') {
   }
 }
 
+// One line per open-branch decision: host, cut path, query LENGTH and hash,
+// never the query or the full URL. scripts/egress-quarantine-daily.mjs reads these.
+function logOpenReader(kind, url, reason, agentType) {
+  try {
+    mkdirSync(join(REPO_ROOT, 'store'), { recursive: true })
+    const f = openReaderLogFields(url)
+    if (SELFTEST) kind = `SELFTEST_${kind}`
+    const safe = (v) => String(v).replace(/["\s]/g, '_')
+    appendFileSync(EGRESS_BLOCK_LOG,
+      `${new Date().toISOString()} ${kind} host="${safe(f.host)}" path="${safe(f.path)}" path_len=${f.pathLen} query_len=${f.queryLen}` +
+      `${f.queryHash ? ` query_sha8=${f.queryHash}` : ''}${f.b64like ? ' query_b64like=1' : ''} reason="${safe(reason)}"` +
+      `${agentType ? ` agent_type="${safe(agentType)}"` : ''}\n`, 'utf-8')
+  } catch {
+    // Never let log failure cascade into blocking the agent process itself.
+  }
+}
+
 const BLOCK_MESSAGE =
   'Egress TILTOTT (egress-gate hook). Ez az URL nem szerepel a fő ágens WebFetch ' +
   'engedélylistáján. Külső web-tartalom (RSS, dokumentáció, cikkek, ismeretlen API-k) ' +
@@ -815,8 +962,15 @@ if (isInvokedDirectly()) {
   const agentType = String(payload?.agent_type ?? '')
   const runtimeList = loadRuntimeAllowlist()
   const decision = egressDecision(payload?.tool_name, payload?.tool_input, runtimeList, agentType)
+  const openPosture = agentType === QUARANTINE_AGENT_TYPE && runtimeList.quarantinePosture === 'denylist'
   if (decision.blocked) {
-    logLine('BLOCKED', url, 'reason="not on egress allowlist"', payloadKeySignature(payload), agentType)
+    // In the open posture a reader URL may be an exfiltration attempt, so its
+    // query is not written even on a denial (Viktor 24670 Q2).
+    if (openPosture && decision.tier === 'quarantine-denied') {
+      logOpenReader('BLOCKED_QUARANTINE_OPEN', url, decision.reason ?? 'deny-rule', agentType)
+    } else {
+      logLine('BLOCKED', url, 'reason="not on egress allowlist"', payloadKeySignature(payload), agentType)
+    }
     deny(BLOCK_MESSAGE)
   }
   // Audited, not silent: the quarantine tier is the one grant a main agent
@@ -824,6 +978,14 @@ if (isInvokedDirectly()) {
   // other tiers are the ordinary allowlist and stay quiet.
   if (decision.tier === 'quarantine') {
     logLine('ALLOWED_QUARANTINE', url, 'reason="quarantine-reader tier"', '', agentType)
+  }
+  if (decision.tier === 'quarantine-open') {
+    const inward = await openReaderResolvesInward(new URL(url).hostname)
+    if (inward) {
+      logOpenReader('BLOCKED_QUARANTINE_OPEN', url, inward, agentType)
+      deny(BLOCK_MESSAGE)
+    }
+    logOpenReader('ALLOWED_QUARANTINE_OPEN', url, 'open-posture', agentType)
   }
   allow()
 }
