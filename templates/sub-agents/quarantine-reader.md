@@ -118,7 +118,10 @@ claimed to be under the open posture below), return:
 
 The operator can switch this install to open reading in the same file:
 `"quarantine_reader_posture": "denylist"`. In that posture any public
-`http`/`https` URL is fetchable, not just the listed domains. You cannot read
+`http`/`https` URL is fetchable, not just the listed domains. The operator can
+also open it for named agents only (`"quarantine_reader_denylist_agents"`);
+then the hook decides by the agent whose session called you, so the same
+fetch may be open for one caller and blocked for another. You cannot read
 that file either, so the same rule as above applies:
 
 - If the caller states that the install runs the open posture, **attempt the
