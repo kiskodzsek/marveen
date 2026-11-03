@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Csapat – iroda</title>
+<link rel="stylesheet" href="/iroda.css">
+</head>
+<body>
+<header>
+  <div class="brand"><div class="logo">M</div><div><h1>Csapat</h1><div class="meta"><span class="live" id="live"><i></i><span id="liveText">betöltés…</span></span></div></div></div>
+  <div class="tabs"><span class="on">Iroda</span><a href="/" style="text-decoration:none"><span>Dashboard</span></a></div>
+  <div class="replay" id="replayBox" hidden><button id="play">Szünet</button><div class="track"><i id="bar"></i></div><span class="clock" id="clock"></span></div>
+</header>
+<main>
+  <section>
+    <h2 class="sec">Nagy feladatok</h2>
+    <div class="projects" id="projects"></div>
+  </section>
+
+  <section class="await">
+    <div class="t">Rád vár, Patrik <span class="n" id="waitN">0</span></div>
+    <ul class="plist" id="waitList"></ul>
+  </section>
+
+  <section class="office" id="org">
+    <svg id="wires"><g id="static"></g><g id="trails"></g></svg>
+    <div class="boss" id="boss"></div>
+    <div class="depts" id="depts"></div>
+  </section>
+
+  <div class="bottom">
+    <section class="panel log"><h2 class="sec">Üzenetek, ahogy mennek</h2><ol id="log"></ol></section>
+    <aside class="panel drawer" id="drawer"></aside>
+  </div>
+
+  <div class="legend">
+    <span><span class="pill work">dolgozik</span></span><span><span class="pill stall">elakadt?</span> régóta nincs jele</span><span><span class="pill idle">szabad</span></span><span><span class="pill off">alszik</span> hívásra indul</span><span><span class="pill none">üres hely</span> tervezett</span>
+    <span>monitor: a legutóbbi eszközhívás, dokumentum vagy kép/videó-képkocka</span><span>sor: várakozó üzenet · a legrégebbi kora</span>
+  </div>
+  <div class="note">Élő nézet, néhány másodpercenként frissül. A monitoron csak az eszközhívás rövid címe, a fájl neve vagy egy bélyegkép látszik; bélyegkép csak az engedélyezett, nem-ügyfél munkamappákból (store/iroda-thumbs.json). Az üzenetek tárgya rövidített, e-mail-, szám- és kulcsminta kitakarva.</div>
+</main>
+<script src="/iroda.js"></script>
+</body>
+</html>

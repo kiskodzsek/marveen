@@ -100,6 +100,7 @@ import { tryHandleSettings } from './web/routes/settings.js'
 import { tryHandleAuditLog } from './web/routes/audit-log.js'
 import { tryHandleFleetQ } from './web/routes/fleet-q.js'
 import { tryHandleStatic } from './web/routes/static.js'
+import { tryHandleIroda } from './web/routes/iroda.js'
 import { tryHandleVoice } from './web/routes/voice.js'
 import { tryHandleVaultSsh } from './web/routes/vault-ssh.js'
 import { tryHandleFleet } from './web/routes/fleet.js'
@@ -265,6 +266,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleAuditLog(routeCtx)) return
       if (await tryHandleFleetQ(routeCtx)) return
       if (await tryHandleFleet(routeCtx)) return
+      if (await tryHandleIroda(routeCtx)) return
       if (await tryHandleStatic(routeCtx, WEB_DIR)) return
 
       res.writeHead(404)
