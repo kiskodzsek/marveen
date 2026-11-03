@@ -148,4 +148,12 @@ describe('iroda org / thumb config', () => {
     expect(other?.seats.map((s) => s.id)).toEqual(['ujagens'])
     expect(withUnplacedAgents(DEFAULT_ORG, ['klodel', 'dave'])).toBe(DEFAULT_ORG)
   })
+  it('never shows a hidden agent, neither on the chart nor in the "other" room', () => {
+    expect(DEFAULT_ORG.depts.flatMap((d) => d.seats.map((s) => s.id))).not.toContain('pixel')
+    expect(withUnplacedAgents(DEFAULT_ORG, ['klodel', 'pixel'])).toBe(DEFAULT_ORG)
+    writeFileSync(join(store, 'iroda-org.json'), JSON.stringify({ lead: { id: 'klodel', name: 'Klodel', role: '' }, depts: [], hidden: ['pixel', 7] }))
+    const org = loadOrg(store)
+    expect(org.hidden).toEqual(['pixel'])
+    expect(withUnplacedAgents(org, ['klodel', 'pixel', 'dave']).depts.find((d) => d.id === 'other')?.seats.map((s) => s.id)).toEqual(['dave'])
+  })
 })

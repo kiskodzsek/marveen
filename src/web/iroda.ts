@@ -225,22 +225,24 @@ export function mediaCaption(hit: MediaHit): string {
 
 export interface OrgSeat { id: string; name: string; role: string; placeholder?: boolean }
 export interface OrgDept { id: string; name: string; lead: string; seats: OrgSeat[] }
-export interface Org { lead: OrgSeat; depts: OrgDept[] }
+/** hidden: agents that still have a directory but are not part of the team (e.g. wound down); never shown. */
+export interface Org { lead: OrgSeat; depts: OrgDept[]; hidden?: string[] }
 
 export const DEFAULT_ORG: Org = {
   lead: { id: 'klodel', name: 'Klodel', role: 'vezérigazgató-helyettes' },
+  // Pixel was wound down on 2026-10-21 (TG 4619); the directory still exists.
+  hidden: ['pixel'],
   depts: [
     { id: 'marabel', name: 'Marabel üzletág', lead: 'vezeti: Klodel, amíg fókusz', seats: [
       { id: 'dave', name: 'Dave', role: 'fejlesztő' },
-      { id: 'pixel', name: 'Pixel', role: 'fejlesztő' },
       { id: 'pulzus', name: 'Pulzus', role: 'üzemeltetés' },
     ] },
-    { id: 'mkt', name: 'Marketing', lead: 'vezető: Stratéga (új)', seats: [
-      { id: 'strateg', name: 'Stratéga', role: 'új vezető', placeholder: true },
+    { id: 'mkt', name: 'Marketing', lead: 'vezető: Mágnes', seats: [
+      { id: 'magnes', name: 'Mágnes', role: 'marketing-stratéga' },
       { id: 'mira', name: 'Mira', role: 'social media' },
     ] },
-    { id: 'kf', name: 'K+F', lead: 'kutató (új)', seats: [
-      { id: 'kutato', name: 'Kutató', role: 'K+F', placeholder: true },
+    { id: 'kf', name: 'K+F', lead: 'kutató: Radar', seats: [
+      { id: 'radar', name: 'Radar', role: 'K+F-kutató' },
     ] },
     { id: 'myshp', name: 'mySHP', lead: 'alvó, ha lesz munka', seats: [
       { id: 'myshp-vezeto', name: 'mySHP-vezető', role: 'alvó üzletág', placeholder: true },
@@ -268,7 +270,8 @@ export function loadOrg(storeDir: string): Org {
     if (!isSeat(raw.lead) || !Array.isArray(raw.depts)) return DEFAULT_ORG
     const depts = raw.depts.filter((d) => d && typeof d.id === 'string' && typeof d.name === 'string' && Array.isArray(d.seats))
       .map((d) => ({ id: d.id, name: d.name, lead: typeof d.lead === 'string' ? d.lead : '', seats: d.seats.filter(isSeat) }))
-    return { lead: raw.lead, depts }
+    const hidden = Array.isArray(raw.hidden) ? raw.hidden.filter((h): h is string => typeof h === 'string') : []
+    return { lead: raw.lead, depts, hidden }
   } catch {
     return DEFAULT_ORG
   }
@@ -276,7 +279,7 @@ export function loadOrg(storeDir: string): Org {
 
 /** Agents that run but are not on the chart land in an extra room, so nobody silently disappears. */
 export function withUnplacedAgents(org: Org, agentIds: string[]): Org {
-  const placed = new Set([org.lead.id, ...org.depts.flatMap((d) => d.seats.map((s) => s.id))])
+  const placed = new Set([org.lead.id, ...org.depts.flatMap((d) => d.seats.map((s) => s.id)), ...(org.hidden ?? [])])
   const extra = agentIds.filter((a) => !placed.has(a))
   if (!extra.length) return org
   return { ...org, depts: [...org.depts, { id: 'other', name: 'Egyéb', lead: 'nincs az ábrán', seats: extra.map((id) => ({ id, name: id, role: '' })) }] }

@@ -91,7 +91,11 @@ function escapeAttr(s: string): string {
 export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promise<boolean> {
   const { req, res, path } = ctx
 
-  if (path === '/' || path === '/index.html') { serveIndexHtml(ctx, webDir); return true }
+  // The office view is the home page (Patrik TG 14169); the classic dashboard
+  // lives on /dashboard (and /index.html for old bookmarks). The office shell
+  // carries no data, so this opens nothing: /api/iroda/* is Bearer-gated.
+  if (path === '/') { serveFile(req, res, join(webDir, 'iroda.html')); return true }
+  if (path === '/dashboard' || path === '/index.html') { serveIndexHtml(ctx, webDir); return true }
   // app.js/style.css URLs are versioned (?v=mtime-size, rewritten into
   // index.html above), so a long max-age is safe: any content change produces
   // a new URL. index.html itself stays no-cache.
