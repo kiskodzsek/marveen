@@ -38,6 +38,7 @@ cat > "$SB/sysctl" <<STUB
 case "\$2" in
   hw.memsize) echo 17179869184 ;;
   kern.memorystatus_level) cat "$SB/level" ;;
+  vm.swapusage) cat "$SB/swapusage" 2>/dev/null || exit 1 ;;
   *) exit 1 ;;
 esac
 STUB
@@ -194,6 +195,35 @@ HEAVY_JOB_VM_PID=4242 hj --name colima --allow-vm --wait 1 -- bash -c 'echo ran 
 check "--allow-vm (the VM's own start, the cleanup) runs past a running VM" "$(ok "$RC" = 0 -a -f "$SB/vm2")" "rc=$RC $OUT"
 level 30; HEAVY_JOB_VM_PID=4242 hj --name colima --allow-vm --wait 1 -- bash -c 'echo ran > "$0"' "$SB/vm3"
 check "--allow-vm still waits for memory (75 at 30% free)" "$(ok "$RC" = 75 -a ! -e "$SB/vm3")" "rc=$RC $OUT"
+level 70
+
+echo "== a VM start needs swap <= 80% and 10 GiB free disk (Klodel 25411, the 2026-11-03 panic)"
+mkdir -p "$SB/vmbin"; printf '#!/usr/bin/env bash\necho "$*" > "%s/colima.ran"\n' "$SB" > "$SB/vmbin/colima"; chmod +x "$SB/vmbin/colima"
+clean; rm -f "$SB/colima.ran"
+HEAVY_JOB_VM_PID= HEAVY_JOB_SWAP_PCT=85 hj --name colima --allow-vm --wait 1 -- "$SB/vmbin/colima" start
+check "colima start at 85% swap -> not started (75), even with --allow-vm" "$(ok "$RC" = 75 -a ! -e "$SB/colima.ran" -a -n "$(echo "$OUT" | grep 'VM start: swap 85% > 80%')")" "rc=$RC $OUT"
+check "...the swap hook leaves a WARN in the log" "$(ok -n "$(grep "WARN test hook HEAVY_JOB_SWAP_PCT='85'" "$SB/store/heavy-job.log")")"
+HEAVY_JOB_VM_PID= HEAVY_JOB_SWAP_PCT=40 DF_KB=$(( 9 * 1048576 )) hj --name colima --allow-vm --wait 1 -- "$SB/vmbin/colima" start
+check "colima start at 9 GiB free disk -> not started (75)" "$(ok "$RC" = 75 -a ! -e "$SB/colima.ran" -a -n "$(echo "$OUT" | grep 'VM start: free disk 9 GiB < 10 GiB')")" "rc=$RC $OUT"
+HEAVY_JOB_VM_PID= HEAVY_JOB_SWAP_PCT=80 DF_KB=$(( 10 * 1048576 )) hj --name colima --allow-vm --wait 1 -- "$SB/vmbin/colima" start
+check "colima start at 80% swap and 10 GiB -> runs" "$(ok "$RC" = 0 -a "$(cat "$SB/colima.ran" 2>/dev/null)" = start)" "rc=$RC $OUT"
+rm -f "$SB/colima.ran"
+HEAVY_JOB_VM_PID= HEAVY_JOB_SWAP_PCT=95 hj --name colima --wait 1 -- "$SB/vmbin/colima" stop
+check "colima stop at 95% swap -> runs (only a start is held)" "$(ok "$RC" = 0 -a "$(cat "$SB/colima.ran" 2>/dev/null)" = stop)" "rc=$RC $OUT"
+rm -f "$SB/colima.ran"
+HEAVY_JOB_VM_PID= HEAVY_JOB_SWAP_PCT=95 hj --name cleanup --allow-vm --wait 1 -- bash -c 'echo ran > "$0"' "$SB/vm5"
+check "--allow-vm for a non-VM job (the cleanup) is not held by the swap rule" "$(ok "$RC" = 0 -a -f "$SB/vm5")" "rc=$RC $OUT"
+HEAVY_JOB_VM_PID= HEAVY_JOB_SWAP_PCT=99 DF_KB=$(( 10 * 1048576 )) hj --name colima --vm-max-swap-pct 100 --vm-min-disk-gb 10 --wait 1 -- "$SB/vmbin/colima" start
+check "--vm-max-swap-pct 100 lifts the swap rule" "$(ok "$RC" = 0 -a -e "$SB/colima.ran")" "rc=$RC $OUT"
+rm -f "$SB/colima.ran"
+echo "total = 3072.00M  used = 2764.80M  free = 307.20M  (encrypted)" > "$SB/swapusage"  # sysctl -n form
+OUT="$(env -u HEAVY_JOB_SWAP_PCT HEAVY_JOB_VM_PID= HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+    HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name colima --wait 0 -- "$SB/vmbin/colima" start 2>&1)"; RC=$?
+check "the macOS reading: sysctl vm.swapusage 2764.8/3072 MB = 90% -> not started" "$(ok "$RC" = 75 -a ! -e "$SB/colima.ran" -a -n "$(echo "$OUT" | grep 'VM start: swap 90% > 80%')")" "rc=$RC $OUT"
+rm -f "$SB/swapusage"
+OUT="$(env -u HEAVY_JOB_SWAP_PCT HEAVY_JOB_VM_PID= HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+    HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name colima --wait 0 -- "$SB/vmbin/colima" start 2>&1)"; RC=$?
+check "unreadable swap -> a VM start does not start (75)" "$(ok "$RC" = 75 -a ! -e "$SB/colima.ran" -a -n "$(echo "$OUT" | grep 'VM start: swap unreadable')")" "rc=$RC $OUT"
 level 70
 # The real probe: a process that looks like Lima's host agent is found.
 # No exec in the fake: exec would swap its command line for "sleep 30", and the probe would

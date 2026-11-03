@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """worktree-prune.py -- remove merged, idle git worktrees and the build caches of idle trees.
 
-    worktree-prune.py --install-dir DIR [--days N] [--cache-hours H] [--keep-file F]
+    worktree-prune.py --install-dir DIR [--days N] [--cache-hours H] [--keep-file F] [--node-modules]
                       [--lsof PATH] [--now EPOCH] [--dry-run]
 
 Why (card c310dd1b, Klodel 21708/21709, Patrik TG 11766 "miert nem cleanupoltok
@@ -49,6 +49,12 @@ not busy, and no source file changed for --cache-hours hours (default 24). A
 symlinked cache is never followed or removed, nor one reached through a
 symlinked apps/<x> (Viktor 21749 L1): the cache's resolved path must lie
 inside the tree.
+
+--node-modules (the disk emergency, daily-cleanup.sh under DAILY_CLEANUP_EMERGENCY_GB; card
+152400f3, 2026-11-03: 365 MiB free, and 0.9 GB of it came back from these by hand): a tree that
+passes the cache rules above, is not a clone's main tree, has no change to a tracked file, and is
+not the target of another tree's node_modules symlink, also loses its own (real, not symlinked)
+node_modules at the root. `npm ci` brings it back; a busy tree (a dev server's cwd) is never touched.
 
 --install-dir must be a clone's main tree (its .git a directory): run from a
 worktree copy of the scripts (a test, a review checkout), the "install" would
@@ -213,6 +219,7 @@ def main():
     parser.add_argument("--lsof", default="/usr/sbin/lsof")
     parser.add_argument("--now", type=float, default=None)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--node-modules", action="store_true")
     args = parser.parse_args()
     if args.days < 1 or args.cache_hours < 1:
         print("stop: --days and --cache-hours must be at least 1")
@@ -289,7 +296,14 @@ def main():
                 kept_n += 1
         if not under(tree, agents_root) or tree_busy or kept(tree) or newest_source_mtime(tree, now - args.cache_hours * 3600):
             continue
-        for cache in caches(tree):
+        found = caches(tree)
+        nm = os.path.join(tree, "node_modules")
+        if (args.node_modules and not is_main and os.path.isdir(nm) and not os.path.islink(nm)
+                and real(nm) not in link_targets and not any(under(target, tree) for target in link_targets)
+                and (status := git(tree, "status", "--porcelain", "--untracked-files=no")).returncode == 0
+                and not status.stdout.strip()):
+            found.append(nm)
+        for cache in found:
             print(f"remove {cache}")
             if args.dry_run:
                 cached += 1
