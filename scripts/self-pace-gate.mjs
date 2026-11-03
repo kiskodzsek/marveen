@@ -157,7 +157,7 @@ const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_
 // boundary is a separate uid (H1).
 export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
 export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato'])
-export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo', 'com.marveen.host-restart-watchdog', 'com.marveen.host-monitor', 'com.marveen.daily-cleanup'])
+export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo', 'com.marveen.host-restart-watchdog', 'com.marveen.host-monitor', 'com.marveen.daily-cleanup', 'com.marveen.mem-relief'])
 export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // K1 (Viktor 3423, card ad7d3eaa): the worker runs under sandbox-exec denying writes under
   // ~/Library/CloudStorage, plus the ~/Library and ~ directory nodes so a parent rename cannot
@@ -186,6 +186,12 @@ export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // 10-minute disk gate, 1-day worktree age (card 024b8ac4, the 2026-10-31 full disk);
   // bootstrap and bootout only, nothing kickstarts it.
   'com.marveen.daily-cleanup': new Set(['cb3687ae1864abe8557a04143571a9ff32fe09c13972f1b387898c782346f70a']),
+  // Card 1c58f629 (Klodel 25411, the 2026-11-03 16:56:57 panic): the memory-critical guard, the
+  // plist that scripts/install-mem-relief.sh writes for this install (#104, 319c5425). RunAtLoad
+  // + every 60 s; it stops the Colima VM and next dev servers on a critical host. Bootstrap and
+  // bootout only, nothing kickstarts it. Viktor 25470/25476: the scripts it runs are pinned at
+  // bootstrap against the 3efd5548 blobs (agents/kernel/out/mem-relief-pins-3efd5548.txt).
+  'com.marveen.mem-relief': new Set(['50d2f3a54bce7dc12bc0243030fd07d7337957b5ba8503fc3b017aef454e9572']),
 }
 const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
 const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)
