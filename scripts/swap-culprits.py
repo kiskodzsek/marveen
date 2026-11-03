@@ -10,7 +10,8 @@ each). Cleaning files could not keep up; stopping the VM and the servers gave ba
 minutes. So the disk guard names them and tells their owners.
 
 Suspects: a Colima/Lima VM (limactl hostagent, the Virtualization.framework VM process, qemu) and
-a next dev server (next-server, `next dev`). The owner is the first agents/<id>/ path in the
+a next dev server: argv0 node, argv1 next's bin (node_modules/.bin/next or next/dist/bin/next),
+argv2 `dev`. The owner is the first agents/<id>/ path in the
 process's own or an ancestor's command line (a Claude Code shell snapshot or a worktree path);
 a VM started by launchd has none and is reported with owner "-".
 
@@ -24,6 +25,10 @@ import sys
 
 AGENT = re.compile(r"/agents/([a-z0-9_-]+)/")
 PORT = re.compile(r"(?:-p|--port)\s+(\d+)")
+# A next dev server is anchored on argv: node, then next's own bin, then `dev` (Viktor 25470 d):
+# a long-lived process that only MENTIONS "next dev" in an argument (claude -p "...", a shell
+# -c string, npm exec) is not a server, and mem-relief would signal it and its children.
+NEXT_DEV = re.compile(r"^(?:\S*/)?node\s+\S*/(?:node_modules/\.bin/next|next/dist/bin/next)\s+dev(?:\s|$)")
 TREE = re.compile(r"(/[^\s'\"]*/agents/[a-z0-9_-]+/repos/[^\s/'\"]+)")
 
 
@@ -64,7 +69,7 @@ def main():
         if ("limactl hostagent" in cmd or "Virtualization.VirtualMachine" in cmd or re.search(r"\bqemu-system", cmd)) and not vm_done:
             out.append((owner(procs, pid), pid, "Colima VM"))
             vm_done = True
-        elif re.search(r"\bnext dev\b", cmd) and "npm exec" not in cmd and not cmd.startswith(("/bin/zsh", "/bin/bash", "zsh", "bash")):
+        elif NEXT_DEV.match(cmd):
             port = PORT.search(cmd)
             tree = TREE.search(cmd) or next((TREE.search(procs[p][1]) for p in chain(procs, pid) if TREE.search(procs[p][1])), None)
             out.append((owner(procs, pid), pid, f"next dev :{port.group(1) if port else '?'} {tree.group(1) if tree else '?'}"))

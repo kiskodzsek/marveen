@@ -56,8 +56,11 @@
 #      (--vm-min-disk-gb). On 2026-11-03 16:41 the VM was started again minutes
 #      after it had been stopped by hand at 11 GB swap and 0.9 GiB free disk, and
 #      the Mac panicked at 16:56:57 (shared/cleanup-1103/panic-1103-elemzes.md,
-#      Klodel 25411). --allow-vm does not lift this; mem-relief.sh stops a VM that
-#      was started outside this script;
+#      Klodel 25411). --allow-vm does not lift this; only an explicit
+#      --vm-max-swap-pct 100 --vm-min-disk-gb 0 does. Only the direct forms count
+#      (`colima start`, `limactl start`): `bash -c "colima start"` or `env colima
+#      start` is not seen, so this is a soft gate, not a boundary; mem-relief.sh
+#      stops a VM that was started anyway;
 #   3. while the job runs, a 3 s watchdog stops the WHOLE process group (TERM,
 #      then KILL after 10 s) if free memory drops below --kill-below (default
 #      25%) or the disk below --kill-disk-gb (default 3, never above

@@ -35,6 +35,9 @@ cat > "$SB/ps.base" <<'EOF'
   300     1 /bin/zsh -c source /Users/x/marveen/agents/kernel/.claude-config/shell-snapshots/s.sh && cd /Users/x/marveen/agents/kernel/repos/wt-b && npx next dev -p 3471
   301   300 node /Users/x/marveen/agents/kernel/repos/wt-b/node_modules/.bin/next dev -p 3471
   302   301 next-server (v15.5.2)
+  400     1 claude -p please run next dev -p 3000 in the tree and report
+  401   400 node /Users/x/marveen/agents/kernel/repos/wt-b/scripts/helper.js
+  500     1 npm exec next dev --webpack -H localhost -p 3499
 EOF
 
 # colima / limactl stand-ins: record argv; with STUB_COLIMA_OK=1 / STUB_LIMA_OK=1 the VM leaves the ps fixture.
@@ -77,6 +80,7 @@ check "critical, fresh, memory/swap reason -> colima stop, both servers stopped,
 check "the server's descendants get the signal too (next-server child)" \
   "$(ok -n "$(calls | grep -x 'kill -TERM 202')" -a -n "$(calls | grep -x 'kill -TERM 302')")" "$(calls | tr '\n' ' ')"
 check "the parent shell is not signalled (not a descendant of the server)" "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ (200|300)$')")" "$(calls | tr '\n' ' ')"
+check "a process that only mentions 'next dev' (claude -p ..., npm exec) and its child are not signalled (Viktor 25470 d)" "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ (400|401|500)$')")" "$(calls | tr '\n' ' ')"
 check "a TERM that worked needs no KILL" "$(ok -z "$(calls | grep 'kill -KILL')")" "$(calls | tr '\n' ' ')"
 check "limactl -f is not needed when colima stop worked" "$(ok -z "$(calls | grep limactl)")"
 check "the log says STOP for the VM and each server" \
@@ -102,11 +106,18 @@ T2=$(( $(date +%s) + 601 )); echo "critical $T2 free memory 3%" > "$SB/store/.ho
 check "after 600 s it acts again" "$(ok -n "$(calls | grep -x 'colima stop')")" "$(calls)"
 
 echo "== what stays"
-reset; state critical 10 "free memory 3%"; printf '# Dave print render\n 3495 \n' > "$SB/store/dev-keep.list"; run
+reset; state critical 10 "free memory 3%"; printf '# Dave print render (Klodel ok)\n 3495 until=%s \n' "$(( $(date +%s) + 3600 ))" > "$SB/store/dev-keep.list"; run
 check "a port in store/dev-keep.list stays (no signal to 201/202), the other stops" \
   "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ 20[12]$')" -a -n "$(calls | grep -x 'kill -TERM 301')" -a -n "$(logf | grep 'KEEP next dev :3495')")" "$(calls | tr '\n' ' ') $(logf)"
 check "the kept server's owner is not told" "$(ok -z "$(grep '^klodel dave ' "$SB/msgs" 2>/dev/null)")" "$(cat "$SB/msgs" 2>/dev/null)"
 
+for bad in "3495" "3495 until=$(( $(date +%s) - 5 ))" "3495 until=$(( $(date +%s) + 9 * 3600 ))" "3495 forever"; do
+  reset; state critical 10 "free memory 3%"; echo "$bad" > "$SB/store/dev-keep.list"; run
+  check "dev-keep '$bad' does not count: 3495 stops, the line is logged IGNORE" "$(ok -n "$(calls | grep -x 'kill -TERM 201')" -a -n "$(logf | grep 'IGNORE dev-keep')")" "$(calls | tr '\n' ' ') $(logf)"
+done
+reset; state critical 10 "free memory 3%"; U=$(( $(date +%s) + 3600 ))
+printf '3000 until=%s\n3001 until=%s\n3495 until=%s\n' "$U" "$U" "$U" > "$SB/store/dev-keep.list"; run
+check "only the first 2 valid lines count: the third (3495) stops, logged" "$(ok -n "$(calls | grep -x 'kill -TERM 201')" -a -n "$(logf | grep 'only 2 ports may be kept')")" "$(logf)"
 reset; state critical 10 "free memory 3%"; run env MEM_RELIEF_DRY=1
 check "DRY: no stop, no signal, no message, the log names what it would do" \
   "$(ok "$RC" = 0 -a -z "$(calls)" -a ! -e "$SB/msgs" -a -n "$(logf | grep 'ACT dry')" -a -n "$(logf | grep 'DRY would tell: dave kernel klodel')")" "rc=$RC $(calls) $(logf)"
@@ -126,7 +137,7 @@ check "one message to each owner and the main agent, from the main agent (as dai
   "$(ok "$(grep -c . "$SB/msgs")" = 3 -a -n "$(grep '^klodel klodel \[MEM-RELIEF\]' "$SB/msgs")" -a -n "$(grep '^klodel dave \[MEM-RELIEF\]' "$SB/msgs")" -a -n "$(grep '^klodel kernel \[MEM-RELIEF\]' "$SB/msgs")")" "$(cat "$SB/msgs")"
 check "the owner-less VM sends nothing to \"-\"" "$(ok -z "$(grep -E '^klodel - ' "$SB/msgs")")" "$(cat "$SB/msgs")"
 check "the message names what was stopped and why" \
-  "$(ok -n "$(grep 'Colima VM; next dev :3495' "$SB/msgs" | grep 'host-monitor critical: free memory 3%')")" "$(head -1 "$SB/msgs")"
+  "$(ok -n "$(grep 'Colima VM; next dev :3495' "$SB/msgs" | grep 'host-monitor critical: free memory 3%' | grep 'kérj kivételt Klodeltől')")" "$(head -1 "$SB/msgs")"
 check "no file outside the store was touched: the fixture tree has only the store files" \
   "$(ok "$(cd "$SB/store" && ls -A | sort | tr '\n' ' ')" = ".host-state .mem-relief.last mem-relief.log ")" "$(ls -A "$SB/store")"
 
