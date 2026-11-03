@@ -22,8 +22,10 @@
 #
 # Effects:
 #   - store/.host-state = "<band> <epoch> <reason>" (written atomically).
-#     heavy-job.sh refuses to start while it says warn/critical; the fleet
-#     memory gate keeps its own memory bands for agent starts.
+#     heavy-job.sh refuses to start while it says warn/critical, except a
+#     warn-level swap reason (with free memory >= its floor) and a warn-level
+#     disk reason (its own --min-disk-gb floor, default 5 GiB, decides: card
+#     a635c116); the fleet memory gate keeps its own memory bands for agent starts.
 #   - store/host-monitor.log: one line per band CHANGE, not per run.
 #   - CRITICAL: one Telegram line to the owner chat and one inter-agent message
 #     to the main agent, at most once per 30 min counted from the last alert,
