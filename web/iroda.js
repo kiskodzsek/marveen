@@ -361,7 +361,7 @@
   async function poll() {
     try {
       const r = await api('/api/iroda/snapshot')
-      if (r.status === 401) { $('#live').classList.add('stale'); $('#liveText').textContent = 'nincs belépve: nyisd meg egyszer a dashboardot a tokenes linkkel'; return }
+      if (r.status === 401) { $('#live').classList.add('stale'); $('#liveText').innerHTML = 'nincs belépve: <a href="/dashboard">belépés a Dashboardon</a>'; return }
       if (!r.ok) throw new Error('http ' + r.status)
       apply(await r.json())
     } catch {
