@@ -94,8 +94,12 @@ const DASHBOARD_PORT = (() => {
 // CLAUDE_CONFIG_DIR is that agent here. Fleet rule 4 forbids touching another
 // agent's config dir; this gate does not enforce it.
 const AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,40}$/
-function readEnvValue(key) {
-  if (process.env[key]) return process.env[key]
+// The install's .env ONLY, never process.env: a nested session started from
+// Bash can set MAIN_AGENT_ID / MAIN_AGENT_CONFIG_DIR in its own environment and
+// would be the main agent -- or any named agent -- here (Viktor 24730 LOW).
+// A value given only in the environment or the settings store is not seen,
+// and the main agent then falls back to the allowlist (fail closed).
+function readDotEnvValue(key) {
   try {
     const m = readFileSync(join(REPO_ROOT, '.env'), 'utf-8').match(new RegExp(`^${key}=(.*)$`, 'm'))
     return m?.[1]?.trim().replace(/^["']|["']$/g, '') ?? ''
@@ -104,8 +108,8 @@ function readEnvValue(key) {
 export function callerAgentFromPayload(payload, opts = {}) {
   const repoRoot = String(opts.repoRoot ?? REPO_ROOT).replace(/\/+$/, '')
   const home = String(opts.home ?? process.env.HOME ?? '').replace(/\/+$/, '')
-  const mainId = opts.mainAgentId ?? (readEnvValue('MAIN_AGENT_ID') || 'marveen')
-  let mainConfigDir = String(opts.mainConfigDir ?? readEnvValue('MAIN_AGENT_CONFIG_DIR')).trim()
+  const mainId = opts.mainAgentId ?? (readDotEnvValue('MAIN_AGENT_ID') || 'marveen')
+  let mainConfigDir = String(opts.mainConfigDir ?? readDotEnvValue('MAIN_AGENT_CONFIG_DIR')).trim()
   if (mainConfigDir.startsWith('~') && home) mainConfigDir = home + mainConfigDir.slice(1)
   mainConfigDir = mainConfigDir.replace(/\/+$/, '')
   const tp = String(payload?.transcript_path ?? '')

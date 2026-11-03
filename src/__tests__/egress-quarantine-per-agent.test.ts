@@ -114,9 +114,9 @@ describe('hook entry point: per-agent posture from the store file', () => {
     rmSync(home, { recursive: true, force: true })
   })
   const tp = (agent: string) => join(root, 'agents', agent, '.claude-config', 'projects', 'x', 'a.jsonl')
-  const run = (url: string, transcript_path: string, cwd = root) => spawnSync('node', [join(root, 'scripts', 'hooks', 'egress-gate.mjs')], {
+  const run = (url: string, transcript_path: string, cwd = root, env: Record<string, string> = {}) => spawnSync('node', [join(root, 'scripts', 'hooks', 'egress-gate.mjs')], {
     input: JSON.stringify({ tool_name: 'WebFetch', tool_input: { url }, agent_type: QUARANTINE, transcript_path, cwd }),
-    encoding: 'utf-8', timeout: 15000, env: { ...process.env, HOME: home, MAIN_AGENT_ID: '', MAIN_AGENT_CONFIG_DIR: '' },
+    encoding: 'utf-8', timeout: 15000, env: { ...process.env, HOME: home, MAIN_AGENT_ID: '', MAIN_AGENT_CONFIG_DIR: '', ...env },
   })
   const allowed = (r: { status: number | null, stdout: string }) => r.status === 0 && !r.stdout.includes('"permissionDecision":"deny"')
   const log = () => (existsSync(join(root, 'store', 'egress-blocked.log')) ? readFileSync(join(root, 'store', 'egress-blocked.log'), 'utf-8') : '')
@@ -137,6 +137,14 @@ describe('hook entry point: per-agent posture from the store file', () => {
   it('the main agent (klodel) from the isolated main config is open', () => {
     const r = run('https://example.com/', join(root, '.channels-config', 'projects', root.replace(/[^a-zA-Z0-9-]/g, '-'), 'a.jsonl'))
     expect(allowed(r)).toBe(true)
+  })
+  it('MAIN_AGENT_* from the process environment is ignored (Viktor 24730 LOW)', () => {
+    // A nested session pointing MAIN_AGENT_CONFIG_DIR at its own config dir and
+    // naming an open agent as MAIN_AGENT_ID: still unknown, so the allowlist.
+    const own = join(home, 'nested-cfg')
+    const encoded = root.replace(/[^a-zA-Z0-9-]/g, '-')
+    const r = run('https://example.com/', join(own, 'projects', encoded, 'a.jsonl'), root, { MAIN_AGENT_ID: 'radar', MAIN_AGENT_CONFIG_DIR: own })
+    expect(r.stdout).toContain('"permissionDecision":"deny"')
   })
   it('an unknown caller stays on the allowlist', () => {
     const r = run('https://example.com/', '/somewhere/else/a.jsonl')
