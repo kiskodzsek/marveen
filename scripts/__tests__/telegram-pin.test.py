@@ -52,7 +52,10 @@ class Stub(BaseHTTPRequestHandler):
         elif method == "pinChatMessage" and fail_next["pin"]:
             self.send_response(400)
             self.end_headers()
-            self.wfile.write(json.dumps({"ok": False, "description": fail_next["pin"]}).encode())
+            err = {"ok": False, "description": fail_next["pin"]}
+            if fail_next.get("migrate"):
+                err["parameters"] = {"migrate_to_chat_id": int(fail_next.pop("migrate"))}
+            self.wfile.write(json.dumps(err).encode())
             fail_next["pin"] = None
             return
         else:
@@ -132,6 +135,15 @@ access([GROUP, "-5000000002"])
 n = len(calls)
 rc, out = run("pin", "81")
 ok(rc == 2 and len(calls) == n and "--chat" in out["error"], "two groups: --chat required")
+
+# Klodel 24935: the owner's supergroup is the default when listed, next to the dead old id.
+access(["-5194177964", tgpin.DEFAULT_GROUP])
+rc, out = run("pin", "83")
+ok(rc == 0 and out["chat"] == tgpin.DEFAULT_GROUP and calls[-1][2]["chat_id"] == tgpin.DEFAULT_GROUP, "default supergroup chosen among two groups")
+fail_next["pin"] = "Bad Request: group chat was upgraded to a supergroup chat"
+fail_next["migrate"] = tgpin.DEFAULT_GROUP
+rc, out = run("pin", "84", "--chat", "-5194177964")
+ok(rc == 1 and out.get("migrated_to") == tgpin.DEFAULT_GROUP, "old group id: the migration target is reported")
 access([GROUP])
 
 # check

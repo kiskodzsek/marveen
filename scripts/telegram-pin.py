@@ -16,7 +16,8 @@ Gates:
     message, and the API base is a constant, not an environment knob, so no caller can point the
     token at another host.
   - Only a chat the channel already trusts: a key of access.json "groups" or an "allowFrom" id.
-    Without --chat, the one configured group is used; with several, --chat is required.
+    Without --chat, DEFAULT_GROUP (the owner's supergroup) is used if allowed, else the one
+    configured group; with several and no default, --chat is required.
   - Pins are silent by default (disable_notification); --notify makes a pin notify the members.
   - Every pin / unpin is appended to store/telegram-pin.log (time, action, chat, message id,
     result, the caller's MARVEEN_AGENT_ID if set). `open` reads it back.
@@ -37,6 +38,10 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 API_BASE = "https://api.telegram.org"
 LOG_NAME = "telegram-pin.log"
+# The owner's group (Klodel 24935: it became a supergroup on 2026-11-03, the old
+# basic-group id -5194177964 is dead). Used when --chat is absent and this id is
+# among the channel's allowed groups; access.json may still list the old id.
+DEFAULT_GROUP = "-1004488869449"
 
 
 def channel_dir(root=ROOT):
@@ -139,6 +144,8 @@ def open_pins(root, chat=None):
 def resolve_chat(cdir, chat):
     groups, allowed = allowed_chats(cdir)
     if chat is None:
+        if DEFAULT_GROUP in groups:
+            return DEFAULT_GROUP, None
         if len(groups) == 1:
             return groups[0], None
         return None, "--chat is required (configured groups: %d)" % len(groups)
@@ -217,6 +224,10 @@ def main(argv=None, root=ROOT, base=None):
     out = {"ok": bool(res.get("ok")), "action": a.action, "chat": chat, "message_id": a.message_id}
     if not res.get("ok"):
         out["description"] = redact(res.get("description", ""), tok)
+        # A basic group upgraded to a supergroup answers with its new id.
+        migrated = (res.get("parameters") or {}).get("migrate_to_chat_id")
+        if migrated:
+            out["migrated_to"] = str(migrated)
     print(json.dumps(out, ensure_ascii=False))
     return 0 if res.get("ok") else 1
 
