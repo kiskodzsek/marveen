@@ -16,7 +16,7 @@ import {
 const QUARANTINE = 'quarantine-reader'
 const EMPTY = { domains: [], prefixes: [], quarantineDomains: [] }
 const OPEN = { ...EMPTY, quarantinePosture: 'denylist' }
-const tier = (url: string, list = OPEN, agent = QUARANTINE) => egressDecision('WebFetch', { url }, list, agent)
+const tier = (url: string, list: Record<string, unknown> = OPEN, agent = QUARANTINE) => egressDecision('WebFetch', { url }, list, agent)
 
 describe('open branch: URL shape', () => {
   it('still lets an ordinary public page through', () => {
