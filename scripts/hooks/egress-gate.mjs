@@ -77,6 +77,64 @@ const DASHBOARD_PORT = (() => {
   return '3420'
 })()
 
+// Which fleet agent's session made the call (Patrik TG 14218: the open reader
+// posture is per agent). Taken from the payload's `transcript_path`, which the
+// harness derives from the session's CLAUDE_CONFIG_DIR, fixed at launch:
+//   <install>/agents/<name>/.claude-config/...            -> <name>
+//   <main root>/projects/<encoded install root>/...       -> MAIN_AGENT_ID
+// where a main root is <install>/.channels-config (the live main session,
+// measured 2026-11-03), ~/.claude or MAIN_AGENT_CONFIG_DIR. Only the install
+// root's own project dir counts as the main agent: a non-isolated session that
+// started elsewhere (agents/<x>, a worktree, another checkout) is not
+// attributed to it. `cwd` is NOT used: an agent can `cd` into another agent's
+// directory. Anything else is '' (unknown), and an unknown caller gets the
+// allowlist posture. The install root is REPO_ROOT as node resolved it, so an
+// install reached through a symlink also falls back to the allowlist.
+// Limit (same uid): a session deliberately launched with ANOTHER agent's
+// CLAUDE_CONFIG_DIR is that agent here. Fleet rule 4 forbids touching another
+// agent's config dir; this gate does not enforce it.
+const AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,40}$/
+function readEnvValue(key) {
+  if (process.env[key]) return process.env[key]
+  try {
+    const m = readFileSync(join(REPO_ROOT, '.env'), 'utf-8').match(new RegExp(`^${key}=(.*)$`, 'm'))
+    return m?.[1]?.trim().replace(/^["']|["']$/g, '') ?? ''
+  } catch { return '' }
+}
+export function callerAgentFromPayload(payload, opts = {}) {
+  const repoRoot = String(opts.repoRoot ?? REPO_ROOT).replace(/\/+$/, '')
+  const home = String(opts.home ?? process.env.HOME ?? '').replace(/\/+$/, '')
+  const mainId = opts.mainAgentId ?? (readEnvValue('MAIN_AGENT_ID') || 'marveen')
+  let mainConfigDir = String(opts.mainConfigDir ?? readEnvValue('MAIN_AGENT_CONFIG_DIR')).trim()
+  if (mainConfigDir.startsWith('~') && home) mainConfigDir = home + mainConfigDir.slice(1)
+  mainConfigDir = mainConfigDir.replace(/\/+$/, '')
+  const tp = String(payload?.transcript_path ?? '')
+  // Absolute, and no '.', '..' or empty segment that could walk the prefix
+  // test somewhere else.
+  if (!tp.startsWith('/') || tp.slice(1).split('/').some((s) => s === '' || s === '.' || s === '..')) return ''
+  const agentsPrefix = repoRoot + '/agents/'
+  if (tp.startsWith(agentsPrefix)) {
+    const [name, configDir] = tp.slice(agentsPrefix.length).split('/')
+    return configDir === '.claude-config' && AGENT_NAME.test(name) ? name : ''
+  }
+  // Claude Code's project-dir encoding (src/claude-project-dir.ts).
+  const encodedRoot = repoRoot.replace(/[^a-zA-Z0-9-]/g, '-')
+  const mainRoots = [repoRoot + '/.channels-config', home ? home + '/.claude' : '', mainConfigDir.startsWith('/') ? mainConfigDir : '']
+    .filter(Boolean)
+  if (mainRoots.some((r) => tp.startsWith(`${r}/projects/${encodedRoot}/`))) return AGENT_NAME.test(mainId) ? mainId : ''
+  return ''
+}
+
+// The reader is open for this call when the operator opened it for everyone
+// (`quarantine_reader_posture: "denylist"`, the older global switch) or named
+// the calling agent in `quarantine_reader_denylist_agents`.
+export function readerIsOpen(runtimeList, agentType, callerAgent = '') {
+  if (String(agentType ?? '') !== QUARANTINE_AGENT_TYPE) return false
+  if ((runtimeList?.quarantinePosture ?? 'allowlist') === 'denylist') return true
+  const named = runtimeList?.quarantineDenylistAgents ?? []
+  return !!callerAgent && named.includes(callerAgent)
+}
+
 // Built-in allowlist: URL prefixes the main agent may call directly via WebFetch.
 // Anything not on this list (or the runtime allowlist) must go through the
 // quarantine-reader sub-agent. Keep sorted and documented so additions are
@@ -719,10 +777,15 @@ export function loadRuntimeAllowlist() {
       // the reader; any other value -- absent key, typo, wrong type -- is the
       // allowlist default. Fail-closed to the louder failure direction.
       quarantinePosture: parsed.quarantine_reader_posture === 'denylist' ? 'denylist' : 'allowlist',
+      // Per-agent opening of the reader (Patrik TG 14218). Names only; anything
+      // else in the array is dropped.
+      quarantineDenylistAgents: Array.isArray(parsed.quarantine_reader_denylist_agents)
+        ? parsed.quarantine_reader_denylist_agents.filter((a) => typeof a === 'string' && AGENT_NAME.test(a))
+        : [],
     }
   } catch {
     // Missing file or JSON parse error: treat as empty, never propagate.
-    return { domains: [], prefixes: [], quarantineDomains: [], quarantinePosture: 'allowlist' }
+    return { domains: [], prefixes: [], quarantineDomains: [], quarantinePosture: 'allowlist', quarantineDenylistAgents: [] }
   }
 }
 
@@ -748,13 +811,14 @@ export function egressDecision(
   toolInput,
   runtimeList = { domains: [], prefixes: [], quarantineDomains: [] },
   agentType = '',
+  callerAgent = '',
 ) {
   if (toolName !== 'WebFetch') return { blocked: false, tier: 'not-webfetch' }
   const url = String(toolInput?.url ?? '')
   if (!url) return { blocked: false, tier: 'no-url' }
 
   const isReader = String(agentType ?? '') === QUARANTINE_AGENT_TYPE
-  const openReader = isReader && (runtimeList.quarantinePosture ?? 'allowlist') === 'denylist'
+  const openReader = readerIsOpen(runtimeList, agentType, callerAgent)
   // The reader's steps 1-3 need a public host, in every posture (Viktor 13226
   // LOW). Those steps are every agent type's, so in the allowlist posture the
   // reader reached the built-in Ollama and dashboard on localhost, and a LAN
@@ -903,7 +967,7 @@ function logLine(kind, url, detail, keys = '', agentType = '') {
 
 // One line per open-branch decision: host, cut path, query LENGTH and hash,
 // never the query or the full URL. scripts/egress-quarantine-daily.mjs reads these.
-function logOpenReader(kind, url, reason, agentType) {
+function logOpenReader(kind, url, reason, agentType, caller = '') {
   try {
     mkdirSync(join(REPO_ROOT, 'store'), { recursive: true })
     const f = openReaderLogFields(url)
@@ -912,7 +976,7 @@ function logOpenReader(kind, url, reason, agentType) {
     appendFileSync(EGRESS_BLOCK_LOG,
       `${new Date().toISOString()} ${kind} host="${safe(f.host)}" path="${safe(f.path)}" path_len=${f.pathLen} query_len=${f.queryLen}` +
       `${f.queryHash ? ` query_sha8=${f.queryHash}` : ''}${f.b64like ? ' query_b64like=1' : ''} reason="${safe(reason)}"` +
-      `${agentType ? ` agent_type="${safe(agentType)}"` : ''}\n`, 'utf-8')
+      `${agentType ? ` agent_type="${safe(agentType)}"` : ''}${caller ? ` caller="${safe(caller)}"` : ''}\n`, 'utf-8')
   } catch {
     // Never let log failure cascade into blocking the agent process itself.
   }
@@ -961,13 +1025,14 @@ if (isInvokedDirectly()) {
   const url = String(payload?.tool_input?.url ?? '')
   const agentType = String(payload?.agent_type ?? '')
   const runtimeList = loadRuntimeAllowlist()
-  const decision = egressDecision(payload?.tool_name, payload?.tool_input, runtimeList, agentType)
-  const openPosture = agentType === QUARANTINE_AGENT_TYPE && runtimeList.quarantinePosture === 'denylist'
+  const callerAgent = callerAgentFromPayload(payload)
+  const decision = egressDecision(payload?.tool_name, payload?.tool_input, runtimeList, agentType, callerAgent)
+  const openPosture = readerIsOpen(runtimeList, agentType, callerAgent)
   if (decision.blocked) {
     // In the open posture a reader URL may be an exfiltration attempt, so its
     // query is not written even on a denial (Viktor 24670 Q2).
     if (openPosture && decision.tier === 'quarantine-denied') {
-      logOpenReader('BLOCKED_QUARANTINE_OPEN', url, decision.reason ?? 'deny-rule', agentType)
+      logOpenReader('BLOCKED_QUARANTINE_OPEN', url, decision.reason ?? 'deny-rule', agentType, callerAgent)
     } else {
       logLine('BLOCKED', url, 'reason="not on egress allowlist"', payloadKeySignature(payload), agentType)
     }
@@ -982,10 +1047,10 @@ if (isInvokedDirectly()) {
   if (decision.tier === 'quarantine-open') {
     const inward = await openReaderResolvesInward(new URL(url).hostname)
     if (inward) {
-      logOpenReader('BLOCKED_QUARANTINE_OPEN', url, inward, agentType)
+      logOpenReader('BLOCKED_QUARANTINE_OPEN', url, inward, agentType, callerAgent)
       deny(BLOCK_MESSAGE)
     }
-    logOpenReader('ALLOWED_QUARANTINE_OPEN', url, 'open-posture', agentType)
+    logOpenReader('ALLOWED_QUARANTINE_OPEN', url, 'open-posture', agentType, callerAgent)
   }
   allow()
 }
