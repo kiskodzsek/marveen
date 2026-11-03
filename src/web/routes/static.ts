@@ -126,6 +126,11 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
   }
   if (path === '/sw.js') { serveFile(req, res, join(webDir, 'sw.js')); return true }
 
+  // Office view (org chart with live desks). Static shell only: every byte of
+  // data comes from /api/iroda/*, which is behind the Bearer gate.
+  if (path === '/iroda' || path === '/iroda.html') { serveFile(req, res, join(webDir, 'iroda.html')); return true }
+  if (path === '/iroda.js' || path === '/iroda.css') { serveFile(req, res, join(webDir, path.slice(1))); return true }
+
   if (path.startsWith('/lang/')) {
     const langFile = path.replace('/lang/', '')
     // Allowlist: only the two known language files (no path traversal).

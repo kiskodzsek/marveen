@@ -673,6 +673,65 @@ export async function refuseIfCliCannotLaunch(model: string): Promise<Record<str
   }
 }
 
+// The status rows behind /api/agents/status, also read by the office view
+// (routes/iroda.ts), so both show the same state for the same agent.
+export function collectAgentStatusRows(): AgentStatusRow[] {
+  const nowSec = Math.floor(Date.now() / 1000)
+  const cards = getAgentCurrentCards()
+  const messages = getAgentMessageActivity()
+  // Count tool calls from the moment the current work started, so the number
+  // answers "how much has it done on THIS", not "how busy was it today".
+  const workStart: Record<string, number | null> = {}
+  for (const [agent, card] of Object.entries(cards)) workStart[agent] = card.enteredStatusAt
+  for (const [agent, m] of Object.entries(messages)) {
+    if (workStart[agent] == null) workStart[agent] = m.lastInboundAt
+  }
+  const tools = getAgentToolActivity(AGENT_STATUS_THRESHOLDS.TOOL_DATA_WINDOW_SEC, workStart)
+
+  const signalsFor = (name: string, isMain: boolean, running: boolean, pane: string | null, runState: string): AgentStatusSignals => {
+    const paneLabel = runState === 'unreachable' ? 'unreachable' : paneActivityLabel(running, pane)
+    const tool = tools[name]
+    const msg = messages[name]
+    return {
+      agent: name,
+      isMain,
+      running,
+      paneState: paneLabel as AgentStatusSignals['paneState'],
+      // Passed through uninterpreted -- no state is derived from it. See the
+      // permissionMode note in agent-status.ts for why.
+      permissionMode: running && pane !== null ? detectPermissionMode(pane) : null,
+      toolDataAvailable: tool !== undefined,
+      toolCallsSinceStart: tool?.sinceWork ?? 0,
+      lastToolCallAt: tool?.lastAt ?? null,
+      lastInboundAt: msg?.lastInboundAt ?? null,
+      lastOutboundAt: msg?.lastOutboundAt ?? null,
+      lastInboundSubject: msg?.lastInboundSubject ?? null,
+      currentCard: cards[name] ?? null,
+      nowSec,
+    }
+  }
+
+  const rows: AgentStatusRow[] = []
+  {
+    const mainPane = capturePane(MAIN_CHANNELS_SESSION)
+    const running = mainPane !== null
+    rows.push(deriveAgentStatus(signalsFor(MAIN_AGENT_ID, true, running, mainPane, running ? 'running' : 'stopped')))
+  }
+  for (const name of withoutMainAgent(listAgentNames())) {
+    const host = readAgentRemoteHost(name)
+    const runState = agentRunStateCached(name, host != null)
+    const running = runState === 'running'
+    let pane: string | null = null
+    if (running) {
+      pane = host
+        ? remotePaneCache.getOrRefresh(name, Date.now(), () => capturePane(agentSessionName(name), host), null)
+        : capturePane(agentSessionName(name))
+    }
+    rows.push(deriveAgentStatus(signalsFor(name, false, running, pane, runState)))
+  }
+  return rows
+}
+
 export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promise<boolean> {
   const { req, res, path, method, url } = ctx
 
@@ -869,60 +928,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   // All I/O is here; the derivation is the pure deriveAgentStatus so the rules
   // stay unit-testable. Deliberately no completion percentage -- see agent-status.ts.
   if (path === '/api/agents/status' && method === 'GET') {
-    const nowSec = Math.floor(Date.now() / 1000)
-    const cards = getAgentCurrentCards()
-    const messages = getAgentMessageActivity()
-    // Count tool calls from the moment the current work started, so the number
-    // answers "how much has it done on THIS", not "how busy was it today".
-    const workStart: Record<string, number | null> = {}
-    for (const [agent, card] of Object.entries(cards)) workStart[agent] = card.enteredStatusAt
-    for (const [agent, m] of Object.entries(messages)) {
-      if (workStart[agent] == null) workStart[agent] = m.lastInboundAt
-    }
-    const tools = getAgentToolActivity(AGENT_STATUS_THRESHOLDS.TOOL_DATA_WINDOW_SEC, workStart)
-
-    const signalsFor = (name: string, isMain: boolean, running: boolean, pane: string | null, runState: string): AgentStatusSignals => {
-      const paneLabel = runState === 'unreachable' ? 'unreachable' : paneActivityLabel(running, pane)
-      const tool = tools[name]
-      const msg = messages[name]
-      return {
-        agent: name,
-        isMain,
-        running,
-        paneState: paneLabel as AgentStatusSignals['paneState'],
-        // Passed through uninterpreted -- no state is derived from it. See the
-        // permissionMode note in agent-status.ts for why.
-        permissionMode: running && pane !== null ? detectPermissionMode(pane) : null,
-        toolDataAvailable: tool !== undefined,
-        toolCallsSinceStart: tool?.sinceWork ?? 0,
-        lastToolCallAt: tool?.lastAt ?? null,
-        lastInboundAt: msg?.lastInboundAt ?? null,
-        lastOutboundAt: msg?.lastOutboundAt ?? null,
-        lastInboundSubject: msg?.lastInboundSubject ?? null,
-        currentCard: cards[name] ?? null,
-        nowSec,
-      }
-    }
-
-    const rows: AgentStatusRow[] = []
-    {
-      const mainPane = capturePane(MAIN_CHANNELS_SESSION)
-      const running = mainPane !== null
-      rows.push(deriveAgentStatus(signalsFor(MAIN_AGENT_ID, true, running, mainPane, running ? 'running' : 'stopped')))
-    }
-    for (const name of withoutMainAgent(listAgentNames())) {
-      const host = readAgentRemoteHost(name)
-      const runState = agentRunStateCached(name, host != null)
-      const running = runState === 'running'
-      let pane: string | null = null
-      if (running) {
-        pane = host
-          ? remotePaneCache.getOrRefresh(name, Date.now(), () => capturePane(agentSessionName(name), host), null)
-          : capturePane(agentSessionName(name))
-      }
-      rows.push(deriveAgentStatus(signalsFor(name, false, running, pane, runState)))
-    }
-
+    const rows = collectAgentStatusRows()
     jsonMaybeGzip(req, res, rows)
     return true
   }
