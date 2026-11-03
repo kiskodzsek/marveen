@@ -75,6 +75,10 @@ jobs:
       # error and symlink paths stay tested. Hermetic: mock detectors, temp dirs,
       # no model files (the real detectors need Mira's venv and are skipped).
       - run: python3 scripts/__tests__/image-safety-check.test.py
+      # TGPIN1103: the pin script holds the main bot's token; its "never in the
+      # output or log" and "only allowed chats" cases are the gate. Hermetic:
+      # stub Bot API on localhost, synthetic token, throwaway dir.
+      - run: python3 scripts/__tests__/telegram-pin.test.py
       # MORNTIMERPARK914: the #1313 contract tests shipped without CI wiring,
       # so "CI green" said nothing about them -- the exact rot the comment
       # above warns about. All three are hermetic (stubs on PATH / CLAUDE_BIN,
