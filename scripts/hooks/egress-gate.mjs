@@ -956,14 +956,19 @@ export function payloadKeySignature(payload) {
 // out loud when it skips SELFTEST_ lines rather than silently reporting less.
 const SELFTEST = process.env.EGRESS_GATE_SELFTEST === '1'
 
-function logLine(kind, url, detail, keys = '', agentType = '') {
+// `caller` is the agent whose session made the call (callerAgentFromPayload).
+// It is appended last, so the prefix regexes in fetch-budget.py and
+// egress-quarantine-daily.mjs read the line exactly as before. Without it a
+// denial could not be traced back to the agent that hit it (Klodel 26304).
+function logLine(kind, url, detail, keys = '', agentType = '', caller = '') {
   try {
     mkdirSync(join(REPO_ROOT, 'store'), { recursive: true })
     const ts = new Date().toISOString()
     if (SELFTEST) kind = `SELFTEST_${kind}`
     const keyPart = keys ? ` payload_keys="${keys}"` : ''
     const agentPart = agentType ? ` agent_type="${agentType}"` : ''
-    appendFileSync(EGRESS_BLOCK_LOG, `${ts} ${kind} url="${url}" ${detail}${agentPart}${keyPart}\n`, 'utf-8')
+    const callerPart = caller ? ` caller="${String(caller).replace(/["\s]/g, '_')}"` : ''
+    appendFileSync(EGRESS_BLOCK_LOG, `${ts} ${kind} url="${url}" ${detail}${agentPart}${keyPart}${callerPart}\n`, 'utf-8')
   } catch {
     // Never let log failure cascade into blocking the agent process itself.
   }
@@ -1038,7 +1043,7 @@ if (isInvokedDirectly()) {
     if (openPosture && decision.tier === 'quarantine-denied') {
       logOpenReader('BLOCKED_QUARANTINE_OPEN', url, decision.reason ?? 'deny-rule', agentType, callerAgent)
     } else {
-      logLine('BLOCKED', url, 'reason="not on egress allowlist"', payloadKeySignature(payload), agentType)
+      logLine('BLOCKED', url, 'reason="not on egress allowlist"', payloadKeySignature(payload), agentType, callerAgent)
     }
     deny(BLOCK_MESSAGE)
   }
@@ -1046,7 +1051,7 @@ if (isInvokedDirectly()) {
   // cannot obtain, so every use of it leaves a line next to the denials. The
   // other tiers are the ordinary allowlist and stay quiet.
   if (decision.tier === 'quarantine') {
-    logLine('ALLOWED_QUARANTINE', url, 'reason="quarantine-reader tier"', '', agentType)
+    logLine('ALLOWED_QUARANTINE', url, 'reason="quarantine-reader tier"', '', agentType, callerAgent)
   }
   if (decision.tier === 'quarantine-open') {
     const inward = await openReaderResolvesInward(new URL(url).hostname)

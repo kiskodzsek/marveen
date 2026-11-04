@@ -129,6 +129,11 @@ describe('hook entry point: per-agent posture from the store file', () => {
   it('dave: the same page is denied, even from radar\'s directory', () => {
     const r = run('https://example.com/', tp('dave'), join(root, 'agents', 'radar'))
     expect(r.stdout).toContain('"permissionDecision":"deny"')
+    // The denial names the agent that hit it, taken from the transcript path,
+    // not from the cwd (Klodel 26304).
+    const line = log().trim().split('\n').at(-1) ?? ''
+    expect(line).toMatch(/^\S+ BLOCKED url="https:\/\/example.com\/" reason="not on egress allowlist" .*caller="dave"$/)
+    expect(line).not.toContain('caller="radar"')
   })
   it('localhost is denied for radar', () => {
     const r = run('http://localhost:3420/api/messages', tp('radar'))
@@ -149,5 +154,9 @@ describe('hook entry point: per-agent posture from the store file', () => {
   it('an unknown caller stays on the allowlist', () => {
     const r = run('https://example.com/', '/somewhere/else/a.jsonl')
     expect(r.stdout).toContain('"permissionDecision":"deny"')
+    // No caller is guessed: the field is left out, not filled with a default.
+    const line = log().trim().split('\n').at(-1) ?? ''
+    expect(line).toMatch(/ BLOCKED url="https:\/\/example.com\/" /)
+    expect(line).not.toContain('caller=')
   })
 })
