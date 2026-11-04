@@ -60,17 +60,23 @@ STUB
 # agent-msg.sh stand-in: records "<from> <to> <stdin>".
 printf '#!/bin/bash\necho "$1 $2 $(cat)" >> "%s/msgs"\nexit 0\n' "$SB" > "$SB/agent-msg-stub"
 # tmux stand-in: sessions from $SB/tmux.sessions, a pane's text from $SB/pane-<id>, its pid from $SB/panepid-<id>.
+# Only the exact target form "=agent-<id>:" answers (Viktor 26889 INFO-2); every target is recorded.
 cat > "$SB/tmux" <<STUB
 #!/bin/bash
+[ -n "\${4:-}" ] && echo "tmux-target \$4" >> "$SB/targets"
+case "\$4" in =agent-*:) id="\${4#=agent-}"; id="\${id%:}" ;; *) id="" ;; esac
 case "\$1" in
   ls) cat "$SB/tmux.sessions" 2>/dev/null ;;
-  capture-pane) cat "$SB/pane-\${4#agent-}" 2>/dev/null ;;
-  display-message) cat "$SB/panepid-\${4#agent-}" 2>/dev/null ;;
+  capture-pane) [ -n "\$id" ] && cat "$SB/pane-\$id" 2>/dev/null ;;
+  display-message) [ -n "\$id" ] && cat "$SB/panepid-\$id" 2>/dev/null ;;
 esac
+exit 0
 STUB
+# inbox stand-in: the count of fresh messages to <id> from $SB/inbox-<id>, 0 by default.
+printf '#!/bin/bash\ncat "%s/inbox-$1" 2>/dev/null || echo 0\n' "$SB" > "$SB/inbox-stub"
 # restart stand-in: records "restart <id>".
 printf '#!/bin/bash\necho "restart $1" >> "%s/calls"\n' "$SB" > "$SB/restart-stub"
-chmod +x "$SB/colima" "$SB/limactl" "$SB/kill" "$SB/agent-msg-stub" "$SB/tmux" "$SB/restart-stub"
+chmod +x "$SB/colima" "$SB/limactl" "$SB/kill" "$SB/agent-msg-stub" "$SB/tmux" "$SB/restart-stub" "$SB/inbox-stub"
 
 reset() {
   cp "$SB/ps.base" "$SB/ps"
@@ -82,7 +88,7 @@ run() {
   OUT="$(MARVEEN_STORE="$SB/store" MEM_RELIEF_INSTALL_DIR="$SB/install" MEM_RELIEF_PS="$SB/ps" \
     MEM_RELIEF_COLIMA="$SB/colima" MEM_RELIEF_LIMACTL="$SB/limactl" MEM_RELIEF_KILL="$SB/kill" \
     MEM_RELIEF_AGENT_MSG="$SB/agent-msg-stub" MEM_RELIEF_TMUX="$SB/tmux" MEM_RELIEF_RESTART="$SB/restart-stub" \
-    MEM_RELIEF_PSCPU="$SB/pscpu" MEM_RELIEF_SWAP_MB="${SWAP:-0}" MEM_RELIEF_KILL_WAIT=2 \
+    MEM_RELIEF_PSCPU="$SB/pscpu" MEM_RELIEF_INBOX="$SB/inbox-stub" MEM_RELIEF_SWAP_MB="${SWAP:-0}" MEM_RELIEF_KILL_WAIT=2 \
     MEM_RELIEF_COLIMA_WAIT=5 "$@" bash "$MR" 2>&1)"; RC=$?
 }
 calls() { cat "$SB/calls" 2>/dev/null; }
@@ -225,7 +231,8 @@ check "INFO-1: a process that only names WallpaperAerialsExtension in its argume
 echo "== idle agents (2c: nothing known to stop, swap over 12 GB; Klodel 26862)"
 idle() {
   printf '    1     0 /sbin/launchd\n' > "$SB/ps"; : > "$SB/alive"
-  rm -f "$SB/calls" "$SB/msgs" "$SB/store/.mem-relief.last" "$SB/store/mem-relief.log" "$SB/store/.host-state"
+  rm -f "$SB/calls" "$SB/msgs" "$SB/store/.mem-relief.last" "$SB/store/mem-relief.log" "$SB/store/.host-state" "$SB/targets"; find "$SB" -maxdepth 1 -name 'inbox-*' ! -name inbox-stub -delete
+  rm -rf "$SB/store/.mem-relief-idle"
   printf 'agent-juro\nagent-dave\nagent-klodel\nagent-radar\nagent-lex\nagent-mira\nagent-viktor\nklodel-channels\n' > "$SB/tmux.sessions"
   for a in juro dave klodel radar lex mira viktor; do printf 'done.\n\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0\n\xe2\x94\x80\xe2\x94\x80\n  bypass permissions on\n' > "$SB/pane-$a"; done
   printf 'working\n✻ Rendering… (esc to interrupt)\n\xe2\x9d\xaf \n' > "$SB/pane-radar"
@@ -271,6 +278,37 @@ idle; SWAP=13000 run env MEM_RELIEF_DRY=1 MEM_RELIEF_IDLE_SKIP=""
 check "DRY: no restart, the log names them" "$(ok -z "$(calls | grep '^restart ')" -a -n "$(logf | grep 'DRY would stop: tétlen ágens újraindítva: juro (dry), lex (dry), mira (dry)')")" "$(logf)"
 idle; printf '#!/bin/bash\nexit 1\n' > "$SB/restart-fail"; chmod +x "$SB/restart-fail"; SWAP=13000 run env MEM_RELIEF_RESTART="$SB/restart-fail" MEM_RELIEF_IDLE_MAX=1
 check "a failed restart -> FAIL in the log, rc 1" "$(ok "$RC" = 1 -a -n "$(logf | grep 'FAIL restart idle agent juro')")" "rc=$RC $(logf)"
+
+echo "== idle-agent limits (Viktor 26889 F1, INFO-1, INFO-2)"
+idle; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP=""
+check "INFO-2: every tmux target is the exact form =agent-<id>:" \
+  "$(ok -n "$(cat "$SB/targets")" -a -z "$(grep -v '^tmux-target =agent-[a-z0-9_-]*:$' "$SB/targets")")" "$(sort -u "$SB/targets" | tr '\n' ' ')"
+check "a round writes the stamps: one per restarted agent, the day count, the round's swap" \
+  "$(ok -f "$SB/store/.mem-relief-idle/juro" -a "$(cut -d' ' -f2 "$SB/store/.mem-relief-idle/day")" = 3 -a "$(cut -d' ' -f2 "$SB/store/.mem-relief-idle/last-round")" = 13000)" "$(ls -A "$SB/store/.mem-relief-idle" 2>/dev/null | tr '\n' ' ')"
+T1=$(( $(date +%s) + 700 )); rm -f "$SB/calls" "$SB/store/.mem-relief.last"; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP="" MEM_RELIEF_NOW=$T1
+check "F1 (c): 10 min later, the swap not lower -> no new round, IDLE-SKIP logged" \
+  "$(ok -z "$(calls | grep '^restart ')" -a -n "$(logf | grep 'IDLE-SKIP the swap did not drop since the last round (13000 MB -> 13000 MB)')")" "$(calls | tr '\n' ' ') $(logf | tail -3)"
+rm -f "$SB/calls" "$SB/store/.mem-relief.last"; SWAP=12800 run env MEM_RELIEF_IDLE_SKIP="" MEM_RELIEF_NOW=$T1
+check "F1 (a): the swap dropped, a new round, but juro/lex/mira (restarted 11 min ago) are kept; viktor busy -> nobody" \
+  "$(ok -z "$(calls | grep '^restart ')" -a -n "$(logf | grep 'IDLE-KEEP juro (restarted 11 min ago)')")" "$(calls | tr '\n' ' ') $(logf | tail -5)"
+T2=$(( $(date +%s) + 21700 )); rm -f "$SB/calls" "$SB/store/.mem-relief.last"; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP="" MEM_RELIEF_NOW=$T2
+check "F1 (a): after 6 h the same agents may restart again" "$(ok "$(calls | grep -c '^restart ')" = 3)" "$(calls | tr '\n' ' ') $(logf | tail -3)"
+idle; echo "$(date +%F) 5" > /dev/null; mkdir -p "$SB/store/.mem-relief-idle"; echo "$(date +%F) 5" > "$SB/store/.mem-relief-idle/day"; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP=""
+check "F1 (b): 5 of the 6 daily restarts used -> only 1 more" "$(ok "$(calls | grep -c '^restart ')" = 1 -a "$(cut -d' ' -f2 "$SB/store/.mem-relief-idle/day")" = 6)" "$(calls | tr '\n' ' ')"
+idle; mkdir -p "$SB/store/.mem-relief-idle"; echo "$(date +%F) 6" > "$SB/store/.mem-relief-idle/day"; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP=""
+check "F1 (b): the daily limit reached -> no restart, IDLE-SKIP logged" "$(ok -z "$(calls | grep '^restart ')" -a -n "$(logf | grep 'IDLE-SKIP the daily limit')")" "$(calls | tr '\n' ' ') $(logf | tail -2)"
+idle; mkdir -p "$SB/store/.mem-relief-idle"; echo "2000-01-01 6" > "$SB/store/.mem-relief-idle/day"; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP=""
+check "F1 (b): yesterday's count does not count today" "$(ok "$(calls | grep -c '^restart ')" = 3)" "$(calls | tr '\n' ' ')"
+idle; echo 1 > "$SB/inbox-juro"; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP=""
+check "F1 (d): an agent with a pending or just-delivered message is not restarted" \
+  "$(ok -z "$(calls | grep -x 'restart juro')" -a -n "$(logf | grep 'IDLE-KEEP juro (a message is pending or just delivered)')")" "$(calls | tr '\n' ' ')"
+idle; rm -f "$SB/curl.args"
+printf '#!/bin/bash\necho "$*" >> "%s/curl.args"; cat > "%s/curl.stdin"; exit 0\n' "$SB" "$SB" > "$SB/curl"; chmod +x "$SB/curl"
+echo "TESTTOKEN-not-real-42" > "$SB/store/.dashboard-token"
+SWAP=13000 run env MEM_RELIEF_IDLE_SKIP="" MEM_RELIEF_RESTART="" MEM_RELIEF_IDLE_MAX=1 PATH="$SB:$PATH"
+check "INFO-1: the restart call sends the token on curl's stdin (-K -), never on its command line" \
+  "$(ok -n "$(grep -- '-K - -X POST http://localhost:3420/api/agents/juro/restart' "$SB/curl.args")" -a -z "$(grep TESTTOKEN "$SB/curl.args")" -a -n "$(grep 'Bearer TESTTOKEN-not-real-42' "$SB/curl.stdin")")" "$(cat "$SB/curl.args" 2>/dev/null)"
+rm -f "$SB/curl" "$SB/store/.dashboard-token" "$SB/curl.args" "$SB/curl.stdin"
 
 echo "== installer"
 PL="$SB/la/com.marveen.mem-relief.plist"

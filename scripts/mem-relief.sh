@@ -48,6 +48,14 @@
 #      background wait is never cut off. The main agent and the ids in MEM_RELIEF_IDLE_SKIP
 #      (default "dave": his renders run on his own seat, as ALWAYS_BUSY in scripts/idle-check.py)
 #      are never restarted. The restarted ones are named to the main agent.
+#      Limits (Viktor 26889 F1: a restarted agent is idle again at once, and on 2026-11-04 20:28-21:08
+#      five passes in a row found no culprit at 16-23 GB swap, so without them the same agents would
+#      restart every 10 minutes, each --continue re-reading its whole conversation):
+#        - one agent at most once per MEM_RELIEF_IDLE_GAP_SECS (6 h; store/.mem-relief-idle/<id>);
+#        - at most MEM_RELIEF_IDLE_DAY_MAX (6) restarts a day, all agents together;
+#        - no new round while the swap has not dropped since the last round (within the 6 h);
+#        - an agent with an undelivered message, or one delivered in the last 15 min, is not idle
+#          (a restart can lose what arrived just before it).
 #   3. one inter-agent message to each owner (the agents/<id>/ path in the process chain) and the
 #      main agent, naming what was stopped and why. A line per action in store/mem-relief.log.
 # MEM_RELIEF_DRY=1: decide and log what it would do, stop nothing, send nothing, and leave the
@@ -55,7 +63,8 @@
 # (measured 2026-11-03 18:16 on the live store; Viktor 25498).
 #
 # Exit: 0 (nothing to do, or done), 1 (an action failed; the rest still ran).
-# Test hooks: MEM_RELIEF_TMUX (a tmux stand-in), MEM_RELIEF_PSCPU (a `ps -axo pid=,ppid=,%cpu=,command=`
+# Test hooks: MEM_RELIEF_INBOX (a command run with the agent id, printing its count of fresh messages),
+# MEM_RELIEF_TMUX (a tmux stand-in), MEM_RELIEF_PSCPU (a `ps -axo pid=,ppid=,%cpu=,command=`
 # file), MEM_RELIEF_RESTART (a command run with the agent id instead of the dashboard call), MEM_RELIEF_TOP (a `top -l 1 -stats pid,mem` file), MEM_RELIEF_NOW, MEM_RELIEF_KEEP_MAX, MEM_RELIEF_KEEP_MAX_SECS, MEM_RELIEF_SWAP_MB, MEM_RELIEF_PS (a `ps -axo pid=,ppid=,command=`
 # file), MEM_RELIEF_COLIMA, MEM_RELIEF_LIMACTL, MEM_RELIEF_KILL, MEM_RELIEF_AGENT_MSG,
 # MEM_RELIEF_INSTALL_DIR, MARVEEN_STORE.
@@ -81,6 +90,9 @@ IDLE_MAX="${MEM_RELIEF_IDLE_MAX:-3}"
 IDLE_CPU="${MEM_RELIEF_IDLE_CPU:-10}"
 IDLE_SKIP="${MEM_RELIEF_IDLE_SKIP-dave}"
 TMUX_BIN="${MEM_RELIEF_TMUX:-$(command -v tmux || echo /opt/homebrew/bin/tmux)}"
+IDLE_GAP="${MEM_RELIEF_IDLE_GAP_SECS:-21600}"
+IDLE_DAY_MAX="${MEM_RELIEF_IDLE_DAY_MAX:-6}"
+IDLE_DIR="$STORE/.mem-relief-idle"
 COLIMA="${MEM_RELIEF_COLIMA:-$(command -v colima || echo /opt/homebrew/bin/colima)}"
 LIMACTL="${MEM_RELIEF_LIMACTL:-$(command -v limactl || echo /opt/homebrew/bin/limactl)}"
 KILL="${MEM_RELIEF_KILL:-kill}"
@@ -141,7 +153,8 @@ argv0_is() {
 # busy under the pane (CPU >= IDLE_CPU %, from a `ps` snapshot with %cpu).
 pane_idle() {
   local pane last
-  pane="$("$TMUX_BIN" capture-pane -p -t "agent-$1" 2>/dev/null)" || return 1
+  # "=agent-<id>:" = exactly that session (Viktor 26889 INFO-2: a bare name also matches a prefix).
+  pane="$("$TMUX_BIN" capture-pane -p -t "=agent-$1:" 2>/dev/null)" || return 1
   [[ -n "$pane" ]] || return 1
   echo "$pane" | grep -qE 'esc to interrupt|to interrupt\)' && return 1
   # Claude Code draws the prompt as "❯" + a no-break space (U+00A0, measured 2026-11-04 on agent-juro);
@@ -152,7 +165,7 @@ pane_idle() {
 }
 pane_busy() {
   local root p
-  root="$("$TMUX_BIN" display-message -p -t "agent-$1" '#{pane_pid}' 2>/dev/null)"
+  root="$("$TMUX_BIN" display-message -p -t "=agent-$1:" '#{pane_pid}' 2>/dev/null)"
   [[ "$root" =~ ^[0-9]+$ ]] || return 0   # unknown = busy: never restart blind
   for p in $(PSDATA="$PSCPU" descendants "$root" | sort -u); do
     [[ "$p" == "$root" ]] && continue
@@ -163,12 +176,31 @@ pane_busy() {
   done
   return 1
 }
-restart_agent() {
-  if [[ -n "${MEM_RELIEF_RESTART:-}" ]]; then "$MEM_RELIEF_RESTART" "$1"; return; fi
+# The dashboard token goes to curl on stdin (-K -), not on its command line, where ps would show it
+# (Viktor 26889 INFO-1).
+dash() {
   local tok; tok="$(cat "$STORE/.dashboard-token" 2>/dev/null)"
   [[ -n "$tok" ]] || return 1
-  curl -s -f -m 60 -X POST "http://localhost:${MEM_RELIEF_PORT:-3420}/api/agents/$1/restart" \
-    -H "Authorization: Bearer $tok" -H "Content-Type: application/json" --data-binary '{}' >/dev/null
+  printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -s -f -m 60 -K - "$@"
+}
+restart_agent() {
+  if [[ -n "${MEM_RELIEF_RESTART:-}" ]]; then "$MEM_RELIEF_RESTART" "$1"; return; fi
+  dash -X POST "http://localhost:${MEM_RELIEF_PORT:-3420}/api/agents/$1/restart" \
+    -H "Content-Type: application/json" --data-binary '{}' >/dev/null
+}
+# How many messages to <id> are undelivered, or were delivered in the last 15 min. Unreadable = 1
+# (busy: never restart blind).
+fresh_inbox() {
+  if [[ -n "${MEM_RELIEF_INBOX:-}" ]]; then "$MEM_RELIEF_INBOX" "$1"; return; fi
+  dash "http://localhost:${MEM_RELIEF_PORT:-3420}/api/messages?agent=$1" 2>/dev/null | python3 -I -c '
+import json, sys, time
+try:
+    d = json.load(sys.stdin); d = d if isinstance(d, list) else d.get("messages", [])
+except Exception:
+    print(1); sys.exit()
+t = time.time()
+print(sum(1 for m in d if m.get("to_agent") == sys.argv[1] and (m.get("status") == "pending"
+      or (m.get("status") == "delivered" and t - (m.get("created_at") or 0) < 900))))' "$1" 2>/dev/null || echo 1
 }
 
 descendants() {
@@ -260,18 +292,37 @@ main() {
   local restarted=() mb a n=0 main_id=""
   mb="$(swap_mb)"
   [[ -f "$INSTALL_DIR/.env" ]] && main_id="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
-  if (( ${#done_lines[@]} == 0 && mb > IDLE_SWAP_GB * 1024 )); then
+  local t day used=0 lastmb lastt
+  t="$(now)"; day="$(date -r "$t" +%F 2>/dev/null || date +%F)"
+  [[ "$(cut -d' ' -f1 "$IDLE_DIR/day" 2>/dev/null)" == "$day" ]] && used="$(cut -d' ' -f2 "$IDLE_DIR/day" 2>/dev/null)"
+  [[ "$used" =~ ^[0-9]+$ ]] || used=0
+  { read -r lastt lastmb < "$IDLE_DIR/last-round"; } 2>/dev/null || true
+  if (( ${#done_lines[@]} == 0 && mb > IDLE_SWAP_GB * 1024 )) && [[ "${lastt:-}" =~ ^[0-9]+$ && "${lastmb:-}" =~ ^[0-9]+$ ]] \
+     && (( t - lastt < IDLE_GAP && mb >= lastmb )); then
+    log "IDLE-SKIP the swap did not drop since the last round (${lastmb} MB -> ${mb} MB)"
+  elif (( ${#done_lines[@]} == 0 && mb > IDLE_SWAP_GB * 1024 && used >= IDLE_DAY_MAX )); then
+    log "IDLE-SKIP the daily limit (${IDLE_DAY_MAX} restarts) is reached"
+  elif (( ${#done_lines[@]} == 0 && mb > IDLE_SWAP_GB * 1024 )); then
     if [[ -n "${MEM_RELIEF_PSCPU:-}" ]]; then PSCPU="$(cat "$MEM_RELIEF_PSCPU" 2>/dev/null)"; else PSCPU="$(ps -axo pid=,ppid=,%cpu=,command= 2>/dev/null)"; fi
     for a in $("$TMUX_BIN" ls -F '#{session_name}' 2>/dev/null | sed -n 's/^agent-\([a-z0-9_-]*\)$/\1/p'); do
-      (( n < IDLE_MAX )) || break
+      (( n < IDLE_MAX && used + n < IDLE_DAY_MAX )) || break
       [[ "$a" == "$main_id" ]] && continue
       [[ " $IDLE_SKIP " == *" $a "* ]] && continue
+      local la; la="$(cat "$IDLE_DIR/$a" 2>/dev/null)"
+      if [[ "$la" =~ ^[0-9]+$ ]] && (( t - la < IDLE_GAP )); then log "IDLE-KEEP $a (restarted $(( (t - la) / 60 )) min ago)"; continue; fi
       pane_idle "$a" || continue
       if pane_busy "$a"; then log "IDLE-KEEP $a (a process under the pane is busy)"; continue; fi
+      if [[ "$(fresh_inbox "$a")" != "0" ]]; then log "IDLE-KEEP $a (a message is pending or just delivered)"; continue; fi
       n=$((n + 1))
       if [[ "$DRY" == "1" ]]; then restarted+=("$a (dry)"); continue; fi
-      if restart_agent "$a"; then log "RESTART idle agent $a"; restarted+=("$a"); else log "FAIL restart idle agent $a"; rc=1; fi
+      if restart_agent "$a"; then
+        log "RESTART idle agent $a"; restarted+=("$a")
+        mkdir -p "$IDLE_DIR" && echo "$t" > "$IDLE_DIR/$a"
+      else log "FAIL restart idle agent $a"; rc=1; fi
     done
+    if [[ "$DRY" != "1" ]] && (( ${#restarted[@]} )); then
+      echo "$day $(( used + ${#restarted[@]} ))" > "$IDLE_DIR/day"; echo "$t $mb" > "$IDLE_DIR/last-round"
+    fi
     (( ${#restarted[@]} )) && done_lines+=("tétlen ágens újraindítva: $(printf '%s, ' "${restarted[@]}" | sed 's/, $//')")
   fi
 
