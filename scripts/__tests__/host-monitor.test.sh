@@ -27,6 +27,8 @@ cp "$ROOT/scripts/lib/mem-read.sh" "$ROOT/scripts/lib/send-telegram.sh" "$SB/scr
 # Like POST /api/messages: only a registered fleet agent may be the sender (403 otherwise).
 cat > "$SB/scripts/agent-msg.sh" <<STUB
 #!/usr/bin/env bash
+# "host-monitor" passes only while the test says the running dashboard has it in SYSTEM_SENDER_IDS.
+[ "\$1" = host-monitor ] && [ -f "$SB/accept-hostmon" ] && { echo "\$1 -> \$2: \$(cat)" >> "$SB/agentmsg.log"; exit 0; }
 case "\$1" in mainbot|pulzus) ;; *) echo "403 unknown agent '\$1'" >> "$SB/agentmsg.rejected"; exit 1 ;; esac
 echo "\$1 -> \$2: \$(cat)" >> "$SB/agentmsg.log"
 STUB
@@ -98,6 +100,18 @@ check "a failed Telegram send is retried on the next run (no stamp)" "$(ok "$(gr
 check "...but the main agent is not messaged every run" "$(ok "$(wc -l < "$SB/agentmsg.log" | tr -d ' ')" = 1)"
 check "the failure is logged without the token" "$(ok -n "$(grep 'Telegram FAILED' "$LOG")" -a -z "$(grep FAKE-TEST-TOKEN "$LOG")")"
 rm -f "$SB/curl-fail"
+
+echo "== sender: own id once SYSTEM_SENDER_IDS lists it (Viktor 23239, card 38c8d87f)"
+fresh() { rm -f "$STATE" "$SB/store/.host-monitor-alert"* "$SB/curl.log" "$SB/agentmsg.log" "$SB/agentmsg.rejected" "$LOG"; }
+fresh; echo 'SYSTEM_SENDER_IDS=cortex' > "$SB/.env"; mon 60; mon 10
+check "not listed -> from the main agent's id, as before" "$(ok "$(grep -c '^mainbot -> mainbot: \[HOST-MONITOR\]' "$SB/agentmsg.log" 2>/dev/null)" = 1 -a ! -s "$SB/agentmsg.rejected")" "$(cat "$SB/agentmsg.log" "$SB/agentmsg.rejected" 2>/dev/null)"
+fresh; printf 'SYSTEM_SENDER_IDS=" cortex, host-monitor"\r\n' > "$SB/.env"; touch "$SB/accept-hostmon"; mon 60; mon 10
+check "listed (quoted, spaced) and loaded -> from host-monitor, to the main agent, once" "$(ok "$(grep -c '^host-monitor -> mainbot: \[HOST-MONITOR\]' "$SB/agentmsg.log" 2>/dev/null)" = 1 -a "$(wc -l < "$SB/agentmsg.log" | tr -d ' ')" = 1 -a -f "$SB/store/.host-monitor-alert.agent")" "$(cat "$SB/agentmsg.log" 2>/dev/null)"
+fresh; rm -f "$SB/accept-hostmon"; mon 60; mon 10
+check "listed but the dashboard not restarted (403) -> sent again from the main agent, and logged" "$(ok -s "$SB/agentmsg.rejected" -a "$(grep -c '^mainbot -> mainbot: \[HOST-MONITOR\]' "$SB/agentmsg.log" 2>/dev/null)" = 1 -a -n "$(grep 'from host-monitor refused, sent again from mainbot' "$LOG")" -a -f "$SB/store/.host-monitor-alert.agent")" "$(cat "$LOG" "$SB/agentmsg.log" 2>/dev/null)"
+fresh; echo 'SYSTEM_SENDER_IDS=host-monitor-x,xhost-monitor' > "$SB/.env"; touch "$SB/accept-hostmon"; mon 60; mon 10
+check "a longer id that only contains host-monitor does not count" "$(ok "$(grep -c '^mainbot -> mainbot' "$SB/agentmsg.log" 2>/dev/null)" = 1)" "$(cat "$SB/agentmsg.log" 2>/dev/null)"
+rm -f "$SB/.env" "$SB/accept-hostmon"
 
 echo "== heavy-job.sh reads the state"
 export HEAVY_JOB_VM_PID=""  # no VM: the host running this test may have a real one

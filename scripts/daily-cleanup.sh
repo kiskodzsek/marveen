@@ -22,7 +22,8 @@
 # message to DAILY_CLEANUP_ALERT_TO (default: pulzus and the main agent), at
 # most once per DAILY_CLEANUP_ALERT_COOLDOWN seconds (default 6 h); after a
 # send no recipient took, the next try waits DAILY_CLEANUP_ALERT_RETRY (15 min).
-# The sender is the main agent's id (DAILY_CLEANUP_ALERT_FROM overrides). The
+# The sender is "daily-cleanup" once SYSTEM_SENDER_IDS lists it, else the main
+# agent's id (DAILY_CLEANUP_ALERT_FROM overrides; see alert_sender). The
 # host-monitor pages only at CRITICAL (3 GiB): this is the earlier warning,
 # while there is still room to decide what goes.
 # The run goes through heavy-job.sh: one heavy job at a time, and only with
@@ -142,6 +143,34 @@ ALERT_COOLDOWN="${DAILY_CLEANUP_ALERT_COOLDOWN:-21600}"
 ALERT_RETRY="${DAILY_CLEANUP_ALERT_RETRY:-900}"
 ALERT_STAMP="$STORE/.daily-cleanup.alert"
 AGENT_MSG="${DAILY_CLEANUP_AGENT_MSG:-$HERE/agent-msg.sh}"
+
+# The alert's sender (Viktor 23239, card 38c8d87f). A message from an id in SYSTEM_SENDER_IDS
+# reaches its recipient framed as untrusted, one from the main agent's id as a trusted peer, so
+# this script sends as itself ("daily-cleanup") once the install's .env lists it there; until
+# then as the main agent, the way it always has (an unregistered `from` is refused with 403:
+# Pulzus 23225, 918 lost alerts). DAILY_CLEANUP_ALERT_FROM still overrides both. The list is
+# normalized like the server does (sanitizeAgentIdent: only [A-Za-z0-9_-] per entry).
+OWN_SENDER_ID="daily-cleanup"
+own_sender_registered() {
+  local ids=""
+  [[ -f "$INSTALL_DIR/.env" ]] && ids="$(grep -E '^SYSTEM_SENDER_IDS=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -cd 'A-Za-z0-9_,-')"
+  [[ ",$ids," == *",$OWN_SENDER_ID,"* ]]
+}
+alert_sender() { # <main agent id>
+  if [[ -n "${DAILY_CLEANUP_ALERT_FROM:-}" ]]; then echo "$DAILY_CLEANUP_ALERT_FROM"
+  elif own_sender_registered; then echo "$OWN_SENDER_ID"
+  else echo "$1"; fi
+}
+# deliver_alert <from> <main> <to> <message>. The dashboard reads SYSTEM_SENDER_IDS at start, so
+# an id added to .env without a restart is still refused: then the main agent's id carries the
+# alert, and the log says so. An explicit DAILY_CLEANUP_ALERT_FROM gets no such second try.
+deliver_alert() {
+  local from="$1" main="$2" to="$3" msg="$4"
+  echo "$msg" | bash "$AGENT_MSG" "$from" "$to" - >/dev/null 2>&1 && return 0
+  [[ -z "${DAILY_CLEANUP_ALERT_FROM:-}" && -n "$main" && "$from" != "$main" ]] || return 1
+  log "ALERT from=$from to $to refused, sent again from=$main"
+  echo "$msg" | bash "$AGENT_MSG" "$main" "$to" - >/dev/null 2>&1
+}
 # The disk emergency (Klodel 25381, card 152400f3, 2026-11-03: 365 MiB free at 16:3x, and the run at
 # 16:40 freed 1 MB because every rule waited for age): under EMERGENCY_GB the run also takes what is
 # rebuildable but young. See "Emergency" in the header.
@@ -211,11 +240,10 @@ alert_low_disk() {
   main=""
   [[ -f "$INSTALL_DIR/.env" ]] && main="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
   recipients="${DAILY_CLEANUP_ALERT_TO:-pulzus $main}"
-  # The sender must be a registered fleet agent id: POST /api/messages refuses any other
-  # `from` with 403 (Pulzus 23225: from "daily-cleanup" failed 918 times since 10-30 19:53,
-  # so no alert ever arrived). The main agent's id, as backup.sh and the Marabel watchdog
-  # send; the [DAILY-CLEANUP] prefix in the text says who really wrote it.
-  local from="${DAILY_CLEANUP_ALERT_FROM:-$main}"
+  # Own id once SYSTEM_SENDER_IDS lists it, else the main agent's (alert_sender above); the
+  # [DAILY-CLEANUP] prefix in the text says who really wrote it either way.
+  local from
+  from="$(alert_sender "$main")"
   local ran ran_at="még nem futott"
   ran="$(cat "$STAMP" 2>/dev/null)"
   [[ "$ran" =~ ^[0-9]+$ ]] && ran_at="$(date -r "$ran" '+%m-%d %H:%M' 2>/dev/null || echo "$ran")"
@@ -226,7 +254,7 @@ alert_low_disk() {
     return 0
   fi
   for to in $recipients; do
-    if echo "$msg" | bash "$AGENT_MSG" "$from" "$to" - >/dev/null 2>&1; then sent=1; else log "ALERT to $to FAILED"; fi
+    if deliver_alert "$from" "$main" "$to" "$msg"; then sent=1; else log "ALERT to $to FAILED"; fi
   done
   # A delivered alert starts the full cooldown; a send nobody took waits ALERT_RETRY.
   if (( sent )); then now >"$ALERT_STAMP"; rm -f "$ALERT_STAMP.retry"; else now >"$ALERT_STAMP.retry"; fi
@@ -252,7 +280,7 @@ alert_swap() {
   (( $(now) - last >= SWAP_COOLDOWN )) || return 0
   main=""
   [[ -f "$INSTALL_DIR/.env" ]] && main="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
-  from="${DAILY_CLEANUP_ALERT_FROM:-$main}"
+  from="$(alert_sender "$main")"
   list="$(python3 -I "$HERE/swap-culprits.py" ${DAILY_CLEANUP_PS:+--ps "$DAILY_CLEANUP_PS"} 2>/dev/null)"
   owners="$(echo "$list" | awk -F'\t' '$1!="" && $1!="-"{print $1}' | sort -u | tr '\n' ' ')"
   recipients="$(echo "${DAILY_CLEANUP_SWAP_ALERT_TO:-$owners $main}" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
@@ -264,7 +292,7 @@ alert_swap() {
     now >"$SWAP_STAMP"; return 0
   fi
   for to in $recipients; do
-    if echo "$msg" | bash "$AGENT_MSG" "$from" "$to" - >/dev/null 2>&1; then sent=1; else log "ALERT swap to $to FAILED"; fi
+    if deliver_alert "$from" "$main" "$to" "$msg"; then sent=1; else log "ALERT swap to $to FAILED"; fi
   done
   now >"$SWAP_STAMP"
   log "ALERT swap ${mb} MB > ${SWAP_ALERT_GB} GB sent=$sent to=${recipients}suspects=$(echo "$list" | wc -l | tr -d ' ')"
