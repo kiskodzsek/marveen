@@ -56,7 +56,18 @@ grep -vx -- "\$2" "$SB/alive" > "$SB/alive.n" 2>/dev/null; mv "$SB/alive.n" "$SB
 STUB
 # agent-msg.sh stand-in: records "<from> <to> <stdin>".
 printf '#!/bin/bash\necho "$1 $2 $(cat)" >> "%s/msgs"\nexit 0\n' "$SB" > "$SB/agent-msg-stub"
-chmod +x "$SB/colima" "$SB/limactl" "$SB/kill" "$SB/agent-msg-stub"
+# tmux stand-in: sessions from $SB/tmux.sessions, a pane's text from $SB/pane-<id>, its pid from $SB/panepid-<id>.
+cat > "$SB/tmux" <<STUB
+#!/bin/bash
+case "\$1" in
+  ls) cat "$SB/tmux.sessions" 2>/dev/null ;;
+  capture-pane) cat "$SB/pane-\${4#agent-}" 2>/dev/null ;;
+  display-message) cat "$SB/panepid-\${4#agent-}" 2>/dev/null ;;
+esac
+STUB
+# restart stand-in: records "restart <id>".
+printf '#!/bin/bash\necho "restart $1" >> "%s/calls"\n' "$SB" > "$SB/restart-stub"
+chmod +x "$SB/colima" "$SB/limactl" "$SB/kill" "$SB/agent-msg-stub" "$SB/tmux" "$SB/restart-stub"
 
 reset() {
   cp "$SB/ps.base" "$SB/ps"
@@ -67,7 +78,8 @@ state() { echo "$1 $(( $(date +%s) - ${2:-0} )) $3" > "$SB/store/.host-state"; }
 run() {
   OUT="$(MARVEEN_STORE="$SB/store" MEM_RELIEF_INSTALL_DIR="$SB/install" MEM_RELIEF_PS="$SB/ps" \
     MEM_RELIEF_COLIMA="$SB/colima" MEM_RELIEF_LIMACTL="$SB/limactl" MEM_RELIEF_KILL="$SB/kill" \
-    MEM_RELIEF_AGENT_MSG="$SB/agent-msg-stub" MEM_RELIEF_SWAP_MB="${SWAP:-0}" MEM_RELIEF_KILL_WAIT=2 \
+    MEM_RELIEF_AGENT_MSG="$SB/agent-msg-stub" MEM_RELIEF_TMUX="$SB/tmux" MEM_RELIEF_RESTART="$SB/restart-stub" \
+    MEM_RELIEF_PSCPU="$SB/pscpu" MEM_RELIEF_SWAP_MB="${SWAP:-0}" MEM_RELIEF_KILL_WAIT=2 \
     MEM_RELIEF_COLIMA_WAIT=5 "$@" bash "$MR" 2>&1)"; RC=$?
 }
 calls() { cat "$SB/calls" 2>/dev/null; }
@@ -191,6 +203,56 @@ check "DRY: the leak is named, nothing is signalled, no message" \
 leak; SWAP=23000 run
 check "a ps fixture without MEM_RELIEF_TOP reads no live footprint: only the Aerial wallpaper (by name)" \
   "$(ok -n "$(calls | grep -x 'kill -TERM 728')" -a -z "$(calls | grep -E 'kill -[A-Z]+ (40542|901)$')")" "$(calls | tr '\n' ' ')"
+
+echo "== idle agents (2c: nothing known to stop, swap over 12 GB; Klodel 26862)"
+idle() {
+  printf '    1     0 /sbin/launchd\n' > "$SB/ps"; : > "$SB/alive"
+  rm -f "$SB/calls" "$SB/msgs" "$SB/store/.mem-relief.last" "$SB/store/mem-relief.log" "$SB/store/.host-state"
+  printf 'agent-juro\nagent-dave\nagent-klodel\nagent-radar\nagent-lex\nagent-mira\nagent-viktor\nklodel-channels\n' > "$SB/tmux.sessions"
+  for a in juro dave klodel radar lex mira viktor; do printf 'done.\n\xe2\x94\x80\xe2\x94\x80\n\xe2\x9d\xaf\xc2\xa0\n\xe2\x94\x80\xe2\x94\x80\n  bypass permissions on\n' > "$SB/pane-$a"; done
+  printf 'working\n✻ Rendering… (esc to interrupt)\n\xe2\x9d\xaf \n' > "$SB/pane-radar"
+  i=10; for a in juro dave klodel radar lex mira viktor; do i=$((i+10)); echo "$((i*100))" > "$SB/panepid-$a"; done
+  # Dave's pane (3000) runs claude (3001) and a render it started (3002, 95% CPU); the others only claude.
+  cat > "$SB/pscpu" <<'EOF2'
+ 2000     1   0.0 -zsh
+ 2001  2000   4.0 /opt/homebrew/bin/claude --continue
+ 3000     1   0.0 -zsh
+ 3001  3000   3.0 /opt/homebrew/bin/claude --continue
+ 3002  3001  95.0 python3 render.py
+ 6000     1   0.0 -zsh
+ 6001  6000   2.0 /opt/homebrew/bin/claude --continue
+ 7000     1   0.0 -zsh
+ 7001  7000   1.0 /opt/homebrew/bin/claude --continue
+ 8000     1   0.0 -zsh
+ 8001  8000   1.0 /opt/homebrew/bin/claude --continue
+ 8002  8001   0.0 /bin/zsh -c source /Users/x/marveen/agents/viktor/.claude-config/shell-snapshots/snapshot-zsh-1.sh && sleep 600
+EOF2
+}
+idle; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP=""
+check "swap 13 GB, nothing known to stop -> idle agents restart, at most 3" \
+  "$(ok "$RC" = 0 -a "$(calls | grep -c '^restart ')" = 3)" "rc=$RC $(calls | tr '\n' ' ') $(logf)"
+check "the main agent (klodel) is never restarted" "$(ok -z "$(calls | grep -x 'restart klodel')")" "$(calls | tr '\n' ' ')"
+check "a busy pane (esc to interrupt) is not restarted" "$(ok -z "$(calls | grep -x 'restart radar')")" "$(calls | tr '\n' ' ')"
+check "an idle prompt with a busy process under it (Dave's render, 95% CPU) is kept, IDLE-KEEP logged" \
+  "$(ok -z "$(calls | grep -x 'restart dave')" -a -n "$(logf | grep 'IDLE-KEEP dave')")" "$(calls | tr '\n' ' ') $(logf)"
+check "the restarted ones are juro, lex, mira (tmux order), named to the main agent only" \
+  "$(ok "$(calls | grep '^restart ' | tr '\n' ' ')" = "restart juro restart lex restart mira " -a "$(grep -c . "$SB/msgs")" = 1 -a -n "$(grep '^klodel klodel .*tétlen ágens újraindítva: juro, lex, mira' "$SB/msgs")")" "$(calls | tr '\n' ' ') $(cat "$SB/msgs" 2>/dev/null)"
+idle; SWAP=11500 run
+check "swap 11.2 GB (over the 11 GB trigger, under 12 GB) -> no restart" "$(ok -z "$(calls | grep '^restart ')")" "$(calls | tr '\n' ' ')"
+idle; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP="juro lex"
+check "MEM_RELIEF_IDLE_SKIP keeps the named agents; viktor is kept by its running Bash call (0% CPU)" \
+  "$(ok "$(calls | grep '^restart ' | tr '\n' ' ')" = "restart mira " -a -n "$(logf | grep 'IDLE-KEEP viktor')")" "$(calls | tr '\n' ' ') $(logf)"
+idle; rm -f "$SB/pscpu"; printf ' 2000     1   0.0 -zsh\n' > "$SB/pscpu"; for a in juro lex mira viktor; do echo 2000 > "$SB/panepid-$a"; done; echo 2000 > "$SB/panepid-dave"; SWAP=13000 run
+check "by default dave is never restarted (MEM_RELIEF_IDLE_SKIP default), even when idle" \
+  "$(ok -z "$(calls | grep -x 'restart dave')" -a -z "$(logf | grep 'IDLE-KEEP dave')" -a -n "$(calls | grep -x 'restart juro')")" "$(calls | tr '\n' ' ') $(logf)"
+idle; rm -f "$SB/panepid-juro"; SWAP=13000 run env MEM_RELIEF_IDLE_MAX=1 MEM_RELIEF_IDLE_SKIP=""
+check "an unknown pane pid counts as busy: juro is kept, lex restarts (IDLE_MAX 1)" "$(ok "$(calls | grep '^restart ' | tr '\n' ' ')" = "restart lex ")" "$(calls | tr '\n' ' ') $(logf)"
+idle; cp "$SB/ps.base" "$SB/ps"; printf '%s\n' 200 201 202 300 301 302 > "$SB/alive"; SWAP=13000 run
+check "when the VM or a dev server was stopped, no agent is restarted" "$(ok -n "$(calls | grep -x 'colima stop')" -a -z "$(calls | grep '^restart ')")" "$(calls | tr '\n' ' ')"
+idle; SWAP=13000 run env MEM_RELIEF_DRY=1 MEM_RELIEF_IDLE_SKIP=""
+check "DRY: no restart, the log names them" "$(ok -z "$(calls | grep '^restart ')" -a -n "$(logf | grep 'DRY would stop: tétlen ágens újraindítva: juro (dry), lex (dry), mira (dry)')")" "$(logf)"
+idle; printf '#!/bin/bash\nexit 1\n' > "$SB/restart-fail"; chmod +x "$SB/restart-fail"; SWAP=13000 run env MEM_RELIEF_RESTART="$SB/restart-fail" MEM_RELIEF_IDLE_MAX=1
+check "a failed restart -> FAIL in the log, rc 1" "$(ok "$RC" = 1 -a -n "$(logf | grep 'FAIL restart idle agent juro')")" "rc=$RC $(logf)"
 
 echo "== installer"
 PL="$SB/la/com.marveen.mem-relief.plist"

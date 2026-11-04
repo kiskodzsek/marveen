@@ -38,6 +38,16 @@
 #      when needed; a static wallpaper keeps the Aerial one from coming back.
 #      A process over MEM_RELIEF_LARGE_GB (6) GB that is none of the above is NOT stopped: it is named
 #      in the message (LARGE in the log), so its owner and the main agent see it.
+#   2c. only when 1-2b stopped nothing and swap used is over MEM_RELIEF_IDLE_SWAP_GB (12) GB (Klodel
+#      26838/26862: on 2026-11-04 he freed memory by restarting five idle agents by hand): up to
+#      MEM_RELIEF_IDLE_MAX (3) idle sub-agents are restarted through the dashboard
+#      (POST /api/agents/<id>/restart, which keeps the conversation: --continue). Idle = the
+#      tmux pane agent-<id> stands at an empty prompt (the scripts/idle-check.py test) AND no
+#      process under the pane uses MEM_RELIEF_IDLE_CPU (10) % CPU or more and no Bash tool call of
+#      the agent is still running (a shell-snapshots/snapshot-* shell), so a render, a build or a
+#      background wait is never cut off. The main agent and the ids in MEM_RELIEF_IDLE_SKIP
+#      (default "dave": his renders run on his own seat, as ALWAYS_BUSY in scripts/idle-check.py)
+#      are never restarted. The restarted ones are named to the main agent.
 #   3. one inter-agent message to each owner (the agents/<id>/ path in the process chain) and the
 #      main agent, naming what was stopped and why. A line per action in store/mem-relief.log.
 # MEM_RELIEF_DRY=1: decide and log what it would do, stop nothing, send nothing, and leave the
@@ -45,7 +55,8 @@
 # (measured 2026-11-03 18:16 on the live store; Viktor 25498).
 #
 # Exit: 0 (nothing to do, or done), 1 (an action failed; the rest still ran).
-# Test hooks: MEM_RELIEF_TOP (a `top -l 1 -stats pid,mem` file), MEM_RELIEF_NOW, MEM_RELIEF_KEEP_MAX, MEM_RELIEF_KEEP_MAX_SECS, MEM_RELIEF_SWAP_MB, MEM_RELIEF_PS (a `ps -axo pid=,ppid=,command=`
+# Test hooks: MEM_RELIEF_TMUX (a tmux stand-in), MEM_RELIEF_PSCPU (a `ps -axo pid=,ppid=,%cpu=,command=`
+# file), MEM_RELIEF_RESTART (a command run with the agent id instead of the dashboard call), MEM_RELIEF_TOP (a `top -l 1 -stats pid,mem` file), MEM_RELIEF_NOW, MEM_RELIEF_KEEP_MAX, MEM_RELIEF_KEEP_MAX_SECS, MEM_RELIEF_SWAP_MB, MEM_RELIEF_PS (a `ps -axo pid=,ppid=,command=`
 # file), MEM_RELIEF_COLIMA, MEM_RELIEF_LIMACTL, MEM_RELIEF_KILL, MEM_RELIEF_AGENT_MSG,
 # MEM_RELIEF_INSTALL_DIR, MARVEEN_STORE.
 set -uo pipefail
@@ -65,6 +76,11 @@ KEEP_MAX="${MEM_RELIEF_KEEP_MAX:-2}"
 KEEP_MAX_SECS="${MEM_RELIEF_KEEP_MAX_SECS:-28800}"
 DECODER_GB="${MEM_RELIEF_DECODER_GB:-4}"
 LARGE_GB="${MEM_RELIEF_LARGE_GB:-6}"
+IDLE_SWAP_GB="${MEM_RELIEF_IDLE_SWAP_GB:-12}"
+IDLE_MAX="${MEM_RELIEF_IDLE_MAX:-3}"
+IDLE_CPU="${MEM_RELIEF_IDLE_CPU:-10}"
+IDLE_SKIP="${MEM_RELIEF_IDLE_SKIP-dave}"
+TMUX_BIN="${MEM_RELIEF_TMUX:-$(command -v tmux || echo /opt/homebrew/bin/tmux)}"
 COLIMA="${MEM_RELIEF_COLIMA:-$(command -v colima || echo /opt/homebrew/bin/colima)}"
 LIMACTL="${MEM_RELIEF_LIMACTL:-$(command -v limactl || echo /opt/homebrew/bin/limactl)}"
 KILL="${MEM_RELIEF_KILL:-kill}"
@@ -107,6 +123,40 @@ stop_pids() {
     sleep 1; w=$((w + 1))
   done
   if (( alive )); then for p in "$@"; do "$KILL" -KILL "$p" 2>/dev/null; done; fi
+}
+
+# Is agent-<id> idle? An empty prompt in the pane (as scripts/idle-check.py reads it) and nothing
+# busy under the pane (CPU >= IDLE_CPU %, from a `ps` snapshot with %cpu).
+pane_idle() {
+  local pane last
+  pane="$("$TMUX_BIN" capture-pane -p -t "agent-$1" 2>/dev/null)" || return 1
+  [[ -n "$pane" ]] || return 1
+  echo "$pane" | grep -qE 'esc to interrupt|to interrupt\)' && return 1
+  # Claude Code draws the prompt as "❯" + a no-break space (U+00A0, measured 2026-11-04 on agent-juro);
+  # [[:space:]] does not match it, Python's strip() in idle-check.py does.
+  last="$(echo "$pane" | sed $'s/\xc2\xa0/ /g' | grep -v '^[[:space:]]*$' | tail -4)"
+  echo "$last" | grep -qx '[[:space:]]*❯[[:space:]]*' || return 1
+  return 0
+}
+pane_busy() {
+  local root p
+  root="$("$TMUX_BIN" display-message -p -t "agent-$1" '#{pane_pid}' 2>/dev/null)"
+  [[ "$root" =~ ^[0-9]+$ ]] || return 0   # unknown = busy: never restart blind
+  for p in $(PSDATA="$PSCPU" descendants "$root" | sort -u); do
+    [[ "$p" == "$root" ]] && continue
+    # Busy: CPU at or over the limit, or a Bash tool call of the agent still running (Claude Code runs
+    # each one as a shell sourcing .claude-config/shell-snapshots/snapshot-*; a background wait on a
+    # remote job sleeps at 0% CPU and would be cut off by the restart).
+    echo "$PSCPU" | awk -v p="$p" -v lim="$IDLE_CPU" '$1==p && ($3+0 >= lim || /shell-snapshots\/snapshot-/) {f=1} END{exit !f}' && return 0
+  done
+  return 1
+}
+restart_agent() {
+  if [[ -n "${MEM_RELIEF_RESTART:-}" ]]; then "$MEM_RELIEF_RESTART" "$1"; return; fi
+  local tok; tok="$(cat "$STORE/.dashboard-token" 2>/dev/null)"
+  [[ -n "$tok" ]] || return 1
+  curl -s -f -m 60 -X POST "http://localhost:${MEM_RELIEF_PORT:-3420}/api/agents/$1/restart" \
+    -H "Authorization: Bearer $tok" -H "Content-Type: application/json" --data-binary '{}' >/dev/null
 }
 
 descendants() {
@@ -192,6 +242,25 @@ main() {
         large_lines+=("$what (pid $pid, ${who})"); owners+=" $who" ;;
     esac
   done <<< "$(echo "$list" | awk -F'\t' '$3=="Aerial wallpaper"' ; echo "$list" | awk -F'\t' '$3!="Aerial wallpaper"')"
+
+  # 2c. Idle agents, only when nothing above was stopped and the swap is still high.
+  local restarted=() mb a n=0 main_id=""
+  mb="$(swap_mb)"
+  [[ -f "$INSTALL_DIR/.env" ]] && main_id="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
+  if (( ${#done_lines[@]} == 0 && mb > IDLE_SWAP_GB * 1024 )); then
+    if [[ -n "${MEM_RELIEF_PSCPU:-}" ]]; then PSCPU="$(cat "$MEM_RELIEF_PSCPU" 2>/dev/null)"; else PSCPU="$(ps -axo pid=,ppid=,%cpu=,command= 2>/dev/null)"; fi
+    for a in $("$TMUX_BIN" ls -F '#{session_name}' 2>/dev/null | sed -n 's/^agent-\([a-z0-9_-]*\)$/\1/p'); do
+      (( n < IDLE_MAX )) || break
+      [[ "$a" == "$main_id" ]] && continue
+      [[ " $IDLE_SKIP " == *" $a "* ]] && continue
+      pane_idle "$a" || continue
+      if pane_busy "$a"; then log "IDLE-KEEP $a (a process under the pane is busy)"; continue; fi
+      n=$((n + 1))
+      if [[ "$DRY" == "1" ]]; then restarted+=("$a (dry)"); continue; fi
+      if restart_agent "$a"; then log "RESTART idle agent $a"; restarted+=("$a"); else log "FAIL restart idle agent $a"; rc=1; fi
+    done
+    (( ${#restarted[@]} )) && done_lines+=("tétlen ágens újraindítva: $(printf '%s, ' "${restarted[@]}" | sed 's/, $//')")
+  fi
 
   # Only a real pass starts the cooldown (MEM_RELIEF_DRY above).
   [[ "$DRY" == "1" ]] || now >"$STAMP"
