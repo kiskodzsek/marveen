@@ -51,11 +51,13 @@
 #      Limits (Viktor 26889 F1: a restarted agent is idle again at once, and on 2026-11-04 20:28-21:08
 #      five passes in a row found no culprit at 16-23 GB swap, so without them the same agents would
 #      restart every 10 minutes, each --continue re-reading its whole conversation):
-#        - one agent at most once per MEM_RELIEF_IDLE_GAP_SECS (6 h; store/.mem-relief-idle/<id>);
+#        - one agent at most once per MEM_RELIEF_IDLE_GAP_SECS (6 h; store/.mem-relief-idle/id-<id>);
 #        - at most MEM_RELIEF_IDLE_DAY_MAX (6) restarts a day, all agents together;
 #        - no new round while the swap has not dropped since the last round (within the 6 h);
 #        - an agent with an undelivered message, or one delivered in the last 15 min, is not idle
 #          (a restart can lose what arrived just before it).
+#      The state is written BEFORE the restart, and a write that fails stops the round (Viktor 26919
+#      LOW-1: on a full disk the limits would otherwise never be recorded, the very day they matter).
 #   3. one inter-agent message to each owner (the agents/<id>/ path in the process chain) and the
 #      main agent, naming what was stopped and why. A line per action in store/mem-relief.log.
 # MEM_RELIEF_DRY=1: decide and log what it would do, stop nothing, send nothing, and leave the
@@ -192,7 +194,7 @@ restart_agent() {
 # (busy: never restart blind).
 fresh_inbox() {
   if [[ -n "${MEM_RELIEF_INBOX:-}" ]]; then "$MEM_RELIEF_INBOX" "$1"; return; fi
-  dash "http://localhost:${MEM_RELIEF_PORT:-3420}/api/messages?agent=$1" 2>/dev/null | python3 -I -c '
+  dash "http://localhost:${MEM_RELIEF_PORT:-3420}/api/messages?agent=$1&limit=200" 2>/dev/null | python3 -I -c '
 import json, sys, time
 try:
     d = json.load(sys.stdin); d = d if isinstance(d, list) else d.get("messages", [])
@@ -200,7 +202,7 @@ except Exception:
     print(1); sys.exit()
 t = time.time()
 print(sum(1 for m in d if m.get("to_agent") == sys.argv[1] and (m.get("status") == "pending"
-      or (m.get("status") == "delivered" and t - (m.get("created_at") or 0) < 900))))' "$1" 2>/dev/null || echo 1
+      or (m.get("status") == "delivered" and t - (m.get("delivered_at") or m.get("created_at") or 0) < 900))))' "$1" 2>/dev/null || echo 1
 }
 
 descendants() {
@@ -308,21 +310,21 @@ main() {
       (( n < IDLE_MAX && used + n < IDLE_DAY_MAX )) || break
       [[ "$a" == "$main_id" ]] && continue
       [[ " $IDLE_SKIP " == *" $a "* ]] && continue
-      local la; la="$(cat "$IDLE_DIR/$a" 2>/dev/null)"
+      local la; la="$(cat "$IDLE_DIR/id-$a" 2>/dev/null)"
       if [[ "$la" =~ ^[0-9]+$ ]] && (( t - la < IDLE_GAP )); then log "IDLE-KEEP $a (restarted $(( (t - la) / 60 )) min ago)"; continue; fi
       pane_idle "$a" || continue
       if pane_busy "$a"; then log "IDLE-KEEP $a (a process under the pane is busy)"; continue; fi
       if [[ "$(fresh_inbox "$a")" != "0" ]]; then log "IDLE-KEEP $a (a message is pending or just delivered)"; continue; fi
+      if [[ "$DRY" == "1" ]]; then n=$((n + 1)); restarted+=("$a (dry)"); continue; fi
+      # The limits first, the restart after: a state that cannot be written stops the round.
+      if ! { mkdir -p "$IDLE_DIR" && echo "$t" > "$IDLE_DIR/id-$a" && echo "$day $(( used + n + 1 ))" > "$IDLE_DIR/day" \
+             && echo "$t $mb" > "$IDLE_DIR/last-round"; } 2>/dev/null; then
+        log "IDLE-SKIP cannot write the restart state in $IDLE_DIR: no restart"; rc=1; break
+      fi
       n=$((n + 1))
-      if [[ "$DRY" == "1" ]]; then restarted+=("$a (dry)"); continue; fi
-      if restart_agent "$a"; then
-        log "RESTART idle agent $a"; restarted+=("$a")
-        mkdir -p "$IDLE_DIR" && echo "$t" > "$IDLE_DIR/$a"
+      if restart_agent "$a"; then log "RESTART idle agent $a"; restarted+=("$a")
       else log "FAIL restart idle agent $a"; rc=1; fi
     done
-    if [[ "$DRY" != "1" ]] && (( ${#restarted[@]} )); then
-      echo "$day $(( used + ${#restarted[@]} ))" > "$IDLE_DIR/day"; echo "$t $mb" > "$IDLE_DIR/last-round"
-    fi
     (( ${#restarted[@]} )) && done_lines+=("tétlen ágens újraindítva: $(printf '%s, ' "${restarted[@]}" | sed 's/, $//')")
   fi
 

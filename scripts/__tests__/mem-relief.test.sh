@@ -284,7 +284,7 @@ idle; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP=""
 check "INFO-2: every tmux target is the exact form =agent-<id>:" \
   "$(ok -n "$(cat "$SB/targets")" -a -z "$(grep -v '^tmux-target =agent-[a-z0-9_-]*:$' "$SB/targets")")" "$(sort -u "$SB/targets" | tr '\n' ' ')"
 check "a round writes the stamps: one per restarted agent, the day count, the round's swap" \
-  "$(ok -f "$SB/store/.mem-relief-idle/juro" -a "$(cut -d' ' -f2 "$SB/store/.mem-relief-idle/day")" = 3 -a "$(cut -d' ' -f2 "$SB/store/.mem-relief-idle/last-round")" = 13000)" "$(ls -A "$SB/store/.mem-relief-idle" 2>/dev/null | tr '\n' ' ')"
+  "$(ok -f "$SB/store/.mem-relief-idle/id-juro" -a "$(cut -d' ' -f2 "$SB/store/.mem-relief-idle/day")" = 3 -a "$(cut -d' ' -f2 "$SB/store/.mem-relief-idle/last-round")" = 13000)" "$(ls -A "$SB/store/.mem-relief-idle" 2>/dev/null | tr '\n' ' ')"
 T1=$(( $(date +%s) + 700 )); rm -f "$SB/calls" "$SB/store/.mem-relief.last"; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP="" MEM_RELIEF_NOW=$T1
 check "F1 (c): 10 min later, the swap not lower -> no new round, IDLE-SKIP logged" \
   "$(ok -z "$(calls | grep '^restart ')" -a -n "$(logf | grep 'IDLE-SKIP the swap did not drop since the last round (13000 MB -> 13000 MB)')")" "$(calls | tr '\n' ' ') $(logf | tail -3)"
@@ -309,6 +309,18 @@ SWAP=13000 run env MEM_RELIEF_IDLE_SKIP="" MEM_RELIEF_RESTART="" MEM_RELIEF_IDLE
 check "INFO-1: the restart call sends the token on curl's stdin (-K -), never on its command line" \
   "$(ok -n "$(grep -- '-K - -X POST http://localhost:3420/api/agents/juro/restart' "$SB/curl.args")" -a -z "$(grep TESTTOKEN "$SB/curl.args")" -a -n "$(grep 'Bearer TESTTOKEN-not-real-42' "$SB/curl.stdin")")" "$(cat "$SB/curl.args" 2>/dev/null)"
 rm -f "$SB/curl" "$SB/store/.dashboard-token" "$SB/curl.args" "$SB/curl.stdin"
+
+echo "== Viktor 26919 LOW-1: the state is written before the restart"
+idle; mkdir -p "$SB/store/.mem-relief-idle"; chmod 500 "$SB/store/.mem-relief-idle"; SWAP=13000 run env MEM_RELIEF_IDLE_SKIP=""
+chmod 700 "$SB/store/.mem-relief-idle"
+check "an unwritable state dir -> no restart at all, IDLE-SKIP logged, rc 1" \
+  "$(ok -z "$(calls | grep '^restart ')" -a "$RC" = 1 -a -n "$(logf | grep 'IDLE-SKIP cannot write the restart state')")" "rc=$RC $(calls | tr '\n' ' ') $(logf | tail -2)"
+idle; printf '#!/bin/bash\necho "restart $1" >> "%s/calls"; cat "%s/store/.mem-relief-idle/id-$1" > /dev/null && echo "stamp-before $1" >> "%s/calls"\n' "$SB" "$SB" "$SB" > "$SB/restart-check"; chmod +x "$SB/restart-check"
+SWAP=13000 run env MEM_RELIEF_IDLE_SKIP="" MEM_RELIEF_RESTART="$SB/restart-check" MEM_RELIEF_IDLE_MAX=2
+check "each agent's stamp and the day count exist when its restart runs" \
+  "$(ok -n "$(calls | grep -x 'stamp-before juro')" -a -n "$(calls | grep -x 'stamp-before lex')" -a "$(cut -d' ' -f2 "$SB/store/.mem-relief-idle/day")" = 2)" "$(calls | tr '\n' ' ')"
+check "INFO-1: the per-agent stamp is id-<id>, so a session named 'day' cannot overwrite the day count" \
+  "$(ok -f "$SB/store/.mem-relief-idle/id-juro" -a ! -e "$SB/store/.mem-relief-idle/juro")" "$(ls -A "$SB/store/.mem-relief-idle" | tr '\n' ' ')"
 
 echo "== installer"
 PL="$SB/la/com.marveen.mem-relief.plist"
