@@ -1513,6 +1513,59 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_otel_spans_trace ON otel_spans(trace_id, start_ms)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_otel_spans_agent ON otel_spans(agent_id, start_ms)`)
 
+  // --- Content calendar (CONTENTCAL1104, marketing infra I3, card b84e1760) ---
+  // One row = one social post, keyed by its campaign code. The state machine,
+  // the approval binding and the field rules live in src/content-calendar.ts;
+  // every write goes through it, and every change leaves a content_item_events
+  // row (who, when, which fields, from/to status). No DELETE path on purpose:
+  // a dropped post is status 'elvetve'.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS content_items (
+      id TEXT PRIMARY KEY,
+      brand TEXT NOT NULL,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL,
+      channels TEXT NOT NULL DEFAULT '[]',
+      scheduled_at TEXT,
+      final_text TEXT,
+      hook TEXT,
+      link TEXT,
+      media TEXT NOT NULL DEFAULT '[]',
+      source_render TEXT,
+      ai_status TEXT,
+      license TEXT,
+      lex_gate_required INTEGER,
+      lex_gate_ref TEXT,
+      brief TEXT,
+      notes TEXT,
+      content_hash TEXT,
+      approval_id TEXT,
+      approved_at INTEGER,
+      metricool_date TEXT,
+      metricool_networks TEXT,
+      metricool_readback TEXT,
+      readback_matches INTEGER,
+      live_url TEXT,
+      created_by TEXT NOT NULL,
+      updated_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_content_items_status ON content_items(status, scheduled_at)`)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS content_item_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_id TEXT NOT NULL,
+      at INTEGER NOT NULL,
+      actor TEXT NOT NULL,
+      from_status TEXT,
+      to_status TEXT,
+      fields TEXT NOT NULL DEFAULT '[]'
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_content_item_events_item ON content_item_events(item_id, at)`)
+
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
