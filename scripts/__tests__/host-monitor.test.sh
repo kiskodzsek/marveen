@@ -53,7 +53,7 @@ mon() {
   echo "$free" > "$SB/level"
   OUT="$(env PATH="$SB/bin:$PATH" MARVEEN_STORE="$SB/store" \
     MEMGATE_PROC_MEMINFO="$SB/no-such" MEMGATE_SYSCTL="$SB/sysctl" \
-    HOSTMON_SWAP_PCT="${SWAP:-10}" HOSTMON_DF_KB="${DFKB:-104857600}" HOSTMON_LOAD1="${LOAD:-1.0}" HOSTMON_NCPU=12 \
+    HOSTMON_SWAP_PCT="${SWAP-10}" HOSTMON_SWAP_MB="${SWAPMB:-}" HOSTMON_DF_KB="${DFKB:-104857600}" HOSTMON_LOAD1="${LOAD:-1.0}" HOSTMON_NCPU=12 \
     HOSTMON_THERM="${THERM:-Note: No thermal warning level has been recorded}" HOSTMON_NOW="$NOW" \
     TELEGRAM_ENV="$SB/tg/.env" MARVEEN_ALERT_CHAT_ID=111 HOSTMON_MAIN_AGENT=mainbot \
     bash "$SB/scripts/host-monitor.sh" "$@" 2>&1)"; RC=$?
@@ -69,6 +69,14 @@ DFKB=$((2*1048576)) mon 60; check "disk 2 GiB -> critical" "$(band_is critical; 
 SWAP=80 mon 60;         check "swap 80% -> warn" "$(band_is warn; echo $?)" "$OUT"
 SWAP=95 mon 20;         check "swap 95% with free 20% -> critical" "$(band_is critical; echo $?)" "$OUT"
 SWAP=95 mon 50;         check "swap 95% with free 50% -> only warn" "$(band_is warn; echo $?)" "$OUT"
+# macOS: no fixed swap total, so the % says nothing (98% at 23 GB on 2026-11-04); GB decides (Klodel 26862).
+SWAP="" SWAPMB=2000 mon 60;  check "macOS swap 2 GB -> ok" "$(band_is ok; echo $?)" "$OUT"
+SWAP="" SWAPMB=9000 mon 60;  check "macOS swap 8 GB -> warn, reason 'swap 8 GB'" "$(ok "$(cut -d' ' -f3- "$STATE")" = "swap 8 GB")" "$(cat "$STATE") | $OUT"
+SWAP="" SWAPMB=23000 mon 60; check "macOS swap 22 GB with free 60% -> only warn (heavy jobs still pass on free memory)" "$(band_is warn; echo $?)" "$OUT"
+SWAP="" SWAPMB=13000 mon 20; check "macOS swap 12 GB with free 20% -> critical, 'swap 12 GB with free memory 20%'" \
+  "$(ok "$(cut -d' ' -f1 "$STATE")" = critical -a -n "$(grep 'swap 12 GB with free memory 20%' "$STATE")")" "$(cat "$STATE")"
+SWAP=99 SWAPMB=500 mon 60;   check "with a fixed total (Linux / the % hook) the % rule still counts" "$(band_is warn; echo $?)" "$OUT"
+check "the status line carries swapgb" "$(ok -n "$(echo "$OUT" | grep 'swapgb=0 ')")" "$OUT"
 LOAD=30.5 mon 60;       check "load 30.5 on 12 CPUs -> warn" "$(band_is warn; echo $?)" "$OUT"
 THERM="Thermal warning level set to 2." mon 60; check "a recorded thermal warning -> critical" "$(band_is critical; echo $?)" "$OUT"
 mon bad;                check "unreadable memory -> warn (never ok by silence)" "$(ok -n "$(grep '^warn .*memory unreadable' "$STATE")")" "$(cat "$STATE")"
@@ -122,6 +130,10 @@ check "fresh warn state -> heavy job not started (75)" "$(ok "$RC" = 75 -a ! -e 
 check "...and says why" "$(ok -n "$(echo "$OUT" | grep 'host-monitor says warn (load 20.1 on 8 CPUs)')")" "$OUT"
 echo "warn $(date +%s) swap 80%" > "$STATE"; hj "$SB/hj1s"
 check "fresh swap-only warn, free memory 70% >= --min-free -> the job runs (Patrik TG 11833)" "$(ok "$RC" = 0 -a -e "$SB/hj1s")" "rc=$RC $OUT"
+echo "warn $(date +%s) swap 22 GB" > "$STATE"; hj "$SB/hj1g"
+check "fresh macOS swap-only warn ('swap 22 GB'), free memory 70% -> the job runs" "$(ok "$RC" = 0 -a -e "$SB/hj1g")" "rc=$RC $OUT"
+echo "critical $(date +%s) swap 12 GB with free memory 20%" > "$STATE"; hj "$SB/hj1c"
+check "the critical GB form ('... with free memory N%') still blocks" "$(ok "$RC" = 75 -a ! -e "$SB/hj1c")" "rc=$RC $OUT"
 echo "warn $(( $(date +%s) - 900 )) swap 80%" > "$STATE"; hj "$SB/hj2"
 check "stale state (15 min) is ignored -> the job runs" "$(ok "$RC" = 0 -a -e "$SB/hj2")" "rc=$RC $OUT"
 echo "ok $(date +%s) " > "$STATE"; hj "$SB/hj3"

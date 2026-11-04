@@ -31,6 +31,33 @@
 #      first MEM_RELIEF_KEEP_MAX (2) valid lines count; a bare port or anything else is ignored
 #      (and logged). The VM can never be kept. Every KEEP is logged.
 #      The worktree, its .next and node_modules stay; `npm run dev` brings it back.
+#   2b. a memory leak of macOS itself (scripts/swap-culprits.py, by footprint; 2026-11-04: the video
+#      decoder VTDecoderXPCService held 44 GB for its client, the Aerial wallpaper extension): the
+#      WallpaperAerialsExtension and a VTDecoderXPCService over MEM_RELIEF_DECODER_GB (4) GB get
+#      SIGTERM, SIGKILL after the wait. Both are stateless system services that launchd starts again
+#      when needed; a static wallpaper keeps the Aerial one from coming back.
+#      A process over MEM_RELIEF_LARGE_GB (6) GB that is none of the above is NOT stopped: it is named
+#      in the message (LARGE in the log), so its owner and the main agent see it.
+#   2c. only when 1-2b stopped nothing and swap used is over MEM_RELIEF_IDLE_SWAP_GB (12) GB (Klodel
+#      26838/26862: on 2026-11-04 he freed memory by restarting five idle agents by hand): up to
+#      MEM_RELIEF_IDLE_MAX (3) idle sub-agents are restarted through the dashboard
+#      (POST /api/agents/<id>/restart, which keeps the conversation: --continue). Idle = the
+#      tmux pane agent-<id> stands at an empty prompt (the scripts/idle-check.py test) AND no
+#      process under the pane uses MEM_RELIEF_IDLE_CPU (10) % CPU or more and no Bash tool call of
+#      the agent is still running (a shell-snapshots/snapshot-* shell), so a render, a build or a
+#      background wait is never cut off. The main agent and the ids in MEM_RELIEF_IDLE_SKIP
+#      (default "dave": his renders run on his own seat, as ALWAYS_BUSY in scripts/idle-check.py)
+#      are never restarted. The restarted ones are named to the main agent.
+#      Limits (Viktor 26889 F1: a restarted agent is idle again at once, and on 2026-11-04 20:28-21:08
+#      five passes in a row found no culprit at 16-23 GB swap, so without them the same agents would
+#      restart every 10 minutes, each --continue re-reading its whole conversation):
+#        - one agent at most once per MEM_RELIEF_IDLE_GAP_SECS (6 h; store/.mem-relief-idle/id-<id>);
+#        - at most MEM_RELIEF_IDLE_DAY_MAX (6) restarts a day, all agents together;
+#        - no new round while the swap has not dropped since the last round (within the 6 h);
+#        - an agent with an undelivered message, or one delivered in the last 15 min, is not idle
+#          (a restart can lose what arrived just before it).
+#      The state is written BEFORE the restart, and a write that fails stops the round (Viktor 26919
+#      LOW-1: on a full disk the limits would otherwise never be recorded, the very day they matter).
 #   3. one inter-agent message to each owner (the agents/<id>/ path in the process chain) and the
 #      main agent, naming what was stopped and why. A line per action in store/mem-relief.log.
 # MEM_RELIEF_DRY=1: decide and log what it would do, stop nothing, send nothing, and leave the
@@ -38,7 +65,9 @@
 # (measured 2026-11-03 18:16 on the live store; Viktor 25498).
 #
 # Exit: 0 (nothing to do, or done), 1 (an action failed; the rest still ran).
-# Test hooks: MEM_RELIEF_NOW, MEM_RELIEF_KEEP_MAX, MEM_RELIEF_KEEP_MAX_SECS, MEM_RELIEF_SWAP_MB, MEM_RELIEF_PS (a `ps -axo pid=,ppid=,command=`
+# Test hooks: MEM_RELIEF_INBOX (a command run with the agent id, printing its count of fresh messages),
+# MEM_RELIEF_TMUX (a tmux stand-in), MEM_RELIEF_PSCPU (a `ps -axo pid=,ppid=,%cpu=,command=`
+# file), MEM_RELIEF_RESTART (a command run with the agent id instead of the dashboard call), MEM_RELIEF_TOP (a `top -l 1 -stats pid,mem` file), MEM_RELIEF_NOW, MEM_RELIEF_KEEP_MAX, MEM_RELIEF_KEEP_MAX_SECS, MEM_RELIEF_SWAP_MB, MEM_RELIEF_PS (a `ps -axo pid=,ppid=,command=`
 # file), MEM_RELIEF_COLIMA, MEM_RELIEF_LIMACTL, MEM_RELIEF_KILL, MEM_RELIEF_AGENT_MSG,
 # MEM_RELIEF_INSTALL_DIR, MARVEEN_STORE.
 set -uo pipefail
@@ -56,6 +85,16 @@ COLIMA_WAIT="${MEM_RELIEF_COLIMA_WAIT:-60}"
 KILL_WAIT="${MEM_RELIEF_KILL_WAIT:-10}"
 KEEP_MAX="${MEM_RELIEF_KEEP_MAX:-2}"
 KEEP_MAX_SECS="${MEM_RELIEF_KEEP_MAX_SECS:-28800}"
+DECODER_GB="${MEM_RELIEF_DECODER_GB:-4}"
+LARGE_GB="${MEM_RELIEF_LARGE_GB:-6}"
+IDLE_SWAP_GB="${MEM_RELIEF_IDLE_SWAP_GB:-12}"
+IDLE_MAX="${MEM_RELIEF_IDLE_MAX:-3}"
+IDLE_CPU="${MEM_RELIEF_IDLE_CPU:-10}"
+IDLE_SKIP="${MEM_RELIEF_IDLE_SKIP-dave}"
+TMUX_BIN="${MEM_RELIEF_TMUX:-$(command -v tmux || echo /opt/homebrew/bin/tmux)}"
+IDLE_GAP="${MEM_RELIEF_IDLE_GAP_SECS:-21600}"
+IDLE_DAY_MAX="${MEM_RELIEF_IDLE_DAY_MAX:-6}"
+IDLE_DIR="$STORE/.mem-relief-idle"
 COLIMA="${MEM_RELIEF_COLIMA:-$(command -v colima || echo /opt/homebrew/bin/colima)}"
 LIMACTL="${MEM_RELIEF_LIMACTL:-$(command -v limactl || echo /opt/homebrew/bin/limactl)}"
 KILL="${MEM_RELIEF_KILL:-kill}"
@@ -72,7 +111,8 @@ swap_mb() {
   [[ "$v" =~ ^[0-9]+$ ]] && echo "$v" || echo 0
 }
 ps_snapshot() { if [[ -n "${MEM_RELIEF_PS:-}" ]]; then cat "$MEM_RELIEF_PS" 2>/dev/null; else ps -axo pid=,ppid=,command= 2>/dev/null; fi; }
-culprits() { python3 -I "$HERE/swap-culprits.py" ${MEM_RELIEF_PS:+--ps "$MEM_RELIEF_PS"} 2>/dev/null; }
+culprits() { python3 -I "$HERE/swap-culprits.py" ${MEM_RELIEF_PS:+--ps "$MEM_RELIEF_PS"} ${MEM_RELIEF_TOP:+--top "$MEM_RELIEF_TOP"} \
+  --decoder-gb "$DECODER_GB" --large-gb "$LARGE_GB" 2>/dev/null; }
 
 # Why act now? Prints the reason, or nothing.
 trigger() {
@@ -85,6 +125,84 @@ trigger() {
   (( $(now) - ts <= STATE_MAX_AGE )) || return
   [[ "$rest" =~ (memory|swap|disk) ]] || return
   echo "host-monitor critical: $rest"
+}
+
+# SIGTERM to the given pids, SIGKILL to what is left after KILL_WAIT s.
+stop_pids() {
+  local p w=0 alive=1
+  for p in "$@"; do "$KILL" -TERM "$p" 2>/dev/null; done
+  while (( w < KILL_WAIT )); do
+    alive=0; for p in "$@"; do "$KILL" -0 "$p" 2>/dev/null && alive=1; done
+    (( alive )) || break
+    sleep 1; w=$((w + 1))
+  done
+  if (( alive )); then for p in "$@"; do "$KILL" -KILL "$p" 2>/dev/null; done; sleep 1; fi
+  # Viktor 26868 LOW-1: say so when a pid survives (EPERM, or alive even after KILL).
+  for p in "$@"; do "$KILL" -0 "$p" 2>/dev/null && return 1; done
+  return 0
+}
+
+# Viktor 26868 LOW-2: right before the signal, the pid must still run the expected program (argv0
+# ends with /<name>) in a FRESH snapshot: the ps and top passes are seconds old by now (the dev
+# servers take up to 10 s each), and a pid can be reused.
+argv0_is() {
+  local c
+  c="$(ps_snapshot | awk -v p="$1" '$1==p {print $3; exit}')"
+  [[ "$c" == */"$2" ]]
+}
+
+# Is agent-<id> idle? An empty prompt in the pane (as scripts/idle-check.py reads it) and nothing
+# busy under the pane (CPU >= IDLE_CPU %, from a `ps` snapshot with %cpu).
+pane_idle() {
+  local pane last
+  # "=agent-<id>:" = exactly that session (Viktor 26889 INFO-2: a bare name also matches a prefix).
+  pane="$("$TMUX_BIN" capture-pane -p -t "=agent-$1:" 2>/dev/null)" || return 1
+  [[ -n "$pane" ]] || return 1
+  echo "$pane" | grep -qE 'esc to interrupt|to interrupt\)' && return 1
+  # Claude Code draws the prompt as "❯" + a no-break space (U+00A0, measured 2026-11-04 on agent-juro);
+  # [[:space:]] does not match it, Python's strip() in idle-check.py does.
+  last="$(echo "$pane" | sed $'s/\xc2\xa0/ /g' | grep -v '^[[:space:]]*$' | tail -4)"
+  echo "$last" | grep -qx '[[:space:]]*❯[[:space:]]*' || return 1
+  return 0
+}
+pane_busy() {
+  local root p
+  root="$("$TMUX_BIN" display-message -p -t "=agent-$1:" '#{pane_pid}' 2>/dev/null)"
+  [[ "$root" =~ ^[0-9]+$ ]] || return 0   # unknown = busy: never restart blind
+  for p in $(PSDATA="$PSCPU" descendants "$root" | sort -u); do
+    [[ "$p" == "$root" ]] && continue
+    # Busy: CPU at or over the limit, or a Bash tool call of the agent still running (Claude Code runs
+    # each one as a shell sourcing .claude-config/shell-snapshots/snapshot-*; a background wait on a
+    # remote job sleeps at 0% CPU and would be cut off by the restart).
+    echo "$PSCPU" | awk -v p="$p" -v lim="$IDLE_CPU" '$1==p && ($3+0 >= lim || /shell-snapshots\/snapshot-/) {f=1} END{exit !f}' && return 0
+  done
+  return 1
+}
+# The dashboard token goes to curl on stdin (-K -), not on its command line, where ps would show it
+# (Viktor 26889 INFO-1).
+dash() {
+  local tok; tok="$(cat "$STORE/.dashboard-token" 2>/dev/null)"
+  [[ -n "$tok" ]] || return 1
+  printf 'header = "Authorization: Bearer %s"\n' "$tok" | curl -s -f -m 60 -K - "$@"
+}
+restart_agent() {
+  if [[ -n "${MEM_RELIEF_RESTART:-}" ]]; then "$MEM_RELIEF_RESTART" "$1"; return; fi
+  dash -X POST "http://localhost:${MEM_RELIEF_PORT:-3420}/api/agents/$1/restart" \
+    -H "Content-Type: application/json" --data-binary '{}' >/dev/null
+}
+# How many messages to <id> are undelivered, or were delivered in the last 15 min. Unreadable = 1
+# (busy: never restart blind).
+fresh_inbox() {
+  if [[ -n "${MEM_RELIEF_INBOX:-}" ]]; then "$MEM_RELIEF_INBOX" "$1"; return; fi
+  dash "http://localhost:${MEM_RELIEF_PORT:-3420}/api/messages?agent=$1&limit=200" 2>/dev/null | python3 -I -c '
+import json, sys, time
+try:
+    d = json.load(sys.stdin); d = d if isinstance(d, list) else d.get("messages", [])
+except Exception:
+    print(1); sys.exit()
+t = time.time()
+print(sum(1 for m in d if m.get("to_agent") == sys.argv[1] and (m.get("status") == "pending"
+      or (m.get("status") == "delivered" and t - (m.get("delivered_at") or m.get("created_at") or 0) < 900))))' "$1" 2>/dev/null || echo 1
 }
 
 descendants() {
@@ -114,7 +232,7 @@ kept_ports() {
 }
 
 main() {
-  local why last list rc=0 done_lines=() owners=""
+  local why last list rc=0 done_lines=() large_lines=() owners=""
   why="$(trigger)"
   [[ -n "$why" ]] || return 0
   last="$(cat "$STAMP" 2>/dev/null)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
@@ -151,29 +269,86 @@ main() {
     if [[ -n "$port" ]] && echo "$KEPT" | grep -qx -- "$port"; then log "KEEP $what (store/dev-keep.list)"; continue; fi
     if [[ "$DRY" == "1" ]]; then done_lines+=("$what (dry)"); owners+=" $who"; continue; fi
     pids="$(descendants "$pid" | sort -u | tr '\n' ' ')"
-    for p in $pids; do "$KILL" -TERM "$p" 2>/dev/null; done
-    local w=0 alive=1
-    while (( w < KILL_WAIT )); do
-      alive=0; for p in $pids; do "$KILL" -0 "$p" 2>/dev/null && alive=1; done
-      (( alive )) || break
-      sleep 1; w=$((w + 1))
-    done
-    if (( alive )); then for p in $pids; do "$KILL" -KILL "$p" 2>/dev/null; done; fi
-    log "STOP $what owner=$who pids=$pids"
-    done_lines+=("$what"); owners+=" $who"
+    # shellcheck disable=SC2086
+    if stop_pids $pids; then log "STOP $what owner=$who pids=$pids"; done_lines+=("$what")
+    else log "FAIL $what owner=$who pids=$pids: still alive after KILL"; rc=1; done_lines+=("$what (NEM sikerült leállítani)"); fi
+    owners+=" $who"
   done <<< "$list"
+
+  # 2b. The macOS leak (the Aerial wallpaper first: it is the decoder's client), and the large ones.
+  while IFS=$'\t' read -r who pid what; do
+    case "$what" in
+      "Aerial wallpaper"|"video decoder "*)
+        if [[ "$DRY" == "1" ]]; then done_lines+=("$what (dry)"); continue; fi
+        local want=VTDecoderXPCService; [[ "$what" == "Aerial wallpaper" ]] && want=WallpaperAerialsExtension
+        if ! argv0_is "$pid" "$want"; then log "SKIP $what pid=$pid: no longer $want"; continue; fi
+        if stop_pids "$pid"; then log "STOP $what pid=$pid"; done_lines+=("$what")
+        else log "FAIL $what pid=$pid: still alive after KILL"; rc=1; done_lines+=("$what (NEM sikerült leállítani)"); fi ;;
+      "large "*)
+        log "LARGE $what owner=$who pid=$pid (not stopped)"
+        large_lines+=("$what (pid $pid, ${who})"); owners+=" $who" ;;
+    esac
+  done <<< "$(echo "$list" | awk -F'\t' '$3=="Aerial wallpaper"' ; echo "$list" | awk -F'\t' '$3!="Aerial wallpaper"')"
+
+  # 2c. Idle agents, only when nothing above was stopped and the swap is still high.
+  local restarted=() mb a n=0 main_id=""
+  mb="$(swap_mb)"
+  [[ -f "$INSTALL_DIR/.env" ]] && main_id="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
+  local t day used=0 lastmb lastt
+  t="$(now)"; day="$(date -r "$t" +%F 2>/dev/null || date +%F)"
+  [[ "$(cut -d' ' -f1 "$IDLE_DIR/day" 2>/dev/null)" == "$day" ]] && used="$(cut -d' ' -f2 "$IDLE_DIR/day" 2>/dev/null)"
+  [[ "$used" =~ ^[0-9]+$ ]] || used=0
+  { read -r lastt lastmb < "$IDLE_DIR/last-round"; } 2>/dev/null || true
+  if (( ${#done_lines[@]} == 0 && mb > IDLE_SWAP_GB * 1024 )) && [[ "${lastt:-}" =~ ^[0-9]+$ && "${lastmb:-}" =~ ^[0-9]+$ ]] \
+     && (( t - lastt < IDLE_GAP && mb >= lastmb )); then
+    log "IDLE-SKIP the swap did not drop since the last round (${lastmb} MB -> ${mb} MB)"
+  elif (( ${#done_lines[@]} == 0 && mb > IDLE_SWAP_GB * 1024 && used >= IDLE_DAY_MAX )); then
+    log "IDLE-SKIP the daily limit (${IDLE_DAY_MAX} restarts) is reached"
+  elif (( ${#done_lines[@]} == 0 && mb > IDLE_SWAP_GB * 1024 )); then
+    if [[ -n "${MEM_RELIEF_PSCPU:-}" ]]; then PSCPU="$(cat "$MEM_RELIEF_PSCPU" 2>/dev/null)"; else PSCPU="$(ps -axo pid=,ppid=,%cpu=,command= 2>/dev/null)"; fi
+    for a in $("$TMUX_BIN" ls -F '#{session_name}' 2>/dev/null | sed -n 's/^agent-\([a-z0-9_-]*\)$/\1/p'); do
+      (( n < IDLE_MAX && used + n < IDLE_DAY_MAX )) || break
+      [[ "$a" == "$main_id" ]] && continue
+      [[ " $IDLE_SKIP " == *" $a "* ]] && continue
+      local la; la="$(cat "$IDLE_DIR/id-$a" 2>/dev/null)"
+      if [[ "$la" =~ ^[0-9]+$ ]] && (( t - la < IDLE_GAP )); then log "IDLE-KEEP $a (restarted $(( (t - la) / 60 )) min ago)"; continue; fi
+      pane_idle "$a" || continue
+      if pane_busy "$a"; then log "IDLE-KEEP $a (a process under the pane is busy)"; continue; fi
+      if [[ "$(fresh_inbox "$a")" != "0" ]]; then log "IDLE-KEEP $a (a message is pending or just delivered)"; continue; fi
+      if [[ "$DRY" == "1" ]]; then n=$((n + 1)); restarted+=("$a (dry)"); continue; fi
+      # The limits first, the restart after: a state that cannot be written stops the round.
+      if ! { mkdir -p "$IDLE_DIR" && echo "$t" > "$IDLE_DIR/id-$a" && echo "$day $(( used + n + 1 ))" > "$IDLE_DIR/day" \
+             && echo "$t $mb" > "$IDLE_DIR/last-round"; } 2>/dev/null; then
+        log "IDLE-SKIP cannot write the restart state in $IDLE_DIR: no restart"; rc=1; break
+      fi
+      n=$((n + 1))
+      if restart_agent "$a"; then log "RESTART idle agent $a"; restarted+=("$a")
+      else log "FAIL restart idle agent $a"; rc=1; fi
+    done
+    (( ${#restarted[@]} )) && done_lines+=("tétlen ágens újraindítva: $(printf '%s, ' "${restarted[@]}" | sed 's/, $//')")
+  fi
 
   # Only a real pass starts the cooldown (MEM_RELIEF_DRY above).
   [[ "$DRY" == "1" ]] || now >"$STAMP"
-  (( ${#done_lines[@]} )) || { log "NOTHING to stop ($why)"; return "$rc"; }
+  (( ${#done_lines[@]} )) || log "NOTHING to stop ($why)"
+  (( ${#done_lines[@]} + ${#large_lines[@]} )) || return "$rc"
 
   # 3. Tell the owners and the main agent.
-  local main="" from to msg stopped
+  local main="" from to msg stopped large
   [[ -f "$INSTALL_DIR/.env" ]] && main="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
   from="${MEM_RELIEF_FROM:-$main}"
-  stopped="$(printf '%s; ' "${done_lines[@]}")"; stopped="${stopped%; }"
-  msg="[MEM-RELIEF] A gép a memória-határon volt (${why}), ezért leállítottam: ${stopped}. Fájlhoz nem nyúltam; colima start / npm run dev visszahozza, de csak ha a swap és a lemez rendben van. Ha egy szervernek mégis futnia kell, kérj kivételt Klodeltől (store/dev-keep.list, legfeljebb 8 óra, legfeljebb 2 port)."
-  [[ "$DRY" == "1" ]] && log "DRY would stop: ${stopped}"
+  stopped=""; (( ${#done_lines[@]} )) && { stopped="$(printf '%s; ' "${done_lines[@]}")"; stopped="${stopped%; }"; }
+  if (( ${#done_lines[@]} )); then
+    msg="[MEM-RELIEF] A gép a memória-határon volt (${why}), ezért leállítottam: ${stopped}. Fájlhoz nem nyúltam; colima start / npm run dev visszahozza, de csak ha a swap és a lemez rendben van. Ha egy szervernek mégis futnia kell, kérj kivételt Klodeltől (store/dev-keep.list, legfeljebb 8 óra, legfeljebb 2 port)."
+    echo "$stopped" | grep -qE 'Aerial wallpaper|video decoder' && msg+=" A videódekódert és az Aerial háttérképet a macOS újraindítja, ha kell; statikus háttérkép mellett az Aerial nem jön vissza."
+  else
+    msg="[MEM-RELIEF] A gép a memória-határon van (${why}), és nem találtam ismert, leállítható tettest."
+  fi
+  if (( ${#large_lines[@]} )); then
+    large="$(printf '%s; ' "${large_lines[@]}")"; large="${large%; }"
+    msg+=" Nagy memóriájú folyamat (NEM állítottam le, a gazdája döntsön): ${large}."
+  fi
+  [[ "$DRY" == "1" && -n "$stopped" ]] && log "DRY would stop: ${stopped}"
   [[ "$DRY" == "1" ]] && { log "DRY would tell:$(echo "$owners $main" | tr ' ' '\n' | awk 'NF && $0!="-" && !s[$0]++{printf " %s",$0}')"; return "$rc"; }
   [[ -n "$from" ]] || { log "TELL nobody: no sender id (MAIN_AGENT_ID)"; return "$rc"; }
   for to in $(echo "$owners $main" | tr ' ' '\n' | awk 'NF && $0!="-" && !s[$0]++'); do
