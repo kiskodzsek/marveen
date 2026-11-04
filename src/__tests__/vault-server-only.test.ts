@@ -9,7 +9,7 @@ import type { RouteContext } from '../web/routes/types.js'
 
 vi.mock('../logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }, PRETTY_OPTIONS: {} }))
 const setSecret = vi.fn()
-const deleteSecret = vi.fn(() => true)
+const deleteSecret = vi.fn((..._a: unknown[]) => true)
 vi.mock('../web/vault.js', () => ({
   listSecrets: () => [],
   setSecret: (...a: unknown[]) => setSecret(...a),
