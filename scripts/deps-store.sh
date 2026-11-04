@@ -21,7 +21,9 @@
 #      protobufjs 7.6.6 and unrs-resolver 1.12.2 (dev) have one; marveen and mcp-connectors were not measured;
 #   4. a failed install leaves no half store behind: it is built in <store>.partial and renamed at the end;
 #      the .partial directory is also the lock (a second run for the same lockfile stops with 75), and a
-#      store that appeared meanwhile is used, not overwritten;
+#      store that appeared meanwhile is used, not overwritten. The lock holds the owner's pid; a lock whose
+#      owner is gone (a killed run: mem-relief, heavy-job kill, reboot) is taken over, so it never blocks
+#      every later run (Viktor 26594);
 #   5. a repository .npmrc is copied only without a credential in it (_authToken, _auth, _password).
 #
 # Afterwards `worktree-add.sh <main-clone> <new> <branch>` takes the store by itself when the main clone
@@ -75,10 +77,49 @@ if [[ -f "$WT/.npmrc" ]] && grep -Eq '(_authToken|_auth|_password)[[:space:]]*='
   exit 64
 fi
 # The .partial directory is the lock (Viktor 26587 LOW-1): mkdir is atomic, so a second run for the same lockfile
-# finds it and stops instead of deleting the first run's work. A stale one (a killed run) is removed by hand.
+# finds it and stops instead of deleting the first run's work. The owner writes its pid into it at once.
+# A stale lock (Viktor 26594): the pid is not running (ps -p, which sees every user's process, unlike kill -0),
+# or there is no pid file and nothing in the directory changed for 10 minutes (a run from before this file, or
+# one killed between mkdir and the write). Only the holder of $PART.takeover (mkdir, atomic) removes a stale lock,
+# and nobody else ever removes a lock it does not own, so two runs that both see it stale cannot delete each
+# other's fresh one. A reused pid reads as alive: the run stops with 75, the safe direction.
 PART="$STORE.partial"
 mkdir -p -- "$(dirname "$PART")" || { echo "deps-store: cannot create $(dirname "$PART")" >&2; exit 3; }
-mkdir -- "$PART" 2>/dev/null || { echo "deps-store: $PART exists: another install of this lockfile is running (if none is, remove it: rm -rf $PART)" >&2; exit 75; }
+# An empty or unreadable pid file (a run killed between mkdir and the write) falls to the mtime rule (Viktor 26615
+# INFO-1). ps is checked on our own pid first: a ps that cannot see us cannot call anyone dead, so a broken ps
+# never takes over a live lock (Viktor 26615 LOW-1, fail closed).
+lock_pid() { [[ -f "$PART/.deps-store.pid" ]] && head -c 32 "$PART/.deps-store.pid" | tr -cd '0-9'; }
+lock_is_stale() {
+  local pid; pid="$(lock_pid)"
+  if [[ -n "$pid" ]]; then
+    ps -p "$$" >/dev/null 2>&1 || return 1
+    ! ps -p "$pid" >/dev/null 2>&1
+  else
+    [[ -n "$(find "$PART" -maxdepth 0 -mmin +10 2>/dev/null)" ]]
+  fi
+}
+take_lock() { mkdir -- "$PART" 2>/dev/null && echo "$$" > "$PART/.deps-store.pid"; }
+if ! take_lock; then
+  if lock_is_stale && mkdir -- "$PART.takeover" 2>/dev/null; then
+    # Checked again under the takeover lock: the stale lock is still there and still stale, so it is ours to remove.
+    if lock_is_stale; then
+      echo "deps-store: $PART was left by a run that is gone; taking it over" >&2
+      rm -rf -- "$PART"
+    fi
+    take_lock; got=$?
+    rmdir -- "$PART.takeover"
+    (( got == 0 )) || { echo "deps-store: $PART exists: another install of this lockfile is running" >&2; exit 75; }
+  else
+    echo "deps-store: $PART exists: another install of this lockfile is running (pid: $(lock_pid || true)); if that pid is not a deps-store run (e.g. reused after a reboot), remove it: rm -rf $PART" >&2
+    # A takeover killed midway (it holds no pid) is the one thing left by hand; it is said, never guessed.
+    [[ -d "$PART.takeover" ]] && echo "deps-store: a takeover is in progress; if no deps-store runs, remove it: rmdir $PART.takeover" >&2
+    exit 75
+  fi
+fi
+# Another run may have finished this store while we waited for the lock: use it, no second install.
+for d in "$PROD/agents/$AGENT/deps/"*-"$HASH"; do
+  [[ -f "$d/node_modules/.package-lock.json" ]] && { rm -rf -- "$PART"; echo "$d"; exit 0; }
+done
 cp -- "$WT/package.json" "$WT/package-lock.json" "$PART/" || { rm -rf -- "$PART"; exit 3; }
 [[ -f "$WT/.npmrc" ]] && cp -- "$WT/.npmrc" "$PART/"
 (cd -- "$PART" && bash "$HEAVY_JOB" --name "deps-store-$REPO" -- "$NPM" ci --ignore-scripts --no-audit --no-fund)
@@ -89,5 +130,7 @@ if (( rc != 0 )) || [[ ! -f "$PART/node_modules/.package-lock.json" ]]; then
 fi
 # A store that appeared meanwhile is kept and used: mv would put this one inside it (Viktor 26587 LOW-1).
 if [[ -e "$STORE" ]]; then rm -rf -- "$PART"; echo "$STORE"; exit 0; fi
+# The pid file is the lock's, not the store's; without it the lock reads as fresh (its mtime is now), not stale.
+rm -f -- "$PART/.deps-store.pid"
 mv -- "$PART" "$STORE" || { rm -rf -- "$PART"; echo "deps-store: cannot move $PART to $STORE" >&2; exit 3; }
 echo "$STORE"
