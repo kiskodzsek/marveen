@@ -33,7 +33,9 @@
 #      The worktree, its .next and node_modules stay; `npm run dev` brings it back.
 #   3. one inter-agent message to each owner (the agents/<id>/ path in the process chain) and the
 #      main agent, naming what was stopped and why. A line per action in store/mem-relief.log.
-# MEM_RELIEF_DRY=1: decide and log what it would do, stop nothing, send nothing.
+# MEM_RELIEF_DRY=1: decide and log what it would do, stop nothing, send nothing, and leave the
+# cooldown stamp as it was: a dry pass that wrote it held the next real trigger off for 600 s
+# (measured 2026-11-03 18:16 on the live store; Viktor 25498).
 #
 # Exit: 0 (nothing to do, or done), 1 (an action failed; the rest still ran).
 # Test hooks: MEM_RELIEF_NOW, MEM_RELIEF_KEEP_MAX, MEM_RELIEF_KEEP_MAX_SECS, MEM_RELIEF_SWAP_MB, MEM_RELIEF_PS (a `ps -axo pid=,ppid=,command=`
@@ -161,7 +163,8 @@ main() {
     done_lines+=("$what"); owners+=" $who"
   done <<< "$list"
 
-  now >"$STAMP"
+  # Only a real pass starts the cooldown (MEM_RELIEF_DRY above).
+  [[ "$DRY" == "1" ]] || now >"$STAMP"
   (( ${#done_lines[@]} )) || { log "NOTHING to stop ($why)"; return "$rc"; }
 
   # 3. Tell the owners and the main agent.

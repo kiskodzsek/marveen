@@ -121,6 +121,12 @@ check "only the first 2 valid lines count: the third (3495) stops, logged" "$(ok
 reset; state critical 10 "free memory 3%"; run env MEM_RELIEF_DRY=1
 check "DRY: no stop, no signal, no message, the log names what it would do" \
   "$(ok "$RC" = 0 -a -z "$(calls)" -a ! -e "$SB/msgs" -a -n "$(logf | grep 'ACT dry')" -a -n "$(logf | grep 'DRY would tell: dave kernel klodel')")" "rc=$RC $(calls) $(logf)"
+check "DRY: no cooldown stamp is written (Viktor 25498)" "$(ok ! -e "$SB/store/.mem-relief.last")" "$(ls -A "$SB/store")"
+rm -f "$SB/calls"; run
+check "a real pass right after a DRY one acts (no SKIP cooldown)" \
+  "$(ok -n "$(calls | grep -x 'colima stop')" -a -z "$(logf | grep 'SKIP cooldown')" -a -e "$SB/store/.mem-relief.last")" "$(calls | tr '\n' ' ') $(logf)"
+reset; state critical 10 "free memory 3%"; echo 1000 > "$SB/store/.mem-relief.last"; run env MEM_RELIEF_DRY=1
+check "DRY leaves an older stamp as it was" "$(ok "$(cat "$SB/store/.mem-relief.last")" = 1000 -a -n "$(logf | grep 'ACT dry')")" "$(cat "$SB/store/.mem-relief.last") $(logf)"
 
 reset; state critical 10 "free memory 3%"; echo 301 > "$SB/stubborn"; run
 check "a server that ignores TERM gets KILL after the wait" "$(ok -n "$(calls | grep -x 'kill -KILL 301')" -a -z "$(calls | grep -x 'kill -KILL 201')")" "$(calls | tr '\n' ' ')"
