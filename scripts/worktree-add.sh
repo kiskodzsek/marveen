@@ -19,6 +19,10 @@
 #      worktree of the repository this script lives in (its git common dir's parent), so the
 #      guard holds when the script runs from a linked worktree too; and any source with a
 #      store/claudeclaw.db next to its node_modules counts as a Marveen install, wherever it is;
+#   3b. never a link into a linked worktree (it is removed with its branch, and the link breaks);
+#      the stable sources are a main clone and the deps store (scripts/deps-store.sh: one install
+#      per lockfile at <production tree>/agents/<agent>/deps/<repo>-<lock sha256, 16 hex>/), which
+#      is taken by itself when the main clone cannot serve the new worktree's lockfile;
 #   4. never a link to another agent's clone: under <production tree>/agents/<name>/, the
 #      source and the new worktree must belong to the same <name> (same Unix user, so an npm
 #      install in one agent's tree would write the other's node_modules);
@@ -75,18 +79,43 @@ NEW="$(phys "$NEW")"
 
 not_linked() { echo "worktree-add: $NEW created, node_modules NOT linked: $1" >&2; echo "  own install, under the gate: heavy-job.sh --name npm-ci -- npm ci" >&2; exit 3; }
 
-SRC_NM="$(phys "${FROM:-$MAIN}/node_modules")"
-[[ -n "$SRC_NM" ]] || not_linked "no node_modules in ${FROM:-$MAIN}"
-OWNER="$(dirname "$SRC_NM")"
 PROD="$(phys "$PROD_TREE")"
-[[ -n "$PROD" && "$OWNER" == "$PROD" ]] && not_linked "the source is the production tree ($PROD); an npm install here would rewrite the live node_modules"
-[[ -e "$OWNER/store/claudeclaw.db" ]] && not_linked "the source is a Marveen install ($OWNER/store/claudeclaw.db); an npm install here would rewrite the live node_modules"
 # agent_of PATH: <name> if PATH is under <production tree>/agents/<name>, else empty.
 agent_of() { local rest="${1#"$PROD"/agents/}"; [[ -n "$PROD" && "$rest" != "$1" ]] && echo "${rest%%/*}"; }
+
+# The deps store (code review 2026-10-30 #16, card f24e6745): one npm install per lockfile, outside every
+# branch, at <production tree>/agents/<agent>/deps/<repo>-<sha256(package-lock.json), 16 hex>/node_modules,
+# made by scripts/deps-store.sh. Without --node-modules-from, a main clone that cannot serve (no install,
+# or another lockfile) hands over to the store of the new worktree's own lockfile, if there is one.
+store_for() { # <worktree>: the matching store's node_modules, physical, or nothing
+  local wt="$1" agent hash d
+  agent="$(agent_of "$wt")"; [[ -n "$agent" && -f "$wt/package-lock.json" ]] || return 0
+  hash="$(shasum -a 256 "$wt/package-lock.json" | cut -c1-16)"
+  # The hash is the identity, the <repo> part only a label: two clones of one repo share a store.
+  for d in "$PROD/agents/$agent/deps/"*-"$hash"; do
+    [[ -f "$d/node_modules/.package-lock.json" ]] && { phys "$d/node_modules"; return 0; }
+  done
+}
+main_serves() { [[ -f "$MAIN/node_modules/.package-lock.json" && -f "$MAIN/package-lock.json" ]] && cmp -s "$MAIN/package-lock.json" "$NEW/package-lock.json"; }
+SRC_DIR="${FROM:-$MAIN}"
+if [[ -z "$FROM" ]] && ! main_serves; then
+  STORE_NM="$(store_for "$NEW")"
+  [[ -n "$STORE_NM" ]] && SRC_DIR="$(dirname "$STORE_NM")"
+fi
+SRC_NM="$(phys "$SRC_DIR/node_modules")"
+[[ -n "$SRC_NM" ]] || not_linked "no node_modules in $SRC_DIR (a store for this lockfile: scripts/deps-store.sh $NEW)"
+OWNER="$(dirname "$SRC_NM")"
+# Never a linked worktree's node_modules: that worktree is removed once its branch is merged, and every link
+# into it breaks (measured 2026-11-04: 11 broken, 31 more into feature worktrees; review 2026-10-30: 38 broken).
+OWNER_GD="$(git -C "$OWNER" rev-parse --path-format=absolute --git-dir 2>/dev/null)"
+OWNER_CD="$(git -C "$OWNER" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+[[ -n "$OWNER_GD" && "$OWNER_GD" != "$OWNER_CD" ]] && not_linked "the source $OWNER is a linked worktree; it goes when its branch is merged and the link breaks (a store for this lockfile: scripts/deps-store.sh $NEW)"
+[[ -n "$PROD" && "$OWNER" == "$PROD" ]] && not_linked "the source is the production tree ($PROD); an npm install here would rewrite the live node_modules"
+[[ -e "$OWNER/store/claudeclaw.db" ]] && not_linked "the source is a Marveen install ($OWNER/store/claudeclaw.db); an npm install here would rewrite the live node_modules"
 [[ "$(agent_of "$OWNER")" == "$(agent_of "$NEW")" ]] || not_linked "the source $OWNER is not in the same agent's tree as $NEW"
 [[ -f "$SRC_NM/.package-lock.json" ]] || not_linked "$SRC_NM was not installed by npm (no .package-lock.json)"
 [[ -f "$OWNER/package-lock.json" && -f "$NEW/package-lock.json" ]] || not_linked "package-lock.json missing in $OWNER or in the new worktree"
-cmp -s "$OWNER/package-lock.json" "$NEW/package-lock.json" || not_linked "package-lock.json differs from $OWNER (other dependencies)"
+cmp -s "$OWNER/package-lock.json" "$NEW/package-lock.json" || not_linked "package-lock.json differs from $OWNER (other dependencies; a store for this lockfile: scripts/deps-store.sh $NEW)"
 
 ln -s -- "$SRC_NM" "$NEW/node_modules" || not_linked "ln -s failed"
 if ! git -C "$NEW" check-ignore -q node_modules; then
