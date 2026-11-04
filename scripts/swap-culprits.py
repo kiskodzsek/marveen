@@ -17,6 +17,17 @@ a VM started by launchd has none and is reported with owner "-".
 
 Output: one line per suspect, "<owner>\\t<pid>\\t<what>", the what being "Colima VM" or
 "next dev :<port> <worktree>". A next dev server appears once (its next-server child is folded in).
+
+Memory footprint (2026-11-04 20:56-21:08, Klodel 26838/26851): the free disk fell to 1.3 GiB with
+swap at 23 GB while neither a VM nor a dev server ran, so the name list above found nothing. The
+memory was held by VTDecoderXPCService (macOS video decoder), 44 GB footprint in `top`, and its
+client was WallpaperAerialsExtension (the animated Aerial wallpaper): stopping the extension made
+the decoder exit and stay gone. So the footprint (`top -l 1 -stats pid,mem`, or --top FILE) adds:
+  "video decoder <N> GB"  VTDecoderXPCService at or over --decoder-gb (4) GB; mem-relief stops it;
+  "Aerial wallpaper"      WallpaperAerialsExtension, any size (the decoder's client); mem-relief stops it;
+  "large <name> <N> GB"   any other process at or over --large-gb (6) GB: named for the alert, never
+                          stopped by mem-relief (it may be someone's work).
+With --ps and no --top (a test fixture) no footprint is read: a fixture never mixes with the live host.
 """
 import argparse
 import re
@@ -42,6 +53,27 @@ def snapshot(path):
     return procs
 
 
+def footprints(path, fixture):
+    """pid -> footprint in MB, from `top -l 1 -stats pid,mem` (e.g. "40542  44G", "432  339M+")."""
+    if path:
+        text = open(path).read()
+    elif fixture:
+        return {}
+    else:
+        text = subprocess.run(["top", "-l", "1", "-stats", "pid,mem"], capture_output=True, text=True).stdout
+    unit = {"B": 1 / 1048576, "K": 1 / 1024, "M": 1, "G": 1024, "T": 1048576}
+    out = {}
+    for line in text.splitlines():
+        m = re.match(r"^\s*(\d+)\s+([\d.]+)([BKMGT])[+-]?\s*$", line)
+        if m:
+            out[int(m.group(1))] = float(m.group(2)) * unit[m.group(3)]
+    return out
+
+
+def gb(mb):
+    return f"{mb / 1024:.1f}"
+
+
 def chain(procs, pid):
     seen = []
     while pid in procs and pid not in seen and len(seen) < 30:
@@ -61,8 +93,12 @@ def owner(procs, pid):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ps", default="")
+    parser.add_argument("--top", default="")
+    parser.add_argument("--decoder-gb", type=float, default=4)
+    parser.add_argument("--large-gb", type=float, default=6)
     args = parser.parse_args()
     procs = snapshot(args.ps)
+    mem = footprints(args.top, bool(args.ps))
     out = []
     vm_done = False
     for pid, (_, cmd) in sorted(procs.items()):
@@ -73,6 +109,15 @@ def main():
             port = PORT.search(cmd)
             tree = TREE.search(cmd) or next((TREE.search(procs[p][1]) for p in chain(procs, pid) if TREE.search(procs[p][1])), None)
             out.append((owner(procs, pid), pid, f"next dev :{port.group(1) if port else '?'} {tree.group(1) if tree else '?'}"))
+        elif "/WallpaperAerialsExtension" in cmd.split(" -", 1)[0]:
+            out.append(("-", pid, "Aerial wallpaper"))
+        elif cmd.split(" ", 1)[0].endswith("/VTDecoderXPCService") and mem.get(pid, 0) >= args.decoder_gb * 1024:
+            out.append(("-", pid, f"video decoder {gb(mem[pid])} GB"))
+    listed = {pid for _, pid, _ in out}
+    for pid, mb in sorted(mem.items(), key=lambda kv: -kv[1]):
+        if mb >= args.large_gb * 1024 and pid not in listed and pid in procs and pid != 0:
+            name = procs[pid][1].split(" ", 1)[0].rsplit("/", 1)[-1]
+            out.append((owner(procs, pid), pid, f"large {name} {gb(mb)} GB"))
     for who, pid, what in out:
         print(f"{who}\t{pid}\t{what}")
     return 0

@@ -31,6 +31,13 @@
 #      first MEM_RELIEF_KEEP_MAX (2) valid lines count; a bare port or anything else is ignored
 #      (and logged). The VM can never be kept. Every KEEP is logged.
 #      The worktree, its .next and node_modules stay; `npm run dev` brings it back.
+#   2b. a memory leak of macOS itself (scripts/swap-culprits.py, by footprint; 2026-11-04: the video
+#      decoder VTDecoderXPCService held 44 GB for its client, the Aerial wallpaper extension): the
+#      WallpaperAerialsExtension and a VTDecoderXPCService over MEM_RELIEF_DECODER_GB (4) GB get
+#      SIGTERM, SIGKILL after the wait. Both are stateless system services that launchd starts again
+#      when needed; a static wallpaper keeps the Aerial one from coming back.
+#      A process over MEM_RELIEF_LARGE_GB (6) GB that is none of the above is NOT stopped: it is named
+#      in the message (LARGE in the log), so its owner and the main agent see it.
 #   3. one inter-agent message to each owner (the agents/<id>/ path in the process chain) and the
 #      main agent, naming what was stopped and why. A line per action in store/mem-relief.log.
 # MEM_RELIEF_DRY=1: decide and log what it would do, stop nothing, send nothing, and leave the
@@ -38,7 +45,7 @@
 # (measured 2026-11-03 18:16 on the live store; Viktor 25498).
 #
 # Exit: 0 (nothing to do, or done), 1 (an action failed; the rest still ran).
-# Test hooks: MEM_RELIEF_NOW, MEM_RELIEF_KEEP_MAX, MEM_RELIEF_KEEP_MAX_SECS, MEM_RELIEF_SWAP_MB, MEM_RELIEF_PS (a `ps -axo pid=,ppid=,command=`
+# Test hooks: MEM_RELIEF_TOP (a `top -l 1 -stats pid,mem` file), MEM_RELIEF_NOW, MEM_RELIEF_KEEP_MAX, MEM_RELIEF_KEEP_MAX_SECS, MEM_RELIEF_SWAP_MB, MEM_RELIEF_PS (a `ps -axo pid=,ppid=,command=`
 # file), MEM_RELIEF_COLIMA, MEM_RELIEF_LIMACTL, MEM_RELIEF_KILL, MEM_RELIEF_AGENT_MSG,
 # MEM_RELIEF_INSTALL_DIR, MARVEEN_STORE.
 set -uo pipefail
@@ -56,6 +63,8 @@ COLIMA_WAIT="${MEM_RELIEF_COLIMA_WAIT:-60}"
 KILL_WAIT="${MEM_RELIEF_KILL_WAIT:-10}"
 KEEP_MAX="${MEM_RELIEF_KEEP_MAX:-2}"
 KEEP_MAX_SECS="${MEM_RELIEF_KEEP_MAX_SECS:-28800}"
+DECODER_GB="${MEM_RELIEF_DECODER_GB:-4}"
+LARGE_GB="${MEM_RELIEF_LARGE_GB:-6}"
 COLIMA="${MEM_RELIEF_COLIMA:-$(command -v colima || echo /opt/homebrew/bin/colima)}"
 LIMACTL="${MEM_RELIEF_LIMACTL:-$(command -v limactl || echo /opt/homebrew/bin/limactl)}"
 KILL="${MEM_RELIEF_KILL:-kill}"
@@ -72,7 +81,8 @@ swap_mb() {
   [[ "$v" =~ ^[0-9]+$ ]] && echo "$v" || echo 0
 }
 ps_snapshot() { if [[ -n "${MEM_RELIEF_PS:-}" ]]; then cat "$MEM_RELIEF_PS" 2>/dev/null; else ps -axo pid=,ppid=,command= 2>/dev/null; fi; }
-culprits() { python3 -I "$HERE/swap-culprits.py" ${MEM_RELIEF_PS:+--ps "$MEM_RELIEF_PS"} 2>/dev/null; }
+culprits() { python3 -I "$HERE/swap-culprits.py" ${MEM_RELIEF_PS:+--ps "$MEM_RELIEF_PS"} ${MEM_RELIEF_TOP:+--top "$MEM_RELIEF_TOP"} \
+  --decoder-gb "$DECODER_GB" --large-gb "$LARGE_GB" 2>/dev/null; }
 
 # Why act now? Prints the reason, or nothing.
 trigger() {
@@ -85,6 +95,18 @@ trigger() {
   (( $(now) - ts <= STATE_MAX_AGE )) || return
   [[ "$rest" =~ (memory|swap|disk) ]] || return
   echo "host-monitor critical: $rest"
+}
+
+# SIGTERM to the given pids, SIGKILL to what is left after KILL_WAIT s.
+stop_pids() {
+  local p w=0 alive=1
+  for p in "$@"; do "$KILL" -TERM "$p" 2>/dev/null; done
+  while (( w < KILL_WAIT )); do
+    alive=0; for p in "$@"; do "$KILL" -0 "$p" 2>/dev/null && alive=1; done
+    (( alive )) || break
+    sleep 1; w=$((w + 1))
+  done
+  if (( alive )); then for p in "$@"; do "$KILL" -KILL "$p" 2>/dev/null; done; fi
 }
 
 descendants() {
@@ -114,7 +136,7 @@ kept_ports() {
 }
 
 main() {
-  local why last list rc=0 done_lines=() owners=""
+  local why last list rc=0 done_lines=() large_lines=() owners=""
   why="$(trigger)"
   [[ -n "$why" ]] || return 0
   last="$(cat "$STAMP" 2>/dev/null)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
@@ -151,29 +173,47 @@ main() {
     if [[ -n "$port" ]] && echo "$KEPT" | grep -qx -- "$port"; then log "KEEP $what (store/dev-keep.list)"; continue; fi
     if [[ "$DRY" == "1" ]]; then done_lines+=("$what (dry)"); owners+=" $who"; continue; fi
     pids="$(descendants "$pid" | sort -u | tr '\n' ' ')"
-    for p in $pids; do "$KILL" -TERM "$p" 2>/dev/null; done
-    local w=0 alive=1
-    while (( w < KILL_WAIT )); do
-      alive=0; for p in $pids; do "$KILL" -0 "$p" 2>/dev/null && alive=1; done
-      (( alive )) || break
-      sleep 1; w=$((w + 1))
-    done
-    if (( alive )); then for p in $pids; do "$KILL" -KILL "$p" 2>/dev/null; done; fi
+    # shellcheck disable=SC2086
+    stop_pids $pids
     log "STOP $what owner=$who pids=$pids"
     done_lines+=("$what"); owners+=" $who"
   done <<< "$list"
 
+  # 2b. The macOS leak (the Aerial wallpaper first: it is the decoder's client), and the large ones.
+  while IFS=$'\t' read -r who pid what; do
+    case "$what" in
+      "Aerial wallpaper"|"video decoder "*)
+        if [[ "$DRY" == "1" ]]; then done_lines+=("$what (dry)"); continue; fi
+        stop_pids "$pid"
+        log "STOP $what pid=$pid"
+        done_lines+=("$what") ;;
+      "large "*)
+        log "LARGE $what owner=$who pid=$pid (not stopped)"
+        large_lines+=("$what (pid $pid, ${who})"); owners+=" $who" ;;
+    esac
+  done <<< "$(echo "$list" | awk -F'\t' '$3=="Aerial wallpaper"' ; echo "$list" | awk -F'\t' '$3!="Aerial wallpaper"')"
+
   # Only a real pass starts the cooldown (MEM_RELIEF_DRY above).
   [[ "$DRY" == "1" ]] || now >"$STAMP"
-  (( ${#done_lines[@]} )) || { log "NOTHING to stop ($why)"; return "$rc"; }
+  (( ${#done_lines[@]} )) || log "NOTHING to stop ($why)"
+  (( ${#done_lines[@]} + ${#large_lines[@]} )) || return "$rc"
 
   # 3. Tell the owners and the main agent.
-  local main="" from to msg stopped
+  local main="" from to msg stopped large
   [[ -f "$INSTALL_DIR/.env" ]] && main="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
   from="${MEM_RELIEF_FROM:-$main}"
-  stopped="$(printf '%s; ' "${done_lines[@]}")"; stopped="${stopped%; }"
-  msg="[MEM-RELIEF] A gép a memória-határon volt (${why}), ezért leállítottam: ${stopped}. Fájlhoz nem nyúltam; colima start / npm run dev visszahozza, de csak ha a swap és a lemez rendben van. Ha egy szervernek mégis futnia kell, kérj kivételt Klodeltől (store/dev-keep.list, legfeljebb 8 óra, legfeljebb 2 port)."
-  [[ "$DRY" == "1" ]] && log "DRY would stop: ${stopped}"
+  stopped=""; (( ${#done_lines[@]} )) && { stopped="$(printf '%s; ' "${done_lines[@]}")"; stopped="${stopped%; }"; }
+  if (( ${#done_lines[@]} )); then
+    msg="[MEM-RELIEF] A gép a memória-határon volt (${why}), ezért leállítottam: ${stopped}. Fájlhoz nem nyúltam; colima start / npm run dev visszahozza, de csak ha a swap és a lemez rendben van. Ha egy szervernek mégis futnia kell, kérj kivételt Klodeltől (store/dev-keep.list, legfeljebb 8 óra, legfeljebb 2 port)."
+    echo "$stopped" | grep -qE 'Aerial wallpaper|video decoder' && msg+=" A videódekódert és az Aerial háttérképet a macOS újraindítja, ha kell; statikus háttérkép mellett az Aerial nem jön vissza."
+  else
+    msg="[MEM-RELIEF] A gép a memória-határon van (${why}), és nem találtam ismert, leállítható tettest."
+  fi
+  if (( ${#large_lines[@]} )); then
+    large="$(printf '%s; ' "${large_lines[@]}")"; large="${large%; }"
+    msg+=" Nagy memóriájú folyamat (NEM állítottam le, a gazdája döntsön): ${large}."
+  fi
+  [[ "$DRY" == "1" && -n "$stopped" ]] && log "DRY would stop: ${stopped}"
   [[ "$DRY" == "1" ]] && { log "DRY would tell:$(echo "$owners $main" | tr ' ' '\n' | awk 'NF && $0!="-" && !s[$0]++{printf " %s",$0}')"; return "$rc"; }
   [[ -n "$from" ]] || { log "TELL nobody: no sender id (MAIN_AGENT_ID)"; return "$rc"; }
   for to in $(echo "$owners $main" | tr ' ' '\n' | awk 'NF && $0!="-" && !s[$0]++'); do

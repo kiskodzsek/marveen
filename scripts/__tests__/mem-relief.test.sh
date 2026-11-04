@@ -150,6 +150,48 @@ check "no file outside the store was touched: the fixture tree has only the stor
 reset; printf '    1     0 /sbin/launchd\n' > "$SB/ps"; state critical 10 "free memory 3%"; run
 check "nothing to stop -> NOTHING in the log, no message, rc 0" "$(ok "$RC" = 0 -a ! -e "$SB/msgs" -a -n "$(logf | grep NOTHING)")" "rc=$RC $(logf)"
 
+echo "== macOS leak by footprint (2026-11-04: VTDecoderXPCService 44 GB, client the Aerial wallpaper)"
+# No VM and no dev server: only the decoder, its client, a large agent process and a small one.
+cat > "$SB/ps.leak" <<'EOF2'
+    1     0 /sbin/launchd
+  728     1 /System/Library/ExtensionKit/Extensions/WallpaperAerialsExtension.appex/Contents/MacOS/WallpaperAerialsExtension -BSServiceDomains {}
+40542     1 /System/Library/Frameworks/VideoToolbox.framework/Versions/A/XPCServices/VTDecoderXPCService.xpc/Contents/MacOS/VTDecoderXPCService
+  900     1 /opt/homebrew/bin/claude --model x
+  901   900 /bin/zsh -c cd /Users/x/marveen/agents/dave/work && python3 render.py
+  950     1 /usr/bin/small-tool
+EOF2
+printf 'PID    MEM\n0      45G\n40542  44G\n728    120M\n901    7012M+\n950    3G\n' > "$SB/top.leak"
+leak() { cp "$SB/ps.leak" "$SB/ps"; printf '%s\n' 728 40542 901 950 > "$SB/alive"; rm -f "$SB/calls" "$SB/msgs" "$SB/store/.mem-relief.last" "$SB/store/mem-relief.log"; }
+leak; rm -f "$SB/store/.host-state"; SWAP=23000 run env MEM_RELIEF_TOP="$SB/top.leak"
+check "swap 23 GB, decoder 44 GB -> the Aerial wallpaper and the decoder get TERM, rc 0" \
+  "$(ok "$RC" = 0 -a -n "$(calls | grep -x 'kill -TERM 728')" -a -n "$(calls | grep -x 'kill -TERM 40542')")" "rc=$RC $(calls | tr '\n' ' ') $(logf)"
+check "the Aerial wallpaper (the client) is stopped before the decoder" \
+  "$(ok "$(calls | grep -n 'kill -TERM' | head -1 | cut -d: -f2)" = "kill -TERM 728")" "$(calls | tr '\n' ' ')"
+check "a large process (7 GB) is NOT signalled, it is logged LARGE and named in the message" \
+  "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ 90[01]$')" -a -n "$(logf | grep 'LARGE large zsh 6.8 GB owner=dave pid=901')" -a -n "$(grep 'NEM állítottam le' "$SB/msgs" | grep 'large zsh 6.8 GB (pid 901, dave)')")" "$(calls | tr '\n' ' ') $(logf) $(cat "$SB/msgs" 2>/dev/null)"
+check "a small process (3 GB) and pid 0 (kernel_task) are not touched or named" \
+  "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ (950|0)$')" -a -z "$(grep -E 'small-tool|pid 0' "$SB/msgs")")" "$(calls | tr '\n' ' ')"
+check "the large process's owner and the main agent are told, nobody else" \
+  "$(ok "$(grep -c . "$SB/msgs")" = 2 -a -n "$(grep '^klodel dave ' "$SB/msgs")" -a -n "$(grep '^klodel klodel ' "$SB/msgs")")" "$(cat "$SB/msgs")"
+check "the message names the stop and says macOS starts them again" \
+  "$(ok -n "$(grep 'leállítottam: Aerial wallpaper; video decoder 44.0 GB' "$SB/msgs" | grep 'macOS újraindítja')")" "$(head -1 "$SB/msgs")"
+
+leak; printf 'PID    MEM\n40542  3G\n728    120M\n' > "$SB/top.small"; SWAP=23000 run env MEM_RELIEF_TOP="$SB/top.small"
+check "a decoder under 4 GB is left alone (only the Aerial wallpaper stops)" \
+  "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ 40542$')" -a -n "$(calls | grep -x 'kill -TERM 728')")" "$(calls | tr '\n' ' ')"
+
+leak; grep -v -e WallpaperAerials -e VTDecoder "$SB/ps.leak" > "$SB/ps"; SWAP=23000 run env MEM_RELIEF_TOP="$SB/top.leak"
+check "only a large process: nothing is stopped, NOTHING + LARGE in the log, an alert still goes out" \
+  "$(ok -z "$(calls | grep 'kill -TERM')" -a -n "$(logf | grep NOTHING)" -a -n "$(logf | grep LARGE)" -a -n "$(grep 'nem találtam ismert, leállítható tettest' "$SB/msgs" | grep 'pid 901')")" "$(calls | tr '\n' ' ') $(logf) $(cat "$SB/msgs" 2>/dev/null)"
+
+leak; SWAP=23000 run env MEM_RELIEF_TOP="$SB/top.leak" MEM_RELIEF_DRY=1
+check "DRY: the leak is named, nothing is signalled, no message" \
+  "$(ok -z "$(calls | grep 'kill -TERM')" -a ! -e "$SB/msgs" -a -n "$(logf | grep 'DRY would stop: Aerial wallpaper (dry); video decoder 44.0 GB (dry)')")" "$(logf)"
+
+leak; SWAP=23000 run
+check "a ps fixture without MEM_RELIEF_TOP reads no live footprint: only the Aerial wallpaper (by name)" \
+  "$(ok -n "$(calls | grep -x 'kill -TERM 728')" -a -z "$(calls | grep -E 'kill -[A-Z]+ (40542|901)$')")" "$(calls | tr '\n' ' ')"
+
 echo "== installer"
 PL="$SB/la/com.marveen.mem-relief.plist"
 OUT="$(MEM_RELIEF_LAUNCH_AGENTS="$SB/la" bash "$INST" 2>&1)"; RC=$?
