@@ -35,7 +35,8 @@ printf '#!/bin/bash\nif [ "$1" = "-t" ]; then cat "%s/cwds" "%s/late" 2>/dev/nul
 : > "$SB/cwds"
 # agent-msg.sh stand-in: records "<from> <to> <stdin>" a line; exit $STUB_RC_msg.
 # Like POST /api/messages: only a registered fleet agent may be the sender (403 otherwise; Pulzus 23225).
-printf '#!/bin/bash\ncase "$1" in klodel|pulzus|kernel) ;; *) echo "403 $1" >> "%s/msgs.rejected"; exit 1 ;; esac\necho "$1 $2 $(cat)" >> "%s/msgs"\nexit "${STUB_RC_msg:-0}"\n' "$SB" "$SB" > "$SB/agent-msg-stub"; chmod +x "$SB/agent-msg-stub"
+# "daily-cleanup" passes only while the test says the running dashboard has it in SYSTEM_SENDER_IDS ($SB/accept-dc).
+printf '#!/bin/bash\nif [ "$1" = daily-cleanup ] && [ -f "%s/accept-dc" ]; then :; else case "$1" in klodel|pulzus|kernel) ;; *) echo "403 $1" >> "%s/msgs.rejected"; exit 1 ;; esac; fi\necho "$1 $2 $(cat)" >> "%s/msgs"\nexit "${STUB_RC_msg:-0}"\n' "$SB" "$SB" "$SB" > "$SB/agent-msg-stub"; chmod +x "$SB/agent-msg-stub"
 # The wrapper stand-in: records its argv, then runs the command after --.
 cat > "$SB/hj-stub" <<STUB
 #!/usr/bin/env bash
@@ -460,6 +461,29 @@ rm -f "$SB/store/.daily-cleanup.alert"*
 INST="$SB/inst-alert"
 HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) STUB_ENV="DAILY_CLEANUP_ALERT_GB=10" dc tick
 check "DAILY_CLEANUP_ALERT_GB=10: 15 GiB free is fine" "$(ok ! -f "$SB/store/.daily-cleanup.alert")"
+
+echo "== the alert's sender: own id once SYSTEM_SENDER_IDS lists it (Viktor 23239, card 38c8d87f)"
+mkdir -p "$SB/inst-own"; INST="$SB/inst-own"
+own_reset() { rm -f "$SB/msgs" "$SB/msgs.rejected" "$SB/store/.daily-cleanup.alert"* "$SB/store/.daily-cleanup.swap-alert" "$SB/store/daily-cleanup.log"; }
+own_reset; printf 'MAIN_AGENT_ID=klodel\nSYSTEM_SENDER_IDS=cortex,host-monitor\n' > "$INST/.env"
+HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) dc tick
+check "not listed -> from the main agent, as before" "$(ok "$(grep -c '^klodel ' "$SB/msgs" 2>/dev/null)" = 2 -a ! -s "$SB/msgs.rejected")" "$(cat "$SB/msgs" "$SB/msgs.rejected" 2>/dev/null)"
+own_reset; printf 'MAIN_AGENT_ID=klodel\nSYSTEM_SENDER_IDS="host-monitor, daily-cleanup"\r\n' > "$INST/.env"; touch "$SB/accept-dc"
+HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) dc tick
+check "listed (quoted, spaced, CRLF) and loaded -> from daily-cleanup to both, nothing refused, cooldown set" "$(ok "$(grep -c '^daily-cleanup ' "$SB/msgs" 2>/dev/null)" = 2 -a "$(grep -c '^klodel ' "$SB/msgs" 2>/dev/null)" = 0 -a ! -s "$SB/msgs.rejected" -a -f "$SB/store/.daily-cleanup.alert" -a -n "$(grep 'sent=1 from=daily-cleanup' "$SB/store/daily-cleanup.log")")" "$(cat "$SB/msgs" "$SB/msgs.rejected" 2>/dev/null)"
+own_reset; rm -f "$SB/accept-dc"
+HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) dc tick
+check "listed but the dashboard not restarted (403) -> each sent again from the main agent, logged, cooldown set" "$(ok "$(grep -c '^klodel ' "$SB/msgs" 2>/dev/null)" = 2 -a "$(grep -c '403 daily-cleanup' "$SB/msgs.rejected" 2>/dev/null)" = 2 -a "$(grep -c 'refused, sent again from=klodel' "$SB/store/daily-cleanup.log")" = 2 -a -f "$SB/store/.daily-cleanup.alert")" "$(cat "$SB/store/daily-cleanup.log" "$SB/msgs" 2>/dev/null)"
+own_reset; touch "$SB/accept-dc"
+HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) STUB_ENV="DAILY_CLEANUP_ALERT_FROM=kernel" dc tick
+check "DAILY_CLEANUP_ALERT_FROM still wins over the listed own id" "$(ok "$(grep -c '^kernel ' "$SB/msgs" 2>/dev/null)" = 2 -a "$(grep -c '^daily-cleanup ' "$SB/msgs" 2>/dev/null)" = 0)" "$(cat "$SB/msgs" 2>/dev/null)"
+own_reset; printf 'MAIN_AGENT_ID=klodel\nSYSTEM_SENDER_IDS=daily-cleanup-old\n' > "$INST/.env"
+HOUR=12 LAST=$((NOW - 2 * H)) DF_KB=$((15 * GB)) dc tick
+check "a longer id that only starts with daily-cleanup does not count" "$(ok "$(grep -c '^klodel ' "$SB/msgs" 2>/dev/null)" = 2 -a "$(grep -c '^daily-cleanup ' "$SB/msgs" 2>/dev/null)" = 0)" "$(cat "$SB/msgs" 2>/dev/null)"
+own_reset; printf 'MAIN_AGENT_ID=klodel\nSYSTEM_SENDER_IDS=daily-cleanup\n' > "$INST/.env"
+LAST=$((NOW - 2 * H)) SWAP_MB=12000 PS_FILE="$SB/ps.txt" dc tick
+check "the swap guard sends from the listed own id too (owner dave + the main agent)" "$(ok "$(grep -c '^daily-cleanup dave ' "$SB/msgs" 2>/dev/null)" = 1 -a "$(grep -c '^daily-cleanup klodel ' "$SB/msgs" 2>/dev/null)" = 1)" "$(cat "$SB/msgs" 2>/dev/null)"
+own_reset; rm -f "$SB/accept-dc"; INST="$SB/inst-alert"
 
 echo "== install-daily-cleanup.sh (macOS launchd)"
 FAKEHOME="$SB/ihome"; mkdir -p "$FAKEHOME" "$SB/ubin"
