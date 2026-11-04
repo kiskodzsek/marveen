@@ -34,7 +34,8 @@ import { join } from 'node:path'
 import { STORE_DIR } from '../config.js'
 import { readEnvFile } from '../env.js'
 import { logger } from '../logger.js'
-import { getApproval, resolveApprovalByBot, setApprovalBotMessage, type Approval } from '../db.js'
+import { getApproval, resolveApprovalByBot, setApprovalBotMessage, setApprovalIssueSignature, type Approval } from '../db.js'
+import { BILLINGO_ISSUE_CATEGORY, readIssueSigningKey, signIssueApproval } from './billingo-issue-approval.js'
 import { getSecret } from './vault.js'
 import { markIfTestRun } from '../test-run-marker.js'
 
@@ -234,7 +235,19 @@ export interface HandlerDeps {
   onResolved: (approval: Approval) => void
   lookup?: (id: string) => Approval | undefined
   resolve?: typeof resolveApprovalByBot
+  /** BILLINGOISSUE1104: signs an approved billingo_issue row after the press; true when stored. */
+  signIssue?: (approval: Approval) => boolean
   now?: () => number
+}
+
+/** BILLINGOISSUE1104 (Viktor 26223 A1): the signature is made at the press, here and nowhere else. */
+export function signAndStoreIssueApproval(approval: Approval): boolean {
+  const signed = signIssueApproval(approval, readIssueSigningKey())
+  if ('error' in signed) {
+    logger.warn({ approvalId: approval.id, reason: signed.error }, 'billingo issue approval NOT signed')
+    return false
+  }
+  return setApprovalIssueSignature(approval.id, signed.value)
 }
 
 const notOwnerCount = { n: 0, windowStart: 0 }
@@ -295,6 +308,11 @@ export async function handleCallback(cq: CallbackQuery, cfg: ApprovalBotConfig, 
       await answer(label)
       await closeButtons(outcome.approval, label)
       const fresh = (deps.lookup ?? getApproval)(outcome.approval.id)
+      if (fresh && fresh.category === BILLINGO_ISSUE_CATEGORY && fresh.status === 'approved') {
+        let signed = false
+        try { signed = (deps.signIssue ?? signAndStoreIssueApproval)(fresh) } catch { signed = false }
+        if (!signed) deps.alert('⚠️ Jóváhagyó bot: a Billingo-számla jóváhagyását nem sikerült aláírni, így a számla NEM állítható ki. Szólj Kernelnek.')
+      }
       if (fresh) deps.onResolved(fresh)
       logger.info({ approvalId: outcome.approval.id, status: outcome.status }, 'approval resolved by the approval bot')
       break

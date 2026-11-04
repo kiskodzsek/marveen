@@ -14,6 +14,7 @@ import { resolveOwnerChatId } from '../../owner-chat.js'
 import { sendTelegramMessage } from '../telegram.js'
 import { redact } from '../tool-input-preview.js'
 import { readApprovalBotConfig, sendApprovalWithButtons, startApprovalBotPoller } from '../approval-bot.js'
+import { BILLINGO_ISSUE_CATEGORY, parseIssueRequest, renderIssueText } from '../billingo-issue-approval.js'
 import type { RouteContext } from './types.js'
 
 const AUTONOMY_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
@@ -164,9 +165,24 @@ export function buildOwnerApprovalText(approval: Approval, withButtons = false):
     withButtons
       ? `Döntés: a lenti gombokkal, vagy Dashboard -> Jóváhagyások (id: ${approval.id})`
       : `Döntés: Dashboard -> Jóváhagyások (id: ${approval.id})`,
-    'Leírás:',
-    quoteOwnerDescription(approval.action_description),
+    ...ownerDescriptionLines(approval),
   ].join('\n')
+}
+
+// BILLINGOISSUE1104 (Viktor 26223 K1): a Billingo invoice's amounts, dates and
+// items come from the request body through the server's own rendering; the
+// agent's text is only a labelled note under it. Only a press on the approval
+// bot's button signs (approval-bot.ts); the dashboard and a text reply do not.
+function ownerDescriptionLines(approval: Approval): string[] {
+  if (approval.category !== BILLINGO_ISSUE_CATEGORY) return ['Leírás:', quoteOwnerDescription(approval.action_description)]
+  const parsed = parseIssueRequest(approval.action_payload, approval.content_hash)
+  if ('error' in parsed) return ['HIBÁS KÉRÉS, NE HAGYD JÓVÁ.']
+  return [
+    renderIssueText(parsed.request),
+    'Csak a lenti gombbal érvényes; szöveges válasz vagy a dashboard nem állítja ki a számlát.',
+    'Megjegyzés (az ügynöktől, nem ellenőrzött):',
+    quoteOwnerDescription(approval.action_description),
+  ]
 }
 
 // When the owner send is suppressed or fails AND the requester is the main
@@ -357,8 +373,9 @@ export function notifyOwnerOfBotResolution(approval: Approval): void {
 }
 
 // Viktor 2384 I2: the bot hash columns are server-internal; the API does not echo them.
-export function publicApproval<T extends Record<string, unknown>>(a: T): Omit<T, 'bot_text_hash' | 'bot_nonce_hash'> {
-  const { bot_text_hash: _t, bot_nonce_hash: _n, ...rest } = a as T & { bot_text_hash?: unknown; bot_nonce_hash?: unknown }
+export function publicApproval<T extends Record<string, unknown>>(a: T): Omit<T, 'bot_text_hash' | 'bot_nonce_hash' | 'issue_signature'> {
+  // issue_signature has its own route (GET /api/approvals/:id/signature).
+  const { bot_text_hash: _t, bot_nonce_hash: _n, issue_signature: _s, ...rest } = a as T & { bot_text_hash?: unknown; bot_nonce_hash?: unknown; issue_signature?: unknown }
   return rest
 }
 
@@ -428,6 +445,16 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       return true
     }
 
+    // BILLINGOISSUE1104: a Billingo invoice request is the connector's approval_request,
+    // checked and re-hashed here; a request the server cannot render is never stored.
+    if (category.trim() === BILLINGO_ISSUE_CATEGORY) {
+      const parsed = parseIssueRequest(typeof action_payload === 'string' ? action_payload : null, typeof content_hash === 'string' ? content_hash : null)
+      if ('error' in parsed) {
+        json(res, { error: `billingo_issue: ${parsed.error}` }, 400)
+        return true
+      }
+    }
+
     const id = randomUUID()
     const timeout_at = computeTimeoutAt(category, timeout_seconds)
     const approval = createApproval({
@@ -457,6 +484,24 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
 
     const items = listApprovals({ agent_id, category, status, limit })
     json(res, items.map((a) => publicApproval(a as unknown as Record<string, unknown>)))
+    return true
+  }
+
+  // GET /api/approvals/:id/signature -- BILLINGOISSUE1104: the egress gate's signed
+  // approval of one Billingo invoice, for the connector's issue_own_draft. Only a row
+  // the approval bot's button approved carries one (approval-bot.ts); 409 otherwise.
+  const signatureMatch = path.match(/^\/api\/approvals\/([0-9a-f-]{36})\/signature$/)
+  if (signatureMatch && method === 'GET') {
+    const approval = getApproval(signatureMatch[1]!)
+    if (!approval || approval.category !== BILLINGO_ISSUE_CATEGORY) {
+      json(res, { error: 'no billingo_issue approval with this id' }, 404)
+      return true
+    }
+    if (!approval.issue_signature) {
+      json(res, { error: 'not signed: pending, rejected, expired, or not approved on the approval bot\'s button', status: approval.status }, 409)
+      return true
+    }
+    json(res, { approval: approval.issue_signature })
     return true
   }
 

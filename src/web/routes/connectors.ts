@@ -18,6 +18,13 @@ import { getExternalProjectPaths, addExternalProjectPath, removeExternalProjectP
 import { listSecrets, setSecret, getSecret, deleteSecret } from '../vault.js'
 import { logVaultRead, isSshPrivateKeyId, principalOf } from '../vault-acl.js'
 import { approvalBotVaultId } from '../approval-bot.js'
+import { BILLINGO_ISSUE_KEY_VAULT_ID } from '../billingo-issue-approval.js'
+
+/** Vault ids read in-process only: the approval bot's token and the Billingo issue signing key (BILLINGOISSUE1104). */
+export function isServerOnlyVaultId(id: string): boolean {
+  const t = id.trim()
+  return t === approvalBotVaultId() || t === BILLINGO_ISSUE_KEY_VAULT_ID
+}
 import {
   getBindings, addBinding, removeBinding, removeBindingsForSecret,
   syncSecret, syncAllBindings, scanMcpConfigs, unsyncBinding,
@@ -116,7 +123,7 @@ export function vaultAndBindEnvSecrets(
     if (!value) continue
     const vaultId = `${slugifyMcp(serverName)}-${key.toLowerCase()}`
     // APPROVALBOT1013: a generated id must never land on (and overwrite) the approval bot token.
-    if (vaultId === approvalBotVaultId()) throw new Error(`A(z) "${vaultId}" Vault-azonosito foglalt (jovahagyo bot), valassz mas szervernevet.`)
+    if (isServerOnlyVaultId(vaultId)) throw new Error(`A(z) "${vaultId}" Vault-azonosito foglalt (szerver-titok), valassz mas szervernevet.`)
     setSecret(vaultId, `${key} (${serverName})`, value)
     addBinding({ vaultSecretId: vaultId, envVar: key, targets: [{ mcpFilePath, serverName }] })
     const result = syncSecret(vaultId)
@@ -765,7 +772,7 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     // only (approval-bot.ts). Served here, any fleet-token caller would hold it and
     // could rewrite the buttons of the owner's approval message. Same shape as the
     // SSH-key branch: an audit row, no decryption, 403.
-    if (id.trim() === approvalBotVaultId()) {
+    if (isServerOnlyVaultId(id)) {
       logVaultRead(id, ctx.auth, listSecrets().some(s => s.id === id))
       json(res, { error: 'The approval bot token is not served by this route' }, 403)
       return true
@@ -817,7 +824,7 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     // to vault-headers-helper, which sends it to a REMOTE server as an HTTP header; an env
     // binding would put it into a child process. Refused before any write or sync runs.
     // Measured 2026-09-23: the live store/vault-bindings.json has 1 binding, 0 on an ssh-key.
-    if (data.vaultSecretId.trim() === approvalBotVaultId()) {
+    if (isServerOnlyVaultId(data.vaultSecretId)) {
       const { kind, principal } = principalOf(ctx.auth)
       logger.warn({ event: 'vault-binding-refused', vaultSecretId: data.vaultSecretId, kind, principal }, 'vault: approval bot token binding refused')
       json(res, { error: 'The approval bot token cannot be bound to an env var or a header' }, 400)
