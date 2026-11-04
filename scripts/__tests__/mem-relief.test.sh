@@ -51,7 +51,10 @@ echo "kill \$1 \$2" >> "$SB/calls"
 case "\$1" in
   -0) grep -qx -- "\$2" "$SB/alive" 2>/dev/null; exit \$? ;;
   -TERM) grep -qx -- "\$2" "$SB/stubborn" 2>/dev/null && exit 0 ;;
+  -KILL) grep -qx -- "\$2" "$SB/immortal" 2>/dev/null && exit 1 ;;
 esac
+# With \$SB/reuse-40542: once the Aerial wallpaper (728) is signalled, pid 40542 runs another program.
+[ "\$1 \$2" = "-TERM 728" ] && [ -f "$SB/reuse-40542" ] && sed -i '' 's#^40542 .*#40542     1 /usr/bin/some-new-process#' "$SB/ps"
 grep -vx -- "\$2" "$SB/alive" > "$SB/alive.n" 2>/dev/null; mv "$SB/alive.n" "$SB/alive"; exit 0
 STUB
 # agent-msg.sh stand-in: records "<from> <to> <stdin>".
@@ -203,6 +206,21 @@ check "DRY: the leak is named, nothing is signalled, no message" \
 leak; SWAP=23000 run
 check "a ps fixture without MEM_RELIEF_TOP reads no live footprint: only the Aerial wallpaper (by name)" \
   "$(ok -n "$(calls | grep -x 'kill -TERM 728')" -a -z "$(calls | grep -E 'kill -[A-Z]+ (40542|901)$')")" "$(calls | tr '\n' ' ')"
+
+echo "== Viktor 26868: verify before the signal, report a survivor, plain names, argv0 only"
+leak; rm -f "$SB/immortal"; printf '%s\n' 40542 > "$SB/stubborn"; printf '%s\n' 40542 > "$SB/immortal"; SWAP=23000 run env MEM_RELIEF_TOP="$SB/top.leak"
+check "LOW-1: a decoder alive even after KILL -> FAIL in the log, rc 1, the message says it did not stop" \
+  "$(ok "$RC" = 1 -a -n "$(logf | grep 'FAIL video decoder 44.0 GB pid=40542: still alive after KILL')" -a -n "$(grep 'video decoder 44.0 GB (NEM sikerült leállítani)' "$SB/msgs")" -a -z "$(logf | grep 'STOP video decoder')")" "rc=$RC $(logf) $(cat "$SB/msgs" 2>/dev/null)"
+rm -f "$SB/stubborn" "$SB/immortal"
+leak; touch "$SB/reuse-40542"; SWAP=23000 run env MEM_RELIEF_TOP="$SB/top.leak"; rm -f "$SB/reuse-40542"
+check "LOW-2: found as the decoder, but another program by the time the signal is due -> SKIP, no signal" \
+  "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ 40542$')" -a -n "$(calls | grep -x 'kill -TERM 728')" -a -n "$(logf | grep 'SKIP video decoder 44.0 GB pid=40542: no longer VTDecoderXPCService')")" "$(calls | tr '\n' ' ') $(logf)"
+leak; printf '  910     1 /tmp/x/evil$(id)name`whoami`;rm -rf ~ --with-a-very-long-tail-of-characters-to-cut\n' >> "$SB/ps"; printf '910    9G\n' >> "$SB/top.leak"; SWAP=23000 run env MEM_RELIEF_TOP="$SB/top.leak"
+check "LOW-3: a large process name reaches the message only as [A-Za-z0-9._-]" \
+  "$(ok -n "$(grep 'large evil__id_name_whoami__rm 9.0 GB (pid 910' "$SB/msgs")" -a -z "$(grep -F '$(id)' "$SB/msgs")")" "$(cat "$SB/msgs" 2>/dev/null)"
+leak; printf '  920     1 /usr/bin/grep /WallpaperAerialsExtension -r /System\n' >> "$SB/ps"; SWAP=23000 run env MEM_RELIEF_TOP="$SB/top.leak"
+check "INFO-1: a process that only names WallpaperAerialsExtension in its arguments is not the Aerial wallpaper" \
+  "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ 920$')" -a -n "$(calls | grep -x 'kill -TERM 728')")" "$(calls | tr '\n' ' ')"
 
 echo "== idle agents (2c: nothing known to stop, swap over 12 GB; Klodel 26862)"
 idle() {

@@ -60,7 +60,11 @@ def footprints(path, fixture):
     elif fixture:
         return {}
     else:
-        text = subprocess.run(["top", "-l", "1", "-stats", "pid,mem"], capture_output=True, text=True).stdout
+        # Viktor 26868 INFO-2: an absolute path and a timeout, so a stuck top cannot hold the launchd job.
+        try:
+            text = subprocess.run(["/usr/bin/top", "-l", "1", "-stats", "pid,mem"], capture_output=True, text=True, timeout=30).stdout
+        except (subprocess.TimeoutExpired, OSError):
+            return {}
     unit = {"B": 1 / 1048576, "K": 1 / 1024, "M": 1, "G": 1024, "T": 1048576}
     out = {}
     for line in text.splitlines():
@@ -109,14 +113,16 @@ def main():
             port = PORT.search(cmd)
             tree = TREE.search(cmd) or next((TREE.search(procs[p][1]) for p in chain(procs, pid) if TREE.search(procs[p][1])), None)
             out.append((owner(procs, pid), pid, f"next dev :{port.group(1) if port else '?'} {tree.group(1) if tree else '?'}"))
-        elif "/WallpaperAerialsExtension" in cmd.split(" -", 1)[0]:
+        elif cmd.split(" ", 1)[0].endswith("/WallpaperAerialsExtension"):  # argv0, as measured 2026-11-04 21:03
             out.append(("-", pid, "Aerial wallpaper"))
         elif cmd.split(" ", 1)[0].endswith("/VTDecoderXPCService") and mem.get(pid, 0) >= args.decoder_gb * 1024:
             out.append(("-", pid, f"video decoder {gb(mem[pid])} GB"))
     listed = {pid for _, pid, _ in out}
     for pid, mb in sorted(mem.items(), key=lambda kv: -kv[1]):
         if mb >= args.large_gb * 1024 and pid not in listed and pid in procs and pid != 0:
-            name = procs[pid][1].split(" ", 1)[0].rsplit("/", 1)[-1]
+            # Viktor 26868 LOW-3: the name goes into a message sent as the main agent; any same-user
+            # process can choose it, so only a short, plain form passes.
+            name = re.sub(r"[^A-Za-z0-9._-]", "_", procs[pid][1].split(" ", 1)[0].rsplit("/", 1)[-1])[:40]
             out.append((owner(procs, pid), pid, f"large {name} {gb(mb)} GB"))
     for who, pid, what in out:
         print(f"{who}\t{pid}\t{what}")

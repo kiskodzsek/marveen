@@ -122,7 +122,19 @@ stop_pids() {
     (( alive )) || break
     sleep 1; w=$((w + 1))
   done
-  if (( alive )); then for p in "$@"; do "$KILL" -KILL "$p" 2>/dev/null; done; fi
+  if (( alive )); then for p in "$@"; do "$KILL" -KILL "$p" 2>/dev/null; done; sleep 1; fi
+  # Viktor 26868 LOW-1: say so when a pid survives (EPERM, or alive even after KILL).
+  for p in "$@"; do "$KILL" -0 "$p" 2>/dev/null && return 1; done
+  return 0
+}
+
+# Viktor 26868 LOW-2: right before the signal, the pid must still run the expected program (argv0
+# ends with /<name>) in a FRESH snapshot: the ps and top passes are seconds old by now (the dev
+# servers take up to 10 s each), and a pid can be reused.
+argv0_is() {
+  local c
+  c="$(ps_snapshot | awk -v p="$1" '$1==p {print $3; exit}')"
+  [[ "$c" == */"$2" ]]
 }
 
 # Is agent-<id> idle? An empty prompt in the pane (as scripts/idle-check.py reads it) and nothing
@@ -224,9 +236,9 @@ main() {
     if [[ "$DRY" == "1" ]]; then done_lines+=("$what (dry)"); owners+=" $who"; continue; fi
     pids="$(descendants "$pid" | sort -u | tr '\n' ' ')"
     # shellcheck disable=SC2086
-    stop_pids $pids
-    log "STOP $what owner=$who pids=$pids"
-    done_lines+=("$what"); owners+=" $who"
+    if stop_pids $pids; then log "STOP $what owner=$who pids=$pids"; done_lines+=("$what")
+    else log "FAIL $what owner=$who pids=$pids: still alive after KILL"; rc=1; done_lines+=("$what (NEM sikerült leállítani)"); fi
+    owners+=" $who"
   done <<< "$list"
 
   # 2b. The macOS leak (the Aerial wallpaper first: it is the decoder's client), and the large ones.
@@ -234,9 +246,10 @@ main() {
     case "$what" in
       "Aerial wallpaper"|"video decoder "*)
         if [[ "$DRY" == "1" ]]; then done_lines+=("$what (dry)"); continue; fi
-        stop_pids "$pid"
-        log "STOP $what pid=$pid"
-        done_lines+=("$what") ;;
+        local want=VTDecoderXPCService; [[ "$what" == "Aerial wallpaper" ]] && want=WallpaperAerialsExtension
+        if ! argv0_is "$pid" "$want"; then log "SKIP $what pid=$pid: no longer $want"; continue; fi
+        if stop_pids "$pid"; then log "STOP $what pid=$pid"; done_lines+=("$what")
+        else log "FAIL $what pid=$pid: still alive after KILL"; rc=1; done_lines+=("$what (NEM sikerült leállítani)"); fi ;;
       "large "*)
         log "LARGE $what owner=$who pid=$pid (not stopped)"
         large_lines+=("$what (pid $pid, ${who})"); owners+=" $who" ;;
