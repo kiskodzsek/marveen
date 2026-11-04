@@ -52,7 +52,7 @@ export function issueContentHash(company: string, draftId: number, body: unknown
   return createHash('sha256').update(canonicalJson({ company, draft_id: draftId, body }), 'utf8').digest('hex')
 }
 
-export interface IssueItem { name: string; unit_price: number; unit_price_type: 'net' | 'gross'; quantity: number; unit: string; vat: string }
+export interface IssueItem { name: string; unit_price: number; unit_price_type: 'net' | 'gross'; quantity: number; unit: string; vat: string; comment?: string }
 export interface IssueRequest {
   company: string
   draftId: number
@@ -94,7 +94,9 @@ export function parseIssueRequest(payload: string | null | undefined, contentHas
     if (typeof i.unit_price !== 'number' || !Number.isFinite(i.unit_price) || i.unit_price < 0) return { error: 'an item has no unit price' }
     if (i.unit_price_type !== 'net' && i.unit_price_type !== 'gross') return { error: 'an item has no unit price type' }
     if (typeof i.quantity !== 'number' || !Number.isFinite(i.quantity) || !(i.quantity > 0)) return { error: 'an item has no quantity' }
-    items.push({ name: i.name, unit_price: i.unit_price, unit_price_type: i.unit_price_type, quantity: i.quantity, unit: i.unit, vat: i.vat })
+    // The item comment (e.g. "2026. szeptember hónap", the period) is shown when it is plain text; it is in the hash like the rest of the body.
+    const comment = typeof i.comment === 'string' && i.comment.trim() ? i.comment : undefined
+    items.push({ name: i.name, unit_price: i.unit_price, unit_price_type: i.unit_price_type, quantity: i.quantity, unit: i.unit, vat: i.vat, ...(comment ? { comment } : {}) })
   }
   const hash = issueContentHash(p.company, p.draft_id, b)
   if (p.content_hash !== hash) return { error: 'content_hash is not the hash of company, draft_id and body' }
@@ -130,7 +132,29 @@ export function issueTotals(r: IssueRequest): { net: number; vat: number; gross:
 }
 
 function money(n: number, currency: string): string {
-  return `${n.toLocaleString('hu-HU', { maximumFractionDigits: 2 })} ${currency}`
+  return `${n.toLocaleString('hu-HU', { maximumFractionDigits: 2 })} ${currency === 'HUF' ? 'Ft' : currency}`
+}
+
+/**
+ * Partner names the owner reads, by company and Billingo partner id. Reviewed
+ * like code, NOT taken from the agent's text: the body only carries the id,
+ * and the gate checks that id against the draft in Billingo. An id missing
+ * here is shown as unknown, never guessed.
+ *   myshp 1757508684: the partner_id of the four Grepton drafts (approval
+ *   7cf0ba3e body, draft 140695431 read through the gate 2026-11-04 12:36Z),
+ *   Grepton Zrt. per Patrik's TG 778/779 list
+ *   (shared/tig-grepton-1101/patrik-jovahagyas-1104.json).
+ */
+export const BILLINGO_PARTNER_NAMES: Record<string, Record<number, string>> = {
+  myshp: { 1757508684: 'Grepton Zrt.' },
+  notramit: {},
+}
+
+/** "2026-11-19" -> "2026. november 19." (the date as written, no time zone shift). */
+function huDate(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  const months = ['január', 'február', 'március', 'április', 'május', 'június', 'július', 'augusztus', 'szeptember', 'október', 'november', 'december']
+  return `${y}. ${months[m! - 1]} ${d}.`
 }
 
 /** One line of agent-originated text, made harmless for the button message. */
@@ -140,18 +164,41 @@ function plain(s: string, max: number): string {
   return one.length > max ? `${one.slice(0, max - 1)}…` : one
 }
 
-/** The owner's text: everything that decides the invoice comes from the body, through this code. */
+/**
+ * The owner's text, in plain Hungarian (Patrik TG 873: the first version was
+ * hard to read). Everything that decides the invoice comes from the body,
+ * through this code; the content hash stays in the background (the signature
+ * and the gate use it), it is not shown.
+ */
 export function renderIssueText(r: IssueRequest): string {
   const t = issueTotals(r)
+  const partner = BILLINGO_PARTNER_NAMES[r.company]?.[r.partnerId]
+  const item = (i: IssueItem) => {
+    const what = i.comment ? `${plain(i.name, 120)}, ${plain(i.comment, 80)}` : plain(i.name, 120)
+    const how = `${i.quantity} ${plain(i.unit, 20)} × ${money(i.unit_price, r.currency)} ${i.unit_price_type === 'net' ? 'nettó' : 'bruttó'}, ÁFA ${plain(i.vat, 16)}`
+    return { what, how }
+  }
+  const itemLines = r.items.length === 1
+    ? (() => { const { what, how } = item(r.items[0]!); return [`Tétel: ${what}`, `   (${how})`] })()
+    : ['Tételek:', ...r.items.map((i) => { const { what, how } = item(i); return `- ${what} (${how})` })]
   const lines = [
-    'Billingo-SZÁMLA KIÁLLÍTÁSA. Kiállítás után nem vonható vissza (sztornó itt nem lehetséges).',
-    `Cég: ${COMPANY_NAMES[r.company]} | piszkozat: ${r.draftId} | partner-azonosító: ${r.partnerId}`,
-    'Tételek:',
-    ...r.items.map((i) => `- ${plain(i.name, 120)}: ${i.quantity} ${plain(i.unit, 20)} x ${money(i.unit_price, r.currency)} (${i.unit_price_type === 'net' ? 'nettó' : 'bruttó'}), ÁFA ${plain(i.vat, 16)}`),
-    `Nettó: ${money(t.net, r.currency)} | ÁFA: ${money(t.vat, r.currency)} | BRUTTÓ: ${money(t.gross, r.currency)}`,
-    `Teljesítés: ${r.fulfillmentDate} | Fizetési határidő: ${r.dueDate}`,
-    `Ellenőrző kód: ${r.hash.slice(0, 12)}`,
-    'Az összegeket a szerver számolta a kérés törzséből; a kapu kiállítás előtt összeveti a Billingóban lévő piszkozattal.',
+    `Cég: ${COMPANY_NAMES[r.company]}`,
+    '',
+    partner
+      ? `Kinek: ${partner}`
+      : `Kinek: ISMERETLEN PARTNER (Billingo-azonosító ${r.partnerId}), nézd meg a Billingóban, mielőtt jóváhagyod`,
+    ...itemLines,
+    '',
+    `Nettó: ${money(t.net, r.currency)}`,
+    `ÁFA: ${money(t.vat, r.currency)}`,
+    `BRUTTÓ: ${money(t.gross, r.currency)}`,
+    '',
+    'Kelte: a kiállítás napja',
+    `Teljesítés: ${huDate(r.fulfillmentDate)}`,
+    `Fizetési határidő: ${huDate(r.dueDate)}`,
+    '',
+    'Kiállítás után nem vonható vissza. Csak a lenti gomb érvényes.',
+    `piszkozat ${r.draftId}`,
   ]
   return lines.join('\n')
 }

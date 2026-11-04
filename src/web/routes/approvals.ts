@@ -159,6 +159,19 @@ export function buildOwnerApprovalText(approval: Approval, withButtons = false):
   const expires = approval.timeout_at
     ? new Date(approval.timeout_at * 1000).toLocaleString('hu-HU', { timeZone: 'Europe/Budapest' })
     : 'nincs'
+  // Patrik TG 873: the invoice request reads as a few plain lines above the
+  // buttons. No category key, no approval id, no agent note: the server-
+  // rendered invoice is the whole message (the dashboard still has the id).
+  if (approval.category === BILLINGO_ISSUE_CATEGORY && withButtons) {
+    const body = ownerDescriptionLines(approval).join('\n').split('\n')
+    const last = body.pop() ?? ''            // "piszkozat <id>" stays the very last, small line
+    return [
+      `[JÓVÁHAGYÁS KELL] Számla kiállítása (${headerField(approval.agent_id)} kéri)`,
+      ...body,
+      `Lejárat: ${expires}`,
+      last,
+    ].join('\n')
+  }
   return [
     `[JÓVÁHAGYÁS KELL] ${headerField(approval.agent_id)} | ${headerField(approval.category)}`,
     `Lejárat: ${expires}`,
@@ -177,12 +190,10 @@ function ownerDescriptionLines(approval: Approval): string[] {
   if (approval.category !== BILLINGO_ISSUE_CATEGORY) return ['Leírás:', quoteOwnerDescription(approval.action_description)]
   const parsed = parseIssueRequest(approval.action_payload, approval.content_hash)
   if ('error' in parsed) return ['HIBÁS KÉRÉS, NE HAGYD JÓVÁ.']
-  return [
-    renderIssueText(parsed.request),
-    'Csak a lenti gombbal érvényes; szöveges válasz vagy a dashboard nem állítja ki a számlát.',
-    'Megjegyzés (az ügynöktől, nem ellenőrzött):',
-    quoteOwnerDescription(approval.action_description),
-  ]
+  // The agent's free text is left out on purpose: everything the owner decides
+  // on is rendered from the checked body, and an unchecked note next to it is
+  // what made the first version hard to read.
+  return [renderIssueText(parsed.request)]
 }
 
 // When the owner send is suppressed or fails AND the requester is the main
