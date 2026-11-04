@@ -85,11 +85,15 @@ fi
 # other's fresh one. A reused pid reads as alive: the run stops with 75, the safe direction.
 PART="$STORE.partial"
 mkdir -p -- "$(dirname "$PART")" || { echo "deps-store: cannot create $(dirname "$PART")" >&2; exit 3; }
+# An empty or unreadable pid file (a run killed between mkdir and the write) falls to the mtime rule (Viktor 26615
+# INFO-1). ps is checked on our own pid first: a ps that cannot see us cannot call anyone dead, so a broken ps
+# never takes over a live lock (Viktor 26615 LOW-1, fail closed).
+lock_pid() { [[ -f "$PART/.deps-store.pid" ]] && head -c 32 "$PART/.deps-store.pid" | tr -cd '0-9'; }
 lock_is_stale() {
-  local pid
-  if [[ -f "$PART/.deps-store.pid" ]]; then
-    pid="$(head -c 32 "$PART/.deps-store.pid" | tr -cd '0-9')"
-    [[ -n "$pid" ]] && ! ps -p "$pid" >/dev/null 2>&1
+  local pid; pid="$(lock_pid)"
+  if [[ -n "$pid" ]]; then
+    ps -p "$$" >/dev/null 2>&1 || return 1
+    ! ps -p "$pid" >/dev/null 2>&1
   else
     [[ -n "$(find "$PART" -maxdepth 0 -mmin +10 2>/dev/null)" ]]
   fi
@@ -106,7 +110,7 @@ if ! take_lock; then
     rmdir -- "$PART.takeover"
     (( got == 0 )) || { echo "deps-store: $PART exists: another install of this lockfile is running" >&2; exit 75; }
   else
-    echo "deps-store: $PART exists: another install of this lockfile is running (its pid: $PART/.deps-store.pid)" >&2
+    echo "deps-store: $PART exists: another install of this lockfile is running (pid: $(lock_pid || true)); if that pid is not a deps-store run (e.g. reused after a reboot), remove it: rm -rf $PART" >&2
     # A takeover killed midway (it holds no pid) is the one thing left by hand; it is said, never guessed.
     [[ -d "$PART.takeover" ]] && echo "deps-store: a takeover is in progress; if no deps-store runs, remove it: rmdir $PART.takeover" >&2
     exit 75
