@@ -17,7 +17,8 @@ import { shellEscape } from '../sanitize.js'
 import { getExternalProjectPaths, addExternalProjectPath, removeExternalProjectPath, getGitHubRepos, installGitHubRepo, removeGitHubRepo, updateGitHubRepo, detectRequiredEnvVars } from '../dashboard-settings.js'
 import { listSecrets, setSecret, getSecret, deleteSecret } from '../vault.js'
 import { logVaultRead, isSshPrivateKeyId, principalOf } from '../vault-acl.js'
-import { approvalBotVaultId } from '../approval-bot.js'
+import { isServerOnlyVaultId } from '../server-only-secrets.js'
+export { isServerOnlyVaultId }
 import {
   getBindings, addBinding, removeBinding, removeBindingsForSecret,
   syncSecret, syncAllBindings, scanMcpConfigs, unsyncBinding,
@@ -116,7 +117,7 @@ export function vaultAndBindEnvSecrets(
     if (!value) continue
     const vaultId = `${slugifyMcp(serverName)}-${key.toLowerCase()}`
     // APPROVALBOT1013: a generated id must never land on (and overwrite) the approval bot token.
-    if (vaultId === approvalBotVaultId()) throw new Error(`A(z) "${vaultId}" Vault-azonosito foglalt (jovahagyo bot), valassz mas szervernevet.`)
+    if (isServerOnlyVaultId(vaultId)) throw new Error(`A(z) "${vaultId}" Vault-azonosito foglalt (szerver-titok), valassz mas szervernevet.`)
     setSecret(vaultId, `${key} (${serverName})`, value)
     addBinding({ vaultSecretId: vaultId, envVar: key, targets: [{ mcpFilePath, serverName }] })
     const result = syncSecret(vaultId)
@@ -733,6 +734,8 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     const { id, label, value } = JSON.parse(body.toString()) as { id: string, label: string, value: string }
     if (!id?.trim() || !value) { json(res, { error: 'id and value required' }, 400); return true }
+    // Viktor 26241: a server-only secret is neither replaced nor created over HTTP.
+    if (isServerOnlyVaultId(id)) { json(res, { error: 'This Vault id is server-only' }, 403); return true }
     setSecret(id.trim(), label || id.trim(), value)
     const syncResult = syncSecret(id.trim())
     json(res, { ok: true, synced: syncResult.updated })
@@ -765,7 +768,7 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     // only (approval-bot.ts). Served here, any fleet-token caller would hold it and
     // could rewrite the buttons of the owner's approval message. Same shape as the
     // SSH-key branch: an audit row, no decryption, 403.
-    if (id.trim() === approvalBotVaultId()) {
+    if (isServerOnlyVaultId(id)) {
       logVaultRead(id, ctx.auth, listSecrets().some(s => s.id === id))
       json(res, { error: 'The approval bot token is not served by this route' }, 403)
       return true
@@ -782,6 +785,7 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
 
   if (vaultMatch && !isVaultSubroute && method === 'DELETE') {
     const id = decodeURIComponent(vaultMatch[1])
+    if (isServerOnlyVaultId(id)) { json(res, { error: 'This Vault id is server-only' }, 403); return true }
     if (!deleteSecret(id)) { json(res, { error: 'Not found' }, 404); return true }
     removeBindingsForSecret(id)
     json(res, { ok: true })
@@ -817,7 +821,7 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     // to vault-headers-helper, which sends it to a REMOTE server as an HTTP header; an env
     // binding would put it into a child process. Refused before any write or sync runs.
     // Measured 2026-09-23: the live store/vault-bindings.json has 1 binding, 0 on an ssh-key.
-    if (data.vaultSecretId.trim() === approvalBotVaultId()) {
+    if (isServerOnlyVaultId(data.vaultSecretId)) {
       const { kind, principal } = principalOf(ctx.auth)
       logger.warn({ event: 'vault-binding-refused', vaultSecretId: data.vaultSecretId, kind, principal }, 'vault: approval bot token binding refused')
       json(res, { error: 'The approval bot token cannot be bound to an env var or a header' }, 400)
@@ -927,6 +931,10 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
       }
       if (!value) {
         errors.push(`Could not read value for ${imp.envVar} from ${imp.serverName}`)
+        continue
+      }
+      if (typeof imp.vaultId !== 'string' || isServerOnlyVaultId(imp.vaultId)) {
+        errors.push(`${imp.vaultId}: server-only Vault id, not imported`)
         continue
       }
       setSecret(imp.vaultId, imp.label, value)

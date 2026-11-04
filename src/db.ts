@@ -1372,6 +1372,9 @@ export function initDatabase(dbPathOverride?: string): void {
   try { db.exec('ALTER TABLE approvals ADD COLUMN bot_text_hash TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE approvals ADD COLUMN bot_nonce_hash TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE approvals ADD COLUMN resolution_channel TEXT') } catch { /* already exists */ }
+  // BILLINGOISSUE1104: the egress gate's signed approval of one Billingo invoice,
+  // written once, only for an approved billingo_issue row the owner's button resolved.
+  try { db.exec('ALTER TABLE approvals ADD COLUMN issue_signature TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE approvals ADD COLUMN consumed_ref TEXT') } catch { /* already exists */ }
   // Every consume call leaves a row here, the refused ones too: a second send
   // attempt on a used approval is exactly the event worth seeing afterwards.
@@ -5539,6 +5542,8 @@ export interface Approval {
   bot_text_hash?: string | null
   bot_nonce_hash?: string | null
   resolution_channel?: string | null
+  // BILLINGOISSUE1104: optional in the type for the same reason as consumed_by.
+  issue_signature?: string | null
 }
 
 export function createApproval(params: {
@@ -5617,6 +5622,18 @@ export function resolveApprovalByBot(id: string, status: 'approved' | 'rejected'
     WHERE id = ? AND status = 'pending' AND bot_nonce_hash = ?
       AND (timeout_at IS NULL OR timeout_at > ?)
   `).run(status, now, id, nonceHash, now).changes > 0
+}
+
+// BILLINGOISSUE1104 (Viktor 26223 A1): the signature is stored once, and only on
+// a row the approval bot's button approved. The WHERE repeats every condition,
+// so no caller can put a signature on a text-reply or dashboard resolution.
+export function setApprovalIssueSignature(id: string, value: string): boolean {
+  return db.prepare(`
+    UPDATE approvals SET issue_signature = ?
+    WHERE id = ? AND category = 'billingo_issue' AND status = 'approved'
+      AND resolution_channel = 'approval_bot' AND resolved_by = 'telegram_button'
+      AND issue_signature IS NULL
+  `).run(value, id).changes > 0
 }
 
 // The CREATE path stamps the owner-notification message id onto the row
