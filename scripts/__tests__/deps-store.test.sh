@@ -34,6 +34,7 @@ cat > "$SB/npm" <<STUB
 #!/usr/bin/env bash
 echo "\$*" >> "$SB/npm.log"
 [ -n "\${STUB_NPM_FAIL:-}" ] && { mkdir -p node_modules/half; exit 1; }
+[ -n "\${STUB_RACE_STORE:-}" ] && mkdir -p "\$STUB_RACE_STORE/node_modules" && echo '{}' > "\$STUB_RACE_STORE/node_modules/.package-lock.json"
 mkdir -p node_modules/dep && echo '{}' > node_modules/.package-lock.json
 STUB
 chmod +x "$SB/hj" "$SB/npm"
@@ -83,6 +84,32 @@ check "exit 3" "$(ok "$RC" = 3)" "$RC $OUT"
 check "no store, no .partial" "$(ok ! -e "$FLEET/agents/carol/deps/other-$H2" -a ! -e "$FLEET/agents/carol/deps/other-$H2.partial")"
 STUB_ENV="STUB_HJ_RC=75" ds "$FLEET/agents/carol/repos/other"
 check "heavy-job.sh busy: exit 75, nothing ran, nothing left" "$(ok "$RC" = 75 -a ! -f "$SB/npm.log" -a ! -e "$FLEET/agents/carol/deps/other-$H2.partial")" "$RC $OUT"
+
+echo "== two runs of one lockfile (Viktor 26587 LOW-1)"
+mkrepo "$FLEET/agents/carol/repos/race" d
+H3="$(shasum -a 256 "$FLEET/agents/carol/repos/race/package-lock.json" | cut -c1-16)"
+R3="$FLEET/agents/carol/deps/race-$H3"
+mkdir -p "$R3.partial" && echo first > "$R3.partial/marker"
+ds "$FLEET/agents/carol/repos/race"
+check "a .partial in place: exit 75, the other run's files untouched, nothing ran" "$(ok "$RC" = 75 -a -f "$R3.partial/marker" -a ! -f "$SB/npm.log")" "$RC $OUT"
+# Its own lockfile, so no earlier case has built this store already.
+mkrepo "$FLEET/agents/carol/repos/race2" g
+H6="$(shasum -a 256 "$FLEET/agents/carol/repos/race2/package-lock.json" | cut -c1-16)"
+R6="$FLEET/agents/carol/deps/race2-$H6"
+STUB_ENV="STUB_RACE_STORE=$R6" ds "$FLEET/agents/carol/repos/race2"
+check "the store appeared during the install: exit 0, that store, nothing nested in it, no .partial" "$(ok "$RC" = 0 -a "$(echo "$OUT" | tail -1)" = "$R6" -a -f "$SB/npm.log" -a -z "$(ls "$R6" | grep partial)" -a ! -e "$R6.partial")" "$RC $OUT $(ls "$R6")"
+
+echo "== .npmrc (Viktor 26587 INFO-1)"
+mkrepo "$FLEET/agents/carol/repos/rc1" e
+printf '//registry.npmjs.org/:_authToken=FAKE-TEST-TOKEN\n' > "$FLEET/agents/carol/repos/rc1/.npmrc"
+H4="$(shasum -a 256 "$FLEET/agents/carol/repos/rc1/package-lock.json" | cut -c1-16)"
+ds "$FLEET/agents/carol/repos/rc1"
+check "an .npmrc with a token: exit 64, no store, no copy, the token not printed" "$(ok "$RC" = 64 -a ! -e "$FLEET/agents/carol/deps/rc1-$H4" -a ! -e "$FLEET/agents/carol/deps/rc1-$H4.partial" -a -z "$(echo "$OUT" | grep FAKE-TEST-TOKEN)")" "$RC $OUT"
+mkrepo "$FLEET/agents/carol/repos/rc2" f
+printf 'fund=false\n' > "$FLEET/agents/carol/repos/rc2/.npmrc"
+H5="$(shasum -a 256 "$FLEET/agents/carol/repos/rc2/package-lock.json" | cut -c1-16)"
+ds "$FLEET/agents/carol/repos/rc2"
+check "an .npmrc without a credential is copied" "$(ok "$RC" = 0 -a -f "$FLEET/agents/carol/deps/rc2-$H5/.npmrc")" "$RC $OUT"
 
 echo "== usage"
 mkrepo "$SB/outside" c

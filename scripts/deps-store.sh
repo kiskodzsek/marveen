@@ -19,13 +19,17 @@
 #      the project or of a dependency runs in it; a package that needs one is installed in the worktree
 #      itself, as before. Measured on kiskodzsek/marabel 0691037f2 (package-lock.json hasInstallScript):
 #      protobufjs 7.6.6 and unrs-resolver 1.12.2 (dev) have one; marveen and mcp-connectors were not measured;
-#   4. a failed install leaves no half store behind: it is built in <store>.partial and renamed at the end.
+#   4. a failed install leaves no half store behind: it is built in <store>.partial and renamed at the end;
+#      the .partial directory is also the lock (a second run for the same lockfile stops with 75), and a
+#      store that appeared meanwhile is used, not overwritten;
+#   5. a repository .npmrc is copied only without a credential in it (_authToken, _auth, _password).
 #
 # Afterwards `worktree-add.sh <main-clone> <new> <branch>` takes the store by itself when the main clone
 # cannot serve that lockfile. A store nobody links to is the owner's to remove (rm -rf <store>).
 #
-# Exit codes: 0 = the store is ready (its path on stdout); 3 = the install failed; 64 = usage error;
-# 75 = heavy-job.sh did not start the install (busy host).
+# Exit codes: 0 = the store is ready (its path on stdout); 3 = the install failed; 64 = usage error (or an
+# .npmrc with a credential); 75 = heavy-job.sh did not start the install (busy host), or another install of the
+# same lockfile is running.
 
 set -uo pipefail
 
@@ -65,9 +69,16 @@ if (( DRY )); then
   exit 0
 fi
 
+# A repository .npmrc may carry a registry credential; the store never gets a copy of one (Viktor 26587 INFO-1).
+if [[ -f "$WT/.npmrc" ]] && grep -Eq '(_authToken|_auth|_password)[[:space:]]*=' "$WT/.npmrc"; then
+  echo "deps-store: $WT/.npmrc holds a credential; not copied, nothing installed (install in the worktree itself)" >&2
+  exit 64
+fi
+# The .partial directory is the lock (Viktor 26587 LOW-1): mkdir is atomic, so a second run for the same lockfile
+# finds it and stops instead of deleting the first run's work. A stale one (a killed run) is removed by hand.
 PART="$STORE.partial"
-rm -rf -- "$PART"
-mkdir -p -- "$PART" || { echo "deps-store: cannot create $PART" >&2; exit 3; }
+mkdir -p -- "$(dirname "$PART")" || { echo "deps-store: cannot create $(dirname "$PART")" >&2; exit 3; }
+mkdir -- "$PART" 2>/dev/null || { echo "deps-store: $PART exists: another install of this lockfile is running (if none is, remove it: rm -rf $PART)" >&2; exit 75; }
 cp -- "$WT/package.json" "$WT/package-lock.json" "$PART/" || { rm -rf -- "$PART"; exit 3; }
 [[ -f "$WT/.npmrc" ]] && cp -- "$WT/.npmrc" "$PART/"
 (cd -- "$PART" && bash "$HEAVY_JOB" --name "deps-store-$REPO" -- "$NPM" ci --ignore-scripts --no-audit --no-fund)
@@ -76,5 +87,7 @@ if (( rc == 75 )); then rm -rf -- "$PART"; echo "deps-store: heavy-job.sh did no
 if (( rc != 0 )) || [[ ! -f "$PART/node_modules/.package-lock.json" ]]; then
   rm -rf -- "$PART"; echo "deps-store: npm ci failed (rc=$rc); nothing kept" >&2; exit 3
 fi
+# A store that appeared meanwhile is kept and used: mv would put this one inside it (Viktor 26587 LOW-1).
+if [[ -e "$STORE" ]]; then rm -rf -- "$PART"; echo "$STORE"; exit 0; fi
 mv -- "$PART" "$STORE" || { rm -rf -- "$PART"; echo "deps-store: cannot move $PART to $STORE" >&2; exit 3; }
 echo "$STORE"
