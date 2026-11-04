@@ -17,14 +17,8 @@ import { shellEscape } from '../sanitize.js'
 import { getExternalProjectPaths, addExternalProjectPath, removeExternalProjectPath, getGitHubRepos, installGitHubRepo, removeGitHubRepo, updateGitHubRepo, detectRequiredEnvVars } from '../dashboard-settings.js'
 import { listSecrets, setSecret, getSecret, deleteSecret } from '../vault.js'
 import { logVaultRead, isSshPrivateKeyId, principalOf } from '../vault-acl.js'
-import { approvalBotVaultId } from '../approval-bot.js'
-import { BILLINGO_ISSUE_KEY_VAULT_ID } from '../billingo-issue-approval.js'
-
-/** Vault ids read in-process only: the approval bot's token and the Billingo issue signing key (BILLINGOISSUE1104). */
-export function isServerOnlyVaultId(id: string): boolean {
-  const t = id.trim()
-  return t === approvalBotVaultId() || t === BILLINGO_ISSUE_KEY_VAULT_ID
-}
+import { isServerOnlyVaultId } from '../server-only-secrets.js'
+export { isServerOnlyVaultId }
 import {
   getBindings, addBinding, removeBinding, removeBindingsForSecret,
   syncSecret, syncAllBindings, scanMcpConfigs, unsyncBinding,
@@ -740,6 +734,8 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     const { id, label, value } = JSON.parse(body.toString()) as { id: string, label: string, value: string }
     if (!id?.trim() || !value) { json(res, { error: 'id and value required' }, 400); return true }
+    // Viktor 26241: a server-only secret is neither replaced nor created over HTTP.
+    if (isServerOnlyVaultId(id)) { json(res, { error: 'This Vault id is server-only' }, 403); return true }
     setSecret(id.trim(), label || id.trim(), value)
     const syncResult = syncSecret(id.trim())
     json(res, { ok: true, synced: syncResult.updated })
@@ -789,6 +785,7 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
 
   if (vaultMatch && !isVaultSubroute && method === 'DELETE') {
     const id = decodeURIComponent(vaultMatch[1])
+    if (isServerOnlyVaultId(id)) { json(res, { error: 'This Vault id is server-only' }, 403); return true }
     if (!deleteSecret(id)) { json(res, { error: 'Not found' }, 404); return true }
     removeBindingsForSecret(id)
     json(res, { ok: true })
@@ -934,6 +931,10 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
       }
       if (!value) {
         errors.push(`Could not read value for ${imp.envVar} from ${imp.serverName}`)
+        continue
+      }
+      if (typeof imp.vaultId !== 'string' || isServerOnlyVaultId(imp.vaultId)) {
+        errors.push(`${imp.vaultId}: server-only Vault id, not imported`)
         continue
       }
       setSecret(imp.vaultId, imp.label, value)

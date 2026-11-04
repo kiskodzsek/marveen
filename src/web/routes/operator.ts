@@ -23,6 +23,7 @@
 // forwarded WRITE carries an empty body: the owner's options on those routes
 // (a fresh restart, an auto-stash update) stay the owner's.
 
+import { isServerOnlyVaultId } from '../server-only-secrets.js'
 import http from 'node:http'
 import os from 'node:os'
 import { join } from 'node:path'
@@ -370,7 +371,7 @@ export async function tryHandleOperator(ctx: RouteContext, webDir: string): Prom
     if (!requireCapability(ctx, access, 'vaultWrite')) return true
     let id = ''
     try { id = decodeURIComponent(vaultMatch[1]!) } catch { /* rejected below */ }
-    if (!VAULT_ID_RE.test(id) || id.startsWith(SSH_KEY_PREFIX)) {
+    if (!VAULT_ID_RE.test(id) || id.startsWith(SSH_KEY_PREFIX) || isServerOnlyVaultId(id)) {
       json(res, { error: 'Invalid secret id' }, 400)
       return true
     }
