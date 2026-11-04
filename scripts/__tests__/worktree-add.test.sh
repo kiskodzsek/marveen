@@ -131,6 +131,43 @@ check "created under the caller's directory" "$(ok -f "$SB/callerdir/rel-wt/pack
 check "not under <main-clone>" "$(ok ! -e "$SB/main/rel-wt")"
 check "linked" "$(ok -L "$SB/callerdir/rel-wt/node_modules")"
 
+echo "== never into a linked worktree's node_modules (code review #16, card f24e6745)"
+git -C "$SB/other" worktree add -q "$SB/other-feat" -b feat/other-feat
+mkdir -p "$SB/other-feat/node_modules/dep" && echo '{}' > "$SB/other-feat/node_modules/.package-lock.json"
+wa --node-modules-from "$SB/other-feat" "$SB/main" "$SB/wt14" feat/fourteen
+check "--node-modules-from a linked worktree: exit 3, not linked" "$(ok "$RC" = 3 -a ! -e "$SB/wt14/node_modules")" "$RC $OUT"
+check "says linked worktree and names the store" "$(echo "$OUT" | grep -q 'is a linked worktree' && echo "$OUT" | grep -q 'deps-store.sh' && echo 0 || echo 1)" "$OUT"
+wa "$SB/other-feat" "$SB/wt15" feat/fifteen
+check "a linked worktree as <main-clone> with its own install: exit 3" "$(ok "$RC" = 3 -a ! -e "$SB/wt15/node_modules")" "$RC $OUT"
+wa "$SB/wt1" "$SB/wt16" feat/sixteen
+check "control: a linked worktree whose node_modules is a link to the main clone still links (to the main clone)" "$(ok "$RC" = 0 -a "$(readlink "$SB/wt16/node_modules")" = "$SB/main/node_modules")" "$RC $OUT"
+
+echo "== the deps store: taken by itself when the main clone cannot serve the lockfile"
+mkclone "$SB/fleet/agents/carol/repo" "node_modules"
+rm -rf "$SB/fleet/agents/carol/repo/node_modules"
+H="$(shasum -a 256 "$SB/fleet/agents/carol/repo/package-lock.json" | cut -c1-16)"
+mkstore() { mkdir -p "$1/node_modules/dep" && echo '{}' > "$1/node_modules/.package-lock.json" && cp "$SB/fleet/agents/carol/repo/package-lock.json" "$1/"; }
+PROD="$SB/fleet" wa "$SB/fleet/agents/carol/repo" "$SB/fleet/agents/carol/wt-a" feat/ca
+check "no install, no store: exit 3, names deps-store.sh" "$(ok "$RC" = 3 -a ! -e "$SB/fleet/agents/carol/wt-a/node_modules" -a -n "$(echo "$OUT" | grep 'deps-store.sh')")" "$RC $OUT"
+mkstore "$SB/fleet/agents/alice/deps/repo-$H"
+PROD="$SB/fleet" wa "$SB/fleet/agents/carol/repo" "$SB/fleet/agents/carol/wt-b" feat/cb
+check "another agent's store of the same lockfile is not taken" "$(ok "$RC" = 3 -a ! -e "$SB/fleet/agents/carol/wt-b/node_modules")" "$RC $OUT"
+mkstore "$SB/fleet/agents/carol/deps/repo-0000000000000000"
+PROD="$SB/fleet" wa "$SB/fleet/agents/carol/repo" "$SB/fleet/agents/carol/wt-c" feat/cc
+check "a store of another lockfile is not taken" "$(ok "$RC" = 3 -a ! -e "$SB/fleet/agents/carol/wt-c/node_modules")" "$RC $OUT"
+mkstore "$SB/fleet/agents/carol/deps/repo-$H"
+PROD="$SB/fleet" wa "$SB/fleet/agents/carol/repo" "$SB/fleet/agents/carol/wt-d" feat/cd
+check "own store of this lockfile: exit 0, linked to the store" "$(ok "$RC" = 0 -a "$(readlink "$SB/fleet/agents/carol/wt-d/node_modules")" = "$SB/fleet/agents/carol/deps/repo-$H/node_modules")" "$RC $OUT"
+check "git status is clean" "$(ok -z "$(git -C "$SB/fleet/agents/carol/wt-d" status --porcelain)")" "$(git -C "$SB/fleet/agents/carol/wt-d" status --porcelain)"
+PROD="$SB/fleet" wa "$SB/fleet/agents/carol/wt-d" "$SB/fleet/agents/carol/wt-e" feat/ce
+check "a worktree of that worktree goes to the store too" "$(ok "$RC" = 0 -a "$(readlink "$SB/fleet/agents/carol/wt-e/node_modules")" = "$SB/fleet/agents/carol/deps/repo-$H/node_modules")" "$RC $OUT"
+git clone -q "$SB/fleet/agents/carol/repo" "$SB/fleet/agents/carol/repo-copy"
+PROD="$SB/fleet" wa "$SB/fleet/agents/carol/repo-copy" "$SB/fleet/agents/carol/wt-g" feat/cg
+check "a second clone under another name shares the store (the hash is the identity)" "$(ok "$RC" = 0 -a "$(readlink "$SB/fleet/agents/carol/wt-g/node_modules")" = "$SB/fleet/agents/carol/deps/repo-$H/node_modules")" "$RC $OUT"
+mkdir -p "$SB/fleet/agents/carol/repo/node_modules/dep" && echo '{}' > "$SB/fleet/agents/carol/repo/node_modules/.package-lock.json"
+PROD="$SB/fleet" wa "$SB/fleet/agents/carol/repo" "$SB/fleet/agents/carol/wt-f" feat/cf
+check "an installed main clone of the same lockfile is still first" "$(ok "$RC" = 0 -a "$(readlink "$SB/fleet/agents/carol/wt-f/node_modules")" = "$SB/fleet/agents/carol/repo/node_modules")" "$RC $OUT"
+
 echo "== usage"
 wa "$SB/main" "$SB/wt1" feat/x
 check "an existing path is refused (64)" "$(ok "$RC" = 64)" "$RC"
