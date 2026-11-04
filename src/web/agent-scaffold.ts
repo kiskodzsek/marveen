@@ -1936,13 +1936,80 @@ export function quarantineReaderDomains(storeDir = STORE_DIR, pslPath = PUBLIC_S
   }
 }
 
-// Render the reader definition: the template's shipped feeds, plus the domains
-// the owner allowed on this install. Pure, so the tests drive the same string
-// the deploy writes.
-//
+// Whether the egress-gate hook runs the OPEN reader posture for readers spawned
+// by `name`: the same two switches as the hook's readerIsOpen() (the global
+// `quarantine_reader_posture: "denylist"`, or the agent named in
+// `quarantine_reader_denylist_agents`, vetted with the hook's AGENT_NAME shape).
+// Anything unreadable or malformed means "not open": the prompt then keeps the
+// allowlist refusal, which is the fail-closed direction.
+const READER_AGENT_NAME = /^[a-z0-9][a-z0-9-]{0,40}$/
+export function quarantineReaderOpenFor(name: string, storeDir = STORE_DIR): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(join(storeDir, 'egress-allowlist.json'), 'utf-8'))
+    if (raw?.quarantine_reader_posture === 'denylist') return true
+    const named: unknown[] = Array.isArray(raw?.quarantine_reader_denylist_agents) ? raw.quarantine_reader_denylist_agents : []
+    return READER_AGENT_NAME.test(name)
+      && named.some((a) => typeof a === 'string' && READER_AGENT_NAME.test(a) && a === name)
+  } catch {
+    return false
+  }
+}
+
+// QREADEROPEN1104: the open posture used to reach the hook only. The reader's
+// prompt kept the allowlist refusal, so a reader spawned by an agent the
+// operator had opened refused an unlisted public host by itself -- no WebFetch
+// call, no egress-blocked.log line (Radar 26315, 2026-11-04 12:32Z: github.com,
+// recordly.ai, connectors.hu, mobbin.com). Unless the CALLER happened to say
+// "the install runs the open posture", the switch did nothing. The deployed
+// copy is per agent, so it can carry that agent's real posture. The hook stays
+// the authority: a copy that says "open" for a closed caller opens nothing.
+export const QUARANTINE_POSTURE_BEGIN = '<!-- BEGIN PER-AGENT POSTURE (from store/egress-allowlist.json) -->'
+export const QUARANTINE_POSTURE_END = '<!-- END PER-AGENT POSTURE -->'
+const QUARANTINE_OPEN_NOTICE = [
+  QUARANTINE_POSTURE_BEGIN,
+  '**This copy runs the OPEN posture.** The operator opened the reader for the',
+  'agent that spawns you (`store/egress-allowlist.json`). Attempt every public',
+  '`http`/`https` URL, whether or not its host is in the list below; never',
+  'answer `domain not on quarantine-reader fetch allowlist`. The "Always',
+  'refused" section still applies in full, and the egress-gate hook still',
+  'decides every call: if it blocks one, report that block in `error`.',
+  QUARANTINE_POSTURE_END,
+].join('\n')
+
+// Literal-position strip, same reason as the domain block below (the markers
+// carry regex metacharacters).
+function stripMarkedBlock(text: string, begin: string, end: string): string {
+  const b = text.indexOf(begin)
+  if (b < 0) return text
+  const e = text.indexOf(end, b)
+  if (e <= b) return text
+  // The notice is inserted as "\n\n<block>": take both newlines back out, so a
+  // re-render (open -> closed) restores the template byte for byte.
+  let from = b
+  if (from > 0 && text[from - 1] === '\n') from--
+  if (from > 0 && text[from - 1] === '\n') from--
+  return text.slice(0, from) + text.slice(e + end.length)
+}
+
+// Render the reader definition: the template's shipped feeds, the domains the
+// owner allowed on this install, and -- when `opts.open` -- the per-agent open
+// posture notice. Pure, so the tests drive the same string the deploy writes.
+export function renderQuarantineReader(template: string, domains: string[], opts?: { open?: boolean }): string {
+  const withDomains = renderQuarantineReaderDomains(
+    stripMarkedBlock(template, QUARANTINE_POSTURE_BEGIN, QUARANTINE_POSTURE_END), domains)
+  if (!opts?.open) return withDomains
+  // Right under the Domain restriction heading: the model reads the notice
+  // before the list it would otherwise refuse from. The notice has no
+  // backtick-bullet, so the per-install domain anchor is not affected.
+  const heading = /^##\s+Domain restriction\s*$/m.exec(withDomains)
+  if (!heading) return withDomains
+  const at = heading.index + heading[0].length
+  return `${withDomains.slice(0, at)}\n\n${QUARANTINE_OPEN_NOTICE}${withDomains.slice(at)}`
+}
+
 // Marker-delimited so a re-render replaces the previous block instead of
 // stacking copies, and so a reader can see which lines are per-install.
-export function renderQuarantineReader(template: string, domains: string[]): string {
+function renderQuarantineReaderDomains(template: string, domains: string[]): string {
   const BEGIN = '<!-- BEGIN PER-INSTALL DOMAINS (from store/egress-allowlist.json) -->'
   const END = '<!-- END PER-INSTALL DOMAINS -->'
   // Strip a previous block by literal position, NOT with a regex: the markers
@@ -2086,7 +2153,8 @@ export function ensureQuarantineReader(
   const destPath = join(destDir, 'quarantine-reader.md')
   let rendered: string
   try {
-    rendered = renderQuarantineReader(readFileSync(tplPath, 'utf-8'), quarantineReaderDomains(paths?.storeDir))
+    rendered = renderQuarantineReader(readFileSync(tplPath, 'utf-8'), quarantineReaderDomains(paths?.storeDir),
+      { open: quarantineReaderOpenFor(name, paths?.storeDir) })
   } catch {
     return false
   }
