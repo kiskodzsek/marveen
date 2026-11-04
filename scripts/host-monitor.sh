@@ -16,8 +16,14 @@
 #
 # Bands (defaults, env-overridable):
 #   CRITICAL  free mem < 12% | disk < 3 GiB | swap >= 90% with free mem < 25%
-#             | a thermal warning is recorded
-#   WARN      free mem < 25% | disk < 10 GiB | swap >= 75% | load1 > 2 x CPUs
+#             | swap >= 12 GB with free mem < 25% | a thermal warning is recorded
+#   WARN      free mem < 25% | disk < 10 GiB | swap >= 75% | swap >= 8 GB
+#             | load1 > 2 x CPUs
+#   The swap % rules apply only where the swap total is fixed (Linux, or the
+#   HOSTMON_SWAP_PCT hook). macOS grows the swap total with use, so its % says
+#   nothing: on 2026-11-04 21:0x it read 98% at 23 GB used (Klodel 26862). There
+#   the GB rules decide (vm.swapusage "used"); the reasons read "swap N GB" and
+#   "swap N GB with free memory N%", the same shapes heavy-job.sh knows.
 #   OK        otherwise
 #
 # Effects:
@@ -34,7 +40,7 @@
 #   - It never kills, pauses or restarts anything. Pausing non-core agents in
 #     CRITICAL is a separate, approved step, not a side effect of a monitor.
 #
-# Test hooks: MEMGATE_PROC_MEMINFO / MEMGATE_SYSCTL (memory), HOSTMON_SWAP_PCT,
+# Test hooks: MEMGATE_PROC_MEMINFO / MEMGATE_SYSCTL (memory), HOSTMON_SWAP_PCT, HOSTMON_SWAP_MB,
 # HOSTMON_DF_KB, HOSTMON_LOAD1, HOSTMON_NCPU, HOSTMON_THERM (text of
 # `pmset -g therm`), HOSTMON_NOW (epoch), MARVEEN_STORE (state dir).
 
@@ -54,6 +60,8 @@ CRIT_DISK_GB="${HOSTMON_CRIT_DISK_GB:-3}"
 WARN_DISK_GB="${HOSTMON_WARN_DISK_GB:-10}"
 WARN_SWAP="${HOSTMON_WARN_SWAP_PCT:-75}"
 CRIT_SWAP="${HOSTMON_CRIT_SWAP_PCT:-90}"
+WARN_SWAP_GB="${HOSTMON_WARN_SWAP_GB:-8}"
+CRIT_SWAP_GB="${HOSTMON_CRIT_SWAP_GB:-12}"
 COOLDOWN="${HOSTMON_ALERT_COOLDOWN:-1800}"
 NOW="${HOSTMON_NOW:-$(date +%s)}"
 SYSCTL="${MEMGATE_SYSCTL:-/usr/sbin/sysctl}"
@@ -64,6 +72,17 @@ SYSCTL="${MEMGATE_SYSCTL:-/usr/sbin/sysctl}"
 free_pct="?"; mem_read && free_pct="$MEM_FREE_PCT"
 
 swap_pct="${HOSTMON_SWAP_PCT:-}"
+pct_rules=1; [[ -z "$swap_pct" && ! -r /proc/meminfo ]] && pct_rules=0
+swap_mb="${HOSTMON_SWAP_MB:-}"
+if [[ -z "$swap_mb" ]]; then
+  if [[ -r /proc/meminfo ]]; then
+    swap_mb="$(awk '/^SwapTotal:/{t=$2}/^SwapFree:/{f=$2}END{printf "%d",(t-f)/1024}' /proc/meminfo)"
+  else
+    swap_mb="$("$SYSCTL" -n vm.swapusage 2>/dev/null | sed -n 's/.*used = \([0-9]*\)[.0-9]*M.*/\1/p')"
+  fi
+fi
+[[ "$swap_mb" =~ ^[0-9]+$ ]] || swap_mb="?"
+swap_gb="?"; [[ "$swap_mb" != "?" ]] && swap_gb=$(( swap_mb / 1024 ))
 if [[ -z "$swap_pct" ]]; then
   if [[ -r /proc/meminfo ]]; then
     swap_pct="$(awk '/^SwapTotal:/{t=$2}/^SwapFree:/{f=$2}END{if(t>0)printf "%d",(t-f)*100/t; else print 0}' /proc/meminfo)"
@@ -105,7 +124,11 @@ if [[ "$disk_gb" != "?" ]]; then
   if (( disk_gb < CRIT_DISK_GB )); then crit "free disk ${disk_gb} GiB"
   elif (( disk_gb < WARN_DISK_GB )); then warn "free disk ${disk_gb} GiB"; fi
 fi
-if [[ "$swap_pct" != "?" ]]; then
+if [[ "$swap_mb" != "?" ]]; then
+  if (( swap_mb >= CRIT_SWAP_GB * 1024 )) && [[ "$free_pct" != "?" ]] && (( free_pct < WARN_FREE )); then crit "swap ${swap_gb} GB with free memory ${free_pct}%"
+  elif (( swap_mb >= WARN_SWAP_GB * 1024 )); then warn "swap ${swap_gb} GB"; fi
+fi
+if [[ "$swap_pct" != "?" ]] && (( pct_rules )); then
   if (( swap_pct >= CRIT_SWAP )) && [[ "$free_pct" != "?" ]] && (( free_pct < WARN_FREE )); then crit "swap ${swap_pct}% with free memory ${free_pct}%"
   elif (( swap_pct >= WARN_SWAP )); then warn "swap ${swap_pct}%"; fi
 fi
@@ -114,7 +137,7 @@ if [[ "$load_int" != "?" ]] && (( load_int > 2 * ncpu )); then warn "load ${load
 [[ "$free_pct" == "?" ]] && warn "memory unreadable"
 
 reason="$(IFS=';'; echo "${why[*]:-}")"
-line="band=${band} free=${free_pct}% swap=${swap_pct}% disk=${disk_gb}GiB load1=${load1:-?}/${ncpu:-?}cpu therm=${therm_warn}${reason:+ reason=${reason}}"
+line="band=${band} free=${free_pct}% swap=${swap_pct}% swapgb=${swap_gb} disk=${disk_gb}GiB load1=${load1:-?}/${ncpu:-?}cpu therm=${therm_warn}${reason:+ reason=${reason}}"
 
 if [[ "$MODE" == "status" ]]; then echo "$line"; exit 0; fi
 
@@ -137,7 +160,7 @@ tg_due=1
 # the owner on every return to critical (Viktor 9013 L3).
 if [[ -n "$last" ]] && (( NOW - last < COOLDOWN )); then tg_due=0; fi
 
-msg="Mac mini KRITIKUS: ${reason}. Szabad memória ${free_pct}%, swap ${swap_pct}%, lemez ${disk_gb} GiB. Nehéz munka nem indul; nézzétek, mi fut."
+msg="Mac mini KRITIKUS: ${reason}. Szabad memória ${free_pct}%, swap ${swap_gb} GB, lemez ${disk_gb} GiB. Nehéz munka nem indul; nézzétek, mi fut."
 
 TG_CHAN_DIR="${TELEGRAM_STATE_DIR:-}"
 if [[ -z "$TG_CHAN_DIR" ]]; then

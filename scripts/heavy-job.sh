@@ -157,7 +157,8 @@ host_state() {
     IFS=';' read -r -a parts <<< "$r"
     for x in "${parts[@]}"; do
       if (( disk_ok )) && [[ "$x" == "free disk "* ]]; then continue; fi
-      if (( swap_ok )) && [[ "$x" =~ ^swap\ [0-9]+%$ ]]; then continue; fi
+      # "swap N GB" is host-monitor's macOS form of the same warn (Klodel 26862).
+      if (( swap_ok )) && [[ "$x" =~ ^swap\ [0-9]+(%|\ GB)$ ]]; then continue; fi
       others=1
     done
     (( others )) || return 0
