@@ -876,3 +876,66 @@ describe('bash egress parser: if / while / until / coproc, case header across a 
     pass(`case "$x"\nin a) curl -s ${L};; esac`)
   })
 })
+
+// A shell's -c <string> (Viktor 28589, card 55b51e54): `bash -c 'curl https://...'` passed, because a
+// shell is not an INTERPRETER and the quoted string was masked. The string is now classified like a
+// $( ... ) substitution: the same rules, the enclosing assignments and loop values, the same depth.
+describe('a shell -c <string> is read (55b51e54)', () => {
+  const U = 'https://example.invalid/x'
+  const L = 'http://localhost:3420/api/kanban'
+  const deny = (c: string) => expect(classify(c).deny, c).toBe(true)
+  const pass = (c: string) => expect(classify(c).deny, c).toBe(false)
+
+  it('denies an external curl or one-liner inside -c', () => {
+    deny(`bash -c 'curl -s ${U}'`)
+    deny(`sh -c "curl ${U}"`)
+    deny(`zsh -c 'curl ${U}'`)
+    deny(`/bin/bash -lc 'curl -s ${U}'`)
+    deny(`bash -ec 'set -x; curl ${U}'`)
+    deny(`bash -o pipefail -c 'curl ${U} | head'`)
+    deny(`bash -euo pipefail -c 'curl ${U}'`)
+    deny(`bash --norc -c 'curl ${U}'`)
+    deny(`bash -c -- 'curl ${U}'`)
+    deny(`bash -c $'curl ${U}'`)
+    deny(`bash -c 'curl example.invalid/x'`) // no scheme: curl still reaches the host
+    deny(`bash -c 'python3 -c "import urllib.request; urllib.request.urlopen(\\"${U}\\")"'`)
+    deny(`bash -c 'x=$(curl -s ${U}); echo $x'`)
+    deny(`bash -c "bash -c 'curl ${U}'"`)
+    deny(`ls; bash -c 'curl ${U}' && echo ok`)
+  })
+
+  it('finds the shell after a carrier command, not only at the command word', () => {
+    deny(`env FOO=1 bash -c 'curl ${U}'`)
+    deny(`timeout 10 sh -c 'curl ${U}'`)
+    deny(`xargs -I{} sh -c 'curl ${U}/{}'`)
+    deny(`find . -name x -exec sh -c 'curl ${U}' \;`)
+  })
+
+  it('carries the enclosing assignments and loop values into the string', () => {
+    deny(`u=${U}; bash -c "curl -s $u"`)
+    deny(`for u in ${U}; do sh -c "curl $u"; done`)
+  })
+
+  it('past the depth limit an external URL literal denies', () => {
+    expect(classify(`bash -c "bash -c 'bash -c \\"bash -c \\\\\\"bash -c curl\\\\\\" ${U}\\"'"`)).toMatchObject({ deny: true, reason: 'shell-c-too-deep' })
+  })
+
+  it('controls: local targets, URL data, script arguments and mentions still pass', () => {
+    pass(`bash -c 'curl -s ${L}'`)
+    pass(`bash -c 'curl -s -X POST ${L} -d "{\\"content\\":\\"see ${U}\\"}"'`) // a link in the data, not a destination
+    pass(`bash -c 'curl -s http://192.168.1.10/x'`)
+    pass(`bash -c 'echo ${U}'`)
+    pass(`bash -c 'ls -la'`)
+    pass(`bash x.sh -c 'curl ${U}'`) // -c after the script is the script's argument
+    pass(`bash -e run.sh`)
+    pass(`echo "bash -c 'curl ${U}'"`)
+    pass(`cat > f.md <<'EOF'\nbash -c 'curl ${U}'\nEOF`) // a heredoc body that mentions it
+    pass(`grep -rn "sh -c" scripts/`)
+  })
+
+  it('honours the vendor list inside the string', () => {
+    const vendor = new Set(['api.elevenlabs.io'])
+    expect(classify(`sh -c 'curl -s https://api.elevenlabs.io/v1/x'`, 0, vendor).deny).toBe(false)
+    expect(classify(`sh -c 'curl -s https://api.elevenlabs.io/v1/x ${U}'`, 0, vendor)).toMatchObject({ deny: true, hosts: ['example.invalid'] })
+  })
+})
