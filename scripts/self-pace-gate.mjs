@@ -157,7 +157,7 @@ const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_
 // boundary is a separate uid (H1).
 export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
 export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato'])
-export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo', 'com.marveen.host-restart-watchdog', 'com.marveen.host-monitor', 'com.marveen.daily-cleanup', 'com.marveen.mem-relief'])
+export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo', 'com.marveen.host-restart-watchdog', 'com.marveen.host-monitor', 'com.marveen.daily-cleanup', 'com.marveen.mem-relief', 'com.marveen.konyveles-hydrate'])
 export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // K1 (Viktor 3423, card ad7d3eaa): the worker runs under sandbox-exec denying writes under
   // ~/Library/CloudStorage, plus the ~/Library and ~ directory nodes so a parent rename cannot
@@ -192,6 +192,11 @@ export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // bootout only, nothing kickstarts it. Viktor 25470/25476: the scripts it runs are pinned at
   // bootstrap against the 3efd5548 blobs (agents/kernel/out/mem-relief-pins-3efd5548.txt).
   'com.marveen.mem-relief': new Set(['50d2f3a54bce7dc12bc0243030fd07d7337957b5ba8503fc3b017aef454e9572']),
+  // Card 7b30ebe5 (Klodel 27133/27138, 2026-11-05: the accounting folder was found cloud-only while
+  // the owner waited at the bank): the plist that scripts/install-konyveles-hydrate.sh writes for
+  // this install. RunAtLoad + every hour; read-only towards OneDrive (downloads dataless files under
+  // Könyvelés, never writes there). Bootstrap and bootout only, nothing kickstarts it.
+  'com.marveen.konyveles-hydrate': new Set(['3c907d97d24bfa6fe7415ad2fd2c92f7f131fd27fccce3f872ba9fa4fc545e5d']),
 }
 const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
 const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)
