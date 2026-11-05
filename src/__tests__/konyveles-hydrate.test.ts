@@ -35,10 +35,15 @@ describe('konyveles-hydrate classify', () => {
     expect(out).not.toMatch(/[`$<>;|()]/)
     expect(out.split(' ')[1].length).toBeLessThanOrEqual(40)
   })
-  it('at most 5 names, then a count', () => {
+  it('classify returns every name; fmt keeps at most 5 unique names, then a count (summed across runs, INFO-4)', () => {
     const R = '/r/Könyvelés'
     const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((d) => `${R}/${d}/x.pdf`)
-    expect(classify(files, files)).toBe('7 a,b,c,d,e,+2')
+    expect(classify(files, files)).toBe('7 a,b,c,d,e,f,g')
+    const fmt = (input: string) => spawnSync('python3', ['-I', PY, 'fmt'], { input, encoding: 'utf8' }).stdout.trim()
+    expect(fmt('a,b,c,d,e,f,g')).toBe('a,b,c,d,e,+2')
+    // two runs' names, one per line, with a repeat and an empty marker
+    expect(fmt('mySHP\nNotramIT\nmySHP\n-\n')).toBe('NotramIT,mySHP')
+    expect(fmt('')).toBe('-')
   })
 })
 
