@@ -1017,8 +1017,9 @@ const SELF_PACE_TOOL_DENY = ['ScheduleWakeup', 'CronCreate', 'CronDelete', 'Cron
 //     SUB-AGENTS those three shapes are now closed by the Bash PreToolUse hook
 //     scripts/hooks/bash-egress-parser.mjs (EGRESSPARSER923), which parses the
 //     command and always lets localhost through. It is a longer named list,
-//     not a complete one: a script file, a heredoc-fed interpreter, a URL built
-//     from pieces, and every other network-capable binary still pass, and the
+//     not a complete one: a script file, a program passed as -c "$(cat <<PY)",
+//     a URL built from pieces, and every other network-capable binary still
+//     pass (a heredoc- or pipe-fed interpreter is read since 3d3307dd), and the
 //     main agent is not covered by the hook. Closing those needs an allowlist
 //     or network-level gate, which is a separate owner decision.
 export const BASH_EGRESS_DENY = [

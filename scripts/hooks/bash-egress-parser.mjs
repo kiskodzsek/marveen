@@ -40,10 +40,13 @@
 //
 // WHAT THIS DOES NOT CLOSE -- said here so nobody reads "merged" as "closed" (owner/Marveen 29047):
 // the name-and-shape list will never be complete. Still open after (a): network calls INSIDE a script
-// file (`bash x.sh`, `python3 x.py` -- the hook sees only the outer command); heredoc-fed interpreters
-// (`python3 - <<'PY'`, `bash <<EOF`); a URL whose host is not literally in the command (read from a
+// file (`bash x.sh`, `python3 x.py` -- the hook sees only the outer command); a program passed as
+// `-c "$(cat <<PY ...)"`; a URL whose host is not literally in the command (read from a
 // file, the environment, a previous command, a curl -K config, or computed by a substitution such as
-// `curl $(echo https://x)`); every other network-capable binary (git, pip, npm, ssh, scp, rsync, dig ...).
+// `curl $(echo https://x)`); every other network-capable binary (git, pip, npm, ssh, scp, rsync, dig ...);
+// in a stdin-fed program: a `$VAR` in an unquoted heredoc is not expanded, a host given without a scheme
+// (`socket.create_connection(("host", 80))`) is not a URL literal, and only the span right before a `|`
+// is read (`printf ... | tr ... | python3 -` passes) (Viktor 28582, LOW).
 // Closing those is direction (b): an allowlist / network-level gate, not this hook.
 //
 // Fail-open on unparseable input or an internal error (logged): a crashed gate must not silence the
@@ -490,6 +493,67 @@ function commandWordAt(mw) {
   }
   return i
 }
+
+// ---- stdin-fed interpreters and shells (Viktor 3d3307dd, reproduced 2026-11-05) ----------------
+// `python3 - <<'PY'`, `node - <<'JS'`, `bash <<EOF`, `sh -s <<EOF`, a here-string (`python3 - <<< '...'`)
+// and a pipe (`cat <<'EOF' | python3`) all hand the interpreter its PROGRAM on stdin. maskInertLiterals
+// blanks heredoc bodies (correctly: for every other command they are data), so before this the program
+// was never read and these shapes passed (Kernel 27756, Szigma 28413).
+const SHELLS = /^(?:bash|sh|zsh|dash|ksh)$/
+// Options whose VALUE is the next word (python -W/-X, node -r/--require/--import/--loader, shell -o).
+const VALUE_OPTS = new Set(['-W', '-X', '-r', '--require', '--import', '--loader', '--experimental-loader', '-o', '-O'])
+// The interpreter reads its PROGRAM from stdin: no code flag and no script argument (or a lone `-`).
+function stdinFed(mw, i) {
+  const cmd = mw[i].split('/').pop()
+  if (!(INTERPRETER.test(cmd) || SHELLS.test(cmd))) return false
+  const args = mw.slice(i + 1).filter((w) => !/^(?:\d*[<>]|&>)/.test(w)) // redirections are not program arguments
+  // A code flag means the program is in the argv, not on stdin. For a shell only `-c` is one: its `-e`,
+  // `-E`, `-p` are errexit / errtrace / privileged (`bash -e <<EOF`, Viktor 28589). `-r` is code only
+  // for php; for node, ruby, bun and deno it preloads a module (Viktor 28585 (2)).
+  const codeFlag = (w) => w === '-c' || (CODE_FLAG.has(w) && !SHELLS.test(cmd) && (w !== '-r' || cmd === 'php'))
+  if (args.some(codeFlag)) return false
+  // `python3 -m mod`: the program is a module, not stdin.
+  if (args.includes('-m')) return false
+  // The FIRST positional argument decides: `-`, /dev/stdin or /dev/fd/0 is stdin, anything else is a
+  // program file (`node script.js`, `bash x.sh`, and `bash agent-msg.sh a b - <<EOF`, where the `-` is
+  // the SCRIPT's argument). The value of an option that takes one is skipped, so `python3 -W ignore -`
+  // and `-X utf8 -` are stdin (Viktor 28582 X1, X3). A shell's `-s` before any positional reads the
+  // program from stdin and turns what follows into the script's arguments (`bash -s -- arg`, X4).
+  // `deno run -`: the subcommand is skipped (X5).
+  let first = null
+  for (let j = 0; j < args.length; j++) {
+    const w = args[j]
+    if (VALUE_OPTS.has(w)) { j++; continue }
+    if (w === '--') { first = args[j + 1] ?? null; break }
+    if (w !== '-' && w.startsWith('-')) {
+      // A short-option cluster: a shell's `s` anywhere in it reads stdin (`-es`); a value-taking LAST
+      // letter takes the next word as its value (`bash -euo pipefail <<EOF`, `python3 -bW ignore -`;
+      // Viktor 28585 (1)).
+      const cluster = /^-[A-Za-z]+$/.test(w) ? w.slice(1) : ''
+      if (SHELLS.test(cmd) && cluster.includes('s')) return true
+      if (cluster.length > 1 && (SHELLS.test(cmd) ? /[oO]$/ : /[WX]$/).test(cluster)) j++
+      continue
+    }
+    if (cmd === 'deno' && w === 'run' && first === null) continue
+    first = w; break
+  }
+  return first === null || first === '-' || first === '/dev/stdin' || first === '/dev/fd/0'
+}
+// Text of the heredoc bodies announced inside orig.slice(a,b) (not a `<<<` here-string: its text is
+// already in the span); the first body starts on the line after the span end.
+function heredocBodies(orig, a, b) {
+  const seg = orig.slice(a, b); const out = []
+  let from = orig.indexOf('\n', b); if (from === -1) return out
+  for (const m of seg.matchAll(/(?<!<)<<(?!<)-?\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_]\w*))/g)) {
+    const tag = m[1] ?? m[2] ?? m[3]
+    const endRx = new RegExp(`^[ \\t]*${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*$`, 'm')
+    const rest = orig.slice(from + 1); const rel = endRx.exec(rest)
+    if (!rel) break
+    out.push(rest.slice(0, rel.index)); from = from + 1 + rel.index + rel[0].length
+  }
+  return out
+}
+
 export function classify(command, depth = 0, vendorHosts = new Set(), vendorDomains = new Set(), scope = null) {
   const norm = String(command ?? '').replace(/\\\r?\n/g, ' ')
   const { stripped: orig, inners } = liftSubstitutions(norm)
@@ -513,10 +577,36 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
     return { deny: true, reason: 'subst-too-deep', hosts: [] }
   }
   if (!parseable) return { deny: false, reason: 'unparseable', hosts: [] }
-  for (const [a, b] of spans(masked)) {
+  const sp = spans(masked)
+  for (const [k, [a, b]] of sp.entries()) {
     const mw = words(masked.slice(a, b))
     const i = commandWordAt(mw)
     if (i >= mw.length) continue
+    // The program arrives on stdin (heredoc, here-string, or the previous span of a pipe): judge the
+    // program text itself, with the same localhost / private / vendor rules as everywhere else.
+    if (stdinFed(mw, i)) {
+      // Read from `norm`, not `orig`: liftSubstitutions does not know a second heredoc is a body, and
+      // lifts its `(...)` out of `orig` as if it were a subshell (offsets are the same in both).
+      const parts = [norm.slice(a, b), ...heredocBodies(norm, a, b)]
+      if (k > 0) {
+        const [pa, pb] = sp[k - 1]
+        if (masked[pb] === '|' && masked[pb + 1] !== '|') parts.push(norm.slice(pa, pb), ...heredocBodies(norm, pa, pb))
+      }
+      const payload = parts.join('\n')
+      const hostsIn = () => [...new Set([...payload.matchAll(URL_RE)].map((m) => m[0]).filter(isExternal).map(hostOf))]
+        .filter((h) => !vendorHosts.has(h) && !hostInDomains(h, vendorDomains))
+      if (SHELLS.test(mw[i].split('/').pop())) {
+        // A shell fed from stdin: any external URL literal in what it is fed is a deny (fail closed; the
+        // body is a program, and recursing into it would re-mask its own heredoc).
+        const hs = hostsIn()
+        if (hs.length) return { deny: true, reason: 'stdin-shell-external', hosts: hs }
+      } else if (NET_PRIMITIVE.test(payload.replace(/\burllib\.parse\b/g, ''))) {
+        // `urllib.parse` alone builds or splits URLs and fetches nothing (measured: Radar builds the
+        // quarantine-reader's URL list that way); any other network primitive still counts.
+        const hs = hostsIn()
+        if (hs.length) return { deny: true, reason: 'stdin-interpreter-external', hosts: hs }
+      }
+    }
     // Every loop reading AND the plain one: a loop variable can share its name with an assignment
     // elsewhere in the command (`for u in <local>; do ...; done; u=<external>; curl "$u"`), and a
     // loop-only reading would let the assigned value go unjudged.
