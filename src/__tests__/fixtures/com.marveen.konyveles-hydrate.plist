@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.marveen.konyveles-hydrate</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/klodel/marveen/scripts/konyveles-hydrate.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/klodel/marveen</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/klodel/marveen/store/konyveles-hydrate.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>/Users/klodel</string>
+    <key>TZ</key>
+    <string>Europe/Budapest</string>
+    <key>MARVEEN_STORE</key>
+    <string>/Users/klodel/marveen/store</string>
+    <key>KONYVELES_ROOT</key>
+    <string>/Users/klodel/Library/CloudStorage/OneDrive-mySHPSolutionsBt/Könyvelés</string>
+    <key>KONYVELES_CARD</key>
+    <string>7b30ebe5</string>
+  </dict>
+</dict>
+</plist>
