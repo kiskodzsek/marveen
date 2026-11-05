@@ -87,10 +87,31 @@ fail() {
 KNOWN="$STATE/known-local.txt"; touch "$KNOWN"
 DL="$STATE/dataless.txt"
 ALL="$STATE/all.txt"
-find "$ROOT" -type f > "$ALL" 2>/dev/null; rc_all=$?
-find "$ROOT" -type f -flags +dataless > "$DL" 2>/dev/null; rc_dl=$?
+FERR="$STATE/find.err"
+find "$ROOT" -type f > "$ALL" 2>"$FERR"; rc_all=$?
+# find_why: the first find error reduced to an errno name and whether it hit
+# ROOT itself or something below it (Viktor 15528: no file name, no free text).
+find_why() {
+  local line where="below-ROOT" why="OTHER"
+  line=$(head -n 1 "$FERR" 2>/dev/null | cut -c1-200)
+  rm -f "$FERR"   # the raw stderr names files: never kept
+  [ -n "$line" ] || { echo "no-stderr"; return; }
+  case "$line" in "find: $ROOT: "*) where="at-ROOT" ;; esac
+  case "$line" in
+    *"Operation not permitted") why="EPERM" ;;
+    *"Permission denied") why="EACCES" ;;
+    *"No such file or directory") why="ENOENT" ;;
+    *"Resource deadlock avoided") why="EDEADLK" ;;
+    *"Operation timed out") why="ETIMEDOUT" ;;
+  esac
+  echo "$why $where"
+}
+[ "$rc_all" = 0 ] || fail "find exited non-zero ($rc_all, $(find_why))"
+: > "$FERR"
+find "$ROOT" -type f -flags +dataless > "$DL" 2>"$FERR"; rc_dl=$?
 total=$(grep -c . "$ALL" || true)
-[ "$rc_all" = 0 ] && [ "$rc_dl" = 0 ] || fail "find exited non-zero ($rc_all/$rc_dl, files=$total)"
+[ "$rc_dl" = 0 ] || fail "find exited non-zero (dataless walk $rc_dl, files=$total, $(find_why))"
+rm -f "$FERR"
 [ "$total" -gt 0 ] || fail "the walk saw no file (files=0; launchd without access to ~/Library/CloudStorage?)"
 n=$(grep -c . "$DL" || true)
 
