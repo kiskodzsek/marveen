@@ -452,7 +452,9 @@ describe('still open after (a) -- pinned on purpose', () => {
   const OPEN = [
     'bash ./fetch.sh', // the network call is inside the script file
     'python3 fetch.py',
-    `python3 - <<'PY'\nimport urllib.request; urllib.request.urlopen('https://example.org')\nPY`, // heredoc-fed interpreter
+    `python3 -c "$(cat <<'PY'\nimport urllib.request; urllib.request.urlopen('https://example.org')\nPY\n)"`, // program via -c "$(cat <<PY)"
+    `cat > /tmp/x.py <<'PY'\nimport urllib.request; urllib.request.urlopen('https://example.org')\nPY\npython3 /tmp/x.py`, // written, then run as a file
+    `printf '%s' 'import urllib.request; urllib.request.urlopen("https://example.org")' | tr a a | python3 -`, // only the span right before the | is read
     'H=$(cat host.txt); curl -s "http://$H/x"', // host not literally in the command
     'curl -s "$URL"', // URL from the environment
     'curl $(echo https://example.org)', // URL computed at runtime by a substitution (#1514 review B)
@@ -463,6 +465,96 @@ describe('still open after (a) -- pinned on purpose', () => {
   ]
   it('does not claim these', () => {
     for (const cmd of OPEN) expect({ cmd, deny: deny(cmd) }).toEqual({ cmd, deny: false })
+  })
+})
+
+// A program handed to an interpreter or a shell on STDIN (Viktor 3d3307dd, reproduced 2026-11-05;
+// Kernel 27756, Szigma 28413 ran these by accident). The heredoc body is masked for every other
+// command, so before this the program was never read. Each row is one shape from Viktor's report.
+describe('stdin-fed interpreters and shells (3d3307dd)', () => {
+  const U = 'https://example.invalid/x'
+  const PY = `import urllib.request\nurllib.request.urlopen("${U}")`
+  const DENIED: Array<[string, string, string]> = [
+    ['H1', `python3 - <<'PY'\n${PY}\nPY`, 'stdin-interpreter-external'],
+    ['H2', `python3 -I - <<'PY'\n${PY}\nPY`, 'stdin-interpreter-external'],
+    ['H3', `python3 - <<PY\n${PY}\nPY`, 'stdin-interpreter-external'],
+    ['H4', `python3 <<'PY'\n${PY}\nPY`, 'stdin-interpreter-external'],
+    ['H4b', `python3 - <<-PY\n\t${PY.replace('\n', '\n\t')}\n\tPY`, 'stdin-interpreter-external'],
+    ['H5', `node - <<'JS'\nfetch("${U}")\nJS`, 'stdin-interpreter-external'],
+    ['H6', `bash <<EOF\ncurl -s ${U}\nEOF`, 'stdin-shell-external'],
+    ['H7', `sh -s <<'EOF'\ncurl -s ${U}\nEOF`, 'stdin-shell-external'],
+    ['H8', `python3 - <<< 'import urllib.request; urllib.request.urlopen("${U}")'`, 'stdin-interpreter-external'],
+    ['P1', `printf '%s' 'import urllib.request; urllib.request.urlopen("${U}")' | python3 -`, 'stdin-interpreter-external'],
+    ['P2', `cat <<'EOF' | python3\n${PY}\nEOF`, 'stdin-interpreter-external'],
+    ['P3', `cd /tmp && /usr/bin/python3 - <<'PY'\n${PY}\nPY`, 'stdin-interpreter-external'],
+    ['P4', `echo start; python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen("http://localhost:3420/x")\nurllib.request.urlopen("${U}")\nPY`, 'stdin-interpreter-external'],
+    // Look-alike hosts that only START like localhost are external (the isExternal rules, unchanged).
+    ['L1', `python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen("http://localhost.evil.com/x")\nPY`, 'stdin-interpreter-external'],
+    ['L2', `python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen("http://localhost@evil.com/x")\nPY`, 'stdin-interpreter-external'],
+    // Two heredocs in one command: the second body is read too.
+    ['M1', `python3 - <<'A' <<'B'\nprint(1)\nA\n${PY}\nB`, 'stdin-interpreter-external'],
+    // Viktor 28582: an option that takes a value, /dev/stdin, a shell's -s with script arguments, deno.
+    ['X1', `python3 -W ignore - <<'PY'\n${PY}\nPY`, 'stdin-interpreter-external'],
+    ['X2', `python3 -X utf8 - <<'PY'\n${PY}\nPY`, 'stdin-interpreter-external'],
+    ['X3', `python3 /dev/stdin <<'PY'\n${PY}\nPY`, 'stdin-interpreter-external'],
+    ['X3b', `python3 /dev/fd/0 <<'PY'\n${PY}\nPY`, 'stdin-interpreter-external'],
+    ['X4', `bash -s -- arg <<'EOF'\ncurl -s ${U}\nEOF`, 'stdin-shell-external'],
+    ['X5', `deno run - <<'JS'\nfetch("${U}")\nJS`, 'stdin-interpreter-external'],
+    // Viktor 28585: an option cluster ending in a value-taking letter, and node's -r (a preload, not code).
+    ['X6', `bash -euo pipefail <<'EOF'\ncurl -s ${U}\nEOF`, 'stdin-shell-external'],
+    ['X7', `bash -es <<'EOF'\ncurl -s ${U}\nEOF`, 'stdin-shell-external'],
+    ['X8', `python3 -bW ignore - <<'PY'\n${PY}\nPY`, 'stdin-interpreter-external'],
+    ['X9', `node -r ./x.js - <<'JS'\nfetch("${U}")\nJS`, 'stdin-interpreter-external'],
+    // Viktor 28589: a shell's -e / -E / -p are options, not code flags.
+    ['X10', `bash -e <<'EOF'\ncurl -s ${U}\nEOF`, 'stdin-shell-external'],
+    ['X11', `bash -e -s <<'EOF'\ncurl -s ${U}\nEOF`, 'stdin-shell-external'],
+    ['X12', `sh -e <<'EOF'\ncurl -s ${U}\nEOF`, 'stdin-shell-external'],
+    ['X13', `bash -E <<'EOF'\ncurl -s ${U}\nEOF`, 'stdin-shell-external'],
+    ['X14', `bash -p <<'EOF'\ncurl -s ${U}\nEOF`, 'stdin-shell-external'],
+    ['X15', `printf '%s' 'curl -s ${U}' | bash -e`, 'stdin-shell-external'],
+    // urllib.parse next to a real primitive is not an exemption.
+    ['U1', `python3 - <<'PY'\nimport urllib.parse, urllib.request\nurllib.request.urlopen("${U}?q=" + urllib.parse.quote("x"))\nPY`, 'stdin-interpreter-external'],
+    ['U2', `python3 - <<'PY'\nfrom urllib import parse, request as r\nr.urlopen("${U}")\nPY`, 'stdin-interpreter-external'],
+  ]
+  it('denies every stdin-fed shape with an external URL', () => {
+    for (const [id, cmd, reason] of DENIED) expect({ id, ...classify(cmd) }).toMatchObject({ id, deny: true, reason })
+  })
+
+  // The other half of the claim: the fleet's own stdin-fed calls keep working.
+  const ALLOWED: Array<[string, string]> = [
+    ['N1 dashboard', `python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen("http://localhost:3420/api/agents")\nPY`],
+    ['N2 127.0.0.1', `python3 -I - <<'PY'\nimport urllib.request\nurllib.request.urlopen("http://127.0.0.1:3420/api/kanban")\nPY`],
+    ['N3 no network primitive', `python3 - <<'PY'\nprint("see https://example.org/docs for details")\nPY`],
+    ['N4 shell, localhost only', `bash <<'EOF'\ncurl -s http://localhost:3420/api/agents\nEOF`],
+    ['N5 file program, heredoc is data', `python3 tool.py <<'EOF'\nurllib https://example.org\nEOF`],
+    ['N6 module', `python3 -m json.tool <<'EOF'\n{"u": "https://example.org", "x": "urlopen"}\nEOF`],
+    ['N7 heredoc to cat, not a program', `cat > notes.md <<'EOF'\nimport urllib; urlopen("https://example.org")\nEOF`],
+    ['N8 here-string to grep', `grep -c urlopen <<< 'urlopen("https://example.org")'`],
+    ['N9 pipe from a non-heredoc, local', `echo 'import urllib.request; urllib.request.urlopen("http://localhost:3420/x")' | python3 -`],
+    ['N10 || is not a pipe', `false || python3 - <<'PY'\nprint(1)\nPY`],
+    ['N12 -W value, local', `python3 -W ignore - <<'PY'\nimport urllib.request\nurllib.request.urlopen("http://localhost:3420/x")\nPY`],
+    ['N13 bash -s, local', `bash -s -- arg <<'EOF'\ncurl -s http://localhost:3420/api/agents\nEOF`],
+    // The documented inter-agent message shape: the `-` is agent-msg.sh's argument (message on stdin),
+    // the body is DATA for the script, not a program for bash (replay 2026-11-05: 40+ of these).
+    ['N14 agent-msg.sh - <<EOF', `bash /Users/klodel/marveen/scripts/agent-msg.sh kernel viktor - <<'EOF'\nPR: https://github.com/kiskodzsek/marveen/pull/1\nEOF`],
+    ['N15 script then -', `python3 tool.py - <<'EOF'\nimport urllib.request; urllib.request.urlopen("https://example.org")\nEOF`],
+    ['N16 bash script.sh -s', `bash run.sh -s <<'EOF'\nhttps://example.org\nEOF`],
+    ['N17 bash -euo pipefail, local', `bash -euo pipefail <<'EOF'\ncurl -s http://localhost:3420/api/agents\nEOF`],
+    ['N18 bash -eu script.sh', `bash -eu run.sh <<'EOF'\nhttps://example.org\nEOF`],
+    ['N19 sh -e, local', `sh -e <<'EOF'\ncurl -s http://localhost:3420/api/agents\nEOF`],
+    ['N20 bash -e script.sh', `bash -e run.sh <<'EOF'\nhttps://example.org\nEOF`],
+    ['N11 urllib.parse only builds URLs', `python3 -I - <<'PY'\nimport urllib.parse\nprint("https://example.org/s?q=" + urllib.parse.quote("x"))\nPY`],
+  ]
+  it('lets the local and non-network stdin shapes through', () => {
+    for (const [id, cmd] of ALLOWED) expect({ id, ...classify(cmd) }).toMatchObject({ id, deny: false })
+  })
+
+  it('honours the vendor list, and an unlisted host in the same program still denies', () => {
+    const vendor = new Set(['api.elevenlabs.io'])
+    const ok = `python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen("https://api.elevenlabs.io/v1/x")\nPY`
+    expect(classify(ok, 0, vendor).deny).toBe(false)
+    const mixed = `python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen("https://api.elevenlabs.io/v1/x")\nurllib.request.urlopen("${U}")\nPY`
+    expect(classify(mixed, 0, vendor)).toMatchObject({ deny: true, hosts: ['example.invalid'] })
   })
 })
 
