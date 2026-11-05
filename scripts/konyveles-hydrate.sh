@@ -44,6 +44,11 @@ STATE="$STORE/konyveles-hydrate"
 HYDRATE_MAX_S=${KONYVELES_HYDRATE_MAX_S:-1800}  # the whole download pass; the job runs hourly
 LOG="$STORE/konyveles-hydrate.log"
 mkdir -p "$STATE"
+# umask covers only new files: tighten what an older run left at 0644/0755
+# (Viktor 27230). Regular files only, so a planted symlink is not followed.
+chmod 700 "$STATE"
+find "$STATE" -maxdepth 1 -type f ! -perm 600 -exec chmod 600 {} + 2>/dev/null
+[ -f "$LOG" ] && [ ! -L "$LOG" ] && chmod 600 "$LOG"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 now=$(date +%s)
 
