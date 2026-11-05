@@ -18,6 +18,8 @@
 //      denied when the command carries an external URL literal anywhere. A ( ... ) subshell and a
 //      <( ... ) / >( ... ) process substitution are inner commands the same way; past the nesting
 //      limit (4) an external URL literal in the command is a deny (subst-too-deep).
+//   4. any of the above inside a shell's -c <string> (`bash -c 'curl ...'`, `timeout 5 sh -c ...`),
+//      read like a substitution (55b51e54; see shellCStrings).
 // localhost / 127.0.0.1 / [::1] ALWAYS pass: the dashboard's own calls (memory, kanban, message
 // queue, approvals) go over http://localhost and a gate that cut them would silence the fleet.
 // Hosts are cut with a regex, not URL(), so http://localhost:$PORT stays local, while
@@ -539,6 +541,45 @@ function stdinFed(mw, i) {
   }
   return first === null || first === '-' || first === '/dev/stdin' || first === '/dev/fd/0'
 }
+// ---- a shell's -c <string> (Viktor 28589, card 55b51e54) -----------------------------------------
+// `bash -c 'curl https://x'` and `sh -c "curl ..."` passed: a shell is not an INTERPRETER, and the
+// string after -c is one quoted word, so maskInertLiterals blanked it and nothing read the command it
+// runs. The string is a command line of its own: it is classified like a $( ... ) substitution, with
+// the same rules (curl destination from the argv, a one-liner only with a network primitive), the
+// enclosing assignments and loop values, and the same depth limit. Judging it by "any URL in the
+// string" would have repeated the stdin-shell false denies (a localhost call whose JSON carries a
+// link). The shell word is searched in the WHOLE span, not only at the command word, because the
+// usual carriers put it later: `timeout 10 sh -c`, `xargs -I{} sh -c`, `find . -exec sh -c`.
+// Options end at the first word that is not one: `bash x.sh -c y` runs x.sh, and its -c is the
+// script's argument. A -c anywhere in a short-option cluster counts (`bash -lc`, `sh -ec`).
+// The shell word and its options are read from the MASKED span (so a heredoc body or a quoted text
+// that merely mentions `bash -c '...'` is not a command); the string itself is quoted, hence blank in
+// the masked text, and is read as the first shell word of the ORIGINAL text after the last option.
+const SHELL_LONG_WITH_VALUE = new Set(['--rcfile', '--init-file'])
+export function shellCStrings(orig, masked, a, b) {
+  const toks = [...masked.slice(a, b).matchAll(/\S+/g)].map((m) => ({ w: m[0], end: a + m.index + m[0].length }))
+  const out = []
+  for (let k = 0; k < toks.length; k++) {
+    if (!SHELLS.test(toks[k].w.split('/').pop())) continue
+    let hasC = false; let last = toks[k].end
+    for (let j = k + 1; j < toks.length; j++) {
+      const w = toks[j].w
+      if (w === '--') { last = toks[j].end; break }
+      if (SHELL_LONG_WITH_VALUE.has(w)) { j++; last = toks[Math.min(j, toks.length - 1)].end; continue }
+      if (w.startsWith('--')) { last = toks[j].end; continue }
+      if (!/^[-+][A-Za-z]+$/.test(w)) break
+      if (w[0] === '-' && w.includes('c')) hasC = true
+      if (/[oO]$/.test(w) && j + 1 < toks.length) j++ // -o pipefail, -euo pipefail, +O extglob
+      last = toks[j].end
+    }
+    if (!hasC) continue
+    // $'...' (ANSI-C quoting) is one word too; shellWords would keep its `$` as text.
+    const rest = orig.slice(last, b).replace(/^\s*\$'/, "'")
+    const str = shellWords(rest)[0]
+    if (str) out.push(str)
+  }
+  return out
+}
 // Text of the heredoc bodies announced inside orig.slice(a,b) (not a `<<<` here-string: its text is
 // already in the span); the first body starts on the line after the span end.
 function heredocBodies(orig, a, b) {
@@ -582,6 +623,15 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
     const mw = words(masked.slice(a, b))
     const i = commandWordAt(mw)
     if (i >= mw.length) continue
+    // A shell's -c <string> is a command line of its own: judged like a substitution, with this
+    // command's assignments and loop values, up to the same depth (see shellCStrings).
+    const cStrings = shellCStrings(orig, masked, a, b)
+    if (cStrings.length && depth < 4) {
+      const inner = { env, loops, externalLiteral: outer.externalLiteral }
+      for (const s of cStrings) { const r = classify(s, depth + 1, vendorHosts, vendorDomains, inner); if (r.deny) return r }
+    } else if (cStrings.length && outer.externalLiteral) {
+      return { deny: true, reason: 'shell-c-too-deep', hosts: [] }
+    }
     // The program arrives on stdin (heredoc, here-string, or the previous span of a pipe): judge the
     // program text itself, with the same localhost / private / vendor rules as everywhere else.
     if (stdinFed(mw, i)) {
