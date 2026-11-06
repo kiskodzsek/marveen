@@ -939,3 +939,80 @@ describe('a shell -c <string> is read (55b51e54)', () => {
     expect(classify(`sh -c 'curl -s https://api.elevenlabs.io/v1/x ${U}'`, 0, vendor)).toMatchObject({ deny: true, hosts: ['example.invalid'] })
   })
 })
+
+// A wrapper before curl (card 74d46cd0, Viktor 28582 LOW): only the bare wrapper word was stepped over, so a
+// wrapper with an option (`env -i`, `sudo -u x`, `nice -n 5`), with its path (`/usr/bin/env`), or a carrier
+// that is not a shell keyword (`timeout 10`, `xargs`, `caffeinate -i`, `stdbuf -o0`, `watch`) let the curl
+// pass; `env -S '<line>'` ran a whole command line unread.
+describe('bash egress parser: wrappers with options, paths, and env -S', () => {
+  const U = 'https://example.invalid/x'
+  const L = 'http://localhost:3420/api/health'
+  const deny = (c: string) => expect(classify(c).deny, c).toBe(true)
+  const pass = (c: string) => expect(classify(c).deny, c).toBe(false)
+
+  it('a wrapper with options or a path does not hide the curl', () => {
+    deny(`/usr/bin/env curl ${U}`)
+    deny(`env -i curl ${U}`)
+    deny(`env - curl ${U}`)
+    deny(`env -u HOME curl ${U}`)
+    deny(`env -C /tmp curl ${U}`)
+    deny(`env --unset=HOME curl ${U}`)
+    deny(`env -- curl ${U}`)
+    deny(`/usr/bin/env -i PATH=/usr/bin curl ${U}`)
+    deny(`sudo -u x curl ${U}`)
+    deny(`sudo -Eu x curl ${U}`)
+    deny(`/usr/bin/sudo curl ${U}`)
+    deny(`nice -n 5 curl ${U}`)
+    deny(`command -p curl ${U}`)
+    deny(`exec -a x curl ${U}`)
+    deny(`time -p curl ${U}`)
+    deny(`builtin exec curl ${U}`)
+    deny(`ls && env -i /usr/bin/curl -s ${U}`)
+  })
+
+  it('a carrier command does not hide the curl', () => {
+    deny(`timeout 10 curl ${U}`)
+    deny(`timeout -s KILL 5s curl ${U}`)
+    deny(`xargs curl ${U} < /dev/null`)
+    deny(`xargs -n 1 curl ${U} < /dev/null`)
+    deny(`caffeinate -i curl ${U}`)
+    deny(`stdbuf -o0 curl ${U}`)
+    deny(`arch -arm64 curl ${U}`)
+    deny(`watch -n 5 curl ${U}`)
+  })
+
+  it('timeout after `--`, and a DURATION that does not start with a digit (Viktor 30051)', () => {
+    deny(`timeout -- 10 curl ${U}`)
+    deny(`timeout -s KILL -- 5 curl ${U}`)
+    deny(`timeout .5 curl ${U}`)
+    deny(`timeout +5 curl ${U}`)
+    deny(`timeout inf curl ${U}`)
+    pass(`timeout -- 10 curl ${L}`)
+  })
+
+  it('an env short-option cluster with S runs its line (Viktor 30051)', () => {
+    deny(`env -iS 'curl ${U}'`)
+    deny(`env -vS "curl ${U}"`)
+    deny(`env -i -vS 'curl ${U}'`)
+    pass(`env -iS 'curl ${L}'`)
+  })
+
+  it('env -S runs its string as a command line', () => {
+    deny(`env -S 'curl ${U}'`)
+    deny(`env -S "curl -s ${U}"`)
+    deny(`env -i -S 'curl ${U}'`)
+    deny(`/usr/bin/env --split-string='curl ${U}'`)
+  })
+
+  it('controls: local targets through the same wrappers still pass', () => {
+    pass(`env curl -s ${L}`)
+    pass(`env -i PATH=/usr/bin curl -s ${L}`)
+    pass(`/usr/bin/env -i curl -s ${L}`)
+    pass(`timeout 5 curl -fsS ${L}`)
+    pass(`env -S 'curl -s ${L}'`)
+    pass(`sudo -u x ls -la`)
+    pass(`nice -n 5 make`)
+    pass(`env FOO=1 node scripts/x.mjs`)
+    pass(`timeout 10 echo ${U}`)
+  })
+})

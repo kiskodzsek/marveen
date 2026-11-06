@@ -111,6 +111,49 @@ const CODE_FLAG = new Set(['-c', '-e', '-E', '-r', '--eval', '-p', '--print', 'e
 // is stepped over by the function-head rule in commandWordAt().
 const PREFIX_WORDS = new Set(['env', 'sudo', 'command', 'exec', 'time', 'nohup', 'nice',
   'do', 'then', 'else', 'elif', 'if', 'while', 'until', 'coproc', '{', '(', '!'])
+// Wrapper commands that run the rest of their argv as a command, with the options whose VALUE is the next
+// word (card 74d46cd0, Viktor 28582 LOW). Before this only the bare word was stepped over, so
+// `/usr/bin/env curl <url>`, `env -i curl`, `sudo -u x curl`, `nice -n 5 curl`, `command -p curl`,
+// `exec -a x curl`, `time -p curl`, `env -- curl`, and the carriers below (`timeout 10 curl`, `xargs curl`,
+// `caffeinate -i curl`, `stdbuf -o0 curl`, `arch -arm64 curl`, `watch curl`) all passed. A path counts (`/usr/bin/env`).
+// A short-option cluster whose LAST letter takes a value takes the next word (`sudo -Eu x`). `timeout`
+// also takes a positional DURATION before the command. `env -S <line>` runs <line> as a command line:
+// shellCStrings() judges it like `bash -c`. Fail-closed direction: a wrongly skipped word only lets a later
+// word be judged as the command.
+const WRAPPERS = new Map([
+  ['env', new Set(['-u', '-C', '-P', '-S', '--unset', '--chdir', '--split-string'])],
+  ['sudo', new Set(['-u', '-g', '-h', '-p', '-C', '-U', '-r', '-t', '-D', '-R', '-T', '--user', '--group', '--host',
+    '--prompt', '--close-from', '--other-user', '--role', '--type', '--chdir', '--chroot', '--command-timeout'])],
+  ['nice', new Set(['-n', '--adjustment'])],
+  ['exec', new Set(['-a'])],
+  ['time', new Set(['-f', '-o', '--format', '--output'])],
+  ['command', new Set()],
+  ['nohup', new Set()],
+  ['builtin', new Set()],
+  ['timeout', new Set(['-s', '-k', '--signal', '--kill-after'])],
+  ['xargs', new Set(['-I', '-J', '-L', '-n', '-P', '-R', '-S', '-s', '-E', '-d', '-a', '--max-args', '--max-procs',
+    '--max-lines', '--delimiter', '--arg-file', '--eof', '--replace'])],
+  ['caffeinate', new Set(['-t', '-w'])],
+  ['stdbuf', new Set(['-i', '-o', '-e', '--input', '--output', '--error'])],
+  ['arch', new Set(['-arch'])],
+  ['watch', new Set(['-n', '--interval'])],
+])
+// Index just past a wrapper's options (and timeout's DURATION), starting at the word after the wrapper.
+function skipWrapperOptions(mw, i, name) {
+  const withValue = WRAPPERS.get(name)
+  while (i < mw.length) {
+    const w = mw[i]
+    if (w === '--') { i++; break } // then timeout's DURATION still follows (`timeout -- 10 curl`, Viktor 30051)
+    if (w === '-' && name === 'env') { i++; continue } // `env -` = `env -i`
+    if (!w.startsWith('-') || w.length < 2) break
+    if (w.includes('=')) { i++; continue } // --user=x, --signal=KILL
+    const last = /^-[A-Za-z]+$/.test(w) ? `-${w.slice(-1)}` : w
+    i += withValue.has(w) || withValue.has(last) ? 2 : 1
+  }
+  // DURATION: 10, 1.5, 5s, 2m, .5, +5, inf (GNU timeout reads it as a float; Viktor 30051)
+  if (name === 'timeout' && i < mw.length && /^(?:[+.]?\d|inf)/i.test(mw[i])) i++
+  return i
+}
 // A one-liner is a DOWNLOADER only when its code uses a network primitive of the language itself.
 // Measured on 7 days of fleet commands: a one-liner that merely CARRIES a URL as data (an
 // inter-agent message built with subprocess + curl to localhost) must not be denied -- that was 4 of
@@ -485,7 +528,9 @@ function commandWordAt(mw) {
   let i = 0
   while (i < mw.length) {
     const w = mw[i]
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || PREFIX_WORDS.has(w)) i++
+    const base = w.includes('/') ? w.split('/').pop() : w
+    if (WRAPPERS.has(base)) i = skipWrapperOptions(mw, i + 1, base)
+    else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || PREFIX_WORDS.has(w)) i++
     else if (w === 'case') { const at = mw.indexOf('in', i + 1); i = at === -1 ? mw.length : at + 1 }
     else if (w === 'in' && i === 0) i++
     else if (w === 'function') i += mw[i + 2] === '{' ? 3 : 2
@@ -560,6 +605,26 @@ export function shellCStrings(orig, masked, a, b) {
   const toks = [...masked.slice(a, b).matchAll(/\S+/g)].map((m) => ({ w: m[0], end: a + m.index + m[0].length }))
   const out = []
   for (let k = 0; k < toks.length; k++) {
+    // `env -S <line>` / `--split-string[=]<line>` runs <line> as a command line (card 74d46cd0). The quoted
+    // value is blanked in `masked`, so the token ends where the value starts in `orig`.
+    if (toks[k].w.split('/').pop() === 'env') {
+      for (let j = k + 1; j < toks.length && toks[j].w.startsWith('-'); j++) {
+        const w = toks[j].w
+        if (w === '-S' || w === '--split-string' || w === '--split-string=') {
+          const str = shellWords(orig.slice(toks[j].end, b))[0]
+          if (str) out.push(str)
+        } else if (w.startsWith('--split-string=')) out.push(w.slice('--split-string='.length))
+        else if (/^-[A-Za-z]*S[A-Za-z]*$/.test(w)) {
+          // A short cluster with S (`-iS '<line>'`, `-vScurl`, Viktor 30051): the line is the rest of the cluster after
+          // the S, or the next word when the S is its last letter (the quoted value is blank in `masked`).
+          const rest = w.slice(w.indexOf('S') + 1)
+          const str = rest || shellWords(orig.slice(toks[j].end, b))[0]
+          if (str) out.push(str)
+        } else if (w.startsWith('-S') && w.length > 2) out.push(w.slice(2))
+        else if (WRAPPERS.get('env').has(w)) j++
+      }
+      continue
+    }
     if (!SHELLS.test(toks[k].w.split('/').pop())) continue
     let hasC = false; let last = toks[k].end
     for (let j = k + 1; j < toks.length; j++) {
@@ -622,9 +687,9 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
   for (const [k, [a, b]] of sp.entries()) {
     const mw = words(masked.slice(a, b))
     const i = commandWordAt(mw)
-    if (i >= mw.length) continue
-    // A shell's -c <string> is a command line of its own: judged like a substitution, with this
-    // command's assignments and loop values, up to the same depth (see shellCStrings).
+    // A shell's -c <string> (and `env -S <line>`) is a command line of its own: judged like a substitution,
+    // with this command's assignments and loop values, up to the same depth (see shellCStrings). Before the
+    // command-word check: `env -S '<line>'` has no command word of its own (card 74d46cd0).
     const cStrings = shellCStrings(orig, masked, a, b)
     if (cStrings.length && depth < 4) {
       const inner = { env, loops, externalLiteral: outer.externalLiteral }
@@ -632,6 +697,7 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
     } else if (cStrings.length && outer.externalLiteral) {
       return { deny: true, reason: 'shell-c-too-deep', hosts: [] }
     }
+    if (i >= mw.length) continue
     // The program arrives on stdin (heredoc, here-string, or the previous span of a pipe): judge the
     // program text itself, with the same localhost / private / vendor rules as everywhere else.
     if (stdinFed(mw, i)) {
