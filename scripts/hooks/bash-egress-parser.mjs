@@ -53,7 +53,8 @@
 //
 // Fail-open on unparseable input or an internal error (logged): a crashed gate must not silence the
 // fleet; that is today's behaviour, not a new hole. Every DENY is appended to the block log.
-import { readFileSync, appendFileSync, realpathSync, mkdirSync } from 'node:fs'
+import { readFileSync, appendFileSync, realpathSync, mkdirSync, lstatSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { maskInertLiterals } from '../self-pace-gate.mjs'
@@ -95,6 +96,41 @@ export function loadVendorDomains(path = VENDOR_HOSTS_PATH) {
 export function hostInDomains(host, domains) {
   for (const d of domains) if (host === d || host.endsWith(`.${d}`)) return true
   return false
+}
+// GHPRPIN (card 54bd5c28, Viktor 30388 P1-P4): scripts/gh-pr.mjs is the fleet's one Bash path to the GitHub
+// API. A node (or bun / deno) command that names it passes only in the EXACT shape
+//   node <ROOT>/scripts/gh-pr.mjs <args>
+// as the whole command: no `VAR=` before it (NODE_OPTIONS=--require would preload code next to the token),
+// no wrapper, no node option before the script, no `;` `&&` `|` or `$(...)` anywhere in the command (a write
+// to the file in the same command would land after the hash below was taken), not inside `bash -c` or a
+// substitution; the path absolute, not a symlink, resolving to <ROOT>/scripts/gh-pr.mjs; and the file's
+// sha256 equal to the pin in store/egress-script-pins.json ({ "scripts/gh-pr.mjs": "<64 hex>" }).
+// FAIL-CLOSED for this path (P2): a missing or malformed pin file, an unreadable script, any error = deny,
+// although the gate as a whole fails open. A redirect (`> out.json`, `--body-file - <<'EOF'`) is allowed.
+// This is DRIFT CONTROL, not enforcement: a copy under another name runs unchecked (open point (a) above),
+// and a write between this check and node's read is not closed (TOCTOU, P3). The pin is an owner step after
+// Viktor's review of the exact sha (P4).
+export const GH_PR_SCRIPT = join(ROOT, 'scripts', 'gh-pr.mjs')
+const SCRIPT_PIN_KEY = 'scripts/gh-pr.mjs'
+const NODE_RUNTIME = /^(?:node(?:js)?|bun|deno)$/
+export function loadScriptPin(path = process.env.BASH_EGRESS_SCRIPT_PINS || join(ROOT, 'store', 'egress-script-pins.json')) {
+  const pin = JSON.parse(readFileSync(path, 'utf-8'))?.[SCRIPT_PIN_KEY]
+  if (typeof pin !== 'string' || !/^[0-9a-f]{64}$/.test(pin)) throw new Error('no valid pin')
+  return pin
+}
+// The verdict for a node span naming gh-pr.mjs: null = the exact pinned shape, else a deny reason.
+function ghPrPinVerdict(sw, alone) {
+  try {
+    if (!alone || commandWordAt(sw) !== 0) return 'gh-pr-pin-shape'
+    const script = sw[1] ?? ''
+    if (!script.startsWith('/') || /(?:^|\/)\.\.?(?:\/|$)/.test(script)) return 'gh-pr-pin-path'
+    if (lstatSync(script).isSymbolicLink() || realpathSync(script) !== realpathSync(GH_PR_SCRIPT)) return 'gh-pr-pin-path'
+    let pin
+    try { pin = loadScriptPin() } catch { return 'gh-pr-pin-missing' }
+    return createHash('sha256').update(readFileSync(script)).digest('hex') === pin ? null : 'gh-pr-pin-hash'
+  } catch {
+    return 'gh-pr-pin-error'
+  }
 }
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 // One-liner URL schemes: every network scheme libcurl speaks (minus file:, and ipfs:/ipns:, which
@@ -692,6 +728,24 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
   for (const [k, [a, b]] of sp.entries()) {
     const mw = words(masked.slice(a, b))
     const i = commandWordAt(mw)
+    // GHPRPIN: a node span that names gh-pr.mjs passes only in the exact, pinned, stand-alone shape.
+    // Read with this command's assignments and loop values expanded: `G=<path>/gh-pr.mjs; node $G` and
+    // `for s in <path>/gh-pr.mjs; do node $s; done` name the script too (replay 2026-11-06: the first shape
+    // passed unexamined). A value set in an EARLIER Bash call is not visible here (drift control, see above).
+    const pinText = [expand(orig.slice(a, b), env), ...(loopVariants(orig.slice(a, b), env, loops) ?? [])].find((t) => t.includes('gh-pr.mjs'))
+    if (pinText !== undefined) {
+      const sw = shellWords(pinText)
+      const at = commandWordAt(sw)
+      if (at < sw.length && NODE_RUNTIME.test(sw[at].split('/').pop())) {
+        // The other spans must be empty: a heredoc body is already blanked in `masked`, and its closing
+        // delimiter line (`EOF`) is the only text that may stand there.
+        const delims = new Set([...orig.slice(a, b).matchAll(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g)].map((m) => m[2]))
+        const alone = depth === 0 && scope === null && !inners.length &&
+          sp.every(([x, y], j) => { const t = masked.slice(x, y).trim(); return j === k || !t || (j > k && delims.has(t)) })
+        const why = ghPrPinVerdict(sw, alone)
+        if (why) return { deny: true, reason: why, hosts: [] }
+      }
+    }
     // A shell's -c <string> (and `env -S <line>`) is a command line of its own: judged like a substitution,
     // with this command's assignments and loop values, up to the same depth (see shellCStrings). Before the
     // command-word check: `env -S '<line>'` has no command word of its own (card 74d46cd0).
@@ -777,7 +831,14 @@ const INTERPRETER_HINT =
   "egyedi nevvel, mert parhuzamos ugynokok osztoznak a /tmp-n (f=$(mktemp); cat > \"$f\" <<'EOF' ... EOF), " +
   'es kuldd curl-lel: curl -s -X POST http://localhost:3420/api/... --data-binary @"$f" ' +
   '(a curl celjat a kapu csak az argv-bol olvassa), vagy scripts/agent-msg.sh.'
+const GH_PR_PIN_MSG =
+  'scripts/gh-pr.mjs csak a pontos, pinelt alakban futhat (GHPRPIN, Viktor 30388): egyetlen parancs, ' +
+  'node <telepites>/scripts/gh-pr.mjs [-C <klon>] <marabel|marveen> <pr|ci> ... -- elotte nincs VAR=, wrapper, ' +
+  'node-kapcsolo; nincs ; && | vagy $(...); nem bash -c-ben. Kimenet fajlba: > <fajl>; PR-szoveg: --body-file <fajl> ' +
+  "vagy --body-file - <<'EOF'. A fajl sha256-janak egyeznie kell a store/egress-script-pins.json pinjevel; " +
+  'uj valtozat = Viktor-atnezes a pontos SHA-ra, utana owner-pin.'
 export function gateMessage(r) {
+  if (/^gh-pr-pin-/.test(r.reason ?? '')) return `${GH_PR_PIN_MSG} (ok: ${r.reason})`
   const hint = /^(?:stdin-interpreter|one-liner)-/.test(r.reason ?? '') ? INTERPRETER_HINT : ''
   return `${GATE_MSG}${hint} (${r.hosts.length ? `hoszt: ${r.hosts.join(', ')}` : `ok: ${r.reason}`})`
 }
