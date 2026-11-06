@@ -42,6 +42,22 @@ BLOCK = [
     'security -p "> " < cmds.txt',
     '( security dump-keychain )',
     'if true; then\nsecurity export\nfi',
+    # Viktor 30044 hardening: keyword positions, quoted words, $IFS, wrappers with an argument, find -exec.
+    'if true; then security dump-keychain; fi',
+    'while true; do security export; done',
+    '! security dump-keychain',
+    '"security" find-generic-password -s x',
+    's"ec"urity dump-keychain',
+    'security "find-generic-password" -s x',
+    'security find-generic-"password" -s x',
+    'security${IFS}find-generic-password -s x',
+    'security$IFS dump-keychain',
+    'timeout 5 security dump-keychain',
+    'timeout .5 security dump-keychain',
+    'nice -n 5 security dump-keychain',
+    'stdbuf -o0 security export',
+    'setsid security dump-keychain',
+    'find . -name x -exec security dump-keychain {} +',
 ]
 
 ALLOW = [
@@ -92,7 +108,19 @@ def main():
         code, _ = run(payload)
         if code != 0:
             fails.append(f'non-Bash input should pass (got {code}): {payload!r}')
-    total = len(BLOCK) + len(ALLOW) + 6
+    # ReDoS (Viktor 30044): many ambiguous wrapper tokens before the call must still block, fast (the old POSITION
+    # never returned at 26 x "env a=b ", and a hook that times out does not block).
+    for cmd in [('env a=b ' * 30) + '; security dump-keychain', ('env a=b ' * 60) + 'z', 'echo ' + 'a=b ' * 2000]:
+        want = 2 if 'security' in cmd else 0
+        try:
+            p = subprocess.run([sys.executable, '-I', HOOK], capture_output=True, text=True, timeout=5,
+                               input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}),
+                               env={'PATH': '/usr/bin:/bin'})
+            if p.returncode != want:
+                fails.append(f'redos case: want {want}, got {p.returncode}: {cmd[:40]!r}...')
+        except subprocess.TimeoutExpired:
+            fails.append(f'redos case timed out (5 s): {cmd[:40]!r}...')
+    total = len(BLOCK) + len(ALLOW) + 6 + 3
     for f in fails:
         print('FAIL', f)
     print(f'{total - len(fails)}/{total} passed')
