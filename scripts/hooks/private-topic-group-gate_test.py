@@ -121,6 +121,16 @@ def private_chat_allowed(root):
 
 
 @case
+def private_chat_allowed_live_store_shape(root):
+    # The live store: elo_uzenet.privat is {"chat_id", "message_id"} (the status card), not a bare id.
+    live = dict(PROJEKTEK, elo_uzenet={'csoport': {'chat_id': int(GROUP), 'message_id': 11}, 'privat': {'chat_id': int(PRIV), 'message_id': 12}})
+    setup(root, projektek=live)
+    rc_priv, _ = run(root, {'chat_id': PRIV, 'text': 'Kész a hirdetéskép.'})
+    rc_group, _ = run(root, {'chat_id': GROUP, 'text': 'Kész a hirdetéskép.'})
+    return rc_priv == 0 and rc_group == 2
+
+
+@case
 def third_chat_gated(root):
     # Viktor 29635 INFO-3: any chat but the owner's private one (e.g. a direct chat with Balázs).
     setup(root)
