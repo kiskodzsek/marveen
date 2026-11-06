@@ -31,6 +31,8 @@ J1 paper "too white, almost glows" -- both passed a self-attested "A5: ok"):
     FENY: <paper L* (Lab)> / <brightest comparable white in the scene L*> + gutter shadow
            paper may not be brighter than the scene's own whites (no glowing page)
     KEPES: van <what photo cover/page shows> | nincs <reason>   (Patrik TG 1806)
+And (Patrik TG 14836, 2026-11-06; message_and_real): a marketing image needs "UZENET: <kit fog meg> | <miért
+most>", and a book on a marketing image or on a 3D-engine frame ("MERCE: nincs-ember") needs "VALODI: igen <reason>".
 Also (card 0ecad9e5, Patrik TG 14472): a reply to the owner's PRIVATE chat is blocked unless the
 text carries "PRIVÁT-OK: <reason>"; team work goes to the group chat. An open private window
 (store/privat-ablak.json, 0600, see private_window_open; Patrik TG 14496) lifts the marker rule only;
@@ -141,6 +143,36 @@ def majsztro_ok(val):
     return None
 
 
+MESSAGE_PART_MIN = 8
+REAL_REASON_MIN = 20
+
+
+def message_and_real(d):
+    """Patrik TG 14836 (2026-11-06 13:37, shared/hibanaplo.md): an ad image passed every gate (A5, light, page
+    edge) and he answered "túl AI a könyv.. nem tunik valodi könyvnek.. és mi a mondanivaloja a képnek? ... kit
+    és miért fogna meg?". The gates measured technique, not whether the book looks REAL and WHOM the image speaks to.
+    UZENET: <kit fog meg> | <miért most>   -- every marketing image (not "MAJSZTRO: nem-marketing").
+    VALODI: igen <what makes it a real book, looked at 100%>   -- every image with a book that is marketing or a
+            3D-engine frame ("MERCE: nincs-ember ..."); anything but "igen <reason>" blocks.
+    Returns the reason to block, or None."""
+    marketing = not (d.get('MAJSZTRO') or '').lower().startswith('nem-marketing')
+    if marketing:
+        parts = [p.strip() for p in (d.get('UZENET') or '').split('|')]
+        if len(parts) != 2 or min(len(p) for p in parts) < MESSAGE_PART_MIN:
+            return ('UZENET sor hiányzik/hibás. Alak: "UZENET: <kit fog meg> | <miért most>", mindkét rész legalább '
+                    f'{MESSAGE_PART_MIN} karakter (Patrik TG 14836: "mi a mondanivaloja a képnek? ... kit és miért '
+                    'fogna meg?"). Ha egy mondatban nem mondható ki, a kép ELDOBANDÓ.')
+    book = (d.get('KONYV') or '').lower().startswith('van')
+    engine = (d.get('MERCE') or '').lower().startswith('nincs-ember')
+    if book and (marketing or engine):
+        v = (d.get('VALODI') or '').split(None, 1)
+        if len(v) < 2 or v[0].lower() != 'igen' or len(v[1].strip()) < REAL_REASON_MIN:
+            return ('VALODI sor hiányzik/hibás. Alak: "VALODI: igen <mi teszi valódi könyvnek, 100%-on nézve>", '
+                    f'az indok legalább {REAL_REASON_MIN} karakter. Ha 3D-makettnek vagy MI-nek hat, a kép nem mehet '
+                    '(Patrik TG 14836: "túl AI a könyv.. nem tunik valodi könyvnek").')
+    return None
+
+
 def check(fp):
     base = os.path.basename(fp)
     ok = os.path.join(KAPU, base + '.ok')
@@ -159,6 +191,9 @@ def check(fp):
     miss = [k for k in REQ if not d.get(k)]
     if miss:
         return f'{base}: hiányzó mezők: {", ".join(miss)}.'
+    msg = message_and_real(d)
+    if msg:
+        return f'{base}: {msg}'
     me = majsztro_ok(d.get('MAJSZTRO'))
     if me:
         return f'{base}: {me}'

@@ -28,7 +28,11 @@ def run(root, tool_input):
     return p.returncode, p.stderr
 
 
-def book_fixture(root, kepes, merce='nyitott 300/170', kez='nyitott 300/180'):
+VALODI_OK = 'igen valódi fehér lap, papírszál és gerinc-árnyék 100%-on nézve'
+
+
+def book_fixture(root, kepes, merce='nyitott 300/170', kez='nyitott 300/180', valodi=VALODI_OK,
+                 majsztro='nem-marketing teszt-fixture', uzenet=None):
     kapu = os.path.join(root, 'store', 'kep-kapu')
     os.makedirs(kapu, exist_ok=True)
     img = os.path.join(root, 'kep.png')
@@ -36,11 +40,15 @@ def book_fixture(root, kepes, merce='nyitott 300/170', kez='nyitott 300/180'):
     for f in (img, crop):
         open(f, 'wb').write(b'\x89PNG')
     lines = ['KONYV: van', 'A5: ok', 'PAPIR: feher', 'SAJAT: ok', 'KERES: teszt kérés, egyezik',
-             f'NAGYITVA: {crop}', 'MAJSZTRO: nem-marketing teszt-fixture',
+             f'NAGYITVA: {crop}', f'MAJSZTRO: {majsztro}',
              'EP: ok a teljes jelenet ép, semmi nincs levágva', 'HELY: tiszta asztalon fekszik',
              f'MERCE: {merce}', f'KEZ: {kez}', 'FENY: papír L* 88 / jelenet L* 92, finom gerinc']
     if kepes is not None:
         lines.append(f'KEPES: {kepes}')
+    if valodi is not None:
+        lines.append(f'VALODI: {valodi}')
+    if uzenet is not None:
+        lines.append(f'UZENET: {uzenet}')
     open(os.path.join(kapu, 'kep.png.ok'), 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
     return img
 
@@ -170,6 +178,80 @@ def head_merce_with_hand_still_allowed(root):
     img = book_fixture(root, KEPES_OK, merce='zart 100/110', kez='zárt 100/120')
     rc, _ = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
     return rc == 0
+
+
+# UZENET + VALODI (Patrik TG 14836, shared/hibanaplo.md 2026-11-06 13:37, card ca0737c2).
+MARKETING = 'MEHET 1'  # the MAJSZTRO API check comes after UZENET/VALODI; here it fails (no token): rc 2, MAJSZTRO
+UZENET_OK = 'nagyszülőnek ajándékot kereső felnőtt gyerek | karácsony előtt, amíg még elkészül'
+
+
+def sent(root, **kw):
+    img = book_fixture(root, KEPES_OK, **kw)
+    return run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+
+
+@case
+def engine_frame_without_valodi_blocked(root):
+    rc, err = sent(root, merce='nincs-ember nyitott 888/630', kez=NO_PERSON_KEZ, valodi=None)
+    return rc == 2 and 'VALODI' in err
+
+
+@case
+def engine_frame_valodi_nem_blocked(root):
+    rc, err = sent(root, merce='nincs-ember nyitott 888/630', kez=NO_PERSON_KEZ, valodi='nem 3D-makettnek hat, túl sima a lap')
+    return rc == 2 and 'VALODI' in err
+
+
+@case
+def engine_frame_bare_valodi_igen_blocked(root):
+    rc, err = sent(root, merce='nincs-ember nyitott 888/630', kez=NO_PERSON_KEZ, valodi='igen ok')
+    return rc == 2 and 'VALODI' in err
+
+
+@case
+def non_marketing_head_measured_without_valodi_allowed(root):
+    # Not marketing and not a 3D-engine frame: VALODI is not asked (an internal photo check, as before).
+    rc, _ = sent(root, merce='zart 100/110', kez='zárt 100/120', valodi=None)
+    return rc == 0
+
+
+@case
+def marketing_without_uzenet_blocked(root):
+    rc, err = sent(root, majsztro=MARKETING)
+    return rc == 2 and 'UZENET' in err
+
+
+@case
+def marketing_uzenet_one_part_blocked(root):
+    rc, err = sent(root, majsztro=MARKETING, uzenet='mindenkinek szól, mert szép')
+    return rc == 2 and 'UZENET' in err
+
+
+@case
+def marketing_uzenet_short_part_blocked(root):
+    rc, err = sent(root, majsztro=MARKETING, uzenet='anyák | most')
+    return rc == 2 and 'UZENET' in err
+
+
+@case
+def marketing_book_without_valodi_blocked(root):
+    rc, err = sent(root, majsztro=MARKETING, uzenet=UZENET_OK, valodi=None)
+    return rc == 2 and 'VALODI' in err
+
+
+@case
+def marketing_with_uzenet_and_valodi_reaches_majsztro(root):
+    rc, err = sent(root, majsztro=MARKETING, uzenet=UZENET_OK)
+    return rc == 2 and 'MAJSZTRO' in err and 'UZENET' not in err and 'VALODI' not in err
+
+
+@case
+def marketing_without_book_needs_no_valodi(root):
+    img = book_fixture(root, KEPES_OK, majsztro=MARKETING, uzenet=UZENET_OK, valodi=None)
+    okf = os.path.join(root, 'store', 'kep-kapu', 'kep.png.ok')
+    open(okf, 'w', encoding='utf-8').write(open(okf, encoding='utf-8').read().replace('KONYV: van', 'KONYV: nincs'))
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'VALODI' not in err and 'UZENET' not in err
 
 
 REASON = 'Patrik TG 14496: nem-Marabel téma privátban'
