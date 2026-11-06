@@ -74,7 +74,12 @@ def patterns(temak, projektek):
 def gated(chat, projektek):
     elo = projektek.get('elo_uzenet') if isinstance(projektek, dict) else None
     elo = elo if isinstance(elo, dict) else {}
-    private = (os.environ.get('MARVEEN_OWNER_PRIVATE_CHAT') or str(elo.get('privat') or '')).strip()
+    # The live store keeps each chat as {"chat_id": ..., "message_id": ...} (the status card's message); a plain id
+    # is read too. Reading the dict as text made no chat private, so the owner's own chat was gated (2026-11-06).
+    priv = elo.get('privat')
+    if isinstance(priv, dict):
+        priv = priv.get('chat_id')
+    private = (os.environ.get('MARVEEN_OWNER_PRIVATE_CHAT') or str(priv if priv is not None else '')).strip()
     return not private or chat != private
 
 
