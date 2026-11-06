@@ -79,6 +79,9 @@ jobs:
       # output or log" and "only allowed chats" cases are the gate. Hermetic:
       # stub Bot API on localhost, synthetic token, throwaway dir.
       - run: python3 scripts/__tests__/telegram-pin.test.py
+      # PRIVATEWINDOW1106: the owner-reply gate (product images, private-chat marker,
+      # private window 0600). Hermetic: throwaway CLAUDE_PROJECT_DIR, no dashboard call.
+      - run: python3 -I scripts/hooks/product-image-gate_test.py
       # MORNTIMERPARK914: the #1313 contract tests shipped without CI wiring,
       # so "CI green" said nothing about them -- the exact rot the comment
       # above warns about. All three are hermetic (stubs on PATH / CLAUDE_BIN,
