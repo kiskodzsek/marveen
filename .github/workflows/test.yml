@@ -104,3 +104,8 @@ jobs:
       - run: python3 scripts/__tests__/telegram-reply-guard.test.py
       - run: python3 scripts/__tests__/ledger-replay-reply-tool.test.py
       - run: bash scripts/__tests__/conversation-ledger.test.sh
+      # PRIVTOPIC1106 (card 6dbeadad, #123): the private-topic group gate blocks a
+      # private project's words in the team group; its fail-closed cases (bad regex,
+      # broken store, unknown private chat) are the gate. Hermetic: throwaway
+      # CLAUDE_PROJECT_DIR, synthetic chat ids, no network.
+      - run: python3 -I scripts/hooks/private-topic-group-gate_test.py
