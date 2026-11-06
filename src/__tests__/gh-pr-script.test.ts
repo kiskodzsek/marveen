@@ -1,0 +1,200 @@
+// scripts/gh-pr.mjs (card 54bd5c28, Viktor 28582 (b)): the fleet's one Bash path to the GitHub REST API.
+//
+// The script makes two claims, and both are tested here:
+//   (a) the requests the fleet needs are built exactly (PR list/get/files/create/edit, CI checks/runs/
+//       jobs/log on kiskodzsek/marabel and kiskodzsek/marveen);
+//   (b) nothing else can be built: no merge, no close, no contents, no other repository, no raw path,
+//       method or JSON body, no fork head, no traversal -- and the token never comes from the system
+//       keychain helper, and a job-log redirect is followed only to GitHub's blob hosts.
+// No network: buildRequest / credentialArgs / logRedirectAllowed / shape are pure, and the entry point
+// is guarded, so importing runs nothing.
+import { describe, it, expect } from 'vitest'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+// @ts-expect-error -- plain .mjs script, no type declarations
+import { buildRequest, credentialArgs, gitEnv, logRedirectAllowed, checkBodyPath, checkBodyText, bodyRoots, maskSecrets, frameLog, shape, splitClone, agentId, UsageError } from '../../scripts/gh-pr.mjs'
+
+// A PEM block built from parts at run time: the repository's secret-gate (rightly) refuses one written out.
+const PEM_EDGE = '-'.repeat(5)
+const PEM_KIND = ['PRIVATE', 'KEY'].join(' ')
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'gh-pr.mjs')
+const req = (s: string) => buildRequest(s.split(' '))
+const refused = (argv: string[]) => {
+  try { buildRequest(argv); return false } catch (e) { return e instanceof UsageError }
+}
+
+describe('gh-pr: the requests the fleet needs are built exactly', () => {
+  it('PR reads', () => {
+    expect(req('marabel pr list')).toMatchObject({ method: 'GET', path: '/repos/kiskodzsek/marabel/pulls?per_page=50' })
+    expect(req('marveen pr list --state all --head fix/x')).toMatchObject({ method: 'GET', path: '/repos/kiskodzsek/marveen/pulls?per_page=50&state=all&head=kiskodzsek%3Afix%2Fx' })
+    expect(req('marabel pr get 1171')).toMatchObject({ method: 'GET', path: '/repos/kiskodzsek/marabel/pulls/1171' })
+    expect(req('marabel pr files 1171')).toMatchObject({ method: 'GET', path: '/repos/kiskodzsek/marabel/pulls/1171/files?per_page=100' })
+  })
+  it('PR create and edit carry only the allowed keys', () => {
+    const c = req('marabel pr create --title fix:_x --head fix/x --base main --body-file /tmp/b.md --draft')
+    expect(c).toMatchObject({ method: 'POST', path: '/repos/kiskodzsek/marabel/pulls', bodyFile: '/tmp/b.md' })
+    expect(c.body).toEqual({ title: 'fix:_x', head: 'fix/x', base: 'main', draft: true })
+    expect(req('marabel pr create --title t --head a --base main --body-file f').body.draft).toBe(false)
+    const e = req('marabel pr edit 12 --base main --title t')
+    expect(e).toMatchObject({ method: 'PATCH', path: '/repos/kiskodzsek/marabel/pulls/12' })
+    expect(e.body).toEqual({ title: 't', base: 'main' })
+    expect(req('marabel pr edit 12 --body-file f')).toMatchObject({ body: {}, bodyFile: 'f' })
+  })
+  it('CI reads, with the 11-12 digit run and job ids GitHub uses today', () => {
+    expect(req('marabel ci checks 40abc1a026d33c3b2d1367da3b4c5efe463d628d').path).toBe('/repos/kiskodzsek/marabel/commits/40abc1a026d33c3b2d1367da3b4c5efe463d628d/check-runs?per_page=100')
+    expect(req('marabel ci runs --branch feat/a').path).toBe('/repos/kiskodzsek/marabel/actions/runs?per_page=30&branch=feat%2Fa')
+    expect(req('marabel ci jobs 42276225935').path).toBe('/repos/kiskodzsek/marabel/actions/runs/42276225935/jobs?per_page=100')
+    expect(req('marabel ci log 128093120674')).toMatchObject({ method: 'GET', path: '/repos/kiskodzsek/marabel/actions/jobs/128093120674/logs', kind: 'ci-log' })
+  })
+})
+
+describe('gh-pr: nothing else can be built', () => {
+  it('no merge, close, contents, issues, comments, gists, raw path or raw method', () => {
+    for (const s of ['marabel pr merge 1', 'marabel pr close 1', 'marabel pr review 1', 'marabel pr comment 1',
+      'marabel contents put x', 'marabel issues create', 'marabel gist create', 'marabel api /gists', 'marabel GET /user',
+      'marabel ci rerun 1', 'marabel ci cancel 1', 'marabel ci dispatch x'])
+      expect({ s, refused: refused(s.split(' ')) }).toEqual({ s, refused: true })
+  })
+  it('only the two repositories, by exact name', () => {
+    for (const r of ['marabel/', 'kiskodzsek/marabel', 'Marabel', 'marabel-x', 'other', '../marabel', ''])
+      expect({ r, refused: refused([r, 'pr', 'get', '1']) }).toEqual({ r, refused: true })
+  })
+  it('numbers, shas and branches are shaped: no traversal, no query smuggling, no fork head', () => {
+    for (const a of [
+      ['marabel', 'pr', 'get', '1/../../../../user'], ['marabel', 'pr', 'get', '1?x=1'], ['marabel', 'pr', 'get', '0'],
+      ['marabel', 'pr', 'get', '-1'], ['marabel', 'pr', 'get', '12345678901234567'],
+      ['marabel', 'ci', 'checks', 'main'], ['marabel', 'ci', 'checks', '../x'],
+      ['marabel', 'ci', 'runs', '--branch', '../../x'], ['marabel', 'ci', 'runs', '--branch', 'a b'],
+      ['marabel', 'pr', 'create', '--title', 't', '--head', 'evil:main', '--base', 'main', '--body-file', 'f'],
+      ['marabel', 'pr', 'create', '--title', 't', '--head', '-x', '--base', 'main', '--body-file', 'f'],
+      ['marabel', 'pr', 'list', '--head', 'a&state=closed'],
+    ]) expect({ a: a.join(' '), refused: refused(a) }).toEqual({ a: a.join(' '), refused: true })
+  })
+  it('no extra keys, no repeated or unknown options, no stray positionals', () => {
+    for (const a of [
+      ['marabel', 'pr', 'edit', '1', '--state', 'closed'], ['marabel', 'pr', 'edit', '1', '--maintainer_can_modify', 'true'],
+      ['marabel', 'pr', 'edit', '1'], ['marabel', 'pr', 'edit', '1', '--title', 'a', '--title', 'b'],
+      ['marabel', 'pr', 'create', '--title', 't', '--head', 'a', '--base', 'main'],
+      ['marabel', 'pr', 'get', '1', '2'], ['marabel', 'pr', 'list', 'extra'], ['marabel', 'pr', 'list', '--state'],
+      ['marabel', 'pr', 'edit', '1', '2', '--title', 't'], ['marabel', 'ci', 'log', '1', '2'],
+      ['marabel', 'pr', 'create', 'x', '--title', 't', '--head', 'a', '--base', 'main', '--body-file', 'f'],
+      ['marabel', 'pr', 'create', '--title', 'a\nb', '--head', 'a', '--base', 'main', '--body-file', 'f'],
+      ['marabel', 'pr', 'create', '--title', 'x'.repeat(257), '--head', 'a', '--base', 'main', '--body-file', 'f'],
+    ]) expect({ a: a.join(' ').slice(0, 80), refused: refused(a) }).toEqual({ a: a.join(' ').slice(0, 80), refused: true })
+  })
+  it('ci runs takes the filters the actions-minutes measure needs, each shaped', () => {
+    expect(req('marabel ci runs --status completed --event pull_request --created >=2026-11-01 --per-page 100 --page 2').path)
+      .toBe('/repos/kiskodzsek/marabel/actions/runs?per_page=100&page=2&status=completed&event=pull_request&created=%3E%3D2026-11-01')
+    expect(req('marabel ci runs --created 2026-11-01..2026-11-06').path).toContain('created=2026-11-01..2026-11-06')
+    for (const a of ['--status evil', '--event issues', '--created yesterday', '--created 2026-11-01&x=1', '--per-page 101', '--per-page 0', '--page 0'])
+      expect({ a, refused: refused(['marabel', 'ci', 'runs', ...a.split(' ')]) }).toEqual({ a, refused: true })
+  })
+})
+
+describe('gh-pr: the body file and the secrets (H5, K1)', () => {
+  const d = mkdtempSync(join(tmpdir(), 'gh-pr-body-'))
+  const clone = join(d, 'clone'); mkdirSync(join(clone, '.git'), { recursive: true }); mkdirSync(join(clone, 'docs'))
+  writeFileSync(join(clone, 'docs', 'pr.md'), 'ok')
+  writeFileSync(join(clone, '.git', 'config'), 'x')
+  writeFileSync(join(clone, '.env'), 'x')
+  symlinkSync(join(clone, 'docs', 'pr.md'), join(clone, 'docs', 'link.md'))
+  // Outside both roots: this repository's own package.json (the clone is a temp dir, the checkout is not under /tmp).
+  const outsideFile = join(dirname(SCRIPT), '..', 'package.json')
+  const roots = bodyRoots(clone)
+  it('a regular file under the clone or /tmp passes', () => {
+    expect(checkBodyPath(join(clone, 'docs', 'pr.md'), roots)).toMatch(/docs\/pr\.md$/)
+    const t = mkdtempSync('/tmp/gh-pr-t-'); writeFileSync(join(t, 'b.md'), 'x')
+    expect(checkBodyPath(join(t, 'b.md'), roots)).toMatch(/b\.md$/)
+  })
+  it('a symlink, a hidden component, a file outside both roots, a missing file are refused', () => {
+    for (const p of [join(clone, 'docs', 'link.md'), join(clone, '.git', 'config'), join(clone, '.env'), outsideFile, '/etc/hosts', join(clone, 'nope.md')])
+      expect({ p, thrown: (() => { try { checkBodyPath(p, roots); return false } catch (e) { return e instanceof UsageError } })() }).toEqual({ p, thrown: true })
+  })
+  it('a body over 64 KiB or carrying a secret shape is refused', () => {
+    expect(checkBodyText('x'.repeat(65536))).toHaveLength(65536)
+    expect(() => checkBodyText('x'.repeat(65537))).toThrow(UsageError)
+    for (const sec of ['ghp_' + 'a'.repeat(36), 'github_pat_' + 'A'.repeat(30), 'sk_live_' + 'a'.repeat(20), 'rk_test_' + 'b'.repeat(20),
+      'sk-ant-' + 'c'.repeat(30), 'eyJhbGciOiJI.eyJzdWIiOiIx.c2lnbmF0dXJl', `${PEM_EDGE}BEGIN OPENSSH ${PEM_KIND}${PEM_EDGE}\nabc\n${PEM_EDGE}END OPENSSH ${PEM_KIND}${PEM_EDGE}`, 'AKIA' + 'B'.repeat(16)])
+      expect({ sec: sec.slice(0, 12), thrown: (() => { try { checkBodyText(`text ${sec} text`); return false } catch { return true } })() }).toEqual({ sec: sec.slice(0, 12), thrown: true })
+  })
+  it('a job log is framed as untrusted, tail-capped, with secrets masked', () => {
+    const log = `line1\ntoken ghp_${'z'.repeat(36)} here\nlast`
+    const f = frameLog(log, 'marabel', '12', 1000)
+    expect(f.startsWith('=== BEGIN UNTRUSTED GITHUB JOB LOG (kiskodzsek/marabel job 12)')).toBe(true)
+    expect(f.trimEnd().endsWith('=== END UNTRUSTED GITHUB JOB LOG ===')).toBe(true)
+    expect(f).not.toContain('ghp_zzzz')
+    expect(f).toContain('[MASKED]')
+    const cut = frameLog('a'.repeat(50) + 'TAIL', 'marabel', '12', 10)
+    expect(cut).toContain('first 44 bytes cut, last 10 kept')
+    expect(cut).toContain('aaaaaaTAIL')
+    expect(maskSecrets('plain text')).toBe('plain text')
+    expect(refused(['marabel', 'ci', 'log', '1', '--tail-bytes', '99999999'])).toBe(true)
+  })
+})
+
+describe('gh-pr: the token and the redirect', () => {
+  it('git credential fill: the helper list is reset, then only the repository-local helpers', () => {
+    const a = credentialArgs('/c', ['!/x/git-credential-dave.sh'])
+    expect(a.slice(0, 4)).toEqual(['-C', '/c', '-c', 'credential.helper='])
+    expect(a).toContain('credential.helper=!/x/git-credential-dave.sh')
+    expect(a.join(' ')).not.toContain('osxkeychain')
+    expect(a.slice(-2)).toEqual(['credential', 'fill'])
+    const e = gitEnv({ PATH: '/bin' })
+    expect(e).toMatchObject({ GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' })
+  })
+  it('-C takes an existing directory, first; the agent id comes from the env', () => {
+    expect(splitClone(['-C', tmpdir(), 'marabel', 'pr', 'get', '1'])).toEqual({ cloneDir: tmpdir(), rest: ['marabel', 'pr', 'get', '1'] })
+    expect(splitClone(['marabel', 'pr', 'get', '1'], '/w')).toEqual({ cloneDir: '/w', rest: ['marabel', 'pr', 'get', '1'] })
+    expect(() => splitClone(['-C', '/no/such/dir', 'marabel'])).toThrow(UsageError)
+    expect(() => splitClone(['-C'])).toThrow(UsageError)
+    expect(agentId({ MARVEEN_AGENT_ID: 'pulzus' })).toBe('pulzus')
+    expect(agentId({ CLAUDE_CONFIG_DIR: '/i/agents/kernel/.claude-config' })).toBe('kernel')
+    expect(agentId({})).toBe('unknown')
+  })
+  it('a job-log redirect is followed only to https GitHub blob hosts', () => {
+    for (const ok of ['https://productionresultssa1.blob.core.windows.net/actions-results/x?sig=1',
+      'https://pipelines.actions.githubusercontent.com/x'])
+      expect({ ok, allowed: logRedirectAllowed(ok) }).toEqual({ ok, allowed: true })
+    for (const bad of ['http://x.blob.core.windows.net/a', 'https://blob.core.windows.net.evil.com/a',
+      'https://evilblob.core.windows.net/a', 'https://.blob.core.windows.net/a', 'https://u:p@x.blob.core.windows.net/a',
+      'https://x.blob.core.windows.net:8443/a', 'https://api.github.com/gists', 'not a url', ''])
+      expect({ bad, allowed: logRedirectAllowed(bad) }).toEqual({ bad, allowed: false })
+  })
+  it('the output keeps selected fields only (no token-bearing or nested objects are echoed whole)', () => {
+    expect(shape('pr-files', [{ filename: 'a', status: 'added', additions: 1, deletions: 0, patch: 'SECRET?' }])).toEqual([{ filename: 'a', status: 'added', additions: 1, deletions: 0 }])
+    expect(shape('ci-checks', { check_runs: [{ id: 1, name: 'n', status: 's', conclusion: 'c', html_url: 'u', output: { text: 'x' } }] }))
+      .toEqual([{ id: 1, name: 'n', status: 's', conclusion: 'c', html_url: 'u' }])
+  })
+})
+
+describe('gh-pr: one file, node: built-ins only (H7), so the pinned hash covers all code that runs', () => {
+  it('every import is a node: built-in; no dynamic import, no require', () => {
+    const src = readFileSync(SCRIPT, 'utf-8')
+    const specs = [...src.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1])
+    expect(specs.length).toBeGreaterThan(0)
+    expect(specs.filter((x) => !x.startsWith('node:'))).toEqual([])
+    expect(src).not.toMatch(/\bimport\s*\(/)
+    expect(src).not.toMatch(/\brequire\s*\(/)
+  })
+})
+
+describe('gh-pr: the process', () => {
+  const run = (args: string[], cwd = tmpdir()) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd, encoding: 'utf-8', env: { ...process.env, GH_PR_AUDIT_LOG: join(mkdtempSync(join(tmpdir(), 'gh-pr-a-')), 'a.jsonl') } })
+  it('a refused command exits 2 with a usage line, makes no request, and leaves one metadata-only audit line', () => {
+    const log = join(mkdtempSync(join(tmpdir(), 'gh-pr-audit-')), 'audit.jsonl')
+    const r = spawnSync(process.execPath, [SCRIPT, 'marabel', 'pr', 'merge', '1'], { cwd: tmpdir(), encoding: 'utf-8', env: { ...process.env, GH_PR_AUDIT_LOG: log, MARVEEN_AGENT_ID: 'tester' } })
+    expect(r.status).toBe(2)
+    expect(r.stderr).toMatch(/^gh-pr: usage: unknown command/)
+    const row = JSON.parse(readFileSync(log, 'utf-8').trim())
+    expect(Object.keys(row).sort()).toEqual(['agent', 'cmd', 'repo', 'status', 'ts'])
+    expect(row).toMatchObject({ agent: 'tester', cmd: 'pr merge', repo: 'marabel', status: 'refused' })
+  })
+  it('outside a clone with a local credential helper it stops before any request, and names no token', () => {
+    const r = run(['marabel', 'pr', 'get', '1'], mkdtempSync(join(tmpdir(), 'gh-pr-nogit-')))
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('no repository-local git credential helper')
+  })
+})

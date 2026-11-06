@@ -167,6 +167,47 @@ This is a deny list, not a sandbox.
   permission engine excludes single-quoted content). Use single quotes or
   `-d @file` for such a call.
 
+# The GitHub API path: one pinned script (GHPRPIN)
+
+`store/egress-vendor-hosts.json` let every Bash call reach `api.github.com`.
+The vendor list filters on the host, never on the path, so that one entry also
+opened, with a token, gists, issues, comments and repository contents (a write
+channel), and without one, foreign issue and comment text straight into the
+context (Viktor 28582 (b); card 54bd5c28). In 14 days of fleet transcripts,
+131 distinct Bash commands named that host (an upper bound: some only quote it).
+
+`scripts/gh-pr.mjs` replaces it with a closed list:
+
+- two repositories (`kiskodzsek/marabel`, `kiskodzsek/marveen`), the host a
+  constant, the request built only from fixed templates and shaped arguments;
+- `pr list|get|files|create|edit` and `ci checks|runs|jobs|log`; no merge,
+  close, review, comments, issues, gists or contents;
+- the token from the caller's own repository-local git credential helper, with
+  the system and global git config off, so the keychain helper (other agents'
+  credentials) is never asked; in memory only;
+- a PR body from a regular file under the clone or `/tmp`, or stdin, at most
+  64 KiB, refused if it carries a secret shape; a job log printed inside an
+  UNTRUSTED frame, tail-capped, secret shapes masked;
+- one metadata line per call in `store/gh-pr-audit.jsonl` (never a body, a
+  header or the token).
+
+The egress parser lets the script run only as the whole command
+`node <install>/scripts/gh-pr.mjs ...` (output redirects and a body heredoc
+allowed), with the file's sha256 equal to `store/egress-script-pins.json`
+(`{"scripts/gh-pr.mjs": "<64 hex>"}`). A missing or wrong pin denies: this path
+fails closed while the gate as a whole fails open.
+
+**This is drift control, not enforcement.** The hook does not see network calls
+inside a script file, so a renamed, edited copy runs unchecked; a write between
+the hash check and node's read is not closed (TOCTOU). The limit that holds is
+the token's scope: a fine-grained token on the two repositories (an owner step).
+
+Rollout, in this order (Viktor 30388 K4): the script and parser change merged at
+a reviewed sha; the pin written to the store (owner step, the sha from the
+review); skills and memories switched to the script, 1-2 days of the block log;
+then `api.github.com` removed from the vendor list (owner step). A new version of
+the script needs a new review and a new pin.
+
 # What the URL gate does not cover
 
 Both web controls are wired to **one tool**. `scripts/hooks/egress-gate.mjs`
