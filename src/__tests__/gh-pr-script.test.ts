@@ -114,12 +114,14 @@ describe('gh-pr: the body file and the secrets (H5, K1)', () => {
       expect({ p, thrown: (() => { try { checkBodyPath(p, roots); return false } catch (e) { return e instanceof UsageError } })() }).toEqual({ p, thrown: true })
   })
   it('F2: a body file in the store or in another agent tree is refused, even under a body root', () => {
-    const R = realpathSync(mkdtempSync(join(tmpdir(), 'gh-pr-broot-')))
+    const R = realpathSync.native(mkdtempSync(join(tmpdir(), 'gh-pr-broot-')))
     for (const d of ['store', 'agents/pulzus', 'agents/dave']) mkdirSync(join(R, d), { recursive: true })
     for (const f of ['store/a.md', 'agents/pulzus/a.md', 'agents/dave/a.md']) writeFileSync(join(R, f), 'x')
     expect(() => checkBodyPath(join(R, 'store/a.md'), [R], 'dave', R)).toThrow(UsageError)
     expect(() => checkBodyPath(join(R, 'agents/pulzus/a.md'), [R], 'dave', R)).toThrow(UsageError)
     expect(checkBodyPath(join(R, 'agents/dave/a.md'), [R], 'dave', R)).toBe(join(R, 'agents/dave/a.md'))
+    for (const f of ['STORE/a.md', 'Store/a.md', 'AGENTS/pulzus/a.md', 'agents/PULZUS/a.md'])
+      expect({ f, thrown: (() => { try { checkBodyPath(join(R, f), [R], 'dave', R); return false } catch (e) { return e instanceof UsageError } })() }).toEqual({ f, thrown: true })
   })
   it('a body over 64 KiB or carrying a secret shape is refused', () => {
     expect(checkBodyText('x'.repeat(65536))).toHaveLength(65536)
@@ -165,7 +167,7 @@ describe('gh-pr: the token and the redirect', () => {
     expect(e).toMatchObject({ GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' })
   })
   it('F2: -C is the cwd or below it, never another agent tree or the store; the agent id comes from the env', () => {
-    const R = realpathSync(mkdtempSync(join(tmpdir(), 'gh-pr-root-')))
+    const R = realpathSync.native(mkdtempSync(join(tmpdir(), 'gh-pr-root-')))
     for (const d of ['agents/dave/repos/marabel', 'agents/pulzus/repos/marabel', 'store/x', 'other']) mkdirSync(join(R, d), { recursive: true })
     const mine = join(R, 'agents/dave/repos/marabel')
     expect(splitClone(['-C', mine, 'marabel', 'pr', 'get', '1'], R, 'dave', R)).toEqual({ cloneDir: mine, rest: ['marabel', 'pr', 'get', '1'] })
@@ -180,6 +182,12 @@ describe('gh-pr: the token and the redirect', () => {
       [['-C', '/no/such/dir', 'marabel'], R, 'dave'],
       [['-C'], R, 'dave'],
     ] as [string[], string, string][]) expect({ args: args.join(' '), thrown: (() => { try { splitClone(args, cwd, agent, R); return false } catch (e) { return e instanceof UsageError } })() }).toEqual({ args: args.join(' '), thrown: true })
+    // Viktor 30407: the case-insensitive spelling of a forbidden tree (macOS) is refused too; on a
+    // case-sensitive volume the path does not exist, which is a refusal as well.
+    for (const [args, cwd] of [
+      [['-C', join(R, 'AGENTS/pulzus/repos/marabel'), 'marabel'], R], [['-C', join(R, 'Agents/Pulzus/repos/marabel'), 'marabel'], R],
+      [['-C', join(R, 'STORE/x'), 'marabel'], R], [['marabel'], join(R, 'AGENTS/pulzus/repos/marabel')],
+    ] as [string[], string][]) expect({ args: args.join(' '), thrown: (() => { try { splitClone(args, cwd, 'dave', R); return false } catch (e) { return e instanceof UsageError } })() }).toEqual({ args: args.join(' '), thrown: true })
     expect(forbiddenTree(join(R, 'agents'), 'dave', R)).toBeNull()
     expect(checkCloneDir(R, R, 'dave', R)).toBe(R)
     expect(agentId({ MARVEEN_AGENT_ID: 'pulzus' })).toBe('pulzus')

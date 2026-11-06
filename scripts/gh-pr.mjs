@@ -198,6 +198,9 @@ export const hasSecret = (text) => SECRET_PATTERNS.some((re) => { re.lastIndex =
 
 // H5: a body file must be a regular file (not a symlink) under the clone, or under /tmp (a mktemp file, a
 // session scratchpad), with no hidden path component below that root; at most MAX_BODY chars; no secret shape.
+// Every path compared below goes through realpathSync.NATIVE: on the case-insensitive macOS volume the JS
+// realpathSync keeps the caller's spelling, so `AGENTS/other` or `STORE` slipped past a lowercase compare
+// (Viktor 30407, measured); the native call returns the on-disk spelling.
 // F2 (Viktor 30402): another agent's tree is never a clone for -C (its helper would hand out THAT agent's
 // token) nor a body source, and neither is the install's store/ (secrets, ledgers). `agent` is the caller's
 // id from the fleet env; it cannot be overridden inline, because the egress pin admits no `VAR=` prefix.
@@ -207,7 +210,7 @@ export function insideOf(base, real) {
 }
 export function forbiddenTree(real, agent, root = ROOT) {
   let r
-  try { r = realpathSync(root) } catch { r = root }
+  try { r = realpathSync.native(root) } catch { r = root }
   if (insideOf(join(r, 'store'), real)) return 'the install store/'
   const agents = join(r, 'agents')
   if (insideOf(agents, real) && real !== agents) {
@@ -219,7 +222,7 @@ export function forbiddenTree(real, agent, root = ROOT) {
 // -C: an existing directory at or under the cwd, not in another agent's tree (and the cwd itself neither).
 export function checkCloneDir(dir, cwd, agent, root = ROOT) {
   let real, realCwd
-  try { real = realpathSync(dir); realCwd = realpathSync(cwd) } catch { throw new UsageError('-C: not a directory') }
+  try { real = realpathSync.native(dir); realCwd = realpathSync.native(cwd) } catch { throw new UsageError('-C: not a directory') }
   if (!statSync(real).isDirectory()) throw new UsageError('-C: not a directory')
   if (!insideOf(realCwd, real)) throw new UsageError('-C must be the working directory or below it')
   const why = forbiddenTree(real, agent, root)
@@ -228,14 +231,14 @@ export function checkCloneDir(dir, cwd, agent, root = ROOT) {
 }
 export function bodyRoots(cloneDir) {
   const roots = []
-  for (const r of [cloneDir, '/tmp']) { try { roots.push(realpathSync(r)) } catch { /* missing root: skipped */ } }
+  for (const r of [cloneDir, '/tmp']) { try { roots.push(realpathSync.native(r)) } catch { /* missing root: skipped */ } }
   return roots
 }
 export function checkBodyPath(path, roots, agent = agentId(), root = ROOT) {
   let st
   try { st = lstatSync(path) } catch { throw new UsageError(`body file not found: ${path}`) }
   if (st.isSymbolicLink() || !st.isFile()) throw new UsageError('body file must be a regular file, not a symlink')
-  const real = realpathSync(path)
+  const real = realpathSync.native(path)
   const base = roots.find((r) => { const rel = relative(r, real); return rel && !rel.startsWith('..') && !isAbsolute(rel) })
   if (!base) throw new UsageError('body file must be under the clone (-C / cwd) or /tmp')
   if (relative(base, real).split(sep).some((p) => p.startsWith('.'))) throw new UsageError('body file path has a hidden component')
