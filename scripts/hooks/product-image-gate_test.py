@@ -374,6 +374,90 @@ def ok_file_not_utf8_blocked(root):
     return rc == 2 and 'nem olvasható' in err and 'Traceback' not in err
 
 
+# POSZTSZOVEG body cap (Patrik TG 1981: 3 lines, 200 characters) without the file's metadata lines (card 296af564,
+# Klodel 2026-11-06): the Első éved Short v3.9 caption, verbatim, was blocked as "4 lines, 232 characters" because
+# the music credit ("CC BY 4.0", not "cc-by") and the SZERZO line were counted as text.
+ELSO_EVED_CAPTION = (
+    'Az emlékek halványulnak, nem is hinnénk mennyire. \U0001F49B\n'
+    'Meséljétek el a fotók mögötti történeteket a Marabel Első éved könyvében.\n'
+    '\n'
+    '27 980 Ft, a nyomtatott könyvvel együtt.\n'
+    'marabel.hu/elso-eved\n'
+    '\n'
+    'Zene: "Morning" Kevin MacLeod (incompetech.com), CC BY 4.0.\n'
+    '\n'
+    'SZERZO: majsztro 29474 (Meta-hirdetés, Első éved)\n'
+)
+LONG_BODY = '\n'.join(f'{i}. sor: ez a mondat valódi szöveg, amit Patrik elolvas a hírfolyamban, és hosszú.' for i in range(1, 5))
+
+
+def gate_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('product_image_gate', HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def caption_check(root, caption):
+    """The hook's check() on a marketing video whose only difference is its caption file. Majsztro's MEHET (a live
+    queue read) is stubbed; ROOT and KAPU point into the throw-away root, so the SZERZO read after the length cap
+    finds no token and stops there: a result naming SZERZO means the length cap let the caption through."""
+    mod = gate_module()
+    mod.ROOT = root
+    mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
+    mod.majsztro_ok = lambda _value: None
+    os.makedirs(mod.KAPU, exist_ok=True)
+    video = os.path.join(root, 'short.mp4')
+    open(video, 'wb').write(b'\x00')
+    sheet = os.path.join(root, 'feed.png')
+    open(sheet, 'wb').write(b'\x89PNG')
+    cap = os.path.join(root, 'posztszoveg.txt')
+    open(cap, 'w', encoding='utf-8').write(caption)
+    lines = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
+             'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
+             'MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)', f'FEED: ok {sheet}', f'POSZTSZOVEG: {cap}']
+    open(os.path.join(mod.KAPU, 'short.mp4.ok'), 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+    later = time.time() + 5
+    os.utime(sheet, (later, later))
+    os.utime(os.path.join(mod.KAPU, 'short.mp4.ok'), (later, later))
+    return mod.check(video) or ''
+
+
+@case
+def caption_credit_and_author_not_counted(root):
+    body = gate_module().caption_body(ELSO_EVED_CAPTION)
+    return body == ['Az emlékek halványulnak, nem is hinnénk mennyire. \U0001F49B',
+                    'Meséljétek el a fotók mögötti történeteket a Marabel Első éved könyvében.']
+
+
+@case
+def caption_real_short_one_passes_the_cap(root):
+    err = caption_check(root, ELSO_EVED_CAPTION)
+    return 'túl hosszú' not in err and 'SZERZO' in err
+
+
+@case
+def caption_too_long_body_still_blocked(root):
+    # Negative: four real text lines stay too long, credit and author lines or not.
+    err = caption_check(root, LONG_BODY + '\n\nZene: "Jul" Scott Buckley, CC BY 4.0.\n\nSZERZO: majsztro 29474\n')
+    return 'túl hosszú (4 sor' in err
+
+
+@case
+def caption_over_200_chars_still_blocked(root):
+    two = 'Ez egy nagyon hosszú első mondat, ami mindent el akar mondani a termékről egyszerre, ' * 2
+    err = caption_check(root, f'{two}\n{two}\n\nZene: x, CC BY 4.0.\nSZERZO: majsztro 1\n')
+    return 'túl hosszú (2 sor' in err
+
+
+@case
+def caption_music_word_inside_text_still_counted(root):
+    # Only a line that STARTS with the credit/author label is metadata; "zene" inside a sentence is text.
+    body = gate_module().caption_body('A zene is szól a könyvben.\nSzerzői jog nélkül nincs zene.\nHarmadik.\nNegyedik.\n')
+    return len(body) == 4
+
+
 def main():
     bad = 0
     for fn in CASES:

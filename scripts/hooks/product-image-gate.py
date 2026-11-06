@@ -173,6 +173,29 @@ def message_and_real(d):
     return None
 
 
+CAPTION_META_PREFIXES = ('ZENE:', 'SZERZO:', 'SZERZŐ:')
+
+
+def caption_body(text):
+    """The caption lines Patrik reads as text (TG 1981 cap: 3 lines, 200 characters), up to the IG block: not the
+    price, the link, a heading or a note in brackets, and not the file's metadata lines -- the music credit
+    ("Zene: ... CC BY 4.0.") and the author line ("SZERZO: majsztro <id>"), which the first-line check in main()
+    already skips. Card 296af564 (Klodel, 2026-11-06): a 2-line Első éved caption was "4 lines, 232 characters"
+    because the credit says "CC BY" (the filter knew only "cc-by") and SZERZO was counted."""
+    body = []
+    for ln in text.splitlines():
+        t = ln.strip()
+        if t.upper().startswith('IG'):
+            break
+        low = t.lower()
+        if (not t or t.endswith(':') or t.startswith('(') or 'http' in low or 'scottbuckley' in low
+                or 'cc-by' in low or 'cc by' in low or ' ft' in low or 'marabel.hu' in low
+                or t.upper().startswith(CAPTION_META_PREFIXES)):
+            continue
+        body.append(t)
+    return body
+
+
 def check(fp):
     base = os.path.basename(fp)
     ok = os.path.join(KAPU, base + '.ok')
@@ -225,16 +248,7 @@ def check(fp):
             # ("Fuu borzalmas szövegek"); his taste (TG 1235): short, plain, like a friend wrote it.
             # The narrative v9 caption had ~220 chars of story before price/link. Body cap: 3 lines, 200 chars.
             try:
-                body = []
-                for ln in open(ps.split()[0], encoding='utf-8').read().splitlines():
-                    t = ln.strip()
-                    if t.upper().startswith('IG'):
-                        break
-                    low = t.lower()
-                    if (not t or t.endswith(':') or t.startswith('(') or 'http' in low or 'scottbuckley' in low
-                            or 'cc-by' in low or ' ft' in low or 'marabel.hu' in low):
-                        continue
-                    body.append(t)
+                body = caption_body(open(ps.split()[0], encoding='utf-8').read())
             except (OSError, ValueError) as e:
                 return f'{base}: POSZTSZOVEG nem olvasható ({e.__class__.__name__}).'
             n = sum(len(t) for t in body)
