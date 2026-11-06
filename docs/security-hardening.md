@@ -185,11 +185,17 @@ context (Viktor 28582 (b); card 54bd5c28). In 14 days of fleet transcripts,
 - the token from the caller's own repository-local git credential helper, with
   the system and global git config off, so the keychain helper (other agents'
   credentials) is never asked; in memory only;
-- a PR body from a regular file under the clone or `/tmp`, or stdin, at most
-  64 KiB, refused if it carries a secret shape; a job log printed inside an
-  UNTRUSTED frame, tail-capped, secret shapes masked;
-- one metadata line per call in `store/gh-pr-audit.jsonl` (never a body, a
-  header or the token).
+- `-C <clone>` only at or below the working directory, never in another
+  agent's tree or the install's `store/` (another agent's helper would hand out
+  that agent's token);
+- a PR body from a regular file under the clone or `/tmp` (not in the store or
+  another agent's tree), or stdin, at most 64 KiB, refused if it carries a
+  secret shape; a job log printed inside an UNTRUSTED frame whose BEGIN and END
+  lines carry a fresh random nonce (a CI step cannot print a fake end),
+  tail-capped, secret shapes masked;
+- one metadata line per call in `store/gh-pr-audit.jsonl`, refusals included
+  (`refused`, `refused-clone`, `refused-body`, `no-token`); never a body, a
+  header or the token.
 
 The egress parser lets the script run only as the whole command
 `node <install>/scripts/gh-pr.mjs ...` (output redirects and a body heredoc
