@@ -774,8 +774,9 @@ const GATE_MSG =
 // from the argv only. The deny says so, with the shape that passes (3d3307dd replay, cases 6-9: Mira, Pulzus).
 const INTERPRETER_HINT =
   ' Ha a cel a localhost dashboard, es a kulso link csak ADAT a szovegben: ird a JSON-t fajlba ' +
-  "(cat > /tmp/x.json <<'EOF' ... EOF), es kuldd curl-lel: curl -s -X POST http://localhost:3420/api/... " +
-  '--data-binary @/tmp/x.json (a curl celjat a kapu csak az argv-bol olvassa), vagy scripts/agent-msg.sh.'
+  "egyedi nevvel, mert parhuzamos ugynokok osztoznak a /tmp-n (f=$(mktemp); cat > \"$f\" <<'EOF' ... EOF), " +
+  'es kuldd curl-lel: curl -s -X POST http://localhost:3420/api/... --data-binary @"$f" ' +
+  '(a curl celjat a kapu csak az argv-bol olvassa), vagy scripts/agent-msg.sh.'
 export function gateMessage(r) {
   const hint = /^(?:stdin-interpreter|one-liner)-/.test(r.reason ?? '') ? INTERPRETER_HINT : ''
   return `${GATE_MSG}${hint} (${r.hosts.length ? `hoszt: ${r.hosts.join(', ')}` : `ok: ${r.reason}`})`

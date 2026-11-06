@@ -1060,9 +1060,15 @@ describe('an interpreter deny names the shape that passes (4393e82b, 3d3307dd re
   const reason = (command: string) => JSON.parse(run(command).stdout).hookSpecificOutput.permissionDecisionReason as string
   it('a localhost heredoc whose data carries a link: the deny shows curl --data-binary @file and agent-msg.sh', () => {
     const r = reason(`python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen("http://localhost:3420/api/memories", data=b'{"content": "https://example.invalid/pr/1"}')\nPY`)
-    expect(r).toContain('--data-binary @/tmp/x.json')
+    expect(r).toContain('--data-binary @"$f"')
+    expect(r).toContain('mktemp')
+    expect(r).not.toContain('/tmp/x.json')
     expect(r).toContain('agent-msg.sh')
     expect(r).toContain('hoszt: example.invalid')
+  })
+  it('the shape the hint names passes the gate: a mktemp file carrying a link, then curl to localhost', () => {
+    const shape = `f=$(mktemp); cat > "$f" <<'EOF'\n{"from":"a","to":"b","content":"PR kint: https://example.invalid/pr/1"}\nEOF\ncurl -s -X POST http://localhost:3420/api/messages -H "Content-Type: application/json" --data-binary @"$f"`
+    expect(classify(shape).deny).toBe(false)
   })
   it('an interpreter one-liner gets the same hint; a plain curl deny does not', () => {
     expect(reason(`python3 -c 'import urllib.request; urllib.request.urlopen("https://example.invalid/x")'`)).toContain('--data-binary @')
