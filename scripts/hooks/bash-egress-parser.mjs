@@ -143,14 +143,15 @@ function skipWrapperOptions(mw, i, name) {
   const withValue = WRAPPERS.get(name)
   while (i < mw.length) {
     const w = mw[i]
-    if (w === '--') return i + 1
+    if (w === '--') { i++; break } // then timeout's DURATION still follows (`timeout -- 10 curl`, Viktor 30051)
     if (w === '-' && name === 'env') { i++; continue } // `env -` = `env -i`
     if (!w.startsWith('-') || w.length < 2) break
     if (w.includes('=')) { i++; continue } // --user=x, --signal=KILL
     const last = /^-[A-Za-z]+$/.test(w) ? `-${w.slice(-1)}` : w
     i += withValue.has(w) || withValue.has(last) ? 2 : 1
   }
-  if (name === 'timeout' && i < mw.length && /^\d/.test(mw[i])) i++ // DURATION: 10, 1.5, 5s, 2m
+  // DURATION: 10, 1.5, 5s, 2m, .5, +5, inf (GNU timeout reads it as a float; Viktor 30051)
+  if (name === 'timeout' && i < mw.length && /^(?:[+.]?\d|inf)/i.test(mw[i])) i++
   return i
 }
 // A one-liner is a DOWNLOADER only when its code uses a network primitive of the language itself.
@@ -613,7 +614,13 @@ export function shellCStrings(orig, masked, a, b) {
           const str = shellWords(orig.slice(toks[j].end, b))[0]
           if (str) out.push(str)
         } else if (w.startsWith('--split-string=')) out.push(w.slice('--split-string='.length))
-        else if (w.startsWith('-S') && w.length > 2) out.push(w.slice(2))
+        else if (/^-[A-Za-z]*S[A-Za-z]*$/.test(w)) {
+          // A short cluster with S (`-iS '<line>'`, `-vScurl`, Viktor 30051): the line is the rest of the cluster after
+          // the S, or the next word when the S is its last letter (the quoted value is blank in `masked`).
+          const rest = w.slice(w.indexOf('S') + 1)
+          const str = rest || shellWords(orig.slice(toks[j].end, b))[0]
+          if (str) out.push(str)
+        } else if (w.startsWith('-S') && w.length > 2) out.push(w.slice(2))
         else if (WRAPPERS.get('env').has(w)) j++
       }
       continue

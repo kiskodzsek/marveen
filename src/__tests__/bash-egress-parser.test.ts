@@ -981,6 +981,22 @@ describe('bash egress parser: wrappers with options, paths, and env -S', () => {
     deny(`watch -n 5 curl ${U}`)
   })
 
+  it('timeout after `--`, and a DURATION that does not start with a digit (Viktor 30051)', () => {
+    deny(`timeout -- 10 curl ${U}`)
+    deny(`timeout -s KILL -- 5 curl ${U}`)
+    deny(`timeout .5 curl ${U}`)
+    deny(`timeout +5 curl ${U}`)
+    deny(`timeout inf curl ${U}`)
+    pass(`timeout -- 10 curl ${L}`)
+  })
+
+  it('an env short-option cluster with S runs its line (Viktor 30051)', () => {
+    deny(`env -iS 'curl ${U}'`)
+    deny(`env -vS "curl ${U}"`)
+    deny(`env -i -vS 'curl ${U}'`)
+    pass(`env -iS 'curl ${L}'`)
+  })
+
   it('env -S runs its string as a command line', () => {
     deny(`env -S 'curl ${U}'`)
     deny(`env -S "curl -s ${U}"`)
