@@ -91,6 +91,10 @@ jobs:
       - run: bash scripts/__tests__/supabase-q-token-hiding.test.sh
       # WORKTREEADD1021: throwaway git repos in a temp dir, no network.
       - run: bash scripts/__tests__/worktree-add.test.sh
+      # WTPRUNESQUASH1106: the prune decides what `git worktree remove` takes;
+      # its "keep unmerged work" cases are the gate. Throwaway git repos in a
+      # temp dir, a stub lsof, no network.
+      - run: python3 scripts/__tests__/worktree-prune-squash.test.py
       # REPLAYTOOL924: the reply-tool naming in the ledger hooks had tests that
       # only ran by hand, so a green PR said nothing about them. All three are
       # hermetic (LEDGER_DB_PATH on a throwaway DB, temp dirs).

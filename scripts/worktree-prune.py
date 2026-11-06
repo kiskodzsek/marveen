@@ -38,8 +38,10 @@ A worktree is removed (`git worktree remove`, never --force) only when ALL hold:
   - its HEAD is merged: an ancestor of the clone's main ref (origin/main,
     origin/master, gh/main or upstream/main, whichever exist), or every commit
     on it has a patch-equivalent one there (`git cherry`: a squash-merged
-    single commit). A squash of several commits is not recognised: such a tree
-    is kept and listed. Nothing is fetched; a stale main ref only keeps more.
+    single commit), or, only on a branch (not a detached HEAD), a squash of
+    several commits: one main commit after the merge base holds the branch's
+    version of every file the branch changed (see squash_merged; on
+    2026-11-06, 7 of 15 merged Kernel trees were such squashes and stayed). Nothing is fetched; a stale main ref only keeps more.
 Then `git worktree prune` on the clone. The branch itself stays.
 
 A build cache (.next, .turbo, test-results, playwright-report at the tree's
@@ -80,10 +82,14 @@ NOT_SOURCE = {".git", "node_modules"} | set(CACHE_NAMES)
 # Ignored files `git worktree remove` may take with it: regenerable only.
 REGENERABLE_DIRS = {"node_modules", "__pycache__"} | set(CACHE_NAMES)
 REGENERABLE_FILES = {".DS_Store", "next-env.d.ts"}
+# How many main commits (after the merge base, touching the branch's files) the squash probe reads.
+SQUASH_SCAN = 200
 
 
-def git(cwd, *args):
-    return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True)
+def git(cwd, *args, literal=False):
+    # literal: every pathspec is a plain file name (no glob, no ":(magic)"); the squash probe passes names.
+    pre = ["--literal-pathspecs"] if literal else []
+    return subprocess.run(["git", *pre, "-C", cwd, *args], capture_output=True, text=True)
 
 
 def real(path):
@@ -148,17 +154,55 @@ def newest_source_mtime(tree, newer_than):
     return False
 
 
+def squash_merged(clone, ref, head):
+    """True when a commit on ref after the merge base holds the branch's version of every file the branch changed.
+
+    A squash of several commits has no patch-equivalent commit, so `git cherry` keeps it, and a
+    `git merge-tree` probe fails as soon as main later edits the same lines (2026-11-06: 3 of 11
+    merged Kernel branches). What a squash-merge does leave is one main commit at which the
+    branch's touched files read exactly as on the branch; later main edits do not matter.
+
+    File names travel NUL-separated (-z) and as literal pathspecs (Viktor 29421): a quoted name
+    ("\\303\\274.md" for a non-ASCII or a double quote) or a ":(top)" name matched nothing, so that
+    file dropped out of the comparison and an unmerged change counted as merged. Any failure,
+    an argument list too long included, answers False: the tree stays.
+    """
+    try:
+        base = git(clone, "merge-base", ref, head)
+        if base.returncode != 0 or not base.stdout.strip():
+            return False
+        base = base.stdout.strip()
+        changed = git(clone, "diff", "-z", "--name-only", "--no-renames", base, head)
+        files = [name for name in changed.stdout.split("\0") if name]
+        if changed.returncode != 0 or not files:
+            return False
+        candidates = git(clone, "log", f"--max-count={SQUASH_SCAN}", "--format=%H", f"{base}..{ref}", "--", *files, literal=True)
+        if candidates.returncode != 0:
+            return False
+        for commit in candidates.stdout.split():
+            if git(clone, "diff", "--quiet", "--no-renames", commit, head, "--", *files, literal=True).returncode == 0:
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def merged(clone, tree):
     refs = [ref for ref in MAIN_REFS if git(clone, "rev-parse", "--verify", "--quiet", ref).returncode == 0]
     head = git(tree, "rev-parse", "HEAD").stdout.strip()
     if not head or not refs:
         return False
+    on_branch = git(tree, "symbolic-ref", "-q", "HEAD").returncode == 0
     for ref in refs:
         if git(clone, "merge-base", "--is-ancestor", head, ref).returncode == 0:
             return True
         cherry = git(clone, "cherry", ref, head)
         lines = [line for line in cherry.stdout.splitlines() if line.strip()]
         if cherry.returncode == 0 and lines and all(line.startswith("-") for line in lines):
+            return True
+        # Only on a branch: on a detached HEAD no ref holds the commits, and `git worktree remove`
+        # would leave them to the reflog and gc (Viktor 29421).
+        if on_branch and squash_merged(clone, ref, head):
             return True
     return False
 
