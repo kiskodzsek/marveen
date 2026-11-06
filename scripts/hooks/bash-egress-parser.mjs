@@ -160,7 +160,12 @@ function skipWrapperOptions(mw, i, name) {
 // 10 would-be blocks. Browser automation (chromium / playwright / puppeteer) is deliberately NOT in
 // this list: it is the fleet's mandated browser-verify path on its own domains, and an own-domain
 // allowlist is direction (b). Stated as open, measured, and left to the owner.
-const NET_PRIMITIVE = /\b(?:urllib|requests\.|http\.client|httplib|httpx|aiohttp|urlopen|socket\.|fetch\s*\(|https?\.(?:get|request)\s*\(|axios|node-fetch|undici|got\s*\(|LWP::|HTTP::Tiny|Net::HTTP|open-uri|IO::Socket|file_get_contents|curl_exec|Invoke-WebRequest)|-M(?:LWP|HTTP::Tiny|IO::Socket|Net::HTTP)/
+// The left edge is an identifier edge in Unicode, not JS's ASCII \b (card 4393e82b): \b sees an accented letter
+// as a non-word character, so the Hungarian "visszafogottságot (" matched `got\s*\(` and a heredoc that only
+// WROTE caption text with a marabel.hu link was denied (Mágnes, 2026-11-04 22:11; 3d3307dd replay, case 5).
+// Python and JS identifiers may hold any letter, so a primitive glued to a letter of any script is not that
+// primitive: `lógot(` is not `got(`. Everything a \b used to accept (a dot, a bracket, a space, `$`) still does.
+const NET_PRIMITIVE = /(?<![\p{L}\p{N}_])(?:urllib|requests\.|http\.client|httplib|httpx|aiohttp|urlopen|socket\.|fetch\s*\(|https?\.(?:get|request)\s*\(|axios|node-fetch|undici|got\s*\(|LWP::|HTTP::Tiny|Net::HTTP|open-uri|IO::Socket|file_get_contents|curl_exec|Invoke-WebRequest)|-M(?:LWP|HTTP::Tiny|IO::Socket|Net::HTTP)/u
 
 export function hostOf(url) {
   const m = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/?#]*@)?(\[[^\]]*\]|[^/:?#]*)/i.exec(url)
@@ -764,6 +769,17 @@ const GATE_MSG =
   'akkor is, ha az URL valtozoban van. A localhost/127.0.0.1 hivasok (dashboard) es a helyi halozat ' +
   '(10/8, 172.16/12, 192.168/16, *.local) szabadok. Kulso tartalmat ' +
   'a quarantine-reader sub-ugynokon at kerj le; ha ez egy vendor-API hivas, kerd a fo-agenst.'
+// An interpreter program (a heredoc or a one-liner) is judged on its whole text, so a localhost call whose DATA
+// carries a link (a PR link in a message, a marabel.hu link in a memory) is denied too; curl reads its destination
+// from the argv only. The deny says so, with the shape that passes (3d3307dd replay, cases 6-9: Mira, Pulzus).
+const INTERPRETER_HINT =
+  ' Ha a cel a localhost dashboard, es a kulso link csak ADAT a szovegben: ird a JSON-t fajlba ' +
+  "(cat > /tmp/x.json <<'EOF' ... EOF), es kuldd curl-lel: curl -s -X POST http://localhost:3420/api/... " +
+  '--data-binary @/tmp/x.json (a curl celjat a kapu csak az argv-bol olvassa), vagy scripts/agent-msg.sh.'
+export function gateMessage(r) {
+  const hint = /^(?:stdin-interpreter|one-liner)-/.test(r.reason ?? '') ? INTERPRETER_HINT : ''
+  return `${GATE_MSG}${hint} (${r.hosts.length ? `hoszt: ${r.hosts.join(', ')}` : `ok: ${r.reason}`})`
+}
 function isInvokedDirectly() {
   try { return realpathSync(fileURLToPath(import.meta.url)) === (process.argv[1] ? realpathSync(process.argv[1]) : '') } catch { return false }
 }
@@ -778,7 +794,7 @@ if (isInvokedDirectly()) {
       mkdirSync(dirname(BLOCK_LOG), { recursive: true })
       appendFileSync(BLOCK_LOG, JSON.stringify({ ts: new Date().toISOString(), cwd: process.cwd(), reason: r.reason, hosts: r.hosts }) + '\n')
     } catch { /* the deny still stands; a log failure must not turn it into an allow */ }
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `${GATE_MSG} (${r.hosts.length ? `hoszt: ${r.hosts.join(', ')}` : `ok: ${r.reason}`})` } }))
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: gateMessage(r) } }))
   }
   process.exit(0)
 }

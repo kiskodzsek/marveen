@@ -1016,3 +1016,56 @@ describe('bash egress parser: wrappers with options, paths, and env -S', () => {
     pass(`timeout 10 echo ${U}`)
   })
 })
+
+// Card 4393e82b (follow-up of 3d3307dd and #127): the network-primitive match starts at a Unicode identifier edge,
+// and an interpreter deny names the shape that passes.
+describe('a network primitive glued to an accented letter is not that primitive (4393e82b)', () => {
+  const U = 'https://example.invalid/x'
+  // The 3d3307dd replay, case 5 (Mágnes, 2026-11-04 22:11): a heredoc that only WRITES caption text with a link.
+  const CAPTION = `python3 -I - <<'PY'\nopen("poszt.txt", "w").write("A visszafogottságot (és a csendet) szeretjük. ${U}")\nPY`
+  it('the Hungarian word ending in "...got (" does not make a caption writer a downloader', () => {
+    expect(classify(CAPTION)).toMatchObject({ deny: false })
+    for (const word of ['fogottságot (', 'hangot(', 'Lógot (', 'ÁGOT(', 'éfetch(', 'őurlopen(', 'ésocket.x']) {
+      const cmd = `python3 - <<'PY'\nprint("${word} ${U}")\nPY`
+      expect({ word, ...classify(cmd) }).toMatchObject({ word, deny: false })
+    }
+  })
+  it('the primitive itself is still a primitive, whatever stands before it that is not a letter or digit', () => {
+    const DENIED = [
+      `node - <<'JS'\nconst got = require("got"); got("${U}")\nJS`,
+      `node - <<'JS'\nawait got ("${U}")\nJS`,
+      `node - <<'JS'\nx=(got("${U}"))\nJS`,
+      `node - <<'JS'\nlib.got("${U}")\nJS`,
+      `node - <<'JS'\n$got("${U}")\nJS`,
+      `node - <<'JS'\nawait\tgot("${U}")\nJS`,
+      `python3 - <<'PY'\nimport urllib.request\n(urllib.request.urlopen("${U}"))\nPY`,
+      `node -e 'fetch("${U}")'`,
+      `perl -MLWP::Simple -e 'get("${U}")'`,
+    ]
+    for (const cmd of DENIED) expect({ cmd, deny: classify(cmd).deny }).toEqual({ cmd, deny: true })
+  })
+  it('a primitive glued to an ASCII letter or digit stays not-a-primitive, as with \\b', () => {
+    for (const word of ['forgot(', 'ergot (', 'x9fetch(']) {
+      expect({ word, ...classify(`python3 - <<'PY'\nprint("${word} ${U}")\nPY`) }).toMatchObject({ word, deny: false })
+    }
+  })
+})
+
+describe('an interpreter deny names the shape that passes (4393e82b, 3d3307dd replay cases 6-9)', () => {
+  const run = (command: string) => spawnSync(process.execPath, [HOOK], {
+    input: JSON.stringify({ tool_name: 'Bash', tool_input: { command } }),
+    encoding: 'utf-8',
+    env: { ...process.env, BASH_EGRESS_BLOCK_LOG: join(tmpdir(), `bash-egress-hint-${process.pid}.jsonl`), BASH_EGRESS_VENDOR_HOSTS: join(tmpdir(), 'no-such-vendor-hosts.json') },
+  })
+  const reason = (command: string) => JSON.parse(run(command).stdout).hookSpecificOutput.permissionDecisionReason as string
+  it('a localhost heredoc whose data carries a link: the deny shows curl --data-binary @file and agent-msg.sh', () => {
+    const r = reason(`python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen("http://localhost:3420/api/memories", data=b'{"content": "https://example.invalid/pr/1"}')\nPY`)
+    expect(r).toContain('--data-binary @/tmp/x.json')
+    expect(r).toContain('agent-msg.sh')
+    expect(r).toContain('hoszt: example.invalid')
+  })
+  it('an interpreter one-liner gets the same hint; a plain curl deny does not', () => {
+    expect(reason(`python3 -c 'import urllib.request; urllib.request.urlopen("https://example.invalid/x")'`)).toContain('--data-binary @')
+    expect(reason('curl -s https://example.invalid/x')).not.toContain('--data-binary @')
+  })
+})
