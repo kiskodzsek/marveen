@@ -28,6 +28,12 @@ Effects:
     store/.fleet-quota-alert.json, so a new window starts from zero and the
     same band is never sent twice. A failed send is not remembered, so the
     next run retries it.
+  - Inside a band, a reading at least PCT_STEP points away from the last sent
+    one is sent again; a smaller move is not (card 8f6ba5d4). Two resetsAt
+    values within RESET_TOLERANCE_SEC are the same window: an own-token seat's
+    reset time drifts by a second between readings (11-07: 1794497331 vs
+    ...332), and an exact match read every drift as a new window, so the same
+    86% went to the main agent four times in 30 minutes (30924-30927).
   - the fleet seat going stale or missing (no fresh reading, see quota.ts
     maxAgeSec) sends one message per episode; it re-arms once a fresh
     reading is back.
@@ -63,6 +69,9 @@ BANDS = {
     'fiveHour': [90],
 }
 LABEL = {'sevenDay': '7 napos', 'fiveHour': '5 órás'}
+PCT_STEP = 5
+# Shorter than any window (5h), longer than the drift of a computed reset time.
+RESET_TOLERANCE_SEC = 300
 
 
 def now_sec():
@@ -162,8 +171,20 @@ def fmt_reset(epoch):
     return time.strftime('%m-%d %H:%M', time.localtime(epoch))
 
 
+def same_window(a, b):
+    if a == b:
+        return True
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(a - b) <= RESET_TOLERANCE_SEC
+    return False
+
+
 def due_alerts(seats, state):
-    """(messages, new state entries) for the band crossings and stale episodes not yet sent."""
+    """(sid, state entry, message) for the band alerts and stale episodes not yet sent.
+
+    A None message is a silent state update (an entry written before the sent
+    percentage was remembered gets it now, without a message).
+    """
     alerts = []
     for key, s in seats.items():
         if s['status'] != 'ok':
@@ -175,10 +196,17 @@ def due_alerts(seats, state):
             band = max([b for b in bands if w['pct'] >= b], default=0)
             sid = '%s|%s' % (key, kind)
             prev = state.get(sid) or {}
-            sent = prev.get('band', 0) if prev.get('resetsAt') == w['resetsAt'] else 0
-            if band > sent:
+            same = same_window(prev.get('resetsAt'), w['resetsAt'])
+            sent = prev.get('band', 0) if same else 0
+            sent_pct = prev.get('pct') if same else None
+            entry = {'resetsAt': w['resetsAt'], 'band': band, 'pct': w['pct']}
+            if band and band == sent and sent_pct is None:
+                alerts.append((sid, entry, None))
+                continue
+            moved = band and band == sent and abs(w['pct'] - sent_pct) >= PCT_STEP
+            if band > sent or moved:
                 seat = 'flotta seat' if key == 'fleet' else 'seat ' + key
-                alerts.append((sid, {'resetsAt': w['resetsAt'], 'band': band},
+                alerts.append((sid, entry,
                                '[FLOTTA-KERET] %s: a %s ablak %s%% (sáv %s%%), reset %s (Budapest). Forrás: /api/overview, %s.'
                                % (seat, LABEL[kind], w['pct'], band, fmt_reset(w['resetsAt']), ', '.join(s['sources']) or '-')))
     fleet = seats.get('fleet')
@@ -225,14 +253,16 @@ def main():
     if status_only:
         # An alert that stays due run after run is one that never got through:
         # say so here, so a rejected sender is not a silent green.
-        print('unsent alerts: %d%s' % (len(alerts), (' (last send failure %s)' % fmt_reset(state['lastSendFailure']))
+        print('unsent alerts: %d%s' % (sum(1 for a in alerts if a[2]), (' (last send failure %s)' % fmt_reset(state['lastSendFailure']))
                                         if state.get('lastSendFailure') else ''))
         return 0
     if not stale:
         state.pop('fleet|stale', None)
     unsent = []
     for sid, entry, text in alerts:
-        if send(text):
+        if text is None:
+            state[sid] = entry
+        elif send(text):
             state[sid] = entry
             log('alert sent: ' + sid)
         else:
