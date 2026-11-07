@@ -180,6 +180,103 @@ def head_merce_with_hand_still_allowed(root):
     return rc == 0
 
 
+# "MERCE: profil" (card 9e040e9c, Klodel 30821, Dave MERES-v10): a head in profile gives 1.42 for an exact open
+# A5, so the head band is skipped -- and the size rests on a real, in-band hand measure. Dave's numbers: open
+# spread 906 px, head length 640 px, hand 176 mm x 3.06 px/mm = 539 px at the book's depth.
+PROFILE = 'profil nyitott 906/640'
+PROFILE_KEZ = 'nyitott 906/539'
+
+
+def edit_ok(root, old, new):
+    okf = os.path.join(root, 'store', 'kep-kapu', 'kep.png.ok')
+    txt = open(okf, encoding='utf-8').read()
+    assert old in txt, old
+    open(okf, 'w', encoding='utf-8').write(txt.replace(old, new))
+
+
+@case
+def profile_with_depth_correct_hand_allowed(root):
+    rc, _ = sent(root, merce=PROFILE, kez=PROFILE_KEZ)
+    return rc == 0
+
+
+@case
+def profile_with_kez_nincs_blocked(root):
+    rc, err = sent(root, merce=PROFILE, kez='nincs a kéz takarásban van, a fejhez mértem')
+    return rc == 2 and 'MERCE: profil, de KEZ: nincs' in err
+
+
+@case
+def profile_with_bare_kez_nincs_blocked(root):
+    rc, err = sent(root, merce=PROFILE, kez='nincs')
+    return rc == 2 and 'MERCE: profil, de KEZ: nincs' in err
+
+
+@case
+def profile_with_empty_kez_blocked(root):
+    rc, err = sent(root, merce=PROFILE, kez='')
+    return rc == 2 and 'KEZ hiányzik/hibás' in err
+
+
+@case
+def profile_with_kez_out_of_band_blocked(root):
+    rc, err = sent(root, merce=PROFILE, kez='nyitott 906/400')   # 2.27: the book is too big for the hand
+    return rc == 2 and 'nem A5 a kézhez mérve' in err
+
+
+@case
+def profile_with_kez_too_small_blocked(root):
+    rc, err = sent(root, merce=PROFILE, kez='nyitott 600/539')   # 1.11: an open book smaller than A5
+    return rc == 2 and 'nem A5 a kézhez mérve' in err
+
+
+@case
+def profile_without_feny_blocked(root):
+    img = book_fixture(root, KEPES_OK, merce=PROFILE, kez=PROFILE_KEZ)
+    edit_ok(root, 'FENY: papír L* 88 / jelenet L* 92, finom gerinc\n', '')
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'FENY hiányzik' in err
+
+
+@case
+def profile_without_zoomed_crop_blocked(root):
+    img = book_fixture(root, KEPES_OK, merce=PROFILE, kez=PROFILE_KEZ)
+    edit_ok(root, f'NAGYITVA: {os.path.join(root, "crop.png")}', 'NAGYITVA: -')
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'nincs nagyított kivágás' in err
+
+
+@case
+def profile_without_kind_blocked(root):
+    rc, err = sent(root, merce='profil 906/640', kez=PROFILE_KEZ)
+    return rc == 2 and 'MERCE hiányzik/hibás' in err
+
+
+@case
+def profile_unknown_kind_blocked(root):
+    rc, err = sent(root, merce='profil szemből 906/640', kez=PROFILE_KEZ)
+    return rc == 2 and 'MERCE hiányzik/hibás' in err
+
+
+@case
+def profile_zero_head_blocked(root):
+    rc, err = sent(root, merce='profil nyitott 906/0', kez=PROFILE_KEZ)
+    return rc == 2 and 'MERCE hiányzik/hibás' in err
+
+
+@case
+def profile_negative_px_blocked(root):
+    rc, err = sent(root, merce='profil nyitott -906/-640', kez=PROFILE_KEZ)
+    return rc == 2 and 'MERCE hiányzik/hibás' in err
+
+
+@case
+def head_branch_1_42_still_blocked(root):
+    # The same frame on the old head branch: 1.42 is under the 1.5-2.0 band, even with a good hand measure.
+    rc, err = sent(root, merce='nyitott 906/640', kez=PROFILE_KEZ)
+    return rc == 2 and 'nem A5 a fejhez mérve' in err and 'MERCE: profil' in err
+
+
 # UZENET + VALODI (Patrik TG 14836, shared/hibanaplo.md 2026-11-06 13:37, card ca0737c2).
 MARKETING = 'MEHET 1'  # the MAJSZTRO API check comes after UZENET/VALODI; here it fails (no token): rc 2, MAJSZTRO
 UZENET_OK = 'nagyszülőnek ajándékot kereső felnőtt gyerek | karácsony előtt, amíg még elkészül'

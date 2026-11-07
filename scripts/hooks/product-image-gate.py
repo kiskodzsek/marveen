@@ -25,7 +25,11 @@ J1 paper "too white, almost glows" -- both passed a self-attested "A5: ok"):
            or, with no person in the frame (3D book engine, studio): "MERCE: nincs-ember nyitott|zart
            <book width px>/<book height px>" -- the book's own proportions: open 1.38-1.52, closed 0.64-0.74
            (A5 hardcover board 2x148-160 / 210-216 mm). Shape only: an A4 book has the same ratio.
-    KEZ: nyitott|zart <book edge px>/<adult hand wrist-to-fingertip px>  (hand nearest the book's depth)
+           or, with the head seen in PROFILE: "MERCE: profil nyitott|zart <book px>/<head px>" -- no head band (a
+           profile shows the head's length, ~20 cm, not its width, so an exact open A5 gives 1.41-1.48; card
+           9e040e9c, MERES-v10). Only whoever writes down the depth-correct hand measure (the hand at the book's
+           depth, projected onto the page plane) may use the "profil" form: it needs a real, in-band KEZ line.
+    KEZ:nyitott|zart <book edge px>/<adult hand wrist-to-fingertip px>  (hand nearest the book's depth)
            closed: 0.6-1.1, open: 1.3-2.0; or "KEZ: nincs <reason, what else was measured>" -- only together
            with "MERCE: nincs-ember ..." (Klodel 28805: a head-measured frame needs a hand measure)
     FENY: <paper L* (Lab)> / <brightest comparable white in the scene L*> + gutter shadow
@@ -349,19 +353,29 @@ def check(fp):
         # the engine's own A5 board ratio can be checked, so such a frame says "nincs-ember" and gives the book's
         # width/height in px. This checks SHAPE, not size: an A4 book has the same ratio (2x210/297 = 1.41).
         no_person = bool(m) and m[0].lower() == 'nincs-ember'
-        if no_person:
+        # Card 9e040e9c (Klodel 30821, Dave MERES-v10, Majsztro 30817): a head seen in profile shows its length
+        # (~20 cm), not its width (~15 cm), so an exact open A5 measures 1.41-1.48 against it and the head band
+        # (1.5-2.0) blocks a correct book. "profil" skips the head band; the size then rests on the hand alone,
+        # so the hand measure below is compulsory and must be in band ("KEZ: nincs" blocks).
+        profile = bool(m) and m[0].lower() == 'profil'
+        if no_person or profile:
             m = m[1:]
         try:
             kind = m[0].lower()
-            if no_person and not kind.startswith(('nyit', 'zar', 'zár')):
+            if (no_person or profile) and not kind.startswith(('nyit', 'zar', 'zár')):
                 raise ValueError(kind)
             bpx, hpx = (float(x) for x in m[1].split('/'))
+            if profile and not (bpx > 0 and hpx > 0):
+                raise ValueError(m[1])
             r = bpx / hpx
         except Exception:
             return (f'{base}: MERCE hiányzik/hibás. Alak: "MERCE: nyitott <könyv px>/<felnőtt fej px>" '
                     '(mérve a képen, nem becsülve), vagy ember nélküli képen '
-                    '"MERCE: nincs-ember nyitott|zart <könyv szélesség px>/<könyv magasság px>".')
-        if no_person:
+                    '"MERCE: nincs-ember nyitott|zart <könyv szélesség px>/<könyv magasság px>", vagy profilban '
+                    'látott fejnél "MERCE: profil nyitott|zart <könyv px>/<fej px>" (csak mért KEZ-zel).')
+        if profile:
+            pass
+        elif no_person:
             lo, hi = (1.38, 1.52) if kind.startswith('nyit') else (0.64, 0.74)
             if not (lo <= r <= hi):
                 return (f'{base}: a könyv aránya nem A5-ös keménytábla: {kind} szélesség/magasság {r:.2f}, '
@@ -370,12 +384,17 @@ def check(fp):
             lo, hi = (1.5, 2.0) if kind.startswith('nyit') else (0.8, 1.2)
             if not (lo <= r <= hi):
                 return (f'{base}: a könyv nem A5 a fejhez mérve: {kind} arány {r:.2f}, '
-                        f'elvárt {lo}-{hi} (A4-es vagy apró könyv).')
+                        f'elvárt {lo}-{hi} (A4-es vagy apró könyv). Ha a fej profilban látszik: '
+                        '"MERCE: profil ..." és mélységhelyes KEZ-mérés.')
         # Patrik TG 1718 + 2026-11-05 19:0x: the head-based MERCE let A4-sized books through three
         # times (2/10 v3, 5/10, P1): the head width was ESTIMATED and sat further from the camera.
         # Second, independent measure against the nearest adult HAND at the book's depth
         # (wrist to fingertip ~18 cm): closed 14.8 cm edge -> ~0.82, open 30 cm -> ~1.67.
         k = (d.get('KEZ') or '').split()
+        if profile and k and k[0].lower() == 'nincs':
+            return (f'{base}: MERCE: profil, de KEZ: nincs. A profil-mérés a fej-sávot kihagyja, ezért a méretet a '
+                    'kézmérés adja: "KEZ: nyitott|zart <könyv él px>/<kézfej px>", a könyv mélységében lévő kéz, a lap '
+                    'síkjára vetítve (kártya 9e040e9c).')
         if k and k[0].lower() == 'nincs' and not no_person:
             # Klodel 28805 (2026-11-06): with no hand the head branch was the only scale, and short2 passed with
             # an invented "zart 1/1" and no person in the frame. Without a hand, the frame must be the no-person
