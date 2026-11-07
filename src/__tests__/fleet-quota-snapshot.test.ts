@@ -180,6 +180,68 @@ describe('band alerts', () => {
     expect((history().at(-1) as unknown as { unsent?: string[] }).unsent).toBeUndefined()
   })
 
+  // Card 8f6ba5d4 (11-07, 30924-30927): an own-token seat's reset time drifts
+  // by a second between readings, and each drift re-sent the same 86%.
+  it('a reset time drifting by a second is the same window: the same reading is not sent again', () => {
+    for (const [i, drift] of [0, 1, 0, 1, 1, 0].entries()) {
+      overview(86, { reset7d: RESET_7D + drift })
+      run([], { FLEETQ_NOW: String(NOW + i * 900) })
+    }
+    expect(sent()).toHaveLength(1)
+    expect(sent()[0]).toContain('a 7 napos ablak 86% (sáv 80%)')
+  })
+
+  it('the 5h window shares the drift tolerance', () => {
+    overview(1, { fleet5h: 91 })
+    run()
+    writeFileSync(join(dir, 'overview.json'), readFileSync(join(dir, 'overview.json'), 'utf-8').replace(String(RESET_5H), String(RESET_5H + 1)))
+    run()
+    expect(sent()).toHaveLength(1)
+  })
+
+  it('inside a band, a move under 5 points is quiet, 5 points is sent again', () => {
+    overview(81)
+    run()
+    overview(85, { reset7d: RESET_7D + 1 })
+    run()
+    expect(sent()).toHaveLength(1)
+    overview(86)
+    run()
+    expect(sent()).toHaveLength(2)
+    expect(sent()[1]).toContain('a 7 napos ablak 86% (sáv 80%)')
+    overview(89)
+    run()
+    expect(sent()).toHaveLength(2)
+    overview(90)
+    run()
+    expect(sent()).toHaveLength(3)
+    expect(sent()[2]).toContain('(sáv 90%)')
+  })
+
+  it('a falling reading under the sent band sends nothing', () => {
+    overview(91)
+    run()
+    overview(84)
+    run()
+    overview(79)
+    run()
+    expect(sent()).toHaveLength(1)
+  })
+
+  it('a state written before the percentage was kept is filled in silently', () => {
+    writeFileSync(join(dir, '.fleet-quota-alert.json'), JSON.stringify({ 'fleet|sevenDay': { band: 80, resetsAt: RESET_7D } }))
+    overview(86, { reset7d: RESET_7D + 1 })
+    expect(run(['--status']).stdout).toContain('unsent alerts: 0')
+    run()
+    expect(sent()).toEqual([])
+    const st = JSON.parse(readFileSync(join(dir, '.fleet-quota-alert.json'), 'utf-8'))
+    expect(st['fleet|sevenDay']).toEqual({ band: 80, resetsAt: RESET_7D + 1, pct: 86 })
+    expect(run(['--status']).stdout).toContain('unsent alerts: 0')
+    overview(91)
+    run()
+    expect(sent()).toHaveLength(1)
+  })
+
   it('a stale reading never raises a band alert', () => {
     overview(99, { status: 'stale' })
     run()
