@@ -555,6 +555,284 @@ def caption_music_word_inside_text_still_counted(root):
     return len(body) == 4
 
 
+# MARABEL.HU on every second of a marketing video (Patrik csoport TG 3109, 2026-11-07: "Vegig legyen minden snitten
+# marabel.hu"; TG 4539). The OCR itself is stubbed in the portable cases (CI runs on Linux, no Vision); the last case
+# runs the real macOS Vision helper on a generated video and is skipped elsewhere.
+def ocr_module(root):
+    mod = gate_module()
+    mod.ROOT = root
+    mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
+    os.makedirs(mod.KAPU, exist_ok=True)
+    video = os.path.join(root, 'reel.mp4')
+    open(video, 'wb').write(b'synthetic video bytes')
+    return mod, video
+
+
+def write_cache(mod, video, missing, tool=None, seconds=4):
+    d = os.path.join(mod.KAPU, '.ocr')
+    os.makedirs(d, exist_ok=True)
+    sha = mod._sha256(video)
+    json.dump({'sha256': sha, 'tool': tool or mod.ocr_tool_id(), 'seconds': seconds, 'missing': missing},
+              open(os.path.join(d, sha + '.json'), 'w'))
+
+
+def no_ocr(*_a, **_k):
+    raise AssertionError('the OCR ran although the cache was valid')
+
+
+@case
+def brand_cached_missing_second_blocked(root):
+    mod, video = ocr_module(root)
+    write_cache(mod, video, [3])
+    mod.run_ocr = no_ocr
+    r = mod.brand_check(video)
+    return bool(r) and 'nincs "marabel.hu" a videó 3. másodpercében' in r and '1/4 s' in r
+
+
+@case
+def brand_cached_missing_ranges_listed(root):
+    mod, video = ocr_module(root)
+    write_cache(mod, video, [0, 1, 2, 5, 7, 8], seconds=10)
+    mod.run_ocr = no_ocr
+    r = mod.brand_check(video) or ''
+    return '0-2, 5, 7-8. másodpercében' in r
+
+
+@case
+def brand_cached_all_present_passes(root):
+    mod, video = ocr_module(root)
+    write_cache(mod, video, [])
+    mod.run_ocr = no_ocr
+    return mod.brand_check(video) is None
+
+
+@case
+def brand_cache_of_another_helper_not_trusted(root):
+    # A cache written by another OCR helper (or by hand with a made-up tool id) is not read: the OCR runs again.
+    mod, video = ocr_module(root)
+    write_cache(mod, video, [], tool='0000000000000000')
+    mod.run_ocr = lambda fp, budget: {0: 'marabel.hu', 1: 'Anya, te hívtad el apát?', 2: 'MARABEL.HU/meseld-el'}
+    r = mod.brand_check(video) or ''
+    return '1. másodpercében' in r
+
+
+@case
+def brand_cache_of_another_video_not_trusted(root):
+    mod, video = ocr_module(root)
+    write_cache(mod, video, [])
+    open(video, 'ab').write(b' re-exported')            # new bytes, new sha256: the old cache does not apply
+    mod.run_ocr = lambda fp, budget: {0: 'Marabel', 1: 'marabel.hu'}
+    r = mod.brand_check(video) or ''
+    return '0. másodpercében' in r
+
+
+@case
+def brand_cache_copied_from_another_video_not_trusted(root):
+    # A clean video's "all present" cache copied under this video's sha256 name: the sha inside must match too.
+    mod, video = ocr_module(root)
+    d = os.path.join(mod.KAPU, '.ocr')
+    os.makedirs(d, exist_ok=True)
+    json.dump({'sha256': '0' * 64, 'tool': mod.ocr_tool_id(), 'seconds': 2, 'missing': []},
+              open(os.path.join(d, mod._sha256(video) + '.json'), 'w'))
+    mod.run_ocr = lambda fp, budget: {0: 'marabel.hu', 1: 'nincs cím'}
+    return '1. másodpercében' in (mod.brand_check(video) or '')
+
+
+@case
+def brand_text_match_ignores_case_and_spaces(root):
+    mod, video = ocr_module(root)
+    mod.run_ocr = lambda fp, budget: {0: 'MARABEL.HU', 1: 'marabel. hu', 2: 'x\nmarabel.hu/meseld-el'}
+    return mod.brand_check(video) is None
+
+
+@case
+def brand_logo_word_alone_blocked(root):
+    mod, video = ocr_module(root)
+    mod.run_ocr = lambda fp, budget: {0: 'marabel.hu', 1: 'Marabel\nMeséld el!'}
+    r = mod.brand_check(video) or ''
+    return '1. másodpercében' in r
+
+
+@case
+def brand_result_is_cached(root):
+    mod, video = ocr_module(root)
+    calls = []
+    mod.run_ocr = lambda fp, budget: calls.append(1) or {0: 'marabel.hu', 1: 'semmi'}
+    first = mod.brand_check(video)
+    second = mod.brand_check(video)
+    return len(calls) == 1 and first == second and '1. másodpercében' in (first or '')
+
+
+@case
+def brand_ocr_error_blocks(root):
+    mod, video = ocr_module(root)
+
+    def boom(fp, budget):
+        raise mod.OcrError('nincs macOS Vision / swiftc ezen a gépen')
+    mod.run_ocr = boom
+    r = mod.brand_check(video) or ''
+    return 'nem futott le' in r and 'tilt' in r
+
+
+@case
+def brand_unexpected_error_blocks(root):
+    mod, video = ocr_module(root)
+    mod.run_ocr = lambda fp, budget: 1 / 0
+    r = mod.brand_check(video) or ''
+    return 'nem futott le (ZeroDivisionError)' in r
+
+
+def fake_helper(root, body):
+    path = os.path.join(root, 'fake_ocr')
+    open(path, 'w').write('#!/bin/sh\n' + body + '\n')
+    os.chmod(path, 0o700)
+    return path
+
+
+@case
+def brand_ocr_timeout_blocks_with_warmup_hint(root):
+    mod, video = ocr_module(root)
+    helper = fake_helper(root, 'sleep 5')
+    mod.ocr_binary = lambda _tid: helper
+    r = mod.brand_check(video, budget=1) or ''
+    return 'nem fért bele 1 s-be' in r and '--ocr' in r
+
+
+@case
+def brand_ocr_incomplete_output_blocks(root):
+    mod, video = ocr_module(root)
+    helper = fake_helper(root, 'echo \'{"t": 0, "text": "marabel.hu"}\'; echo \'{"done": 3}\'')
+    mod.ocr_binary = lambda _tid: helper
+    r = mod.brand_check(video) or ''
+    return 'hiányos' in r
+
+
+@case
+def brand_ocr_no_done_line_blocks(root):
+    mod, video = ocr_module(root)
+    helper = fake_helper(root, 'echo \'{"t": 0, "text": "marabel.hu"}\'')
+    mod.ocr_binary = lambda _tid: helper
+    r = mod.brand_check(video) or ''
+    return 'hiányos' in r
+
+
+@case
+def brand_ocr_helper_failure_blocks(root):
+    mod, video = ocr_module(root)
+    helper = fake_helper(root, 'echo \'{"done": 0}\'; exit 2')
+    mod.ocr_binary = lambda _tid: helper
+    r = mod.brand_check(video) or ''
+    return 'hibával állt le' in r
+
+
+class FakeResponse:
+    def __init__(self, row):
+        self.data = json.dumps(row).encode()
+
+    def read(self, *_a):
+        return self.data
+
+
+@case
+def marketing_video_check_runs_the_ocr(root):
+    # Wiring: check() on a marketing video that passes every other line reaches brand_check(), and the MARKA line
+    # (self-attested) does not let it through. Majsztro's MEHET and the SZERZO row are stubbed.
+    mod = caption_check_setup(root)
+    mod.run_ocr = lambda fp, budget: {0: 'marabel.hu', 1: 'Anya, te hívtad el apát?'}
+    r = mod.check(os.path.join(root, 'short.mp4')) or ''
+    return '1. másodpercében' in r
+
+
+@case
+def marketing_video_needs_no_marka_line(root):
+    mod = caption_check_setup(root, marka=False)
+    mod.run_ocr = lambda fp, budget: {0: 'marabel.hu', 1: 'MARABEL.HU'}
+    return mod.check(os.path.join(root, 'short.mp4')) is None
+
+
+@case
+def marketing_image_still_needs_marka(root):
+    img = book_fixture(root, KEPES_OK, majsztro=MARKETING, uzenet=UZENET_OK)
+    mod = gate_module()
+    mod.ROOT = root
+    mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
+    mod.majsztro_ok = lambda _value: None
+    return 'MARKA sor hiányzik' in (mod.check(img) or '')
+
+
+def caption_check_setup(root, marka=True):
+    mod = gate_module()
+    mod.ROOT = root
+    mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
+    mod.majsztro_ok = lambda _value: None
+    os.makedirs(mod.KAPU, exist_ok=True)
+    video = os.path.join(root, 'short.mp4')
+    open(video, 'wb').write(b'\x00')
+    sheet = os.path.join(root, 'feed.png')
+    open(sheet, 'wb').write(b'\x89PNG')
+    cap = os.path.join(root, 'posztszoveg.txt')
+    open(cap, 'w', encoding='utf-8').write(ELSO_EVED_CAPTION)
+    open(os.path.join(root, 'store', '.dashboard-token'), 'w').write('synthetic')
+    body = mod.caption_body(ELSO_EVED_CAPTION)
+    mod.urllib.request.urlopen = lambda req, timeout=5: FakeResponse({'from_agent': 'majsztro', 'content': ' '.join(body)})
+    lines = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
+             'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
+             f'FEED: ok {sheet}', f'POSZTSZOVEG: {cap}']
+    if marka:
+        lines.append('MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)')
+    open(os.path.join(mod.KAPU, 'short.mp4.ok'), 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+    later = time.time() + 5
+    os.utime(sheet, (later, later))
+    os.utime(os.path.join(mod.KAPU, 'short.mp4.ok'), (later, later))
+    return mod
+
+
+RENDER_SWIFT = r"""
+import AppKit
+let args = CommandLine.arguments
+let img = NSImage(size: NSSize(width: 540, height: 960))
+img.lockFocus()
+NSColor.white.setFill(); NSRect(x: 0, y: 0, width: 540, height: 960).fill()
+if args[2] != "" {
+    let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: 56), .foregroundColor: NSColor.black]
+    (args[2] as NSString).draw(at: NSPoint(x: 90, y: 440), withAttributes: attrs)
+}
+img.unlockFocus()
+let rep = NSBitmapImageRep(data: img.tiffRepresentation!)!
+try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: args[1]))
+"""
+
+
+@case
+def brand_real_vision_ocr_on_generated_video(root):
+    """macOS only: 4 one-second shots, the third without the address -> the real helper reports second 2."""
+    import shutil
+    ffmpeg = shutil.which('ffmpeg') or '/opt/homebrew/bin/ffmpeg'
+    if sys.platform != 'darwin' or not os.access(ffmpeg, os.X_OK) or not os.access('/usr/bin/swift', os.X_OK):
+        print('SKIP brand_real_vision_ocr_on_generated_video (needs macOS, swift, ffmpeg)')
+        return True
+    src = os.path.join(root, 'render.swift')
+    open(src, 'w').write(RENDER_SWIFT)
+    text, blank = os.path.join(root, 'text.png'), os.path.join(root, 'blank.png')
+    for out, t in ((text, 'marabel.hu'), (blank, '')):
+        subprocess.run(['/usr/bin/swift', src, out, t], check=True, capture_output=True, timeout=120)
+    video = os.path.join(root, 'reel.mp4')
+    shots = [text, text, blank, text]
+    cmd = [ffmpeg, '-v', 'error', '-y']
+    for s in shots:
+        cmd += ['-loop', '1', '-t', '1', '-framerate', '25', '-i', s]
+    cmd += ['-filter_complex', f'concat=n={len(shots)}:v=1:a=0', '-pix_fmt', 'yuv420p', video]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+    mod = gate_module()
+    mod.ROOT = root
+    mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
+    r = mod.brand_check(video, budget=None) or ''
+    ok = 'a videó 2. másodpercében (1/4 s' in r
+    if not ok:
+        print(f'  brand_real_vision_ocr_on_generated_video got: {r!r}')
+    return ok
+
+
 def main():
     bad = 0
     for fn in CASES:

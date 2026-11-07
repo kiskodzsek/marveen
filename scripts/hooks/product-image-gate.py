@@ -41,12 +41,20 @@ Also (card 0ecad9e5, Patrik TG 14472): a reply to the owner's PRIVATE chat is bl
 text carries "PRIVÁT-OK: <reason>"; team work goes to the group chat. An open private window
 (store/privat-ablak.json, 0600, see private_window_open; Patrik TG 14496) lifts the marker rule only;
 the media checks still run.
+Marketing video (Patrik csoport TG 3109, 2026-11-07: "Vegig legyen minden snitten marabel.hu"; TG 4539): the
+self-attested MARKA line does not decide. One frame per second is read with the macOS Vision framework
+(scripts/lib/video_text_ocr.swift) and every second must show "marabel.hu", or the gate blocks with the missing
+seconds. The result is cached on the video's sha256 (store/kep-kapu/.ocr/). If the OCR does not fit in the hook's
+budget, the gate blocks; warm the cache with: python3 scripts/hooks/product-image-gate.py --ocr <video>.
 Tests: product-image-gate_test.py next to this file.
 Exit 0 = allow, exit 2 = block (stderr to the model).
 """
+import hashlib
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
 import time
 import urllib.request
@@ -147,6 +155,125 @@ def majsztro_ok(val):
     return None
 
 
+BRAND = 'marabel.hu'
+OCR_SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib', 'video_text_ocr.swift')
+OCR_BUDGET_S = 40  # inside the hook; the fast Vision level reads ~0.1 s per frame, plus a one-off swiftc build (~2 s)
+VIDEO = ('.mp4', '.mov', '.webm')
+
+
+class OcrError(Exception):
+    pass
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def ocr_tool_id():
+    """The OCR helper's identity: its source's sha256 (16 hex). A changed helper never reuses an old cache."""
+    return _sha256(OCR_SRC)[:16]
+
+
+def ocr_binary(tool_id):
+    """The compiled helper for this source, built once with swiftc into ~/Library/Caches/marveen."""
+    d = os.path.join(os.path.expanduser('~'), 'Library', 'Caches', 'marveen')
+    b = os.path.join(d, f'video_text_ocr-{tool_id}')
+    if os.path.isfile(b) and os.access(b, os.X_OK):
+        return b
+    swiftc = shutil.which('swiftc') or '/usr/bin/swiftc'
+    if sys.platform != 'darwin' or not os.access(swiftc, os.X_OK):
+        raise OcrError('nincs macOS Vision / swiftc ezen a gépen')
+    os.makedirs(d, exist_ok=True)
+    tmp = f'{b}.tmp{os.getpid()}'
+    p = subprocess.run([swiftc, '-O', OCR_SRC, '-o', tmp], capture_output=True, text=True, timeout=120)
+    if p.returncode != 0:
+        raise OcrError('a video_text_ocr.swift nem fordult le')
+    os.replace(tmp, b)
+    return b
+
+
+def run_ocr(fp, budget):
+    """{second: text} for every second of the video, from the helper's JSON lines. Anything odd raises OcrError."""
+    tid = ocr_tool_id()
+    binary = ocr_binary(tid)
+    try:
+        p = subprocess.run([binary, fp], capture_output=True, text=True, timeout=budget)
+    except subprocess.TimeoutExpired:
+        raise OcrError(f'az OCR nem fért bele {budget} s-be. Futtasd előre: python3 '
+                       f'{os.path.abspath(__file__)} --ocr {fp} , utána küldd újra')
+    if p.returncode != 0:
+        raise OcrError(f'az OCR hibával állt le ({(p.stderr or "").strip()[:120]})')
+    texts, done = {}, None
+    for line in p.stdout.splitlines():
+        o = json.loads(line)
+        if 'done' in o:
+            done = o['done']
+        else:
+            texts[int(o['t'])] = str(o['text'])
+    if not done or sorted(texts) != list(range(done)):
+        raise OcrError('az OCR kimenete hiányos')
+    return texts
+
+
+def _ranges(secs):
+    out, start = [], None
+    for i, s in enumerate(secs):
+        if start is None:
+            start = s
+        if i + 1 == len(secs) or secs[i + 1] != s + 1:
+            out.append(f'{start}' if start == s else f'{start}-{s}')
+            start = None
+    return ', '.join(out)
+
+
+def brand_check(fp, budget=OCR_BUDGET_S):
+    """Patrik TG 3109 (2026-11-07, csoport): "Vegig legyen minden snitten marabel.hu" (before: TG 4539, 2026-10-20,
+    "sehol egy logo sehol egy marebel.hu"). The v9 Christmas Reel carried MARKA "logó + marabel.hu" and showed the
+    address on the end card only. One frame per second, OCR, cached on the video's sha256 and the helper's id.
+    Returns the reason to block, or None. budget=None (the --ocr warm-up) waits as long as the OCR takes."""
+    try:
+        vsha = _sha256(fp)
+        tid = ocr_tool_id()
+    except OSError as e:
+        return f'a videó vagy az OCR-segéd nem olvasható ({e.__class__.__name__}).'
+    cache = os.path.join(KAPU, '.ocr', vsha + '.json')
+    res = None
+    try:
+        with open(cache, encoding='utf-8') as f:
+            c = json.load(f)
+        if c.get('sha256') == vsha and c.get('tool') == tid and isinstance(c.get('missing'), list):
+            res = c
+    except Exception:
+        res = None
+    if res is None:
+        try:
+            texts = run_ocr(fp, budget)
+        except OcrError as e:
+            return f'MARABEL.HU-OCR nem futott le: {e}. A kapu ilyenkor tilt.'
+        except Exception as e:
+            return f'MARABEL.HU-OCR nem futott le ({e.__class__.__name__}). A kapu ilyenkor tilt.'
+        missing = [t for t in sorted(texts) if BRAND not in ''.join(texts[t].lower().split())]
+        res = {'sha256': vsha, 'tool': tid, 'seconds': len(texts), 'missing': missing,
+               'text': {str(t): texts[t][:300] for t in sorted(texts)}}
+        try:
+            os.makedirs(os.path.dirname(cache), exist_ok=True)
+            tmp = f'{cache}.tmp{os.getpid()}'
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(res, f, ensure_ascii=False)
+            os.replace(tmp, cache)
+        except OSError:
+            pass
+    if res['missing']:
+        return (f'nincs "{BRAND}" a videó {_ranges(res["missing"])}. másodpercében ({len(res["missing"])}/'
+                f'{res.get("seconds", "?")} s; OCR, másodpercenként egy kocka). Patrik TG 3109: "Vegig legyen minden '
+                f'snitten marabel.hu". Az OCR-szöveg: {cache}')
+    return None
+
+
 MESSAGE_PART_MIN = 8
 REAL_REASON_MIN = 20
 
@@ -227,7 +354,9 @@ def check(fp):
     # Patrik TG 1946 (2026-11-05 19:00): "rajta van a logo de vhigy az h marabel.hu sehol a kepen".
     # Every marketing image carries the visible web address next to the logo.
     if not (d.get('MAJSZTRO') or '').lower().startswith('nem-marketing'):
-        if 'marabel.hu' not in (d.get('MARKA') or '').lower():
+        # a video's MARKA line is not enough: brand_check() reads every second (Patrik TG 3109), at the end of the
+        # video branch below, after the cheap checks
+        if not fp.lower().endswith(VIDEO) and 'marabel.hu' not in (d.get('MARKA') or '').lower():
             return (f'{base}: MARKA sor hiányzik. Alak: "MARKA: logó + marabel.hu látható a képen (<hol>)" '
                     '(Patrik TG 1946: a logó mellett a marabel.hu is kell).')
         # Patrik TG 1952/1958 (2026-11-05 19:23): the Short went to him without a post text ("mi a szovege
@@ -283,6 +412,9 @@ def check(fp):
             if row.get('from_agent') != 'majsztro' or not all(norm(t) in mc for t in body):
                 return (f'{base}: a posztszöveg nem szó szerint Májsztró {sz[0][1]}. üzenetéből való '
                         '(Patrik TG 1985: "Ezek majsztro szovegri? Nem hiszem").')
+            br = brand_check(fp)
+            if br:
+                return f'{base}: {br}'
         # Patrik TG 1751 + TG 1937 (2026-11-05): "Nagyon viaszos mű ai arcok" -- twice in one day, both passed
         # a 100% eyeball review by the maker and by Klodel. A numeric skin-texture score (ops/face_texture_check.py)
         # was tried and does NOT separate waxy from good faces (Kernel calibration: rejected 4.78/2.80/1.71/2.04 vs
@@ -424,7 +556,19 @@ def check(fp):
     return None
 
 
+def warm_ocr(paths):
+    """python3 product-image-gate.py --ocr <video>...: fill the OCR cache with no time limit, print the verdict."""
+    bad = 0
+    for fp in paths:
+        r = brand_check(fp, budget=None)
+        print(f'{os.path.basename(fp)}: ' + (r or f'OK, "{BRAND}" minden másodpercben'))
+        bad += bool(r)
+    return 2 if bad else 0
+
+
 def main():
+    if sys.argv[1:2] == ['--ocr']:
+        return warm_ocr(sys.argv[2:])
     try:
         data = json.load(sys.stdin)
     except Exception:
