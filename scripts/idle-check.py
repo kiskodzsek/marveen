@@ -113,17 +113,41 @@ def idle_report(cards, pane_idle, last_comment, today):
     return lines
 
 
+# IDLEPANE1108 (Klodel 32781): the input box keeps its empty "❯" line while a turn runs, and
+# a narrow pane cuts the "esc to interrupt" tail off the spinner line ("· Unfurling… (2m 27s"
+# at 19:54 on Dave's pane, reported idle). So the last BUSY_TAIL non-empty lines are read for a
+# turn in progress, not only for that tail:
+#   - "esc to interrupt" / "to interrupt)" (the old check);
+#   - a spinner line: a glyph, then a word ending in "…" ("✻ Befuddling… (14s · ↓ 802 tokens");
+#   - a token counter "· ↓ 159.6k tokens" (the running sub-agent rows of a working pane).
+# A FINISHED turn looks different and stays idle: "✻ Sautéed for 35s · done 7:20 PM", or
+# "✻ Churned for 2m 3s" -- past tense with "for", no ellipsis, no counter (measured on the
+# Mira and Kernel panes, 2026-11-08 19:5x). Matching "Churned" would keep an idle agent busy.
+BUSY_TAIL = 10
+_SPINNER_RE = re.compile(r'^\s*\S\s+[^\W\d_][\w-]*…', re.UNICODE)
+_TOKENS_RE = re.compile(r'·\s*↓\s*[\d.,]+\s*k?\s*tokens')
+
+
+def pane_text_idle(pane):
+    """The pane text shows an empty prompt and no turn in progress."""
+    if not pane:
+        return False
+    lines = [l for l in pane.splitlines() if l.strip()]
+    tail = lines[-BUSY_TAIL:]
+    if any('esc to interrupt' in l or 'to interrupt)' in l for l in tail):
+        return False
+    if any(_SPINNER_RE.match(l) or _TOKENS_RE.search(l) for l in tail):
+        return False
+    return any(l.strip() == '❯' for l in lines[-4:])
+
+
 def pane_idle(agent):
     try:
         pane = subprocess.run(['tmux', 'capture-pane', '-p', '-t', f'agent-{agent}'],
                               capture_output=True, text=True, timeout=5).stdout
     except Exception:
         return False
-    if not pane:
-        return False
-    busy = 'esc to interrupt' in pane or 'to interrupt)' in pane
-    lines = [l for l in pane.splitlines() if l.strip()]
-    return any(l.strip() == '❯' for l in lines[-4:]) and not busy
+    return pane_text_idle(pane)
 
 
 def _get(path, token, timeout):
