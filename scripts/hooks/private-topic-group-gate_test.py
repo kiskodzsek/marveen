@@ -193,6 +193,53 @@ def malformed_store_no_crash(root):
     return rc == 2 and 'Traceback' not in err
 
 
+@case
+def klodel_30145_running_ad_sentence_blocked(root):
+    # The sentence that went to the group on 11-06 (Klodel 30145), with the keywords added after it.
+    setup(root, projektek=dict(PROJEKTEK, projektek=[{'id': 'hirdetes-x', 'chat': 'privat',
+                                                      'kulcsszavak': ['futó hirdetés', 'hirdetésben']}]))
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'ez a most futó hirdetésben is benne van'})
+    return rc == 2 and 'hirdetes-x' in err
+
+
+@case
+def suffixed_form_of_keyword_blocked(root):
+    # Substring match: "hirdetés" catches "hirdetésben", "hirdetést", "hirdetéseinkről".
+    setup(root, projektek=dict(PROJEKTEK, projektek=[{'id': 'h', 'chat': 'privat', 'kulcsszavak': ['hirdetés']}]))
+    return all(run(root, {'chat_id': GROUP, 'text': t})[0] == 2
+               for t in ('a hirdetésben', 'láttad a hirdetést?', 'a hirdetéseinkről'))
+
+
+@case
+def lengthened_final_vowel_blocked(root):
+    # Hungarian lengthens a final a/e before a suffix: "Meta" -> "Metában", "csatorna" -> "csatornán", "kecske" -> "kecskét".
+    setup(root, projektek=dict(PROJEKTEK, projektek=[{'id': 'p', 'chat': 'privat',
+                                                      'kulcsszavak': ['Meta', 'arc nélküli csatorna', 'Heni', 'kecske']}]))
+    blocked = all(run(root, {'chat_id': GROUP, 'text': t})[0] == 2
+                  for t in ('a METÁBAN fut', 'a Metán', 'az arc nélküli csatornán', 'Henivel beszéltem', 'a kecskét'))
+    clean = run(root, {'chat_id': GROUP, 'text': 'A receptkönyv kész, holnap posztnaptár.'})[0] == 0
+    private = run(root, {'chat_id': PRIV, 'text': 'a Metában fut'})[0] == 0
+    return blocked and clean and private
+
+
+@case
+def settings_wire_gate_on_reply_and_edit_message(root):
+    # The gate must run on both Telegram send tools. SETTINGS_JSON=<path> measures another copy (e.g. the live one).
+    import re
+    path = os.environ.get('SETTINGS_JSON') or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(HOOK))),
+                                                           '.claude', 'settings.json')
+    entries = json.load(open(path, encoding='utf-8')).get('hooks', {}).get('PreToolUse', [])
+
+    def wired(tool):
+        for e in entries:
+            m = e.get('matcher')
+            if m and re.fullmatch(m, tool) and any('private-topic-group-gate.py' in str(h.get('command', ''))
+                                                   for h in e.get('hooks', [])):
+                return True
+        return False
+    return all(wired(t) for t in ('mcp__plugin_telegram_telegram__reply', 'mcp__plugin_telegram_telegram__edit_message'))
+
+
 def main():
     bad = 0
     for fn in CASES:

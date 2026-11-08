@@ -12,6 +12,10 @@ What blocks (exit 2): a message to the group chat whose text (or a file name) ma
     (the live list and the archive).
 Matching is case-insensitive, over normalised text: NFKC, zero-width characters dropped, "-" and "_" read as a
 space, whitespace collapsed (a no-break space in "12 500 Ft" matches; "meta_hirdetés" matches "Meta-hirdetés").
+A keyword is a substring match, so suffixed forms match too; a keyword ending in a/e also matches the lengthened
+á/é stem ("Meta" -> "Metában").
+Wiring: .claude/settings.json PreToolUse, matcher "mcp__plugin_telegram_telegram__reply|...__edit_message"; the
+test checks it (SETTINGS_JSON=<path> measures another copy, e.g. the live one).
 Which chats are gated: every chat except the owner's private one (MARVEEN_OWNER_PRIVATE_CHAT, else
 store/projektek.json elo_uzenet.privat): the group, and any other chat the bot writes to (Viktor 29635 INFO-3).
 When the private chat is unknown, every chat is gated (fail-closed). Any error while matching blocks too
@@ -66,8 +70,13 @@ def patterns(temak, projektek):
                 words = proj.get('kulcsszavak')
                 for w in words if isinstance(words, list) else []:
                     w = norm(w)
-                    if w:
-                        out.append((f'{proj.get("id", "?")}: {w}', re.compile(re.escape(w))))
+                    if not w:
+                        continue
+                    # A keyword is matched as a substring, so a suffixed form ("hirdetésben") is caught already. A final
+                    # a/e lengthens before a suffix in Hungarian ("Meta" -> "Metában", "csatorna" -> "csatornán"), so
+                    # both vowels match there (Klodel 30145, card 6dbeadad).
+                    rx = re.escape(w[:-1]) + {'a': '[aá]', 'e': '[eé]'}[w[-1]] if w[-1] in 'ae' else re.escape(w)
+                    out.append((f'{proj.get("id", "?")}: {w}', re.compile(rx)))
     return out
 
 
