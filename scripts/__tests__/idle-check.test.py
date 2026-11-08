@@ -14,6 +14,9 @@ Pinned cases:
   7. a marker more than MAX_DEFER_DAYS ahead is ignored: the card counts (Viktor L1)
   8. an assignee not shaped like an agent name never reaches the output, and its raw
      value is not echoed to stderr either (Viktor L2)
+  9. IDLEPANE1108: a pane with a running spinner or token counter is busy even when the
+     "esc to interrupt" tail is cut off and the empty "❯" box shows; a finished turn
+     ("Sautéed for 35s · done", "Churned for 2m 3s") is idle (Klodel 32781)
 """
 import contextlib
 import datetime
@@ -143,6 +146,33 @@ class Report(unittest.TestCase):
         out, _ = self.run_report([], set(), {}, TODAY)
         self.assertEqual(out, [])
 
+
+
+BOX = "─" * 60 + "\n❯ \n" + "─" * 60 + "\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+
+
+class PaneTextIdle(unittest.TestCase):
+    def test_unfurling_cut_off_is_busy(self):
+        # Dave's pane at 19:54: the spinner line lost its "esc to interrupt" tail
+        self.assertFalse(ic.pane_text_idle("worktree nyitás\n· Unfurling… (2m 27s\n" + BOX))
+
+    def test_spinner_with_counter_is_busy(self):
+        self.assertFalse(ic.pane_text_idle("szöveg\n✻ Befuddling… (14s · ↓ 802 tokens · thought for 7s)\n" + BOX))
+
+    def test_running_subagent_rows_are_busy(self):
+        pane = "  ⏺ main\n  ◯ general-purpose  Reading orders table… 1m 6s · ↓ 159.6k tokens\n" + BOX
+        self.assertFalse(ic.pane_text_idle(pane))
+
+    def test_old_tail_check_still_busy(self):
+        self.assertFalse(ic.pane_text_idle("x\n" + BOX.rstrip("\n") + " · esc to interrupt\n"))
+
+    def test_finished_turn_is_idle(self):
+        self.assertTrue(ic.pane_text_idle("megszokott módon jön.\n✻ Sautéed for 35s · done 7:20 PM\n" + BOX))
+        self.assertTrue(ic.pane_text_idle("kész.\n✻ Churned for 2m 3s\n" + BOX))
+
+    def test_no_prompt_or_empty_is_not_idle(self):
+        self.assertFalse(ic.pane_text_idle(""))
+        self.assertFalse(ic.pane_text_idle("valami fut, prompt nélkül\n"))
 
 if __name__ == '__main__':
     unittest.main(verbosity=1)
