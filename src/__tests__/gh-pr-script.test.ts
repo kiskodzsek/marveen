@@ -220,7 +220,7 @@ describe('gh-pr: the body file and the secrets (H5, K1)', () => {
     const b = frameLog(forged, 'marabel', '12', 1000)
     const nonce = /^=== BEGIN UNTRUSTED GITHUB JOB LOG ([0-9a-f-]{36}) /.exec(a)?.[1]
     expect(nonce).toBeTruthy()
-    const lines = a.trimEnd().split('\n')
+    const lines: string[] = a.trimEnd().split('\n') // the .mjs import is untyped (any): name the type for tsc
     expect(lines[lines.length - 1]).toBe(`=== END UNTRUSTED GITHUB JOB LOG ${nonce} ===`)
     expect(lines.filter((l) => l.includes(nonce as string))).toHaveLength(2)
     expect(b).not.toContain(nonce as string)
