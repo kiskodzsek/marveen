@@ -46,14 +46,24 @@ self-attested MARKA line does not decide. One frame per second is read with the 
 (scripts/lib/video_text_ocr.swift) and every second must show "marabel.hu", or the gate blocks with the missing
 seconds. The result is cached on the video's sha256 (store/kep-kapu/.ocr/). If the OCR does not fit in the hook's
 budget, the gate blocks; warm the cache with: python3 scripts/hooks/product-image-gate.py --ocr <video>.
+Safe band (Patrik privát TG 15669, 2026-11-08 07:03, CLAUDE.md BIZTONSÁGI SÁV; card c68d3745): the feed and the
+Reel/Story UI cover the top and the bottom of the frame while scrolling, so every marketing image and video carries
+    SAV: 4x5|9x16|1x1|fekvo felso <px> also <px> <y1>-<y2>
+<y1>-<y2> is the vertical extent of the bounding box of every important element (headline, product, steps, logo,
+price/CTA). The gate measures the file itself (sips / ffprobe), so the format must fit the real aspect, the bands must
+equal 10 % / 10 % (4:5, 1:1, landscape) or 14 % top / 35 % bottom (9:16) of the real height (+-2 px), and the box
+must stay out of them. 1:1 and landscape (any width > height) carry 10 % / 10 % too (Klodel 31805); only an upright
+format other than 4:5 and 9:16 is blocked.
 Tests: product-image-gate_test.py next to this file.
 Exit 0 = allow, exit 2 = block (stderr to the model).
 """
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -304,6 +314,121 @@ def message_and_real(d):
     return None
 
 
+# Safe bands as a share of the frame height: (top, bottom). Klodel 31782 / CLAUDE.md BIZTONSÁGI SÁV (Patrik TG 15669).
+# 1:1 and landscape: 10 % / 10 % like 4:5 (Klodel 31805, 2026-11-08). 'fekvo' is any width > height outside the 1:1
+# tolerance (1.91:1 link image, 16:9 video, ...).
+SAFE_BANDS = {'4x5': (0.10, 0.10), '9x16': (0.14, 0.35), '1x1': (0.10, 0.10), 'fekvo': (0.10, 0.10)}
+SAFE_ASPECT = {'4x5': 5 / 4, '9x16': 16 / 9, '1x1': 1.0}  # height / width
+SAFE_ASPECT_TOL = 0.02
+SAFE_PX_TOL = 2
+SAV_RX = re.compile(r'^(4x5|9x16|1x1|fekv[oő])\s+fels[oő]\s+(\d+)\s+als[oó]\s+(\d+)\s+(\d+)\s*-\s*(\d+)\s*$',
+                    re.I)
+FFPROBE_PATHS = ('/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe')
+
+
+def image_size(fp):
+    """(width, height) from the file header, pure Python (CI runs on Linux, no sips): PNG, GIF, WebP, JPEG.
+    A JPEG's EXIF orientation is not applied: a rotated phone photo reads landscape and fails closed (no 4:5/9:16)."""
+    with open(fp, 'rb') as f:
+        data = f.read(1 << 20)
+    if data[:8] == b'\x89PNG\r\n\x1a\n' and data[12:16] == b'IHDR':
+        return struct.unpack('>II', data[16:24])
+    if data[:6] in (b'GIF87a', b'GIF89a'):
+        return struct.unpack('<HH', data[6:10])
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        kind = data[12:16]
+        if kind == b'VP8X':
+            return 1 + int.from_bytes(data[24:27], 'little'), 1 + int.from_bytes(data[27:30], 'little')
+        if kind == b'VP8L':
+            b = int.from_bytes(data[21:25], 'little')
+            return (b & 0x3FFF) + 1, ((b >> 14) & 0x3FFF) + 1
+        if kind == b'VP8 ':
+            w, h = struct.unpack('<HH', data[26:30])
+            return w & 0x3FFF, h & 0x3FFF
+        return None
+    if data[:2] == b'\xff\xd8':
+        i = 2
+        while i + 9 < len(data):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                h, w = struct.unpack('>HH', data[i + 5:i + 9])
+                return w, h
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7 or marker == 0xFF:
+                i += 2 if marker != 0xFF else 1
+                continue
+            i += 2 + struct.unpack('>H', data[i + 2:i + 4])[0]
+    return None
+
+
+def media_size(fp):
+    """(width, height) of the image (sips) or video (ffprobe), read from the file; None if it cannot be measured.
+    A video is read with its rotation applied (a phone clip stored 1920x1080 with rotation -90 shows 1080x1920)."""
+    try:
+        if fp.lower().endswith(VIDEO):
+            probe = shutil.which('ffprobe') or next((p for p in FFPROBE_PATHS if os.path.exists(p)), None)
+            if not probe:
+                return None
+            r = subprocess.run([probe, '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+                                'stream=width,height:stream_side_data=rotation:stream_tags=rotate', '-of', 'json', fp],
+                               capture_output=True, text=True, timeout=10)
+            st = json.loads(r.stdout or '{}').get('streams') or [{}]
+            w, h = int(st[0]['width']), int(st[0]['height'])
+            rot = [sd.get('rotation') for sd in st[0].get('side_data_list') or [] if 'rotation' in sd]
+            rot = rot[0] if rot else (st[0].get('tags') or {}).get('rotate', 0)
+            if abs(int(float(rot or 0))) % 180 == 90:
+                w, h = h, w
+            return w, h
+        size = image_size(fp)
+        if size:
+            return tuple(int(x) for x in size)
+        if not os.path.exists('/usr/bin/sips'):
+            return None
+        r = subprocess.run(['/usr/bin/sips', '-g', 'pixelWidth', '-g', 'pixelHeight', fp],
+                           capture_output=True, text=True, timeout=10)
+        w = re.search(r'pixelWidth:\s*(\d+)', r.stdout)
+        h = re.search(r'pixelHeight:\s*(\d+)', r.stdout)
+        return (int(w.group(1)), int(h.group(1))) if w and h else None
+    except Exception:
+        return None
+
+
+def safe_band(fp, value):
+    """Patrik TG 15669: "lathatonak kell lennie a fontos reszeknek scrollozasnal is.. levag alul felul vmennyit a fb".
+    Returns the reason to block, or None."""
+    form = ('Alak: "SAV: 4x5|9x16|1x1|fekvo felso <px> also <px> <y1>-<y2>", az y-tartomány a fontos elemek (cím, termék, '
+            'lépések, logó, ár/CTA) közös befoglaló dobozáé (CLAUDE.md BIZTONSÁGI SÁV, Patrik TG 15669).')
+    m = SAV_RX.match((value or '').strip())
+    if not m:
+        return 'SAV sor hiányzik/hibás. ' + form
+    fmt, top, bot, y1, y2 = m.group(1).lower().replace('ő', 'o'), *(int(m.group(i)) for i in range(2, 6))
+    size = media_size(fp)
+    if not size or min(size) <= 0:
+        return 'SAV: a fájl mérete nem mérhető (sips/ffprobe), a sávot nem tudom ellenőrizni.'
+    w, h = size
+    real = next((k for k, a in SAFE_ASPECT.items() if abs(h / w - a) <= a * SAFE_ASPECT_TOL), None)
+    if real is None and h < w:
+        real = 'fekvo'
+    if real is None:
+        return (f'SAV: a fájl {w}x{h} álló, de se 4:5, se 9:16; a hírfolyam-sávot ezekre mérjük (és 1:1-re, fekvőre). '
+                'Készítsd 4:5 (pl. 1080x1350), 9:16 (pl. 1080x1920) vagy 1:1 (pl. 1080x1080) arányban.')
+    if real != fmt:
+        return f'SAV: a sor {fmt}, de a fájl {w}x{h}, ez {real}. ' + form
+    want_top, want_bot = (round(h * f) for f in SAFE_BANDS[fmt])
+    if abs(top - want_top) > SAFE_PX_TOL or abs(bot - want_bot) > SAFE_PX_TOL:
+        return (f'SAV: {h} px magas {fmt} képen a sáv felül {want_top}, alul {want_bot} px '
+                f'({SAFE_BANDS[fmt][0]:.0%} / {SAFE_BANDS[fmt][1]:.0%}), a sorban {top}/{bot}.')
+    if not 0 <= y1 < y2 <= h:
+        return f'SAV: az y-tartomány {y1}-{y2} nem fér a {h} px magas képbe. ' + form
+    if y1 < want_top or y2 > h - want_bot:
+        return (f'SAV: a fontos elem ({y1}-{y2}) belelóg a levágott sávba: a szabad rész {want_top}-{h - want_bot} px. '
+                'Görgetésnél a hírfolyam és a Reel-felület ezt eltakarja (Patrik TG 15669). Told beljebb, és nézd meg '
+                'a levágott változatot Read-del.')
+    return None
+
+
 CAPTION_META_PREFIXES = ('ZENE:', 'SZERZO:', 'SZERZŐ:')
 
 
@@ -359,6 +484,10 @@ def check(fp):
         if not fp.lower().endswith(VIDEO) and 'marabel.hu' not in (d.get('MARKA') or '').lower():
             return (f'{base}: MARKA sor hiányzik. Alak: "MARKA: logó + marabel.hu látható a képen (<hol>)" '
                     '(Patrik TG 1946: a logó mellett a marabel.hu is kell).')
+        # Patrik TG 15669 (2026-11-08): the important part stays visible with the feed's top/bottom cut.
+        sb = safe_band(fp, d.get('SAV'))
+        if sb:
+            return f'{base}: {sb}'
         # Patrik TG 1952/1958 (2026-11-05 19:23): the Short went to him without a post text ("mi a szovege
         # a posztnak?", "Reelshez is kell szöveg amúgy?? Link legyen"). A marketing video goes with its
         # per-channel caption file (FB/IG/YT, link line) or not at all.

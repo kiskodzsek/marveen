@@ -278,6 +278,7 @@ def head_branch_1_42_still_blocked(root):
 
 
 # UZENET + VALODI (Patrik TG 14836, shared/hibanaplo.md 2026-11-06 13:37, card ca0737c2).
+SAV_9X16_OK = 'SAV: 9x16 felso 269 also 672 300-1240'
 MARKETING = 'MEHET 1'  # the MAJSZTRO API check comes after UZENET/VALODI; here it fails (no token): rc 2, MAJSZTRO
 UZENET_OK = 'nagyszülőnek ajándékot kereső felnőtt gyerek | karácsony előtt, amíg még elkészül'
 
@@ -513,7 +514,9 @@ def caption_check(root, caption):
     open(cap, 'w', encoding='utf-8').write(caption)
     lines = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
              'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
-             'MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)', f'FEED: ok {sheet}', f'POSZTSZOVEG: {cap}']
+             'MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)', f'FEED: ok {sheet}', f'POSZTSZOVEG: {cap}',
+             SAV_9X16_OK]
+    mod.media_size = lambda _fp: (1080, 1920)  # the video here is a 1-byte stub; the safe band has its own cases
     open(os.path.join(mod.KAPU, 'short.mp4.ok'), 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
     later = time.time() + 5
     os.utime(sheet, (later, later))
@@ -777,7 +780,8 @@ def caption_check_setup(root, marka=True):
     mod.urllib.request.urlopen = lambda req, timeout=5: FakeResponse({'from_agent': 'majsztro', 'content': ' '.join(body)})
     lines = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
              'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
-             f'FEED: ok {sheet}', f'POSZTSZOVEG: {cap}']
+             f'FEED: ok {sheet}', f'POSZTSZOVEG: {cap}', SAV_9X16_OK]
+    mod.media_size = lambda _fp: (1080, 1920)  # the video here is a 1-byte stub; the safe band has its own cases
     if marka:
         lines.append('MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)')
     open(os.path.join(mod.KAPU, 'short.mp4.ok'), 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
@@ -832,6 +836,220 @@ def brand_real_vision_ocr_on_generated_video(root):
         print(f'  brand_real_vision_ocr_on_generated_video got: {r!r}')
     return ok
 
+
+
+# SAFE BAND (Patrik privát TG 15669, 2026-11-08: "lathatonak kell lennie a fontos reszeknek scrollozasnal is.. levag
+# alul felul vmennyit a fb"; CLAUDE.md BIZTONSÁGI SÁV; card c68d3745). 4:5: 10 % top and bottom; 9:16: 14 % top,
+# 35 % bottom. The gate measures the file itself; the images here are real PNG headers of the given size.
+def png(path, w, h):
+    import struct
+    import zlib
+    ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
+    chunk = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xFFFFFFFF)
+    open(path, 'wb').write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', ihdr) + chunk(b'IEND', b''))
+    return path
+
+
+def sav_check(root, w, h, sav, name='poszt.png'):
+    """check() on a marketing image without a book whose only open question is the SAV line. Majsztro's MEHET is
+    stubbed; the next check after SAV for an image is ARC-ITELET, so a result naming ARC-ITELET means SAV passed."""
+    mod = gate_module()
+    mod.ROOT = root
+    mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
+    mod.majsztro_ok = lambda _value: None
+    os.makedirs(mod.KAPU, exist_ok=True)
+    img = os.path.join(root, name)
+    if w:
+        png(img, w, h)
+    else:
+        open(img, 'wb').write(b'\x89PNG')  # not measurable
+    lines = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
+             'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
+             'MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)']
+    if sav is not None:
+        lines.append(f'SAV: {sav}')
+    okf = os.path.join(mod.KAPU, name + '.ok')
+    open(okf, 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+    later = time.time() + 5
+    os.utime(okf, (later, later))
+    return mod.check(img) or ''
+
+
+@case
+def sav_missing_blocked(root):
+    return 'SAV sor hiányzik' in sav_check(root, 1080, 1350, None)
+
+
+@case
+def sav_malformed_blocked(root):
+    return 'SAV sor hiányzik' in sav_check(root, 1080, 1350, '4x5 rendben, minden belül van')
+
+
+@case
+def sav_4x5_inside_passes(root):
+    r = sav_check(root, 1080, 1350, '4x5 felso 135 also 135 140-1210')
+    return 'SAV' not in r and 'ARC-ITELET' in r
+
+
+@case
+def sav_4x5_accented_words_pass(root):
+    r = sav_check(root, 1080, 1350, '4x5 felső 135 alsó 135 135-1215')
+    return 'SAV' not in r and 'ARC-ITELET' in r
+
+
+@case
+def sav_4x5_top_band_blocked(root):
+    return 'belelóg a levágott sávba' in sav_check(root, 1080, 1350, '4x5 felso 135 also 135 100-1200')
+
+
+@case
+def sav_4x5_bottom_band_blocked(root):
+    return 'belelóg a levágott sávba' in sav_check(root, 1080, 1350, '4x5 felso 135 also 135 200-1250')
+
+
+@case
+def sav_9x16_inside_passes(root):
+    r = sav_check(root, 1080, 1920, '9x16 felso 269 also 672 300-1240')
+    return 'SAV' not in r and 'ARC-ITELET' in r
+
+
+@case
+def sav_9x16_bottom_35_blocked(root):
+    # Fine for a 4:5 band (1920*0.9=1728) but inside the Reel's bottom 35 % (from 1248 down).
+    return 'belelóg a levágott sávba' in sav_check(root, 1080, 1920, '9x16 felso 269 also 672 300-1300')
+
+
+@case
+def sav_9x16_top_14_blocked(root):
+    return 'belelóg a levágott sávba' in sav_check(root, 1080, 1920, '9x16 felso 269 also 672 200-1200')
+
+
+@case
+def sav_format_must_fit_the_file(root):
+    return 'ez 9x16' in sav_check(root, 1080, 1920, '4x5 felso 192 also 192 300-1200')
+
+
+@case
+def sav_band_px_must_fit_the_height(root):
+    # 10 % of 1350 is 135: a maker who measured the bands on another height is stopped.
+    return 'a sorban 100/100' in sav_check(root, 1080, 1350, '4x5 felso 100 also 100 140-1200')
+
+
+@case
+def sav_upright_other_ratio_blocked(root):
+    # 2:3 upright is none of 4:5, 9:16, 1:1: blocked (Klodel 31805 opened only 1:1 and landscape).
+    return 'se 4:5, se 9:16' in sav_check(root, 1080, 1620, '4x5 felso 162 also 162 200-1400')
+
+
+@case
+def sav_1x1_inside_passes(root):
+    # Klodel 31805: 1:1 gets 10 % / 10 % like 4:5 (108 px on 1080).
+    r = sav_check(root, 1080, 1080, '1x1 felso 108 also 108 110-970')
+    return 'SAV' not in r and 'ARC-ITELET' in r
+
+
+@case
+def sav_1x1_top_band_blocked(root):
+    return 'belelóg a levágott sávba' in sav_check(root, 1080, 1080, '1x1 felso 108 also 108 100-900')
+
+
+@case
+def sav_1x1_band_px_must_fit(root):
+    # a 9:16-style 14/35 % band on a square is wrong: 151/378 instead of 108/108
+    return 'a sorban 151/378' in sav_check(root, 1080, 1080, '1x1 felso 151 also 378 200-600')
+
+
+@case
+def sav_landscape_inside_passes(root):
+    # 1200x628 link image: 10 % of 628 = 63 px, free 63-565.
+    r = sav_check(root, 1200, 628, 'fekvo felso 63 also 63 70-560')
+    return 'SAV' not in r and 'ARC-ITELET' in r
+
+
+@case
+def sav_landscape_accented_word_passes(root):
+    r = sav_check(root, 1920, 1080, 'fekvő felső 108 alsó 108 120-960')
+    return 'SAV' not in r and 'ARC-ITELET' in r
+
+
+@case
+def sav_landscape_bottom_band_blocked(root):
+    return 'belelóg a levágott sávba' in sav_check(root, 1200, 628, 'fekvo felso 63 also 63 70-600')
+
+
+@case
+def sav_landscape_file_called_square_blocked(root):
+    return 'ez fekvo' in sav_check(root, 1200, 628, '1x1 felso 63 also 63 70-560')
+
+
+@case
+def sav_square_file_called_4x5_blocked(root):
+    return 'ez 1x1' in sav_check(root, 1080, 1080, '4x5 felso 108 also 108 200-900')
+
+
+@case
+def sav_unmeasurable_file_blocked(root):
+    return 'nem mérhető' in sav_check(root, 0, 0, '4x5 felso 135 also 135 140-1200')
+
+
+@case
+def sav_box_outside_the_image_blocked(root):
+    return 'nem fér' in sav_check(root, 1080, 1350, '4x5 felso 135 also 135 1210-140')
+
+
+@case
+def sav_not_asked_on_non_marketing(root):
+    img = book_fixture(root, KEPES_OK)  # MAJSZTRO: nem-marketing, no SAV line
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 0 and 'SAV' not in err
+
+
+@case
+def sav_webp_and_gif_headers_measured(root):
+    import struct
+    mod = gate_module()
+    vp8x = b'RIFF' + struct.pack('<I', 30) + b'WEBPVP8X' + struct.pack('<I', 10) + b'\x00' * 4 \
+        + (1080 - 1).to_bytes(3, 'little') + (1350 - 1).to_bytes(3, 'little')
+    bits = (1080 - 1) | ((1920 - 1) << 14)
+    vp8l = b'RIFF' + struct.pack('<I', 30) + b'WEBPVP8L' + struct.pack('<I', 10) + b'\x2f' + bits.to_bytes(4, 'little') + b'\x00' * 8
+    gif = b'GIF89a' + struct.pack('<HH', 1080, 1350) + b'\x00' * 8
+    out = []
+    for name, data in (('x.webp', vp8x), ('y.webp', vp8l), ('z.gif', gif)):
+        fp = os.path.join(root, name)
+        open(fp, 'wb').write(data)
+        out.append(mod.image_size(fp))
+    return out == [(1080, 1350), (1080, 1920), (1080, 1350)]
+
+
+@case
+def sav_real_video_measured_with_ffprobe(root):
+    # A real 9:16 mp4 through media_size() and check(): the next line after SAV for a video is FEED. Skipped where
+    # there is no ffmpeg (CI on Linux without it).
+    import shutil as sh
+    ffmpeg = sh.which('ffmpeg') or next((p for p in ('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg') if os.path.exists(p)), None)
+    if not ffmpeg:
+        print('  (skip: no ffmpeg)')
+        return True
+    video = os.path.join(root, 'reel.mp4')
+    subprocess.run([ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=white:s=1080x1920:d=1', '-pix_fmt',
+                    'yuv420p', video], check=True, timeout=60)
+    mod = gate_module()
+    mod.ROOT = root
+    mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
+    mod.majsztro_ok = lambda _value: None
+    os.makedirs(mod.KAPU, exist_ok=True)
+    if mod.media_size(video) != (1080, 1920):
+        return False
+    base = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
+            'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év']
+    results = []
+    for sav in ('9x16 felso 269 also 672 300-1240', '9x16 felso 269 also 672 300-1700'):
+        okf = os.path.join(mod.KAPU, 'reel.mp4.ok')
+        open(okf, 'w', encoding='utf-8').write('\n'.join(base + [f'SAV: {sav}']) + '\n')
+        later = time.time() + 5
+        os.utime(okf, (later, later))
+        results.append(mod.check(video) or '')
+    return 'FEED' in results[0] and 'SAV' not in results[0] and 'belelóg a levágott sávba' in results[1]
 
 def main():
     bad = 0
