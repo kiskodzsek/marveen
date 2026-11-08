@@ -180,8 +180,21 @@ context (Viktor 28582 (b); card 54bd5c28). In 14 days of fleet transcripts,
 
 - two repositories (`kiskodzsek/marabel`, `kiskodzsek/marveen`), the host a
   constant, the request built only from fixed templates and shaped arguments;
-- `pr list|get|files|create|edit` and `ci checks|runs|jobs|log`; no merge,
-  close, review, comments, issues, gists or contents;
+- `pr list|get|files|create|edit` and `ci checks|runs|jobs|log`;
+- the release writes Pulzus's chain needs (card 54bd5c28, 2026-11-08):
+  `pr review-approve`, `pr merge --method squash|merge`, `pr close`, `pr reopen`
+  and `branch get`. Each write takes the PR's full 40-hex head (`--sha`); the
+  script reads the PR first and writes nothing if the head moved or the state
+  is not the expected one (`refused-head` in the audit); the merge also sends
+  the sha, so GitHub refuses a moved head itself. No free text rides along: no
+  review body, no merge commit title or message. The writes run only as
+  `pulzus` or `klodel` (`refused-agent` otherwise, Viktor 31739): a drift
+  control, not authentication, since the agent id is self-declared; the token's
+  scope and the branch protection stay the real limit. The main session's id
+  resolves to `unknown` today, so Klodel's marveen merges stay on their own
+  path until its launcher names it. Still out: auto-merge, rebase
+  merge, other review kinds, comments, issues, gists, contents, branch create,
+  delete or protection, workflow re-run, cancel or dispatch;
 - the token from the caller's own repository-local git credential helper, with
   the system and global git config off, so the keychain helper (other agents'
   credentials) is never asked; in memory only;
@@ -194,8 +207,9 @@ context (Viktor 28582 (b); card 54bd5c28). In 14 days of fleet transcripts,
   lines carry a fresh random nonce (a CI step cannot print a fake end),
   tail-capped, secret shapes masked;
 - one metadata line per call in `store/gh-pr-audit.jsonl`, refusals included
-  (`refused`, `refused-clone`, `refused-body`, `no-token`); never a body, a
-  header or the token.
+  (`refused`, `refused-clone`, `refused-body`, `refused-agent`, `refused-head`,
+  `no-token`); a write's line also names the examined head sha; never a body,
+  a header or the token.
 
 The egress parser lets the script run only as the whole command
 `node <install>/scripts/gh-pr.mjs ...` (output redirects and a body heredoc
