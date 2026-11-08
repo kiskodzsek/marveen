@@ -48,10 +48,12 @@ seconds. The result is cached on the video's sha256 (store/kep-kapu/.ocr/). If t
 budget, the gate blocks; warm the cache with: python3 scripts/hooks/product-image-gate.py --ocr <video>.
 Safe band (Patrik privát TG 15669, 2026-11-08 07:03, CLAUDE.md BIZTONSÁGI SÁV; card c68d3745): the feed and the
 Reel/Story UI cover the top and the bottom of the frame while scrolling, so every marketing image and video carries
-    SAV: 4x5|9x16 felso <px> also <px> <y1>-<y2>
+    SAV: 4x5|9x16|1x1|fekvo felso <px> also <px> <y1>-<y2>
 <y1>-<y2> is the vertical extent of the bounding box of every important element (headline, product, steps, logo,
 price/CTA). The gate measures the file itself (sips / ffprobe), so the format must fit the real aspect, the bands must
-equal 10 % / 10 % (4:5) or 14 % top / 35 % bottom (9:16) of the real height (+-2 px), and the box must stay out of them.
+equal 10 % / 10 % (4:5, 1:1, landscape) or 14 % top / 35 % bottom (9:16) of the real height (+-2 px), and the box
+must stay out of them. 1:1 and landscape (any width > height) carry 10 % / 10 % too (Klodel 31805); only an upright
+format other than 4:5 and 9:16 is blocked.
 Tests: product-image-gate_test.py next to this file.
 Exit 0 = allow, exit 2 = block (stderr to the model).
 """
@@ -313,11 +315,14 @@ def message_and_real(d):
 
 
 # Safe bands as a share of the frame height: (top, bottom). Klodel 31782 / CLAUDE.md BIZTONSÁGI SÁV (Patrik TG 15669).
-SAFE_BANDS = {'4x5': (0.10, 0.10), '9x16': (0.14, 0.35)}
-SAFE_ASPECT = {'4x5': 5 / 4, '9x16': 16 / 9}  # height / width
+# 1:1 and landscape: 10 % / 10 % like 4:5 (Klodel 31805, 2026-11-08). 'fekvo' is any width > height outside the 1:1
+# tolerance (1.91:1 link image, 16:9 video, ...).
+SAFE_BANDS = {'4x5': (0.10, 0.10), '9x16': (0.14, 0.35), '1x1': (0.10, 0.10), 'fekvo': (0.10, 0.10)}
+SAFE_ASPECT = {'4x5': 5 / 4, '9x16': 16 / 9, '1x1': 1.0}  # height / width
 SAFE_ASPECT_TOL = 0.02
 SAFE_PX_TOL = 2
-SAV_RX = re.compile(r'^(4x5|9x16)\s+fels[oő]\s+(\d+)\s+als[oó]\s+(\d+)\s+(\d+)\s*-\s*(\d+)\s*$', re.I)
+SAV_RX = re.compile(r'^(4x5|9x16|1x1|fekv[oő])\s+fels[oő]\s+(\d+)\s+als[oó]\s+(\d+)\s+(\d+)\s*-\s*(\d+)\s*$',
+                    re.I)
 FFPROBE_PATHS = ('/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe')
 
 
@@ -393,20 +398,22 @@ def media_size(fp):
 def safe_band(fp, value):
     """Patrik TG 15669: "lathatonak kell lennie a fontos reszeknek scrollozasnal is.. levag alul felul vmennyit a fb".
     Returns the reason to block, or None."""
-    form = ('Alak: "SAV: 4x5|9x16 felso <px> also <px> <y1>-<y2>", az y-tartomány a fontos elemek (cím, termék, '
+    form = ('Alak: "SAV: 4x5|9x16|1x1|fekvo felso <px> also <px> <y1>-<y2>", az y-tartomány a fontos elemek (cím, termék, '
             'lépések, logó, ár/CTA) közös befoglaló dobozáé (CLAUDE.md BIZTONSÁGI SÁV, Patrik TG 15669).')
     m = SAV_RX.match((value or '').strip())
     if not m:
         return 'SAV sor hiányzik/hibás. ' + form
-    fmt, top, bot, y1, y2 = m.group(1).lower(), *(int(m.group(i)) for i in range(2, 6))
+    fmt, top, bot, y1, y2 = m.group(1).lower().replace('ő', 'o'), *(int(m.group(i)) for i in range(2, 6))
     size = media_size(fp)
     if not size or min(size) <= 0:
         return 'SAV: a fájl mérete nem mérhető (sips/ffprobe), a sávot nem tudom ellenőrizni.'
     w, h = size
     real = next((k for k, a in SAFE_ASPECT.items() if abs(h / w - a) <= a * SAFE_ASPECT_TOL), None)
+    if real is None and h < w:
+        real = 'fekvo'
     if real is None:
-        return (f'SAV: a fájl {w}x{h}, se 4:5, se 9:16; a hírfolyam-sávot ezekre mérjük. Készítsd 4:5 (pl. 1080x1350) '
-                'vagy 9:16 (pl. 1080x1920) arányban.')
+        return (f'SAV: a fájl {w}x{h} álló, de se 4:5, se 9:16; a hírfolyam-sávot ezekre mérjük (és 1:1-re, fekvőre). '
+                'Készítsd 4:5 (pl. 1080x1350), 9:16 (pl. 1080x1920) vagy 1:1 (pl. 1080x1080) arányban.')
     if real != fmt:
         return f'SAV: a sor {fmt}, de a fájl {w}x{h}, ez {real}. ' + form
     want_top, want_bot = (round(h * f) for f in SAFE_BANDS[fmt])

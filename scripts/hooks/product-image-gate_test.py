@@ -936,8 +936,55 @@ def sav_band_px_must_fit_the_height(root):
 
 
 @case
-def sav_square_image_blocked(root):
-    return 'se 4:5, se 9:16' in sav_check(root, 1080, 1080, '4x5 felso 108 also 108 200-900')
+def sav_upright_other_ratio_blocked(root):
+    # 2:3 upright is none of 4:5, 9:16, 1:1: blocked (Klodel 31805 opened only 1:1 and landscape).
+    return 'se 4:5, se 9:16' in sav_check(root, 1080, 1620, '4x5 felso 162 also 162 200-1400')
+
+
+@case
+def sav_1x1_inside_passes(root):
+    # Klodel 31805: 1:1 gets 10 % / 10 % like 4:5 (108 px on 1080).
+    r = sav_check(root, 1080, 1080, '1x1 felso 108 also 108 110-970')
+    return 'SAV' not in r and 'ARC-ITELET' in r
+
+
+@case
+def sav_1x1_top_band_blocked(root):
+    return 'belelóg a levágott sávba' in sav_check(root, 1080, 1080, '1x1 felso 108 also 108 100-900')
+
+
+@case
+def sav_1x1_band_px_must_fit(root):
+    # a 9:16-style 14/35 % band on a square is wrong: 151/378 instead of 108/108
+    return 'a sorban 151/378' in sav_check(root, 1080, 1080, '1x1 felso 151 also 378 200-600')
+
+
+@case
+def sav_landscape_inside_passes(root):
+    # 1200x628 link image: 10 % of 628 = 63 px, free 63-565.
+    r = sav_check(root, 1200, 628, 'fekvo felso 63 also 63 70-560')
+    return 'SAV' not in r and 'ARC-ITELET' in r
+
+
+@case
+def sav_landscape_accented_word_passes(root):
+    r = sav_check(root, 1920, 1080, 'fekvő felső 108 alsó 108 120-960')
+    return 'SAV' not in r and 'ARC-ITELET' in r
+
+
+@case
+def sav_landscape_bottom_band_blocked(root):
+    return 'belelóg a levágott sávba' in sav_check(root, 1200, 628, 'fekvo felso 63 also 63 70-600')
+
+
+@case
+def sav_landscape_file_called_square_blocked(root):
+    return 'ez fekvo' in sav_check(root, 1200, 628, '1x1 felso 63 also 63 70-560')
+
+
+@case
+def sav_square_file_called_4x5_blocked(root):
+    return 'ez 1x1' in sav_check(root, 1080, 1080, '4x5 felso 108 also 108 200-900')
 
 
 @case
