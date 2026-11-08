@@ -32,6 +32,9 @@ J1 paper "too white, almost glows" -- both passed a self-attested "A5: ok"):
     KEZ:nyitott|zart <book edge px>/<adult hand wrist-to-fingertip px>  (hand nearest the book's depth)
            closed: 0.6-1.1, open: 1.3-2.0; or "KEZ: nincs <reason, what else was measured>" -- only together
            with "MERCE: nincs-ember ..." (Klodel 28805: a head-measured frame needs a hand measure)
+    ELRENDEZES: kulon-elem <reason>  (optional; Klodel 32029) the book stands next to the photo as its own layout
+           element, not in a scene with the person: KEZ may then be absent or "nincs" if the MERCE head ratio is in
+           band, or MERCE is "nincs-ember" in the book's own A5 ratio + VALODI: igen. Not with "profil".
     FENY: <paper L* (Lab)> / <brightest comparable white in the scene L*> + gutter shadow
            paper may not be brighter than the scene's own whites (no glowing page)
     KEPES: van <what photo cover/page shows> | nincs <reason>   (Patrik TG 1806)
@@ -321,6 +324,7 @@ SAFE_BANDS = {'4x5': (0.10, 0.10), '9x16': (0.14, 0.35), '1x1': (0.10, 0.10), 'f
 SAFE_ASPECT = {'4x5': 5 / 4, '9x16': 16 / 9, '1x1': 1.0}  # height / width
 SAFE_ASPECT_TOL = 0.02
 SAFE_PX_TOL = 2
+LAYOUT_REASON_MIN = 15  # ELRENDEZES: kulon-elem <reason> (Klodel 32029)
 SAV_RX = re.compile(r'^(4x5|9x16|1x1|fekv[oő])\s+fels[oő]\s+(\d+)\s+als[oó]\s+(\d+)\s+(\d+)\s*-\s*(\d+)\s*$',
                     re.I)
 FFPROBE_PATHS = ('/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe')
@@ -652,32 +656,49 @@ def check(fp):
         # Second, independent measure against the nearest adult HAND at the book's depth
         # (wrist to fingertip ~18 cm): closed 14.8 cm edge -> ~0.82, open 30 cm -> ~1.67.
         k = (d.get('KEZ') or '').split()
-        if profile and k and k[0].lower() == 'nincs':
-            return (f'{base}: MERCE: profil, de KEZ: nincs. A profil-mérés a fej-sávot kihagyja, ezért a méretet a '
-                    'kézmérés adja: "KEZ: nyitott|zart <könyv él px>/<kézfej px>", a könyv mélységében lévő kéz, a lap '
-                    'síkjára vetítve (kártya 9e040e9c).')
-        if k and k[0].lower() == 'nincs' and not no_person:
-            # Klodel 28805 (2026-11-06): with no hand the head branch was the only scale, and short2 passed with
-            # an invented "zart 1/1" and no person in the frame. Without a hand, the frame must be the no-person
-            # one, measured on the book's own proportions; a frame with a person needs the hand measure.
-            return (f'{base}: KEZ: nincs, de a MERCE fejhez mért. Kéz nélkül csak az ember nélküli mérés fogadható el: '
-                    '"MERCE: nincs-ember nyitott|zart <könyv szélesség px>/<könyv magasság px>"; ha van ember a '
-                    'képen, a könyv mélységéhez legközelebbi kézhez mérj (KEZ).')
-        if k and k[0].lower() == 'nincs' and len(' '.join(k[1:])) >= 15:
-            pass
-        else:
-            try:
-                kk = k[0].lower()
-                bk, hk = (float(x) for x in k[1].split('/'))
-                rk = bk / hk
-            except Exception:
-                return (f'{base}: KEZ hiányzik/hibás. Alak: "KEZ: zart|nyitott <könyv él px>/<felnőtt kézfej '
-                        'csuklótól ujjhegyig px, a könyv mélységéhez legközelebbi kéz>" (mérve), vagy '
-                        '"KEZ: nincs <miért nincs kéz a képen, mihez mértél helyette>".')
-            klo, khi = (1.3, 2.0) if kk.startswith('nyit') else (0.6, 1.1)
-            if not (klo <= rk <= khi):
-                return (f'{base}: a könyv nem A5 a kézhez mérve: {kk} arány {rk:.2f}, elvárt {klo}-{khi} '
-                        '(1 kézfej kb. 18 cm; a zárt A5 éle 14,8 cm).')
+        # Klodel 32029 (2026-11-08, Patrik "Gogogo"): a web layout where the book stands NEXT TO a photo, as its own
+        # element, not in a scene with the person. There the nearest hand is not at the book's depth (a fist in
+        # foreshortening measured 2.27; the baby frame has no adult hand), so the hand measure means nothing. With
+        # "ELRENDEZES: kulon-elem <indok>" the KEZ line is optional (absent or "nincs") -- the scale still rests on a
+        # MERCE that passed above: the head band, or "nincs-ember" with the book's own A5 ratio + VALODI: igen.
+        # "profil" is not covered (it has no head band, the hand is its only size). A measured KEZ is still checked.
+        lay_raw = (d.get('ELRENDEZES') or '').strip()
+        lay = lay_raw.split(None, 1)
+        layout = (len(lay) == 2 and lay[0].lower() in ('kulon-elem', 'külön-elem')
+                  and len(lay[1].strip()) >= LAYOUT_REASON_MIN)
+        if lay_raw and not layout:
+            return (f'{base}: ELRENDEZES sor hibás. Alak: "ELRENDEZES: kulon-elem <miért külön elem a könyv, nem '
+                    f'jelenetben az emberrel>", az indok legalább {LAYOUT_REASON_MIN} karakter.')
+        hand_optional = layout and not profile and (not k or k[0].lower() == 'nincs')
+        if hand_optional and no_person and not (d.get('VALODI') or '').lower().startswith('igen'):
+            return f'{base}: ELRENDEZES: kulon-elem ember nélküli MERCE-vel csak "VALODI: igen <indok>" sorral.'
+        if not hand_optional:
+            if profile and k and k[0].lower() == 'nincs':
+                return (f'{base}: MERCE: profil, de KEZ: nincs. A profil-mérés a fej-sávot kihagyja, ezért a méretet a '
+                        'kézmérés adja: "KEZ: nyitott|zart <könyv él px>/<kézfej px>", a könyv mélységében lévő kéz, a lap '
+                        'síkjára vetítve (kártya 9e040e9c).')
+            if k and k[0].lower() == 'nincs' and not no_person:
+                # Klodel 28805 (2026-11-06): with no hand the head branch was the only scale, and short2 passed with
+                # an invented "zart 1/1" and no person in the frame. Without a hand, the frame must be the no-person
+                # one, measured on the book's own proportions; a frame with a person needs the hand measure.
+                return (f'{base}: KEZ: nincs, de a MERCE fejhez mért. Kéz nélkül csak az ember nélküli mérés fogadható el: '
+                        '"MERCE: nincs-ember nyitott|zart <könyv szélesség px>/<könyv magasság px>"; ha van ember a '
+                        'képen, a könyv mélységéhez legközelebbi kézhez mérj (KEZ).')
+            if k and k[0].lower() == 'nincs' and len(' '.join(k[1:])) >= 15:
+                pass
+            else:
+                try:
+                    kk = k[0].lower()
+                    bk, hk = (float(x) for x in k[1].split('/'))
+                    rk = bk / hk
+                except Exception:
+                    return (f'{base}: KEZ hiányzik/hibás. Alak: "KEZ: zart|nyitott <könyv él px>/<felnőtt kézfej '
+                            'csuklótól ujjhegyig px, a könyv mélységéhez legközelebbi kéz>" (mérve), vagy '
+                            '"KEZ: nincs <miért nincs kéz a képen, mihez mértél helyette>".')
+                klo, khi = (1.3, 2.0) if kk.startswith('nyit') else (0.6, 1.1)
+                if not (klo <= rk <= khi):
+                    return (f'{base}: a könyv nem A5 a kézhez mérve: {kk} arány {rk:.2f}, elvárt {klo}-{khi} '
+                            '(1 kézfej kb. 18 cm; a zárt A5 éle 14,8 cm).')
         f = d.get('FENY') or ''
         if 'L*' not in f and 'l*' not in f:
             return (f'{base}: FENY hiányzik. Alak: "FENY: papír L* <x> / jelenet legfehérebb hasonló felülete '
