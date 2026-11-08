@@ -66,6 +66,8 @@ const EXEMPT: Record<string, string> = {
     'shared library imported by clear-capture.py / clear-replay.py; not itself a hook',
   'memory_frontmatter_lib.py':
     'shared library: the one memory-frontmatter check, imported by memory-frontmatter-gate.py (Write/Edit) and memory-frontmatter-bash-gate.py (Bash, KAPUEGYUT918); not itself a hook',
+  'private-topic-group-gate_test.py':
+    'the unit test of private-topic-group-gate.py (run: python3 -I scripts/hooks/private-topic-group-gate_test.py); not itself a hook (6dbeadad)',
   'email_extract.py':
     'shared library imported by outgoing-copy-gate.py (and the level-2 email approval gate, EMAILKAPU901 PR2); not itself a hook',
   'ms365-policy-check.mjs':
@@ -122,6 +124,8 @@ function registrationCorpus(): string {
 // every agent. Keep every reason concrete and sourced (docstring, docs, PR):
 // a "misc" entry here would re-open exactly the blind spot this split closes.
 const CHECKOUT_ONLY: Record<string, string> = {
+  'private-topic-group-gate.py':
+    'the owner\'s private topics stay out of the team group (card 6dbeadad): it lets through only the owner\'s private chat with the MAIN agent (store/projektek.json elo_uzenet.privat) and gates every other chat, so on a sub-agent, whose chats are all "other", it would gate every message that names a private project',
   'email-approval-gate.py':
     'level-aware email gate for the MAIN agent (EMAILKAPU901 PR2, #1149): its docstring scopes it to sessions rooted at PROJECT_ROOT, and sub-agents keep their unconditional hard-deny (email-send-gate.mjs), behind which this gate would be a no-op',
   'inbox-drain.py':

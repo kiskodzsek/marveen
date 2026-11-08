@@ -58,6 +58,7 @@ const EXPECTED: Record<string, string[]> = {
   PostToolUseFailure: ['tool-log-capture.py', 'memory-frontmatter-bash-gate.py'],
   PreToolUse: [
     'outgoing-copy-gate.py', 'email-approval-gate.py',
+    'private-topic-group-gate.py', // 6dbeadad
     'channel-image-resize.sh', 'egress-gate.mjs', 'ms365-download-gate.mjs', 'memory-frontmatter-gate.py',
     'memory-frontmatter-bash-gate.py', 'image-quarantine-gate.mjs',
   ],
