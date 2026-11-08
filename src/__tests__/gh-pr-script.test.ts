@@ -3,9 +3,10 @@
 // The script makes two claims, and both are tested here:
 //   (a) the requests the fleet needs are built exactly (PR list/get/files/create/edit, CI checks/runs/
 //       jobs/log on kiskodzsek/marabel and kiskodzsek/marveen);
-//   (b) nothing else can be built: no merge, no close, no contents, no other repository, no raw path,
-//       method or JSON body, no fork head, no traversal -- and the token never comes from the system
-//       keychain helper, and a job-log redirect is followed only to GitHub's blob hosts.
+//   (b) nothing else can be built: no unbound merge, close or approval (each needs the PR's full head
+//       sha and is checked against the PR before the write), no comment, no contents, no other
+//       repository, no raw path, method or JSON body, no fork head, no traversal -- and the token never
+//       comes from the system keychain helper, and a job-log redirect is followed only to GitHub's blob hosts.
 // No network: buildRequest / credentialArgs / logRedirectAllowed / shape are pure, and the entry point
 // is guarded, so importing runs nothing.
 import { describe, it, expect } from 'vitest'
@@ -15,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { buildRequest, credentialArgs, gitEnv, logRedirectAllowed, checkBodyPath, checkBodyText, bodyRoots, maskSecrets, frameLog, shape, splitClone, checkCloneDir, forbiddenTree, agentId, UsageError } from '../../scripts/gh-pr.mjs'
+import { buildRequest, credentialArgs, gitEnv, logRedirectAllowed, checkBodyPath, checkBodyText, bodyRoots, maskSecrets, frameLog, shape, splitClone, checkCloneDir, forbiddenTree, agentId, headMismatch, UsageError } from '../../scripts/gh-pr.mjs'
 
 // A PEM block built from parts at run time: the repository's secret-gate (rightly) refuses one written out.
 const PEM_EDGE = '-'.repeat(5)
@@ -51,8 +52,70 @@ describe('gh-pr: the requests the fleet needs are built exactly', () => {
   })
 })
 
+const HEAD = '40abc1a026d33c3b2d1367da3b4c5efe463d628d'
+
+describe('gh-pr: the release writes (Pulzus 21:2x, card 54bd5c28), each bound to the PR head', () => {
+  it('approve, merge, close, reopen and the branch head are built exactly, with no free text', () => {
+    const a = req(`marabel pr review-approve 1200 --sha ${HEAD}`)
+    expect(a).toMatchObject({ method: 'POST', path: '/repos/kiskodzsek/marabel/pulls/1200/reviews', kind: 'pr-review', target: '1200' })
+    expect(a.body).toEqual({ commit_id: HEAD, event: 'APPROVE' })
+    expect(a.expect).toEqual({ path: '/repos/kiskodzsek/marabel/pulls/1200', sha: HEAD, state: 'open' })
+    const m = req(`marveen pr merge 134 --sha ${HEAD} --method squash`)
+    expect(m).toMatchObject({ method: 'PUT', path: '/repos/kiskodzsek/marveen/pulls/134/merge', kind: 'pr-merge' })
+    expect(m.body).toEqual({ sha: HEAD, merge_method: 'squash' })
+    expect(m.expect).toEqual({ path: '/repos/kiskodzsek/marveen/pulls/134', sha: HEAD, state: 'open' })
+    expect(req(`marabel pr merge 1 --method merge --sha ${HEAD}`).body).toEqual({ sha: HEAD, merge_method: 'merge' })
+    const c = req(`marabel pr close 1201 --sha ${HEAD}`)
+    expect(c).toMatchObject({ method: 'PATCH', path: '/repos/kiskodzsek/marabel/pulls/1201', body: { state: 'closed' } })
+    expect(c.expect.state).toBe('open')
+    const o = req(`marabel pr reopen 1201 --sha ${HEAD}`)
+    expect(o).toMatchObject({ method: 'PATCH', path: '/repos/kiskodzsek/marabel/pulls/1201', body: { state: 'open' } })
+    expect(o.expect.state).toBe('closed')
+    expect(req('marabel branch get main')).toMatchObject({ method: 'GET', path: '/repos/kiskodzsek/marabel/branches/main', kind: 'branch', target: 'main' })
+    expect(req('marabel branch get feat/x').path).toBe('/repos/kiskodzsek/marabel/branches/feat%2Fx')
+    expect(req('marabel pr get 1').expect).toBeUndefined()
+  })
+  it('a write without the full head sha, with another method, an extra key or free text is refused', () => {
+    for (const s of [
+      'marabel pr review-approve 1', `marabel pr review-approve 1 --sha ${HEAD.slice(0, 7)}`, `marabel pr review-approve 1 --sha ${HEAD.toUpperCase()}`,
+      `marabel pr review-approve 1 --sha ${HEAD}0`, `marabel pr review-approve 1 --sha ${HEAD} --event REQUEST_CHANGES`,
+      `marabel pr review-approve 1 --sha ${HEAD} --body x`, `marabel pr review-approve --sha ${HEAD}`, `marabel pr review-approve 1 2 --sha ${HEAD}`,
+      `marabel pr review-approve 1 --sha ${HEAD} --sha ${HEAD}`,
+      `marabel pr merge 1 --sha ${HEAD}`, 'marabel pr merge 1 --method squash', `marabel pr merge 1 --sha ${HEAD} --method rebase`,
+      `marabel pr merge 1 --sha ${HEAD} --method squash --commit-title x`, `marabel pr merge 1 --sha ${HEAD} --method squash --commit-message x`,
+      `marabel pr merge 1 --sha main --method squash`, `marabel pr merge 0 --sha ${HEAD} --method squash`,
+      'marabel pr close 1', `marabel pr close 1 --sha ${HEAD} --title x`, 'marabel pr reopen 1', `marabel pr reopen 1/../2 --sha ${HEAD}`,
+      'marabel branch get', 'marabel branch get ../x', 'marabel branch get evil:main', 'marabel branch get -x', 'marabel branch get a b',
+      'marabel branch list', 'marabel branch delete x', 'marabel branch protect main', `other pr merge 1 --sha ${HEAD} --method squash`,
+    ]) expect({ s, refused: refused(s.split(' ')) }).toEqual({ s, refused: true })
+  })
+  it('the guard before a write: the PR must be at the --sha head and in the expected state', () => {
+    const open = { head: { sha: HEAD }, state: 'open', merged: false }
+    expect(headMismatch({ sha: HEAD, state: 'open' }, open)).toBeNull()
+    expect(headMismatch({ sha: HEAD, state: 'open' }, { ...open, head: { sha: 'f'.repeat(40) } })).toMatch(/head is not --sha/)
+    expect(headMismatch({ sha: HEAD, state: 'open' }, { ...open, head: {} })).toMatch(/head is not --sha/)
+    expect(headMismatch({ sha: HEAD, state: 'open' }, { ...open, state: 'closed' })).toMatch(/not open/)
+    expect(headMismatch({ sha: HEAD, state: 'open' }, { ...open, merged: true })).toMatch(/already merged/)
+    expect(headMismatch({ sha: HEAD, state: 'closed' }, { ...open, state: 'closed' })).toBeNull()
+    expect(headMismatch({ sha: HEAD, state: 'closed' }, open)).toMatch(/not closed/)
+    for (const pr of [null, undefined, 'x', 1]) expect(headMismatch({ sha: HEAD, state: 'open' }, pr)).toMatch(/could not be read/)
+  })
+  it('the guard runs in the entry point before the write, and a mismatch or a failed read writes nothing', () => {
+    const src = readFileSync(SCRIPT, 'utf-8')
+    const guard = src.indexOf('if (req.expect) {')
+    const write = src.indexOf('res = await fetch(API + req.path')
+    expect(guard).toBeGreaterThan(0)
+    expect(write).toBeGreaterThan(guard)
+    const block = src.slice(guard, write)
+    expect(block).toContain("method: 'GET'")
+    expect(block).toContain('headMismatch(req.expect, pr)')
+    expect(block).toMatch(/pre\.ok \? headMismatch\(req\.expect, pr\) : `the PR read gave HTTP/)
+    expect(block).toMatch(/audit\(\{ \.\.\.row, status: 'refused-head' \}\)\s*\n\s*throw new Error/)
+  })
+})
+
 describe('gh-pr: nothing else can be built', () => {
-  it('no merge, close, contents, issues, comments, gists, raw path or raw method', () => {
+  it('no unbound merge, close or review; no contents, issues, comments, gists, raw path or raw method', () => {
     for (const s of ['marabel pr merge 1', 'marabel pr close 1', 'marabel pr review 1', 'marabel pr comment 1',
       'marabel contents put x', 'marabel issues create', 'marabel gist create', 'marabel api /gists', 'marabel GET /user',
       'marabel ci rerun 1', 'marabel ci cancel 1', 'marabel ci dispatch x'])
@@ -207,6 +270,11 @@ describe('gh-pr: the token and the redirect', () => {
     expect(shape('pr-files', [{ filename: 'a', status: 'added', additions: 1, deletions: 0, patch: 'SECRET?' }])).toEqual([{ filename: 'a', status: 'added', additions: 1, deletions: 0 }])
     expect(shape('ci-checks', { check_runs: [{ id: 1, name: 'n', status: 's', conclusion: 'c', html_url: 'u', output: { text: 'x' } }] }))
       .toEqual([{ id: 1, name: 'n', status: 's', conclusion: 'c', html_url: 'u' }])
+    expect(shape('pr-review', { id: 9, state: 'APPROVED', commit_id: HEAD, submitted_at: 't', html_url: 'u', body: 'x', user: { login: 'l' } }))
+      .toEqual({ id: 9, state: 'APPROVED', commit_id: HEAD, submitted_at: 't', html_url: 'u' })
+    expect(shape('pr-merge', { merged: true, sha: HEAD, message: 'Pull Request successfully merged', extra: 1 })).toEqual({ merged: true, sha: HEAD, message: 'Pull Request successfully merged' })
+    expect(shape('branch', { name: 'main', commit: { sha: HEAD, commit: { message: 'x' } }, protected: true, protection: {} }))
+      .toEqual({ name: 'main', 'commit.sha': HEAD, protected: true })
   })
 })
 
@@ -225,12 +293,19 @@ describe('gh-pr: the process', () => {
   const run = (args: string[], cwd = tmpdir()) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd, encoding: 'utf-8', env: { ...process.env, GH_PR_AUDIT_LOG: join(mkdtempSync(join(tmpdir(), 'gh-pr-a-')), 'a.jsonl') } })
   it('a refused command exits 2 with a usage line, makes no request, and leaves one metadata-only audit line', () => {
     const log = join(mkdtempSync(join(tmpdir(), 'gh-pr-audit-')), 'audit.jsonl')
-    const r = spawnSync(process.execPath, [SCRIPT, 'marabel', 'pr', 'merge', '1'], { cwd: tmpdir(), encoding: 'utf-8', env: { ...process.env, GH_PR_AUDIT_LOG: log, MARVEEN_AGENT_ID: 'tester' } })
+    const r = spawnSync(process.execPath, [SCRIPT, 'marabel', 'pr', 'comment', '1'], { cwd: tmpdir(), encoding: 'utf-8', env: { ...process.env, GH_PR_AUDIT_LOG: log, MARVEEN_AGENT_ID: 'tester' } })
     expect(r.status).toBe(2)
     expect(r.stderr).toMatch(/^gh-pr: usage: unknown command/)
     const row = JSON.parse(readFileSync(log, 'utf-8').trim())
     expect(Object.keys(row).sort()).toEqual(['agent', 'cmd', 'repo', 'status', 'ts'])
-    expect(row).toMatchObject({ agent: 'tester', cmd: 'pr merge', repo: 'marabel', status: 'refused' })
+    expect(row).toMatchObject({ agent: 'tester', cmd: 'pr comment', repo: 'marabel', status: 'refused' })
+  })
+  it('a merge without --sha is refused the same way, before any request', () => {
+    const log = join(mkdtempSync(join(tmpdir(), 'gh-pr-audit-')), 'audit.jsonl')
+    const r = spawnSync(process.execPath, [SCRIPT, 'marabel', 'pr', 'merge', '1', '--method', 'squash'], { cwd: tmpdir(), encoding: 'utf-8', env: { ...process.env, GH_PR_AUDIT_LOG: log, MARVEEN_AGENT_ID: 'tester' } })
+    expect(r.status).toBe(2)
+    expect(r.stderr).toMatch(/^gh-pr: usage: bad head sha/)
+    expect(JSON.parse(readFileSync(log, 'utf-8').trim())).toMatchObject({ cmd: 'pr merge', repo: 'marabel', status: 'refused' })
   })
   const audited = (args: string[], cwd: string) => {
     const log = join(mkdtempSync(join(tmpdir(), 'gh-pr-audit-')), 'audit.jsonl')
