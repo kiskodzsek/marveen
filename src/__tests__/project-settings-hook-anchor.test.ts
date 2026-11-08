@@ -61,6 +61,7 @@ const EXPECTED: Record<string, string[]> = {
     'private-topic-group-gate.py', // 6dbeadad
     'channel-image-resize.sh', 'egress-gate.mjs', 'ms365-download-gate.mjs', 'memory-frontmatter-gate.py',
     'memory-frontmatter-bash-gate.py', 'image-quarantine-gate.mjs',
+    'keychain-read-gate.py', // c1921b55
   ],
   Stop: ['marveen-commands.py', 'telegram-reply-guard.py', 'telegram_progress_clear.py', 'slack_progress_clear.py'],
   SessionStart: ['ledger-replay.py', 'taskstate-replay.py', 'clear-replay.py', 'marveen-commands.py'],

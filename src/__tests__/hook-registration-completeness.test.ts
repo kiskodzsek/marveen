@@ -58,6 +58,8 @@ const REGISTRATION_SURFACES = [...SEEDING_SURFACES, ...CHECKOUT_SURFACES]
 const EXEMPT: Record<string, string> = {
   'ledger_lib.py':
     'shared library imported by the ledger hooks; not itself a hook',
+  'keychain-read-gate_test.py':
+    'the unit test of keychain-read-gate.py (run: python3 -I scripts/hooks/keychain-read-gate_test.py); not itself a hook (c1921b55)',
   'command_prompt.py':
     'shared library: the one "is this prompt an owner slash command" check, imported by marveen-commands.py, inbox-drain.py and channel-inbox-drain.py; not itself a hook',
   'hook_errlog.py':
