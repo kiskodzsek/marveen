@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { buildRequest, credentialArgs, gitEnv, logRedirectAllowed, checkBodyPath, checkBodyText, bodyRoots, maskSecrets, frameLog, shape, splitClone, checkCloneDir, forbiddenTree, agentId, headMismatch, UsageError } from '../../scripts/gh-pr.mjs'
+import { buildRequest, credentialArgs, gitEnv, logRedirectAllowed, checkBodyPath, checkBodyText, bodyRoots, maskSecrets, frameLog, shape, splitClone, checkCloneDir, forbiddenTree, agentId, headMismatch, writerRefusal, UsageError } from '../../scripts/gh-pr.mjs'
 
 // A PEM block built from parts at run time: the repository's secret-gate (rightly) refuses one written out.
 const PEM_EDGE = '-'.repeat(5)
@@ -86,6 +86,7 @@ describe('gh-pr: the release writes (Pulzus 21:2x, card 54bd5c28), each bound to
       `marabel pr merge 1 --sha main --method squash`, `marabel pr merge 0 --sha ${HEAD} --method squash`,
       'marabel pr close 1', `marabel pr close 1 --sha ${HEAD} --title x`, 'marabel pr reopen 1', `marabel pr reopen 1/../2 --sha ${HEAD}`,
       'marabel branch get', 'marabel branch get ../x', 'marabel branch get evil:main', 'marabel branch get -x', 'marabel branch get a b',
+      'marabel branch get .', 'marabel branch get ...', `marabel pr create --title x --head . --base main`,
       'marabel branch list', 'marabel branch delete x', 'marabel branch protect main', `other pr merge 1 --sha ${HEAD} --method squash`,
     ]) expect({ s, refused: refused(s.split(' ')) }).toEqual({ s, refused: true })
   })
@@ -99,6 +100,13 @@ describe('gh-pr: the release writes (Pulzus 21:2x, card 54bd5c28), each bound to
     expect(headMismatch({ sha: HEAD, state: 'closed' }, { ...open, state: 'closed' })).toBeNull()
     expect(headMismatch({ sha: HEAD, state: 'closed' }, open)).toMatch(/not closed/)
     for (const pr of [null, undefined, 'x', 1]) expect(headMismatch({ sha: HEAD, state: 'open' }, pr)).toMatch(/could not be read/)
+  })
+  it('the writes run only as the release chain (Viktor 31739 LOW); reads are anyone\'s', () => {
+    const merge = req(`marabel pr merge 1 --sha ${HEAD} --method squash`)
+    for (const a of ['pulzus', 'klodel']) expect(writerRefusal(merge, a)).toBeNull()
+    for (const a of ['dave', 'kernel', 'unknown', '', 'Pulzus', 'pulzus ']) expect(writerRefusal(merge, a)).toMatch(/only as pulzus or klodel/)
+    for (const s of [`marabel pr review-approve 1 --sha ${HEAD}`, `marabel pr close 1 --sha ${HEAD}`, `marabel pr reopen 1 --sha ${HEAD}`]) expect(writerRefusal(req(s), 'dave')).toMatch(/only as/)
+    for (const s of ['marabel pr get 1', 'marabel branch get main', 'marabel ci checks abcdef1']) expect(writerRefusal(req(s), 'dave')).toBeNull()
   })
   it('the guard runs in the entry point before the write, and a mismatch or a failed read writes nothing', () => {
     const src = readFileSync(SCRIPT, 'utf-8')
@@ -307,11 +315,22 @@ describe('gh-pr: the process', () => {
     expect(r.stderr).toMatch(/^gh-pr: usage: bad head sha/)
     expect(JSON.parse(readFileSync(log, 'utf-8').trim())).toMatchObject({ cmd: 'pr merge', repo: 'marabel', status: 'refused' })
   })
-  const audited = (args: string[], cwd: string) => {
+  const audited = (args: string[], cwd: string, agent = 'tester') => {
     const log = join(mkdtempSync(join(tmpdir(), 'gh-pr-audit-')), 'audit.jsonl')
-    const r = spawnSync(process.execPath, [SCRIPT, ...args], { cwd, encoding: 'utf-8', env: { ...process.env, GH_PR_AUDIT_LOG: log, MARVEEN_AGENT_ID: 'tester' } })
+    const r = spawnSync(process.execPath, [SCRIPT, ...args], { cwd, encoding: 'utf-8', env: { ...process.env, GH_PR_AUDIT_LOG: log, MARVEEN_AGENT_ID: agent } })
     return { r, row: JSON.parse(readFileSync(log, 'utf-8').trim()) }
   }
+  it('a write as another agent stops before the token and any request, audited refused-agent with the sha', () => {
+    const { r, row } = audited(['marabel', 'pr', 'merge', '7', '--sha', HEAD, '--method', 'squash'], mkdtempSync(join(tmpdir(), 'gh-pr-agent-')), 'dave')
+    expect(r.status).toBe(2)
+    expect(r.stderr).toMatch(/^gh-pr: usage: the release writes run only as pulzus or klodel, not dave/)
+    expect(row).toMatchObject({ agent: 'dave', cmd: 'pr merge', repo: 'marabel', target: '7', sha: HEAD, status: 'refused-agent' })
+  })
+  it('a write as pulzus passes the agent check and goes on to the token (no-token here), the sha in the row', () => {
+    const { r, row } = audited(['marabel', 'pr', 'review-approve', '7', '--sha', HEAD], mkdtempSync(join(tmpdir(), 'gh-pr-agent-')), 'pulzus')
+    expect(r.status).toBe(1)
+    expect(row).toMatchObject({ agent: 'pulzus', cmd: 'pr review-approve', sha: HEAD, status: 'no-token' })
+  })
   it('F3: without a local credential helper it stops before any request, names no token, and audits no-token', () => {
     const { r, row } = audited(['marabel', 'pr', 'get', '1'], mkdtempSync(join(tmpdir(), 'gh-pr-nogit-')))
     expect(r.status).toBe(1)

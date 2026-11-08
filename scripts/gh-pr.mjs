@@ -32,8 +32,9 @@
 // examined; before the write the script reads the PR and stops if its head is another commit or its state is
 // not the one the write expects (open; closed for reopen). The merge carries the same sha to GitHub, which
 // refuses a moved head itself. No free text rides along: the approval has no review body, the merge no commit
-// title or message (GitHub's default), so neither is a comment channel. The token's own rights still decide
-// who can approve or merge (H9).
+// title or message (GitHub's default), so neither is a comment channel. The writes run only as pulzus or
+// klodel (`refused-agent` otherwise; a drift control, not authentication), and the audit line names the sha.
+// The token's own rights and the branch protection still decide who can approve or merge (H9).
 //
 // NOT here, on purpose (Viktor 30388 K2, still): auto-merge, rebase merge, request-changes or commented
 // reviews, review or PR comments, issues, gists, repository contents, branch protection, branch create or
@@ -79,7 +80,8 @@ const SHA = /^[0-9a-f]{7,40}$/
 // A write's head: the full commit id only, so a short prefix can never match a different commit.
 const HEAD_SHA = /^[0-9a-f]{40}$/
 // A same-repository branch: no `owner:` (a fork head), no `..`, no `?`, `#`, `%`, no leading `-` or `/`.
-const BRANCH = /^(?!-)(?!\/)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/
+// A name of dots only is refused too: `.` would normalize the URL to the branch list (Viktor 31739 INFO-2).
+const BRANCH = /^(?!-)(?!\/)(?!\.+$)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/
 const PER_PAGE = /^(?:[1-9]|[1-9]\d|100)$/
 const PAGE = /^[1-9]\d{0,3}$/
 // GitHub's `created` filter: a date, a comparison, or a range (actions/runs "created" parameter).
@@ -369,6 +371,15 @@ export function headMismatch(expect, pr) {
   return null
 }
 
+// The release writes run only as the release chain (Viktor 31739 LOW): a drift control against an accidental
+// or injected write from another agent, not authentication (the id is self-declared). The real limit stays
+// the token's scope and the branch protection. Pure: returns the reason it refuses, or null.
+export const RELEASE_AGENTS = new Set(['pulzus', 'klodel'])
+export function writerRefusal(req, agent = agentId()) {
+  if (!req.expect || RELEASE_AGENTS.has(agent)) return null
+  return `the release writes run only as ${[...RELEASE_AGENTS].join(' or ')}, not ${String(agent).slice(0, 40)}`
+}
+
 export function agentId(env = process.env) {
   if (env.MARVEEN_AGENT_ID) return env.MARVEEN_AGENT_ID
   const m = /\/agents\/([^/]+)\//.exec(`${env.CLAUDE_CONFIG_DIR || ''}/`)
@@ -400,6 +411,9 @@ async function run(argv) {
     throw e
   }
   const row = { cmd: req.cmd, repo: req.repo, target: req.target, method: req.method }
+  if (req.expect) row.sha = req.expect.sha // which commit a write approved or merged (Viktor 31739 INFO-1)
+  const notWriter = writerRefusal(req)
+  if (notWriter) { audit({ ...row, status: 'refused-agent' }); throw new UsageError(notWriter) }
   const body = req.body ? { ...req.body } : undefined
   if (req.bodyFile !== undefined) {
     try {
