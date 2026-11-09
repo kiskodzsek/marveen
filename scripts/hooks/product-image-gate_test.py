@@ -1142,6 +1142,69 @@ def layout_wrong_keyword_blocked(root):
     return rc == 2 and 'ELRENDEZES sor hibás' in err
 
 
+
+# Klodel 33823 (2026-11-09): while Majsztro's weekly budget is at 100 % Klodel writes the caption in his place,
+# "SZERZO: helyettes-klodel <indok>"; the MAJSZTRO line has accepted "helyettes-klodel" since 2026-11-07. Both use
+# majsztro_budget_full(), which reads store/mod-state/majsztro.json (synthetic here).
+SUB_CAPTION = 'Mikor mosolygott rád először?\nMeséld el az első évét.\n\nmarabel.hu\n\nSZERZO: helyettes-klodel Májsztró heti kerete elfogyott\n'
+
+
+def budget(root, pct):
+    os.makedirs(os.path.join(root, 'store', 'mod-state'), exist_ok=True)
+    json.dump({'usage': {'rateLimits': [{'kind': 'five_hour', 'percentUsed': 0},
+                                        {'kind': 'seven_day', 'percentUsed': pct}]}},
+              open(os.path.join(root, 'store', 'mod-state', 'majsztro.json'), 'w'))
+
+
+def sub_caption_run(root, pct, caption=SUB_CAPTION):
+    mod = caption_check_setup(root)
+    if pct is not None:
+        budget(root, pct)
+    open(os.path.join(root, 'posztszoveg.txt'), 'w', encoding='utf-8').write(caption)
+    mod.urllib.request.urlopen = lambda req, timeout=5: (_ for _ in ()).throw(AssertionError('no queue read'))
+    mod.run_ocr = lambda fp, budget: {0: 'marabel.hu', 1: 'marabel.hu'}
+    return mod.check(os.path.join(root, 'short.mp4'))
+
+
+@case
+def caption_substitute_passes_at_full_budget(root):
+    return sub_caption_run(root, 100) is None
+
+
+@case
+def caption_substitute_blocked_below_full_budget(root):
+    r = sub_caption_run(root, 99) or ''
+    return 'helyettes-klodel csak akkor' in r
+
+
+@case
+def caption_substitute_blocked_without_budget_file(root):
+    r = sub_caption_run(root, None) or ''
+    return 'helyettes-klodel csak akkor' in r
+
+
+@case
+def caption_substitute_needs_reason(root):
+    r = sub_caption_run(root, 100, SUB_CAPTION.replace(' Májsztró heti kerete elfogyott', ' x')) or ''
+    return 'indok nélkül' in r
+
+
+@case
+def caption_other_author_still_blocked_at_full_budget(root):
+    r = sub_caption_run(root, 100, SUB_CAPTION.replace('helyettes-klodel', 'kernel')) or ''
+    return 'nincs "SZERZO: majsztro <msg_id>"' in r
+
+
+@case
+def majsztro_line_substitute_follows_budget(root):
+    mod = gate_module()
+    mod.ROOT = root
+    budget(root, 100)
+    full = mod.majsztro_ok('helyettes-klodel Májsztró heti kerete elfogyott') is None
+    budget(root, 80)
+    low = 'helyettes-klodel csak akkor' in (mod.majsztro_ok('helyettes-klodel Májsztró heti kerete elfogyott') or '')
+    return full and low
+
 def main():
     bad = 0
     for fn in CASES:

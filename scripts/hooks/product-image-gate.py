@@ -137,6 +137,18 @@ def parse(path):
     return out
 
 
+def majsztro_budget_full():
+    """Patrik TG 15348/15489 (2026-11-07): when Majsztro's weekly budget is used up, Klodel takes over his whole
+    role. True ONLY while store/mod-state/majsztro.json shows the seven_day limit at >= 100 %; a missing or
+    unreadable file is False (the substitute is never the default)."""
+    try:
+        st = json.load(open(os.path.join(ROOT, 'store', 'mod-state', 'majsztro.json')))
+        sd = [r for r in st.get('usage', {}).get('rateLimits', []) if r.get('kind') == 'seven_day']
+        return bool(sd) and float(sd[0].get('percentUsed', 0)) >= 100
+    except Exception:
+        return False
+
+
 def majsztro_ok(val):
     """Patrik TG 1879 (2026-11-05): 'mivel majsztro a főfasz ezért rajta is át kell menjen minden'.
     MAJSZTRO: MEHET <msg_id>  -> the queue row must exist, come from majsztro and contain MEHET.
@@ -144,16 +156,10 @@ def majsztro_ok(val):
     v = (val or '').strip()
     if v.lower().startswith('nem-marketing') and len(v) > len('nem-marketing') + 5:
         return None
-    # Patrik TG 15348/15489 (2026-11-07): when Majsztro's weekly Codex budget is used up, Klodel takes over
-    # his whole role. Allowed ONLY while store/mod-state/majsztro.json shows the seven_day limit at >= 100 %.
+    # Patrik TG 15348/15489 (2026-11-07): Klodel stands in for Majsztro only while his weekly budget is at 100 %.
     if v.lower().startswith('helyettes-klodel') and len(v) > len('helyettes-klodel') + 5:
-        try:
-            st = json.load(open(os.path.join(ROOT, 'store', 'mod-state', 'majsztro.json')))
-            sd = [r for r in st.get('usage', {}).get('rateLimits', []) if r.get('kind') == 'seven_day']
-            if sd and float(sd[0].get('percentUsed', 0)) >= 100:
-                return None
-        except Exception:
-            pass
+        if majsztro_budget_full():
+            return None
         return 'MAJSZTRO: helyettes-klodel csak akkor, ha Majsztro heti kerete 100 % (store/mod-state/majsztro.json).'
     parts = v.split()
     # Patrik TG 1881/1882: the Christmas film v9.x and Short r2v8 were already in production before
@@ -336,6 +342,7 @@ SAFE_ASPECT = {'4x5': 5 / 4, '9x16': 16 / 9, '1x1': 1.0}  # height / width
 SAFE_ASPECT_TOL = 0.02
 SAFE_PX_TOL = 2
 LAYOUT_REASON_MIN = 15  # ELRENDEZES: kulon-elem <reason> (Klodel 32029)
+SUB_REASON_MIN = 10  # SZERZO: helyettes-klodel <reason> (Klodel 33823)
 SAV_RX = re.compile(r'^(4x5|9x16|1x1|fekv[oő])\s+fels[oő]\s+(\d+)\s+als[oó]\s+(\d+)\s+(\d+)\s*-\s*(\d+)\s*$',
                     re.I)
 FFPROBE_PATHS = ('/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe')
@@ -541,21 +548,32 @@ def check(fp):
             except (OSError, ValueError) as e:
                 return f'{base}: POSZTSZOVEG nem olvasható ({e.__class__.__name__}).'
             sz = [l.split(':', 1)[1].split() for l in raw.splitlines() if l.strip().upper().startswith('SZERZO:')]
-            if not sz or len(sz[0]) < 2 or sz[0][0].lower() != 'majsztro' or not sz[0][1].isdigit():
+            # Klodel 33823 (CLAUDE.md MÁJSZTRÓ HELYETTES, TELJES SZEREP; Patrik TG 15348/15489): while Majsztro's
+            # weekly budget is at 100 %, Klodel writes the caption in his place: "SZERZO: helyettes-klodel <indok>",
+            # the same budget condition as the MAJSZTRO line. There is no Majsztro queue row to compare against.
+            sub = bool(sz and sz[0] and sz[0][0].lower() == 'helyettes-klodel')
+            if sub and len(' '.join(sz[0][1:])) < SUB_REASON_MIN:
+                return (f'{base}: SZERZO: helyettes-klodel indok nélkül. Alak: "SZERZO: helyettes-klodel <indok>" '
+                        f'(legalább {SUB_REASON_MIN} karakter).')
+            if sub and not majsztro_budget_full():
+                return (f'{base}: SZERZO: helyettes-klodel csak akkor, ha Majsztro heti kerete 100 % '
+                        '(store/mod-state/majsztro.json); egyébként "SZERZO: majsztro <msg_id>".')
+            if not sub and (not sz or len(sz[0]) < 2 or sz[0][0].lower() != 'majsztro' or not sz[0][1].isdigit()):
                 return (f'{base}: a posztszövegben nincs "SZERZO: majsztro <msg_id>" sor. Vevői szöveget csak Májsztró ír '
                         '(Patrik TG 1985/1988: "te nem irhatsz").')
-            try:
-                tok = open(os.path.join(ROOT, 'store', '.dashboard-token')).read().strip()
-                req = urllib.request.Request(f'http://localhost:3420/api/messages/{sz[0][1]}',
-                                             headers={'Authorization': f'Bearer {tok}'})
-                row = json.load(urllib.request.urlopen(req, timeout=5))
-            except Exception as e:
-                return f'{base}: SZERZO: a {sz[0][1]} üzenet nem olvasható ({e.__class__.__name__}).'
-            norm = lambda x: ' '.join(x.split())
-            mc = norm(row.get('content') or '')
-            if row.get('from_agent') != 'majsztro' or not all(norm(t) in mc for t in body):
-                return (f'{base}: a posztszöveg nem szó szerint Májsztró {sz[0][1]}. üzenetéből való '
-                        '(Patrik TG 1985: "Ezek majsztro szovegri? Nem hiszem").')
+            if not sub:
+                try:
+                    tok = open(os.path.join(ROOT, 'store', '.dashboard-token')).read().strip()
+                    req = urllib.request.Request(f'http://localhost:3420/api/messages/{sz[0][1]}',
+                                                 headers={'Authorization': f'Bearer {tok}'})
+                    row = json.load(urllib.request.urlopen(req, timeout=5))
+                except Exception as e:
+                    return f'{base}: SZERZO: a {sz[0][1]} üzenet nem olvasható ({e.__class__.__name__}).'
+                norm = lambda x: ' '.join(x.split())
+                mc = norm(row.get('content') or '')
+                if row.get('from_agent') != 'majsztro' or not all(norm(t) in mc for t in body):
+                    return (f'{base}: a posztszöveg nem szó szerint Májsztró {sz[0][1]}. üzenetéből való '
+                            '(Patrik TG 1985: "Ezek majsztro szovegri? Nem hiszem").')
             br = brand_check(fp)
             if br:
                 return f'{base}: {br}'
