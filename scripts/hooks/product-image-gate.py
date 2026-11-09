@@ -144,6 +144,17 @@ def majsztro_ok(val):
     v = (val or '').strip()
     if v.lower().startswith('nem-marketing') and len(v) > len('nem-marketing') + 5:
         return None
+    # Patrik TG 15348/15489 (2026-11-07): when Majsztro's weekly Codex budget is used up, Klodel takes over
+    # his whole role. Allowed ONLY while store/mod-state/majsztro.json shows the seven_day limit at >= 100 %.
+    if v.lower().startswith('helyettes-klodel') and len(v) > len('helyettes-klodel') + 5:
+        try:
+            st = json.load(open(os.path.join(ROOT, 'store', 'mod-state', 'majsztro.json')))
+            sd = [r for r in st.get('usage', {}).get('rateLimits', []) if r.get('kind') == 'seven_day']
+            if sd and float(sd[0].get('percentUsed', 0)) >= 100:
+                return None
+        except Exception:
+            pass
+        return 'MAJSZTRO: helyettes-klodel csak akkor, ha Majsztro heti kerete 100 % (store/mod-state/majsztro.json).'
     parts = v.split()
     # Patrik TG 1881/1882: the Christmas film v9.x and Short r2v8 were already in production before
     # Majsztro took over; he gives an OPINION (any verdict), the work is not restarted.
