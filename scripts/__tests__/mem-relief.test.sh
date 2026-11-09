@@ -370,6 +370,36 @@ check "a Blender that survives KILL: FAIL logged, rc 1, the message says so" \
   "$(ok "$RC" = 1 -a -n "$(logf | grep 'FAIL ungated Blender owner=dave')" -a -n "$(grep 'NEM sikerült' "$SB/msgs")")" "rc=$RC $(logf)"
 rm -f "$SB/immortal"
 
+echo "== 0. ffmpeg and mflux too, and 0b: the largest heavy process on a memory trigger (Klodel 34318)"
+heavy_ps() {
+  render_ps
+  cat >> "$SB/ps" <<'EOF'
+ 1000     1 /bin/zsh -c source /Users/x/marveen/agents/mira/.claude-config/shell-snapshots/s.sh && ffmpeg -i a.mov b.mp4
+ 1001  1000 /opt/homebrew/bin/ffmpeg -i a.mov b.mp4
+ 1100     1 /bin/zsh -c source /Users/x/marveen/agents/dave/.claude-config/shell-snapshots/s.sh && mflux-generate --model dev
+ 1101  1100 /Users/x/.venv/bin/python3 /Users/x/.venv/bin/mflux-generate --model dev
+ 1200   801 /opt/homebrew/bin/ffmpeg -i frames/%04d.png out.mp4
+ 1300     1 /usr/bin/python3 make.py --ffmpeg /opt/homebrew/bin/ffmpeg
+EOF
+  printf '%s\n' 1001 1101 1200 >> "$SB/alive"
+}
+reset; heavy_ps; run
+check "an ungated ffmpeg is stopped" "$(ok -n "$(calls | grep -x 'kill -TERM 1001')")" "$(calls | tr '\n' ' ')"
+check "an ungated mflux (console script under python) is stopped" "$(ok -n "$(calls | grep -x 'kill -TERM 1101')")" "$(calls | tr '\n' ' ')"
+check "an ffmpeg under heavy-job.sh is left alone; a process naming ffmpeg in an argument is not matched" \
+  "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ (1200|1300)$')")" "$(calls | tr '\n' ' ')"
+check "the log names the kind" "$(ok -n "$(logf | grep 'STOP ungated ffmpeg owner=mira')" -a -n "$(logf | grep 'STOP ungated mflux owner=dave')")" "$(logf)"
+
+# 0b: a memory trigger with the gated render (802) the largest: it is stopped, the smaller gated ffmpeg (1200) is not.
+reset; heavy_ps; printf '  802  9.5G\n 1200  300M\n  201  2G\n' > "$SB/top"; state critical 10 "free memory 3%"
+run env MEM_RELIEF_TOP="$SB/top" MEM_RELIEF_RENDER_GATE=0
+check "0b: on a memory trigger the largest heavy process is stopped, even under heavy-job.sh" \
+  "$(ok -n "$(calls | grep -x 'kill -TERM 802')" -a -n "$(logf | grep 'STOP largest heavy Blender 9.5 GB owner=dave')")" "$(calls | tr '\n' ' ') $(logf)"
+check "0b: only the largest one" "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ 1200$')")" "$(calls | tr '\n' ' ')"
+check "0b: the owner is told it was the largest heavy process" "$(ok -n "$(grep '^klodel dave .*a legnagyobb nehéz folyamat' "$SB/msgs")")" "$(cat "$SB/msgs" 2>/dev/null)"
+reset; heavy_ps; printf '  802  9.5G\n' > "$SB/top"; rm -f "$SB/store/.host-state"; run env MEM_RELIEF_TOP="$SB/top" MEM_RELIEF_RENDER_GATE=0
+check "0b: no memory trigger, the gated render runs on" "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ 802$')")" "$(calls | tr '\n' ' ')"
+
 echo "== installer"
 PL="$SB/la/com.marveen.mem-relief.plist"
 OUT="$(MEM_RELIEF_LAUNCH_AGENTS="$SB/la" bash "$INST" 2>&1)"; RC=$?

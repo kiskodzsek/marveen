@@ -12,9 +12,11 @@
 # a stop on CRITICAL is "a separate, approved step, not a side effect of a monitor" (its header).
 # This is that step. Analysis: shared/cleanup-1103/panic-1103-elemzes.md.
 #
-# 0. The render gate, EVERY pass (60 s), whatever the memory band and the cooldown (Klodel 34315): a Blender that
-#    does not run under scripts/heavy-job.sh (scripts/swap-culprits.py --ungated-renderers) gets SIGTERM, SIGKILL
-#    after the wait, and its owner and the main agent are told how to run it. Why: the second kernel panic,
+# 0. The heavy-process gate, EVERY pass (60 s), whatever the memory band and the cooldown (Klodel 34315/34318): a
+#    heavy process (Blender, ffmpeg, mflux) that does not run under scripts/heavy-job.sh (scripts/swap-culprits.py
+#    --ungated-heavy) gets SIGTERM, SIGKILL after the wait, and its owner and the main agent are told how to run it.
+#    heavy-job.sh starts one heavy job at a time and only with free memory. And on a memory trigger (below), step 0b
+#    stops the LARGEST heavy process first, gated or not (a gated job can run with a low --kill-below). Why: the second kernel panic,
 #    2026-11-09 15:19 (panic-full-2026-11-09-151916.0002.panic: watchdog timeout, 908 free pages, ~15 GiB wired):
 #    two ungated Blender renders, 11.2 + 6.4 GB resident on the 16 GiB Mac. heavy-job.sh runs one heavy job at a
 #    time and stops it when free memory falls (its watchdog); steps 1-2c below never stop an unknown large process.
@@ -240,28 +242,32 @@ kept_ports() {
   done < "$KEEP"
 }
 
-# 0. The render gate (see the header): every pass, before and apart from the memory trigger.
+# 0. The heavy-process gate (see the header): every pass, before and apart from the memory trigger.
+ungated_now() {
+  python3 -I "$HERE/swap-culprits.py" --ungated-heavy ${MEM_RELIEF_PS:+--ps "$MEM_RELIEF_PS"} 2>/dev/null
+}
 render_gate() {
   [[ "$RENDER_GATE" == "1" ]] || return 0
-  local list who pid pids rc=0 stopped=() owners="" main="" from msg to
-  list="$(python3 -I "$HERE/swap-culprits.py" --ungated-renderers ${MEM_RELIEF_PS:+--ps "$MEM_RELIEF_PS"} 2>/dev/null)"
+  local list who pid what pids rc=0 stopped=() owners="" main="" from msg to
+  list="$(ungated_now)"
   [[ -n "$list" ]] || return 0
   PSDATA="$(ps_snapshot)"
-  while IFS=$'\t' read -r who pid _; do
+  while IFS=$'\t' read -r who pid what; do
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
-    if [[ "$DRY" == "1" ]]; then log "DRY would stop ungated Blender pid=$pid owner=$who"; continue; fi
-    if ! argv0_is "$pid" Blender; then log "SKIP ungated Blender pid=$pid: no longer Blender"; continue; fi
+    if [[ "$DRY" == "1" ]]; then log "DRY would stop $what pid=$pid owner=$who"; continue; fi
+    # Viktor 26868 LOW-2, as for the decoder: a fresh snapshot right before the signal (pid reuse).
+    if ! ungated_now | awk -F'\t' -v p="$pid" '$2==p{f=1} END{exit !f}'; then log "SKIP $what pid=$pid: no longer an ungated heavy process"; continue; fi
     pids="$(descendants "$pid" | sort -u | tr '\n' ' ')"
     # shellcheck disable=SC2086
-    if stop_pids $pids; then log "STOP ungated Blender owner=$who pids=$pids"; stopped+=("Blender pid $pid ($who)")
-    else log "FAIL ungated Blender owner=$who pids=$pids: still alive after KILL"; rc=1; stopped+=("Blender pid $pid ($who, NEM sikerült leállítani)"); fi
+    if stop_pids $pids; then log "STOP $what owner=$who pids=$pids"; stopped+=("${what#ungated } pid $pid ($who)")
+    else log "FAIL $what owner=$who pids=$pids: still alive after KILL"; rc=1; stopped+=("${what#ungated } pid $pid ($who, NEM sikerült leállítani)"); fi
     owners+=" $who"
   done <<< "$list"
   (( ${#stopped[@]} )) || return "$rc"
   [[ -f "$INSTALL_DIR/.env" ]] && main="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
   from="${MEM_RELIEF_FROM:-$main}"
   [[ -n "$from" ]] || { log "TELL nobody: no sender id (MAIN_AGENT_ID)"; return "$rc"; }
-  msg="[MEM-RELIEF] Blender heavy-job nélkül futott, leállítottam: $(printf '%s; ' "${stopped[@]}" | sed 's/; $//'). Blender csak a kapun át indulhat: bash /Users/klodel/marveen/scripts/heavy-job.sh --name <név> -- <a Blender-parancs>. Így egyszerre egy nehéz futás megy, és a memória-őr megállítja, mielőtt a gép elfogy (két kapu nélküli Blender: kernel panic 2026-11-09 15:19). Fájlhoz nem nyúltam."
+  msg="[MEM-RELIEF] Nehéz folyamat heavy-job nélkül futott, leállítottam: $(printf '%s; ' "${stopped[@]}" | sed 's/; $//'). Blender, ffmpeg és mflux csak a kapun át indulhat: bash /Users/klodel/marveen/scripts/heavy-job.sh --name <név> --kill-below 12 -- <a parancs>. Így egyszerre egy nehéz futás megy, csak szabad memóriával, és a memória-őr megállítja, mielőtt a gép elfogy (kernel panic 2026-11-09 15:19: két kapu nélküli Blender). Fájlhoz nem nyúltam."
   for to in $(echo "$owners $main" | tr ' ' '\n' | awk 'NF && $0!="-" && !s[$0]++'); do
     echo "$msg" | bash "$AGENT_MSG" "$from" "$to" - >/dev/null 2>&1 && log "TELL $to" || log "TELL $to FAILED"
   done
@@ -279,6 +285,22 @@ main() {
   list="$(culprits)"
   local dl=""; [[ "$DRY" == "1" ]] && dl=" dry"
   log "ACT${dl} ($why) suspects=$(echo "$list" | grep -c . )"
+
+  # 0b. The largest heavy process, gated or not (Klodel 34318: "ha a memória kritikusra fogy, a kapu állítsa le a
+  # legnagyobbat, mielőtt a gép befagy"). Only the largest one: the others may finish once it is gone.
+  local hv hwho hpid hwhat hpids
+  hv="$(python3 -I "$HERE/swap-culprits.py" --heavy ${MEM_RELIEF_PS:+--ps "$MEM_RELIEF_PS"} ${MEM_RELIEF_TOP:+--top "$MEM_RELIEF_TOP"} 2>/dev/null | head -1)"
+  if [[ -n "$hv" ]]; then
+    IFS=$'\t' read -r hwho hpid hwhat <<< "$hv"
+    if [[ "$DRY" == "1" ]]; then done_lines+=("$hwhat (dry)"); owners+=" $hwho"
+    else
+      hpids="$(descendants "$hpid" | sort -u | tr '\n' ' ')"
+      # shellcheck disable=SC2086
+      if stop_pids $hpids; then log "STOP largest $hwhat owner=$hwho pids=$hpids"; done_lines+=("a legnagyobb nehéz folyamat: $hwhat (pid $hpid, $hwho)")
+      else log "FAIL largest $hwhat owner=$hwho pids=$hpids: still alive after KILL"; rc=1; done_lines+=("$hwhat (pid $hpid, NEM sikerült leállítani)"); fi
+      owners+=" $hwho"
+    fi
+  fi
 
   # 1. The VM.
   if echo "$list" | grep -q $'\tColima VM$'; then
