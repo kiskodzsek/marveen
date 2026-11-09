@@ -32,7 +32,7 @@ VALODI_OK = 'igen valódi fehér lap, papírszál és gerinc-árnyék 100%-on n�
 
 
 def book_fixture(root, kepes, merce='nyitott 300/170', kez='nyitott 300/180', valodi=VALODI_OK,
-                 majsztro='nem-marketing teszt-fixture', uzenet=None):
+                 majsztro='nem-marketing teszt-fixture', uzenet=None, extra=()):
     kapu = os.path.join(root, 'store', 'kep-kapu')
     os.makedirs(kapu, exist_ok=True)
     img = os.path.join(root, 'kep.png')
@@ -42,7 +42,10 @@ def book_fixture(root, kepes, merce='nyitott 300/170', kez='nyitott 300/180', va
     lines = ['KONYV: van', 'A5: ok', 'PAPIR: feher', 'SAJAT: ok', 'KERES: teszt kérés, egyezik',
              f'NAGYITVA: {crop}', f'MAJSZTRO: {majsztro}',
              'EP: ok a teljes jelenet ép, semmi nincs levágva', 'HELY: tiszta asztalon fekszik',
-             f'MERCE: {merce}', f'KEZ: {kez}', 'FENY: papír L* 88 / jelenet L* 92, finom gerinc']
+             f'MERCE: {merce}', 'FENY: papír L* 88 / jelenet L* 92, finom gerinc']
+    if kez is not None:
+        lines.append(f'KEZ: {kez}')
+    lines.extend(extra)
     if kepes is not None:
         lines.append(f'KEPES: {kepes}')
     if valodi is not None:
@@ -163,6 +166,86 @@ def no_person_closed_square_blocked(root):
 def no_person_without_kind_blocked(root):
     rc, err = no_person(root, 'nincs-ember 444/630')
     return rc == 2 and 'MERCE hiányzik/hibás' in err
+
+
+# Klodel 34282 (Patrik TG 3788): an engine frame at an angle measures out of band (oa-seq3 f120: 1.74); it is
+# measured on a FRONT render of the same book, which must exist and be another image.
+def front_ref(root, name='szembol.png'):
+    ref = os.path.join(root, name)
+    open(ref, 'wb').write(b'\x89PNG')
+    return ref
+
+
+@case
+def no_person_angled_frame_still_blocked(root):
+    rc, err = no_person(root, 'nincs-ember nyitott 1096/630')  # 1.74, the measured oa-seq3 f120 frame
+    return rc == 2 and 'A5-ös keménytábla' in err and 'szembol' in err
+
+
+@case
+def no_person_front_render_open_allowed(root):
+    rc, _ = no_person(root, f'nincs-ember nyitott szembol 888/630 {front_ref(root)}')
+    return rc == 0
+
+
+@case
+def no_person_front_render_closed_accented_allowed(root):
+    rc, _ = no_person(root, f'nincs-ember zart szemből 444/630 {front_ref(root)}')
+    return rc == 0
+
+
+@case
+def no_person_front_render_path_with_space_allowed(root):
+    rc, _ = no_person(root, f'nincs-ember nyitott szembol 888/630 {front_ref(root, "szembol kep.png")}')
+    return rc == 0
+
+
+@case
+def no_person_front_render_out_of_band_blocked(root):
+    rc, err = no_person(root, f'nincs-ember nyitott szembol 1096/630 {front_ref(root)}')
+    return rc == 2 and 'A5-ös keménytábla' in err
+
+
+@case
+def no_person_front_render_missing_file_blocked(root):
+    rc, err = no_person(root, f'nincs-ember nyitott szembol 888/630 {os.path.join(root, "nincs-ilyen.png")}')
+    return rc == 2 and 'referencia-fájl' in err
+
+
+@case
+def no_person_front_render_without_file_blocked(root):
+    rc, err = no_person(root, 'nincs-ember nyitott szembol 888/630')
+    return rc == 2 and 'referencia-fájl' in err
+
+
+@case
+def no_person_front_render_not_an_image_blocked(root):
+    txt = os.path.join(root, 'meres.txt')
+    open(txt, 'w').write('888/630')
+    rc, err = no_person(root, f'nincs-ember nyitott szembol 888/630 {txt}')
+    return rc == 2 and 'referencia-fájl' in err
+
+
+@case
+def no_person_front_render_self_reference_blocked(root):
+    rc, err = no_person(root, f'nincs-ember nyitott szembol 888/630 {os.path.join(root, "kep.png")}')
+    return rc == 2 and 'referencia-fájl' in err
+
+
+@case
+def front_render_needs_no_person(root):
+    # "szembol" is the engine branch only: on the head branch it is not a kind, the line is malformed.
+    img = book_fixture(root, KEPES_OK, merce=f'nyitott szembol 888/630 {front_ref(root)}')
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'MERCE hiányzik/hibás' in err
+
+
+@case
+def front_render_still_needs_valodi(root):
+    img = book_fixture(root, KEPES_OK, merce=f'nincs-ember nyitott szembol 888/630 {front_ref(root)}',
+                       kez=NO_PERSON_KEZ, valodi=None)
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'VALODI' in err
 
 
 @case
@@ -1050,6 +1133,214 @@ def sav_real_video_measured_with_ffprobe(root):
         os.utime(okf, (later, later))
         results.append(mod.check(video) or '')
     return 'FEED' in results[0] and 'SAV' not in results[0] and 'belelóg a levágott sávba' in results[1]
+
+# Klodel 32029 (2026-11-08): "ELRENDEZES: kulon-elem <indok>" -- the book next to the photo as its own layout
+# element. KEZ becomes optional only on an in-band head MERCE, or on "nincs-ember" in A5 ratio + VALODI: igen.
+LAYOUT = 'ELRENDEZES: kulon-elem a könyv a fotó mellett áll, nem jelenetben az emberrel'
+
+
+def layout_run(root, merce, kez=None, valodi=VALODI_OK, layout=LAYOUT):
+    img = book_fixture(root, KEPES_OK, merce=merce, kez=kez, valodi=valodi, extra=(layout,) if layout else ())
+    return run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+
+
+@case
+def layout_head_in_band_without_kez_allowed(root):
+    rc, _ = layout_run(root, 'zart 95/100')  # Klodel 32029: Rozi frame, head ratio 0.95
+    return rc == 0
+
+
+@case
+def layout_head_in_band_kez_nincs_allowed(root):
+    rc, _ = layout_run(root, 'zart 110/100', kez='nincs')  # baby frame, 1.10, no adult hand
+    return rc == 0
+
+
+@case
+def layout_open_head_in_band_without_kez_allowed(root):
+    rc, _ = layout_run(root, 'nyitott 300/170')
+    return rc == 0
+
+
+@case
+def no_layout_head_without_kez_still_blocked(root):
+    rc, err = layout_run(root, 'zart 95/100', layout=None)  # negative: without ELRENDEZES the rule stays
+    return rc == 2 and 'KEZ hiányzik/hibás' in err
+
+
+@case
+def no_layout_head_kez_nincs_still_blocked(root):
+    rc, err = layout_run(root, 'zart 95/100', kez='nincs semmi, a fejhez mértem csak', layout=None)
+    return rc == 2 and 'KEZ: nincs, de a MERCE fejhez mért' in err
+
+
+@case
+def layout_head_out_of_band_blocked(root):
+    rc, err = layout_run(root, 'zart 150/100')  # 1.50: not A5 against the head, ELRENDEZES does not help
+    return rc == 2 and 'fejhez mérve' in err
+
+
+@case
+def layout_measured_kez_out_of_band_still_blocked(root):
+    rc, err = layout_run(root, 'zart 95/100', kez='zart 227/100')  # a measured KEZ is still checked
+    return rc == 2 and 'kézhez mérve' in err
+
+
+@case
+def layout_no_person_a5_without_kez_allowed(root):
+    rc, _ = layout_run(root, 'nincs-ember zart 444/630')
+    return rc == 0
+
+
+@case
+def layout_no_person_wrong_ratio_blocked(root):
+    rc, err = layout_run(root, 'nincs-ember nyitott 1000/630')
+    return rc == 2 and 'A5-ös keménytábla' in err
+
+
+@case
+def layout_no_person_without_valodi_blocked(root):
+    rc, err = layout_run(root, 'nincs-ember zart 444/630', valodi=None)
+    return rc == 2 and 'VALODI' in err
+
+
+@case
+def layout_profile_still_needs_hand(root):
+    rc, err = layout_run(root, 'profil nyitott 300/200')
+    return rc == 2 and 'KEZ' in err
+
+
+@case
+def layout_short_reason_blocked(root):
+    rc, err = layout_run(root, 'zart 95/100', layout='ELRENDEZES: kulon-elem rövid')
+    return rc == 2 and 'ELRENDEZES sor hibás' in err
+
+
+@case
+def layout_wrong_keyword_blocked(root):
+    rc, err = layout_run(root, 'zart 95/100', layout='ELRENDEZES: jelenet a könyv az ember kezében van most')
+    return rc == 2 and 'ELRENDEZES sor hibás' in err
+
+
+
+# Klodel 33823 (2026-11-09): while Majsztro's weekly budget is at 100 % Klodel writes the caption in his place,
+# "SZERZO: helyettes-klodel <indok>"; the MAJSZTRO line has accepted "helyettes-klodel" since 2026-11-07. Both use
+# majsztro_budget_full(), which reads store/mod-state/majsztro.json (synthetic here).
+SUB_CAPTION = 'Mikor mosolygott rád először?\nMeséld el az első évét.\n\nmarabel.hu\n\nSZERZO: helyettes-klodel Májsztró heti kerete elfogyott\n'
+
+
+def budget(root, pct):
+    os.makedirs(os.path.join(root, 'store', 'mod-state'), exist_ok=True)
+    json.dump({'usage': {'rateLimits': [{'kind': 'five_hour', 'percentUsed': 0},
+                                        {'kind': 'seven_day', 'percentUsed': pct}]}},
+              open(os.path.join(root, 'store', 'mod-state', 'majsztro.json'), 'w'))
+
+
+def sub_caption_run(root, pct, caption=SUB_CAPTION):
+    mod = caption_check_setup(root)
+    if pct is not None:
+        budget(root, pct)
+    open(os.path.join(root, 'posztszoveg.txt'), 'w', encoding='utf-8').write(caption)
+    mod.urllib.request.urlopen = lambda req, timeout=5: (_ for _ in ()).throw(AssertionError('no queue read'))
+    mod.run_ocr = lambda fp, budget: {0: 'marabel.hu', 1: 'marabel.hu'}
+    return mod.check(os.path.join(root, 'short.mp4'))
+
+
+@case
+def caption_substitute_passes_at_full_budget(root):
+    return sub_caption_run(root, 100) is None
+
+
+@case
+def caption_substitute_blocked_below_full_budget(root):
+    r = sub_caption_run(root, 99) or ''
+    return 'helyettes-klodel csak akkor' in r
+
+
+@case
+def caption_substitute_blocked_without_budget_file(root):
+    r = sub_caption_run(root, None) or ''
+    return 'helyettes-klodel csak akkor' in r
+
+
+@case
+def caption_substitute_needs_reason(root):
+    r = sub_caption_run(root, 100, SUB_CAPTION.replace(' Májsztró heti kerete elfogyott', ' x')) or ''
+    return 'indok nélkül' in r
+
+
+@case
+def caption_other_author_still_blocked_at_full_budget(root):
+    r = sub_caption_run(root, 100, SUB_CAPTION.replace('helyettes-klodel', 'kernel')) or ''
+    return 'nincs "SZERZO: majsztro <msg_id>"' in r
+
+
+@case
+def majsztro_line_substitute_follows_budget(root):
+    mod = gate_module()
+    mod.ROOT = root
+    budget(root, 100)
+    full = mod.majsztro_ok('helyettes-klodel Májsztró heti kerete elfogyott') is None
+    budget(root, 80)
+    low = 'helyettes-klodel csak akkor' in (mod.majsztro_ok('helyettes-klodel Májsztró heti kerete elfogyott') or '')
+    return full and low
+
+PRIV_OK = 'PRIVÁT-OK: Patrik privátban kérdezte, privát ügy\n'
+IDEA_LINE = 'ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel összevetve)\n'
+
+
+@case
+def idea_private_without_line_blocked(root):
+    rc, err = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Van egy új ötletem: könyv a kutyáknak.'})
+    return rc == 2 and 'ÖTLET-KAPU' in err and 'new-direction-start-from-market' in err
+
+
+@case
+def idea_private_forms_blocked(root):
+    # ötletek / ötletet / capitalised Ötlet all count
+    texts = ('Három ötletek jönnek.', 'Hoztam egy ötletet.', 'Ötlet: AI-tanácsadás.')
+    return all(run(root, {'chat_id': PRIV, 'text': PRIV_OK + t})[0] == 2 for t in texts)
+
+
+@case
+def idea_private_decomposed_accent_blocked(root):
+    # NFD "ötlet" (o + combining diaeresis) is the same word
+    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Egy ötlet.'})
+    return rc == 2
+
+
+@case
+def idea_private_half_line_blocked(root):
+    # only one of the two statements: not enough
+    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'ÖTLET-KAPU: nem Marabel/könyv\nÚj ötlet.'})
+    return rc == 2
+
+
+@case
+def idea_private_with_line_allowed(root):
+    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + IDEA_LINE + 'Új ötlet: X piac, Y vevő.'})
+    return rc == 0
+
+
+@case
+def idea_private_window_open_still_gated(root):
+    window(root, time.time() + 3600)
+    blocked = run(root, {'chat_id': PRIV, 'text': 'Új ötlet: X.'})[0] == 2
+    allowed = run(root, {'chat_id': PRIV, 'text': IDEA_LINE + 'Új ötlet: X.'})[0] == 0
+    return blocked and allowed
+
+
+@case
+def idea_group_not_gated(root):
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'Új ötlet a csoportban.'})
+    return rc == 0
+
+
+@case
+def no_idea_private_unchanged(root):
+    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Kész a riport.'})
+    return rc == 0
+
 
 def main():
     bad = 0

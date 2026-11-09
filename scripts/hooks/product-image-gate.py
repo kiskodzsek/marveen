@@ -24,6 +24,9 @@ J1 paper "too white, almost glows" -- both passed a self-attested "A5: ok"):
            open A5 (30 cm) vs adult head (~15 cm): ratio 1.5-2.0; closed (14.8 cm): 0.8-1.2
            or, with no person in the frame (3D book engine, studio): "MERCE: nincs-ember nyitott|zart
            <book width px>/<book height px>" -- the book's own proportions: open 1.38-1.52, closed 0.64-0.74
+           an engine frame seen at an angle (3/4 view): perspective puts the ratio out of band, so the maker measures
+           a FRONT render of the same book: "MERCE: nincs-ember nyitott|zart szembol <px>/<px> <front render file>"
+           -- the file must exist and be another image; the front ratio is held to the same band (Klodel 34282)
            (A5 hardcover board 2x148-160 / 210-216 mm). Shape only: an A4 book has the same ratio.
            or, with the head seen in PROFILE: "MERCE: profil nyitott|zart <book px>/<head px>" -- no head band (a
            profile shows the head's length, ~20 cm, not its width, so an exact open A5 gives 1.41-1.48; card
@@ -32,6 +35,9 @@ J1 paper "too white, almost glows" -- both passed a self-attested "A5: ok"):
     KEZ:nyitott|zart <book edge px>/<adult hand wrist-to-fingertip px>  (hand nearest the book's depth)
            closed: 0.6-1.1, open: 1.3-2.0; or "KEZ: nincs <reason, what else was measured>" -- only together
            with "MERCE: nincs-ember ..." (Klodel 28805: a head-measured frame needs a hand measure)
+    ELRENDEZES: kulon-elem <reason>  (optional; Klodel 32029) the book stands next to the photo as its own layout
+           element, not in a scene with the person: KEZ may then be absent or "nincs" if the MERCE head ratio is in
+           band, or MERCE is "nincs-ember" in the book's own A5 ratio + VALODI: igen. Not with "profil".
     FENY: <paper L* (Lab)> / <brightest comparable white in the scene L*> + gutter shadow
            paper may not be brighter than the scene's own whites (no glowing page)
     KEPES: van <what photo cover/page shows> | nincs <reason>   (Patrik TG 1806)
@@ -41,6 +47,9 @@ Also (card 0ecad9e5, Patrik TG 14472): a reply to the owner's PRIVATE chat is bl
 text carries "PRIVÁT-OK: <reason>"; team work goes to the group chat. An open private window
 (store/privat-ablak.json, 0600, see private_window_open; Patrik TG 14496) lifts the marker rule only;
 the media checks still run.
+Idea gate (Klodel 33881, 2026-11-09): a private-chat text that mentions "ötlet" (ötlet, ötletek, ötletet) is blocked
+unless it carries an "ÖTLET-KAPU:" line with both "nem Marabel/könyv" and "termékpaletta ellenőrizve" (idea_check);
+an open private window does not lift it.
 Marketing video (Patrik csoport TG 3109, 2026-11-07: "Vegig legyen minden snitten marabel.hu"; TG 4539): the
 self-attested MARKA line does not decide. One frame per second is read with the macOS Vision framework
 (scripts/lib/video_text_ocr.swift) and every second must show "marabel.hu", or the gate blocks with the missing
@@ -67,6 +76,7 @@ import struct
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.request
 
 MEDIA = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.mp4', '.mov', '.webm')
@@ -134,6 +144,18 @@ def parse(path):
     return out
 
 
+def majsztro_budget_full():
+    """Patrik TG 15348/15489 (2026-11-07): when Majsztro's weekly budget is used up, Klodel takes over his whole
+    role. True ONLY while store/mod-state/majsztro.json shows the seven_day limit at >= 100 %; a missing or
+    unreadable file is False (the substitute is never the default)."""
+    try:
+        st = json.load(open(os.path.join(ROOT, 'store', 'mod-state', 'majsztro.json')))
+        sd = [r for r in st.get('usage', {}).get('rateLimits', []) if r.get('kind') == 'seven_day']
+        return bool(sd) and float(sd[0].get('percentUsed', 0)) >= 100
+    except Exception:
+        return False
+
+
 def majsztro_ok(val):
     """Patrik TG 1879 (2026-11-05): 'mivel majsztro a főfasz ezért rajta is át kell menjen minden'.
     MAJSZTRO: MEHET <msg_id>  -> the queue row must exist, come from majsztro and contain MEHET.
@@ -141,6 +163,11 @@ def majsztro_ok(val):
     v = (val or '').strip()
     if v.lower().startswith('nem-marketing') and len(v) > len('nem-marketing') + 5:
         return None
+    # Patrik TG 15348/15489 (2026-11-07): Klodel stands in for Majsztro only while his weekly budget is at 100 %.
+    if v.lower().startswith('helyettes-klodel') and len(v) > len('helyettes-klodel') + 5:
+        if majsztro_budget_full():
+            return None
+        return 'MAJSZTRO: helyettes-klodel csak akkor, ha Majsztro heti kerete 100 % (store/mod-state/majsztro.json).'
     parts = v.split()
     # Patrik TG 1881/1882: the Christmas film v9.x and Short r2v8 were already in production before
     # Majsztro took over; he gives an OPINION (any verdict), the work is not restarted.
@@ -321,6 +348,8 @@ SAFE_BANDS = {'4x5': (0.10, 0.10), '9x16': (0.14, 0.35), '1x1': (0.10, 0.10), 'f
 SAFE_ASPECT = {'4x5': 5 / 4, '9x16': 16 / 9, '1x1': 1.0}  # height / width
 SAFE_ASPECT_TOL = 0.02
 SAFE_PX_TOL = 2
+LAYOUT_REASON_MIN = 15  # ELRENDEZES: kulon-elem <reason> (Klodel 32029)
+SUB_REASON_MIN = 10  # SZERZO: helyettes-klodel <reason> (Klodel 33823)
 SAV_RX = re.compile(r'^(4x5|9x16|1x1|fekv[oő])\s+fels[oő]\s+(\d+)\s+als[oó]\s+(\d+)\s+(\d+)\s*-\s*(\d+)\s*$',
                     re.I)
 FFPROBE_PATHS = ('/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe')
@@ -526,21 +555,32 @@ def check(fp):
             except (OSError, ValueError) as e:
                 return f'{base}: POSZTSZOVEG nem olvasható ({e.__class__.__name__}).'
             sz = [l.split(':', 1)[1].split() for l in raw.splitlines() if l.strip().upper().startswith('SZERZO:')]
-            if not sz or len(sz[0]) < 2 or sz[0][0].lower() != 'majsztro' or not sz[0][1].isdigit():
+            # Klodel 33823 (CLAUDE.md MÁJSZTRÓ HELYETTES, TELJES SZEREP; Patrik TG 15348/15489): while Majsztro's
+            # weekly budget is at 100 %, Klodel writes the caption in his place: "SZERZO: helyettes-klodel <indok>",
+            # the same budget condition as the MAJSZTRO line. There is no Majsztro queue row to compare against.
+            sub = bool(sz and sz[0] and sz[0][0].lower() == 'helyettes-klodel')
+            if sub and len(' '.join(sz[0][1:])) < SUB_REASON_MIN:
+                return (f'{base}: SZERZO: helyettes-klodel indok nélkül. Alak: "SZERZO: helyettes-klodel <indok>" '
+                        f'(legalább {SUB_REASON_MIN} karakter).')
+            if sub and not majsztro_budget_full():
+                return (f'{base}: SZERZO: helyettes-klodel csak akkor, ha Majsztro heti kerete 100 % '
+                        '(store/mod-state/majsztro.json); egyébként "SZERZO: majsztro <msg_id>".')
+            if not sub and (not sz or len(sz[0]) < 2 or sz[0][0].lower() != 'majsztro' or not sz[0][1].isdigit()):
                 return (f'{base}: a posztszövegben nincs "SZERZO: majsztro <msg_id>" sor. Vevői szöveget csak Májsztró ír '
                         '(Patrik TG 1985/1988: "te nem irhatsz").')
-            try:
-                tok = open(os.path.join(ROOT, 'store', '.dashboard-token')).read().strip()
-                req = urllib.request.Request(f'http://localhost:3420/api/messages/{sz[0][1]}',
-                                             headers={'Authorization': f'Bearer {tok}'})
-                row = json.load(urllib.request.urlopen(req, timeout=5))
-            except Exception as e:
-                return f'{base}: SZERZO: a {sz[0][1]} üzenet nem olvasható ({e.__class__.__name__}).'
-            norm = lambda x: ' '.join(x.split())
-            mc = norm(row.get('content') or '')
-            if row.get('from_agent') != 'majsztro' or not all(norm(t) in mc for t in body):
-                return (f'{base}: a posztszöveg nem szó szerint Májsztró {sz[0][1]}. üzenetéből való '
-                        '(Patrik TG 1985: "Ezek majsztro szovegri? Nem hiszem").')
+            if not sub:
+                try:
+                    tok = open(os.path.join(ROOT, 'store', '.dashboard-token')).read().strip()
+                    req = urllib.request.Request(f'http://localhost:3420/api/messages/{sz[0][1]}',
+                                                 headers={'Authorization': f'Bearer {tok}'})
+                    row = json.load(urllib.request.urlopen(req, timeout=5))
+                except Exception as e:
+                    return f'{base}: SZERZO: a {sz[0][1]} üzenet nem olvasható ({e.__class__.__name__}).'
+                norm = lambda x: ' '.join(x.split())
+                mc = norm(row.get('content') or '')
+                if row.get('from_agent') != 'majsztro' or not all(norm(t) in mc for t in body):
+                    return (f'{base}: a posztszöveg nem szó szerint Májsztró {sz[0][1]}. üzenetéből való '
+                            '(Patrik TG 1985: "Ezek majsztro szovegri? Nem hiszem").')
             br = brand_check(fp)
             if br:
                 return f'{base}: {br}'
@@ -621,6 +661,19 @@ def check(fp):
         profile = bool(m) and m[0].lower() == 'profil'
         if no_person or profile:
             m = m[1:]
+        # Klodel 34282 (2026-11-09, Patrik TG 3788): our own 3D book engine's open book seen at an angle measures out of
+        # band in the frame (oa-seq3 f120: 1.74 vs 1.38-1.52) because of perspective, not because the book is wrong. Such
+        # a frame is measured on a FRONT render of the same book: "nincs-ember nyitott|zart szembol <px>/<px> <file>".
+        # The file must exist and be an image other than this one; its ratio goes through the same A5 band below.
+        frontal = no_person and len(m) >= 2 and m[1].lower() in ('szembol', 'szemből')
+        if frontal:
+            ref = ' '.join(m[3:]).strip()
+            if (not ref or not ref.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) or not os.path.isfile(ref)
+                    or os.path.abspath(ref) == os.path.abspath(fp)):
+                return (f'{base}: MERCE: nincs-ember ... szembol, de a szemből renderelt referencia-fájl hiányzik, nem kép, '
+                        'vagy maga a kocka. Alak: "MERCE: nincs-ember nyitott|zart szembol <könyv szélesség px>/<könyv '
+                        'magasság px> <a szemből renderelt referencia-kép útja>" (Klodel 34282).')
+            m = [m[0]] + m[2:3]
         try:
             kind = m[0].lower()
             if (no_person or profile) and not kind.startswith(('nyit', 'zar', 'zár')):
@@ -640,7 +693,9 @@ def check(fp):
             lo, hi = (1.38, 1.52) if kind.startswith('nyit') else (0.64, 0.74)
             if not (lo <= r <= hi):
                 return (f'{base}: a könyv aránya nem A5-ös keménytábla: {kind} szélesség/magasság {r:.2f}, '
-                        f'elvárt {lo}-{hi} (A5 tábla 2x148-160 / 210-216 mm).')
+                        f'elvárt {lo}-{hi} (A5 tábla 2x148-160 / 210-216 mm).'
+                        + ('' if frontal else ' Ferde nézetű motor-kockánál a szemből renderelt referencián mérj: '
+                           '"MERCE: nincs-ember nyitott|zart szembol <px>/<px> <referencia-kép>".'))
         else:
             lo, hi = (1.5, 2.0) if kind.startswith('nyit') else (0.8, 1.2)
             if not (lo <= r <= hi):
@@ -652,32 +707,49 @@ def check(fp):
         # Second, independent measure against the nearest adult HAND at the book's depth
         # (wrist to fingertip ~18 cm): closed 14.8 cm edge -> ~0.82, open 30 cm -> ~1.67.
         k = (d.get('KEZ') or '').split()
-        if profile and k and k[0].lower() == 'nincs':
-            return (f'{base}: MERCE: profil, de KEZ: nincs. A profil-mérés a fej-sávot kihagyja, ezért a méretet a '
-                    'kézmérés adja: "KEZ: nyitott|zart <könyv él px>/<kézfej px>", a könyv mélységében lévő kéz, a lap '
-                    'síkjára vetítve (kártya 9e040e9c).')
-        if k and k[0].lower() == 'nincs' and not no_person:
-            # Klodel 28805 (2026-11-06): with no hand the head branch was the only scale, and short2 passed with
-            # an invented "zart 1/1" and no person in the frame. Without a hand, the frame must be the no-person
-            # one, measured on the book's own proportions; a frame with a person needs the hand measure.
-            return (f'{base}: KEZ: nincs, de a MERCE fejhez mért. Kéz nélkül csak az ember nélküli mérés fogadható el: '
-                    '"MERCE: nincs-ember nyitott|zart <könyv szélesség px>/<könyv magasság px>"; ha van ember a '
-                    'képen, a könyv mélységéhez legközelebbi kézhez mérj (KEZ).')
-        if k and k[0].lower() == 'nincs' and len(' '.join(k[1:])) >= 15:
-            pass
-        else:
-            try:
-                kk = k[0].lower()
-                bk, hk = (float(x) for x in k[1].split('/'))
-                rk = bk / hk
-            except Exception:
-                return (f'{base}: KEZ hiányzik/hibás. Alak: "KEZ: zart|nyitott <könyv él px>/<felnőtt kézfej '
-                        'csuklótól ujjhegyig px, a könyv mélységéhez legközelebbi kéz>" (mérve), vagy '
-                        '"KEZ: nincs <miért nincs kéz a képen, mihez mértél helyette>".')
-            klo, khi = (1.3, 2.0) if kk.startswith('nyit') else (0.6, 1.1)
-            if not (klo <= rk <= khi):
-                return (f'{base}: a könyv nem A5 a kézhez mérve: {kk} arány {rk:.2f}, elvárt {klo}-{khi} '
-                        '(1 kézfej kb. 18 cm; a zárt A5 éle 14,8 cm).')
+        # Klodel 32029 (2026-11-08, Patrik "Gogogo"): a web layout where the book stands NEXT TO a photo, as its own
+        # element, not in a scene with the person. There the nearest hand is not at the book's depth (a fist in
+        # foreshortening measured 2.27; the baby frame has no adult hand), so the hand measure means nothing. With
+        # "ELRENDEZES: kulon-elem <indok>" the KEZ line is optional (absent or "nincs") -- the scale still rests on a
+        # MERCE that passed above: the head band, or "nincs-ember" with the book's own A5 ratio + VALODI: igen.
+        # "profil" is not covered (it has no head band, the hand is its only size). A measured KEZ is still checked.
+        lay_raw = (d.get('ELRENDEZES') or '').strip()
+        lay = lay_raw.split(None, 1)
+        layout = (len(lay) == 2 and lay[0].lower() in ('kulon-elem', 'külön-elem')
+                  and len(lay[1].strip()) >= LAYOUT_REASON_MIN)
+        if lay_raw and not layout:
+            return (f'{base}: ELRENDEZES sor hibás. Alak: "ELRENDEZES: kulon-elem <miért külön elem a könyv, nem '
+                    f'jelenetben az emberrel>", az indok legalább {LAYOUT_REASON_MIN} karakter.')
+        hand_optional = layout and not profile and (not k or k[0].lower() == 'nincs')
+        if hand_optional and no_person and not (d.get('VALODI') or '').lower().startswith('igen'):
+            return f'{base}: ELRENDEZES: kulon-elem ember nélküli MERCE-vel csak "VALODI: igen <indok>" sorral.'
+        if not hand_optional:
+            if profile and k and k[0].lower() == 'nincs':
+                return (f'{base}: MERCE: profil, de KEZ: nincs. A profil-mérés a fej-sávot kihagyja, ezért a méretet a '
+                        'kézmérés adja: "KEZ: nyitott|zart <könyv él px>/<kézfej px>", a könyv mélységében lévő kéz, a lap '
+                        'síkjára vetítve (kártya 9e040e9c).')
+            if k and k[0].lower() == 'nincs' and not no_person:
+                # Klodel 28805 (2026-11-06): with no hand the head branch was the only scale, and short2 passed with
+                # an invented "zart 1/1" and no person in the frame. Without a hand, the frame must be the no-person
+                # one, measured on the book's own proportions; a frame with a person needs the hand measure.
+                return (f'{base}: KEZ: nincs, de a MERCE fejhez mért. Kéz nélkül csak az ember nélküli mérés fogadható el: '
+                        '"MERCE: nincs-ember nyitott|zart <könyv szélesség px>/<könyv magasság px>"; ha van ember a '
+                        'képen, a könyv mélységéhez legközelebbi kézhez mérj (KEZ).')
+            if k and k[0].lower() == 'nincs' and len(' '.join(k[1:])) >= 15:
+                pass
+            else:
+                try:
+                    kk = k[0].lower()
+                    bk, hk = (float(x) for x in k[1].split('/'))
+                    rk = bk / hk
+                except Exception:
+                    return (f'{base}: KEZ hiányzik/hibás. Alak: "KEZ: zart|nyitott <könyv él px>/<felnőtt kézfej '
+                            'csuklótól ujjhegyig px, a könyv mélységéhez legközelebbi kéz>" (mérve), vagy '
+                            '"KEZ: nincs <miért nincs kéz a képen, mihez mértél helyette>".')
+                klo, khi = (1.3, 2.0) if kk.startswith('nyit') else (0.6, 1.1)
+                if not (klo <= rk <= khi):
+                    return (f'{base}: a könyv nem A5 a kézhez mérve: {kk} arány {rk:.2f}, elvárt {klo}-{khi} '
+                            '(1 kézfej kb. 18 cm; a zárt A5 éle 14,8 cm).')
         f = d.get('FENY') or ''
         if 'L*' not in f and 'l*' not in f:
             return (f'{base}: FENY hiányzik. Alak: "FENY: papír L* <x> / jelenet legfehérebb hasonló felülete '
@@ -693,6 +765,26 @@ def warm_ocr(paths):
         print(f'{os.path.basename(fp)}: ' + (r or f'OK, "{BRAND}" minden másodpercben'))
         bad += bool(r)
     return 2 if bad else 0
+
+
+IDEA_WORD = 'ötlet'  # ötlet, ötletek, ötletet, Ötlet ... (case-insensitive substring)
+IDEA_MARK = 'ÖTLET-KAPU:'
+IDEA_NEEDS = ('nem marabel/könyv', 'termékpaletta ellenőrizve')
+
+
+def idea_check(text):
+    """Klodel 33881: a private-chat text that mentions an idea ("ötlet") passes only with an "ÖTLET-KAPU:" line that
+    contains both "nem Marabel/könyv" and "termékpaletta ellenőrizve". Returns the reason to block, or None."""
+    t = unicodedata.normalize('NFC', text)
+    if IDEA_WORD not in t.lower():
+        return None
+    for ln in t.splitlines():
+        s = ln.strip()
+        if s.upper().startswith(IDEA_MARK) and all(n in s.lower() for n in IDEA_NEEDS):
+            return None
+    return ('ÖTLET-KAPU: új irány ne legyen Marabel/könyv-variáció, AI-tanácsadás, saját rendszer eladása; vesd össze '
+            'a 6 termékkel (memória new-direction-start-from-market). Ha megvan, írd a szövegbe: "ÖTLET-KAPU: nem '
+            'Marabel/könyv, termékpaletta ellenőrizve <mivel vetetted össze>".')
 
 
 def main():
@@ -717,6 +809,15 @@ def main():
             sys.stderr.write(
                 'PRIVÁT-KAPU (Patrik TG 14472: "elég a marabel csapat chat"): Patrik privát chatjébe csak indokkal '
                 'mehet üzenet. Küldd a csapat-csoportba, vagy írd a szövegbe: "PRIVÁT-OK: <miért privátban>".\n')
+            return 2
+    if chat and chat == owner_private_chat():
+        # Klodel 33881 (hibanapló 2026-11-09 12:1x, the third repeat; memory new-direction-start-from-market): a new
+        # business idea pitched to Patrik privately came back as yet another Marabel/book variation. A private reply
+        # that talks about an idea needs an "ÖTLET-KAPU:" line stating both checks. Applies with the window open too:
+        # the window lifts the PRIVÁT-OK marker only.
+        idea = idea_check(str(ti.get('text') or ''))
+        if idea:
+            sys.stderr.write(idea + '\n')
             return 2
     files = ti.get('files') or []
     errs = [e for e in (check(f) for f in files if f.lower().endswith(MEDIA)) if e]
