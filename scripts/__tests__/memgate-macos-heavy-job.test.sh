@@ -46,6 +46,9 @@ chmod +x "$SB/bin/curl" "$SB/sysctl"
 level() { echo "$1" > "$SB/level"; }
 # No VM unless a test says so: the host running this test may have a real one.
 export HEAVY_JOB_VM_PID=""
+# The tests below this line test the supervisor itself: attached (the test runner may be an agent session,
+# CLAUDECODE=1, which would detach by default). The detached mode has its own section at the end.
+export HEAVY_JOB_DETACH=0
 
 # MEMGATE_PROC_MEMINFO points at a file that does not exist, so the Linux path
 # is skipped on any host and the sysctl stand-in is the only source.
@@ -245,6 +248,59 @@ hj --name x
 check "no command -> usage error (64)" "$(ok "$RC" = 64)" "rc=$RC"
 hj --min-free 20 --kill-below 30 -- true
 check "--kill-below >= --min-free -> usage error (64)" "$(ok "$RC" = 64)" "rc=$RC"
+
+echo "== point 4: detached supervisor (Klodel 34435: a context-guard restart killed a film export)"
+level 80
+hjd() { OUT="$(env HEAVY_JOB_DETACH=1 HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+      HEAVY_JOB_DF_KB=99999999 bash "$HJ" "$@" 2>&1)"; RC=$?; }
+hjd --name d1 --wait 5 -- bash -c 'echo out-line; echo err-line >&2; exit 3'
+check "detached: the caller relays stdout, stderr and the job's exit code (3)" \
+  "$(ok "$RC" = 3 -a -n "$(echo "$OUT" | grep -x out-line)" -a -n "$(echo "$OUT" | grep -x err-line)")" "rc=$RC $OUT"
+check "detached: the START line names the run" "$(ok -n "$(grep '\[d1 pid=.*START .* detached run=.*-d1-' "$SB/store/heavy-job.log")")" "$(tail -3 "$SB/store/heavy-job.log")"
+r1="$(ls -1dt "$SB/store/heavy-jobs/"*-d1-* | head -1)"
+check "detached: out/err/rc stay in the run dir" "$(ok "$(cat "$r1/rc")" = 3 -a -n "$(grep -x out-line "$r1/out")")" "$(ls "$r1")"
+
+# the caller dies mid-run (what tmux kill-session did): the job must finish anyway
+rm -f "$SB/d2"
+( env HEAVY_JOB_DETACH=1 HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+    HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name d2 --wait 5 -- bash -c 'sleep 3; echo done > "$0"' "$SB/d2" >/dev/null 2>&1 ) &
+CALLER=$!
+sleep 1.5
+r2="$(ls -1dt "$SB/store/heavy-jobs/"*-d2-* 2>/dev/null | head -1)"; SUP="$(cat "$r2/pid" 2>/dev/null)"
+SUP_PPID="$(ps -o ppid= -p "${SUP:-0}" 2>/dev/null | tr -d ' ')"
+SUP_SID_OTHER="$( [ -n "$SUP" ] && [ "$(ps -o pgid= -p "$SUP" | tr -d ' ')" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] && echo yes)"
+pkill -TERM -P "$CALLER" 2>/dev/null; kill -TERM "$CALLER" 2>/dev/null; wait "$CALLER" 2>/dev/null
+check "detached: the supervisor is not the caller's child (ppid 1) and not in its process group" "$(ok "$SUP_PPID" = 1 -a "$SUP_SID_OTHER" = yes)" "sup=$SUP ppid=$SUP_PPID"
+for _ in 1 2 3 4 5 6; do [ -e "$SB/d2" ] && break; sleep 1; done
+check "detached: the caller is killed mid-run, the job still finishes" "$(ok -e "$SB/d2" -a "$(cat "$r2/rc" 2>/dev/null)" = 0)" "rc=$(cat "$r2/rc" 2>/dev/null) $(tail -3 "$SB/store/heavy-job.log")"
+check "detached: the lock is released after it" "$(ok ! -e "$SB/store/.heavy-job.lock")"
+
+# --stop: the deliberate stop (the old Ctrl-C)
+rm -f "$SB/d3"
+( env HEAVY_JOB_DETACH=1 HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+    HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name d3 --wait 5 -- bash -c 'sleep 20; echo done > "$0"' "$SB/d3" >/dev/null 2>&1 ) &
+CALLER=$!
+sleep 2
+STOP_OUT="$(HEAVY_JOB_STORE="$SB/store" bash "$HJ" --stop d3 2>&1)"; STOP_RC=$?
+wait "$CALLER"; CALLER_RC=$?
+r3="$(ls -1dt "$SB/store/heavy-jobs/"*-d3-* | head -1)"
+check "--stop NAME: the detached job is stopped, rc 130 reaches the waiting caller" \
+  "$(ok "$STOP_RC" = 0 -a "$(cat "$r3/rc" 2>/dev/null)" = 130 -a "$CALLER_RC" = 130 -a ! -e "$SB/d3")" "stop=$STOP_RC caller=$CALLER_RC rc=$(cat "$r3/rc" 2>/dev/null) $STOP_OUT"
+sleep 1; pgrep -f 'sleep 20; echo done' >/dev/null && LEFT=yes || LEFT=no
+check "--stop NAME: nothing of the job is left" "$(ok "$LEFT" = no)"
+STOP_OUT="$(HEAVY_JOB_STORE="$SB/store" bash "$HJ" --stop nosuch 2>&1)"; STOP_RC=$?
+check "--stop on an unknown name: rc 1" "$(ok "$STOP_RC" = 1)" "$STOP_OUT"
+
+# the default: CLAUDECODE=1 detaches, --attached does not
+OUT="$(env -u HEAVY_JOB_DETACH CLAUDECODE=1 HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+    HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name d4 --wait 5 -- true 2>&1)"
+check "CLAUDECODE=1 without a flag: detached" "$(ok -n "$(grep '\[d4 pid=.*detached run=' "$SB/store/heavy-job.log")")" "$OUT"
+OUT="$(env -u HEAVY_JOB_DETACH CLAUDECODE=1 HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+    HEAVY_JOB_DF_KB=99999999 bash "$HJ" --attached --name d5 --wait 5 -- true 2>&1)"
+check "--attached: not detached" "$(ok -n "$(grep '\[d5 pid=.*START' "$SB/store/heavy-job.log")" -a -z "$(grep '\[d5 pid=.*detached' "$SB/store/heavy-job.log")")" "$OUT"
+OUT="$(env -u HEAVY_JOB_DETACH -u CLAUDECODE HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+    HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name d6 --wait 5 -- true 2>&1)"
+check "outside an agent session (launchd scripts): attached, as before" "$(ok -z "$(grep '\[d6 pid=.*detached' "$SB/store/heavy-job.log")")" "$OUT"
 
 echo
 echo "$((DONE-FAILS))/$DONE passed"

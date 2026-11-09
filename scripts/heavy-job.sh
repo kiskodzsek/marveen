@@ -78,10 +78,20 @@
 # watchdog; 64 = usage error.
 #
 # Every start/stop/refusal is one line in store/heavy-job.log.
+#
+# 4. DETACHED by default from an agent session (CLAUDECODE=1; Klodel 34435): on 2026-11-09 16:20 Dave's
+#    context-guard restart (tmux kill-session) took the session's shells and their children with it, and
+#    heavy-job's own TERM handler stopped a 10-minute film export. Now the supervisor (lock, watchdog, job)
+#    is double-forked into its own session under launchd: a dying caller no longer stops it. The caller
+#    waits for it and relays its stdout/stderr and exit code as before; if the caller is killed, the job
+#    runs on. Output and exit code also stay in store/heavy-jobs/<run>/{out,err,rc} (kept 2 days).
+#    --attached keeps the old behaviour (the caller IS the supervisor; a signal stops the job);
+#    --detach forces detaching outside an agent session; HEAVY_JOB_DETACH=0/1 is the env form.
+#    Stop a detached job on purpose: heavy-job.sh --stop <name>  (TERM to its supervisor = the old Ctrl-C).
 # Test hooks: MEMGATE_PROC_MEMINFO / MEMGATE_SYSCTL (lib/mem-read.sh),
 # HEAVY_JOB_STORE (state dir), HEAVY_JOB_DF_KB (fixed free-disk KB), HEAVY_JOB_DF_KB_FILE
 # (free-disk KB read from a file at every check),
-# HEAVY_JOB_POLL (seconds between checks, default 3).
+# HEAVY_JOB_POLL (seconds between checks, default 3), HEAVY_JOB_DETACH (see point 4).
 
 set -uo pipefail
 
@@ -91,11 +101,30 @@ LOCK="$STORE/.heavy-job.lock"
 LOG="$STORE/heavy-job.log"
 POLL="${HEAVY_JOB_POLL:-3}"
 
+ORIG_ARGS=("$@")
+SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
+RUNS="$STORE/heavy-jobs"
+DETACH="${HEAVY_JOB_DETACH:-}"
+[[ -n "$DETACH" ]] || { [[ "${CLAUDECODE:-}" == "1" ]] && DETACH=1 || DETACH=0; }
 NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=5; KILL_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0; IGNORE_HOST_SWAP=0; ALLOW_VM=0; VM_MAX_SWAP_PCT=80; VM_MIN_DISK_GB=10
-usage() { echo "usage: heavy-job.sh [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--kill-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm] [--vm-max-swap-pct PCT] [--vm-min-disk-gb GB] -- cmd [args...]" >&2; exit 64; }
+usage() { echo "usage: heavy-job.sh [--attached|--detach] [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--kill-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm] [--vm-max-swap-pct PCT] [--vm-min-disk-gb GB] -- cmd [args...]   |   heavy-job.sh --stop NAME" >&2; exit 64; }
 num() { [[ "${1:-}" =~ ^[0-9]+$ ]] || usage; }
+# --stop NAME: TERM to the newest live detached supervisor of that name (its handler stops the job group).
+if [[ "${1:-}" == "--stop" ]]; then
+  [[ $# -eq 2 ]] || usage
+  want="$(printf '%s' "$2" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-40)"
+  for d in $(ls -1dt "$RUNS"/*-"$want"-[0-9]* 2>/dev/null); do
+    sp="$(cat "$d/pid" 2>/dev/null)"
+    if [[ "$sp" =~ ^[0-9]+$ ]] && [[ ! -e "$d/rc" ]] && kill -0 "$sp" 2>/dev/null; then
+      kill -TERM "$sp" && { echo "heavy-job: stop sent to $want (supervisor pid $sp, run $d)" >&2; exit 0; }
+    fi
+  done
+  echo "heavy-job: no running detached job named $want" >&2; exit 1
+fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --attached)    DETACH=0; shift ;;
+    --detach)      DETACH=1; shift ;;
     --name)        [[ $# -ge 2 ]] || usage; NAME="$2"; shift 2 ;;
     --min-free)    [[ $# -ge 2 ]] || usage; num "$2"; MIN_FREE="$2"; shift 2 ;;
     --kill-below)  [[ $# -ge 2 ]] || usage; num "$2"; KILL_BELOW="$2"; shift 2 ;;
@@ -117,6 +146,39 @@ NAME="$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-40)"
 
 mkdir -p "$STORE" 2>/dev/null
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$NAME pid=$$] $*" >>"$LOG" 2>/dev/null; echo "heavy-job: $*" >&2; }
+
+# --- point 4: the caller side of a detached run. Everything below this block runs in the supervisor. ---
+if (( DETACH )) && [[ -z "${HEAVY_JOB_RUN:-}" ]]; then
+  mkdir -p "$RUNS" || { echo "heavy-job: cannot create $RUNS" >&2; exit 75; }
+  find "$RUNS" -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} + 2>/dev/null
+  run="$RUNS/$(date +%Y%m%d-%H%M%S)-$NAME-$$"
+  mkdir "$run" || { echo "heavy-job: cannot create $run" >&2; exit 75; }
+  : >"$run/out"; : >"$run/err"
+  # fork, setsid, fork: the supervisor is reparented to launchd, in its own session and process group, with
+  # no terminal; neither the caller's process group nor a walk of its descendants reaches it.
+  HEAVY_JOB_RUN="$run" /usr/bin/perl -e 'use POSIX (); my $p = fork; exit 71 unless defined $p; exit 0 if $p;
+    POSIX::setsid(); $p = fork; exit 71 unless defined $p; exit 0 if $p; exec { $ARGV[0] } @ARGV or exit 72' \
+    -- /bin/bash "$SELF" "${ORIG_ARGS[@]}" </dev/null >"$run/out" 2>"$run/err"
+  sp=""
+  for _ in $(seq 1 50); do sp="$(cat "$run/pid" 2>/dev/null)"; [[ "$sp" =~ ^[0-9]+$ ]] && break; sleep 0.2; done
+  [[ "$sp" =~ ^[0-9]+$ ]] || { echo "heavy-job: the detached supervisor did not start (run $run)" >&2; cat "$run/err" >&2; exit 75; }
+  trap 'echo "heavy-job: caller stopped; the job runs on detached (supervisor pid $sp, run $run). Stop it: heavy-job.sh --stop $NAME" >&2; exit 130' INT TERM HUP
+  o_off=0; e_off=0
+  relay() { # file fd offset-var: copy what was appended since the last call
+    local sz; sz="$(wc -c <"$1" 2>/dev/null | tr -d ' ')"; [[ "$sz" =~ ^[0-9]+$ ]] || return 0
+    if (( sz > ${!3} )); then tail -c +$(( ${!3} + 1 )) "$1" | head -c $(( sz - ${!3} )) >&"$2"; printf -v "$3" '%s' "$sz"; fi
+  }
+  while kill -0 "$sp" 2>/dev/null && [[ ! -e "$run/rc" ]]; do relay "$run/out" 1 o_off; relay "$run/err" 2 e_off; sleep "$POLL"; done
+  for _ in 1 2 3 4 5; do [[ -e "$run/rc" ]] && break; sleep 0.2; done
+  relay "$run/out" 1 o_off; relay "$run/err" 2 e_off
+  rc="$(cat "$run/rc" 2>/dev/null)"
+  [[ "$rc" =~ ^[0-9]+$ ]] || { echo "heavy-job: the detached supervisor ended without an exit code (run $run)" >&2; exit 70; }
+  exit "$rc"
+fi
+if [[ -n "${HEAVY_JOB_RUN:-}" ]]; then
+  echo "$$" >"$HEAVY_JOB_RUN/pid"
+  trap '' HUP
+fi
 
 . "$HERE/lib/mem-read.sh" || { echo "heavy-job: cannot load lib/mem-read.sh" >&2; exit 75; }
 
@@ -270,7 +332,7 @@ on_signal() {
   log "interrupted, job stopped"; release; exit 130
 }
 trap on_signal INT TERM
-trap release EXIT
+trap 'ec=$?; release; [[ -n "${HEAVY_JOB_RUN:-}" ]] && echo "$ec" >"$HEAVY_JOB_RUN/rc"' EXIT
 
 # --- wait for lock + memory + disk ---
 deadline=$(( $(date +%s) + WAIT )); reason=""
@@ -302,7 +364,7 @@ done
 # customer file path or a prompt, and a newline in it would forge a log line
 # (Viktor 9013 I1).
 cmd="$(printf '%s' "${1##*/}" | tr -c 'A-Za-z0-9._+-' '_' | cut -c1-60)"
-log "START free=${MEM_FREE_PCT}% src=${MEM_SOURCE}: $cmd"
+log "START free=${MEM_FREE_PCT}% src=${MEM_SOURCE}${HEAVY_JOB_RUN:+ detached run=${HEAVY_JOB_RUN##*/}}: $cmd"
 # Job control gives the background job its own process group, so the watchdog
 # can stop the job AND everything it spawned (panna.sh -> mflux -> python).
 set -m
