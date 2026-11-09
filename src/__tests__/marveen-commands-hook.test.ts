@@ -423,7 +423,9 @@ describe('marveen-commands.py', () => {
 // and /context both got answered twice, once free (the hook) and once at
 // full token cost (the drain), 3-20 minutes apart.
 // --stop (Stop hook): a model hold that expired while the session was busy
-// gets one revert retry when the turn ends. Ordinary turn ends cost nothing.
+// gets one revert retry when the turn ends, and so does a write the session
+// was busy for (store/main-command-pending.json). Ordinary turn ends cost
+// nothing.
 describe('marveen-commands.py --stop', () => {
   function runStop(agent = 'marveen'): Promise<number | null> {
     return new Promise((resolve) => {
@@ -436,6 +438,7 @@ describe('marveen-commands.py --stop', () => {
   }
   const holdFile = () => join(install, 'store', 'main-model-hold.json')
   const turnEnded = () => calls.filter(c => c.path === '/api/commands/turn-ended')
+  const pendingFile = () => join(install, 'store', 'main-command-pending.json')
 
   it('an expired hold: the dashboard is told the turn ended; exit 0', async () => {
     writeFileSync(holdFile(), JSON.stringify({ model: 'm', revert_to: 'b', until: Date.now() - 60_000 }))
@@ -443,6 +446,37 @@ describe('marveen-commands.py --stop', () => {
       expect(await runStop()).toBe(0)
       expect(turnEnded()).toHaveLength(1)
     } finally { rmSync(holdFile(), { force: true }) }
+  })
+
+  // Measured 2026-11-09: a busy `/model opus keep` was queued, but with no
+  // hold file the hook never called, so the write only got the 5-minute sweep
+  // and the 10-minute deadline dropped it.
+  it('a queued write and no hold: the dashboard is told the turn ended; exit 0', async () => {
+    writeFileSync(pendingFile(), JSON.stringify({ text: '/model opus keep', ownerId: 1, queuedAt: Date.now(), deadline: Date.now() + 600_000 }))
+    try {
+      expect(await runStop()).toBe(0)
+      expect(turnEnded()).toHaveLength(1)
+    } finally { rmSync(pendingFile(), { force: true }) }
+  })
+
+  it('a queued write and a hold not yet expired: still one call', async () => {
+    writeFileSync(pendingFile(), JSON.stringify({ text: '/model opus keep', ownerId: 1, queuedAt: Date.now(), deadline: Date.now() + 600_000 }))
+    writeFileSync(holdFile(), JSON.stringify({ model: 'm', revert_to: 'b', until: Date.now() + 60_000 }))
+    try {
+      expect(await runStop()).toBe(0)
+      expect(turnEnded()).toHaveLength(1)
+    } finally {
+      rmSync(pendingFile(), { force: true })
+      rmSync(holdFile(), { force: true })
+    }
+  })
+
+  it('a queued write in a sub-agent session: no call', async () => {
+    writeFileSync(pendingFile(), JSON.stringify({ text: '/model opus keep', ownerId: 1, queuedAt: Date.now(), deadline: Date.now() + 600_000 }))
+    try {
+      expect(await runStop('nova')).toBe(0)
+      expect(turnEnded()).toHaveLength(0)
+    } finally { rmSync(pendingFile(), { force: true }) }
   })
 
   it('no hold, a hold not yet expired, or a sub-agent session: no call at all', async () => {

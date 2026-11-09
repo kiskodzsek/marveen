@@ -567,24 +567,41 @@ def run_session_start():
     sys.exit(0)
 
 
+def pending_write_waiting():
+    """A queued write (pending-write.ts) waits for the turn end. Existence is
+    enough: the dashboard reads and validates the file itself."""
+    return os.path.exists(os.path.join(REPO_ROOT, "store", "main-command-pending.json"))
+
+
+def hold_expired():
+    try:
+        with open(os.path.join(REPO_ROOT, "store", "main-model-hold.json"), encoding="utf-8") as f:
+            until = json.load(f).get("until")
+        return isinstance(until, (int, float)) and time.time() * 1000 >= until
+    except Exception:
+        return False
+
+
 def run_stop():
-    """Stop hook: the main session finished a turn. If a /model hold expired
-    while the session was busy (the one-shot expiry timer found it busy), tell
-    the dashboard, which arms ONE revert retry after the switch quiet window.
-    The expiry is checked from the hold file first, so an ordinary turn end
-    costs no HTTP call. Silent, never blocks (exit 0, empty stdout)."""
+    """Stop hook: the main session finished a turn. Tell the dashboard when it
+    has something waiting for exactly this moment, and it arms ONE attempt
+    after the switch quiet window:
+    - a write the session was busy for (store/main-command-pending.json,
+      src/web/pending-write.ts), e.g. a `/model opus keep`. Without this the
+      write only ever got the 5-minute sweep, which kept finding a busy
+      session until the 10-minute deadline dropped it (measured 2026-11-09:
+      sent three times, dropped twice);
+    - a /model hold that expired while the session was busy (the one-shot
+      expiry timer found it busy).
+    Both are checked from the files first, so an ordinary turn end costs no
+    HTTP call. Silent, never blocks (exit 0, empty stdout)."""
     try:
         payload = json.load(sys.stdin)
     except Exception:
         payload = {}
     if not is_main_session(payload):
         sys.exit(0)
-    try:
-        with open(os.path.join(REPO_ROOT, "store", "main-model-hold.json"), encoding="utf-8") as f:
-            until = json.load(f).get("until")
-        if not isinstance(until, (int, float)) or time.time() * 1000 < until:
-            sys.exit(0)
-    except Exception:
+    if not (pending_write_waiting() or hold_expired()):
         sys.exit(0)
     try:
         with open(os.path.join(REPO_ROOT, "store", ".dashboard-token"), encoding="utf-8") as f:
