@@ -109,6 +109,10 @@ jobs:
       # broken store, unknown private chat) are the gate. Hermetic: throwaway
       # CLAUDE_PROJECT_DIR, synthetic chat ids, no network.
       - run: python3 -I scripts/hooks/private-topic-group-gate_test.py
+      # NOMEACULPA1109 (Klodel 34240, Patrik group TG 3795): no "igazad van / hibáztam /
+      # ezentúl" reply to Patrik's chats. Hermetic: throwaway CLAUDE_PROJECT_DIR,
+      # synthetic chat ids, no network.
+      - run: python3 -I scripts/hooks/mea-culpa-reply-gate_test.py
       # KEYCHAINGATE1106 (card c1921b55, Viktor 29950): the Bash gate that stops an
       # agent shell from reading keychain secrets with `security`; its bypass forms
       # (wrappers, paths, escapes, bash -c, stdin mode) are the gate. Hermetic: the
