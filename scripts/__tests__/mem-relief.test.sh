@@ -322,6 +322,54 @@ check "each agent's stamp and the day count exist when its restart runs" \
 check "INFO-1: the per-agent stamp is id-<id>, so a session named 'day' cannot overwrite the day count" \
   "$(ok -f "$SB/store/.mem-relief-idle/id-juro" -a ! -e "$SB/store/.mem-relief-idle/juro")" "$(ls -A "$SB/store/.mem-relief-idle" | tr '\n' ' ')"
 
+echo "== 0. the render gate (Klodel 34315: two ungated Blender renders, kernel panic 2026-11-09 15:19)"
+# Blender under a plain shell (700 -> 701, a child 702), under heavy-job.sh (801 -> 802), and under a shell that only
+# MENTIONS heavy-job.sh (900 -> 901). No host-state: the memory band is fine, the gate still runs.
+render_ps() {
+  grep -v Blender "$SB/ps.base" > "$SB/ps"
+  cat >> "$SB/ps" <<'EOF'
+  700     1 /bin/zsh -c source /Users/x/marveen/agents/dave/.claude-config/shell-snapshots/s.sh && B=/q/Blender.app/Contents/MacOS/Blender; $B -b -P book-final.py
+  701   700 /q/Blender.app/Contents/MacOS/Blender -b -P book-final.py -- /out 12 960 540
+  702   701 /q/Blender.app/Contents/MacOS/Blender-helper --worker
+  800     1 /bin/zsh -c source /Users/x/marveen/agents/dave/.claude-config/shell-snapshots/s.sh && bash /Users/x/marveen/scripts/heavy-job.sh --name render -- /q/Blender.app/Contents/MacOS/Blender -b
+  801   800 bash /Users/x/marveen/scripts/heavy-job.sh --name render -- /q/Blender.app/Contents/MacOS/Blender -b
+  802   801 /q/Blender.app/Contents/MacOS/Blender -b -P seq.py
+  900     1 /bin/zsh -c source /Users/x/marveen/agents/mira/.claude-config/shell-snapshots/s.sh && echo heavy-job.sh; /q/Blender.app/Contents/MacOS/Blender -b
+  901   900 /q/Blender.app/Contents/MacOS/Blender -b -P x.py
+  950     1 /usr/bin/python3 render_blender_frames.py --blender /q/Blender.app/Contents/MacOS/Blender
+EOF
+  printf '%s\n' 200 201 202 300 301 302 701 702 802 901 > "$SB/alive"
+  rm -f "$SB/store/.host-state"
+}
+reset; render_ps; run
+check "an ungated Blender and its child are stopped with the memory band fine (no host-state), rc 0" \
+  "$(ok "$RC" = 0 -a -n "$(calls | grep -x 'kill -TERM 701')" -a -n "$(calls | grep -x 'kill -TERM 702')")" "rc=$RC $(calls | tr '\n' ' ') $(logf)"
+check "the shell that started it is not signalled" "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ 700$')")" "$(calls | tr '\n' ' ')"
+check "a Blender under heavy-job.sh is left alone (and heavy-job itself)" "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ (800|801|802)$')")" "$(calls | tr '\n' ' ')"
+check "a shell that only MENTIONS heavy-job.sh does not gate its Blender" "$(ok -n "$(calls | grep -x 'kill -TERM 901')")" "$(calls | tr '\n' ' ')"
+check "a process that only names Blender in an argument is not signalled" "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ 950$')")" "$(calls | tr '\n' ' ')"
+check "the dev servers are NOT touched when memory is fine (only the gate ran)" "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ (201|301)$')" -a -z "$(calls | grep colima)")" "$(calls | tr '\n' ' ')"
+check "the log has STOP ungated Blender for each, with the owner" \
+  "$(ok -n "$(logf | grep 'STOP ungated Blender owner=dave pids=701 702')" -a -n "$(logf | grep 'STOP ungated Blender owner=mira pids=901')")" "$(logf)"
+check "the owners and the main agent are told, once each, with the heavy-job.sh command" \
+  "$(ok "$(grep -c '^klodel dave ' "$SB/msgs")" = 1 -a "$(grep -c '^klodel mira ' "$SB/msgs")" = 1 -a "$(grep -c '^klodel klodel ' "$SB/msgs")" = 1 -a -n "$(grep 'scripts/heavy-job.sh --name' "$SB/msgs")")" "$(cat "$SB/msgs" 2>/dev/null)"
+check "the gate does not start the memory cooldown" "$(ok ! -e "$SB/store/.mem-relief.last")"
+
+reset; render_ps; date +%s > "$SB/store/.mem-relief.last"; state critical 10 "free memory 3%"; run
+check "the gate runs inside the memory cooldown too" "$(ok -n "$(calls | grep -x 'kill -TERM 701')" -a -n "$(logf | grep 'SKIP cooldown')")" "$(calls | tr '\n' ' ') $(logf)"
+
+reset; render_ps; run env MEM_RELIEF_RENDER_GATE=0
+check "MEM_RELIEF_RENDER_GATE=0: no Blender is signalled" "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ (701|901)$')")" "$(calls | tr '\n' ' ')"
+
+reset; render_ps; run env MEM_RELIEF_DRY=1
+check "dry: nothing signalled, nobody told, the log says what it would stop" \
+  "$(ok -z "$(calls | grep 'kill -TERM')" -a ! -s "$SB/msgs" -a -n "$(logf | grep 'DRY would stop ungated Blender pid=701 owner=dave')")" "$(calls | tr '\n' ' ') $(logf)"
+
+reset; render_ps; echo 701 > "$SB/stubborn"; echo 701 > "$SB/immortal"; run
+check "a Blender that survives KILL: FAIL logged, rc 1, the message says so" \
+  "$(ok "$RC" = 1 -a -n "$(logf | grep 'FAIL ungated Blender owner=dave')" -a -n "$(grep 'NEM sikerült' "$SB/msgs")")" "rc=$RC $(logf)"
+rm -f "$SB/immortal"
+
 echo "== installer"
 PL="$SB/la/com.marveen.mem-relief.plist"
 OUT="$(MEM_RELIEF_LAUNCH_AGENTS="$SB/la" bash "$INST" 2>&1)"; RC=$?

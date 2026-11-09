@@ -94,14 +94,48 @@ def owner(procs, pid):
     return "-"
 
 
+# The render gate (Klodel 34315, 2026-11-09): the Mac took its second kernel panic at 15:19 ("watchdog timeout",
+# 908 free pages, ~15 GiB wired) with two Blender renders resident at 11.2 + 6.4 GB on a 16 GiB machine
+# (/Library/Logs/DiagnosticReports/panic-full-2026-11-09-151916.0002.panic). Neither ran under heavy-job.sh, so
+# nothing held the second one back and nothing stopped them when memory ran out. A Blender is "gated" when a
+# process in its parent chain RUNS heavy-job.sh (argv0 or argv1 ends with /heavy-job.sh), not when some
+# ancestor's text merely mentions it.
+def is_blender(cmd):
+    return cmd.split(" ", 1)[0].rsplit("/", 1)[-1] == "Blender"
+
+
+def gated(procs, pid):
+    for p in chain(procs, pid)[1:]:
+        words = procs[p][1].split()
+        if any(w.rsplit("/", 1)[-1] == "heavy-job.sh" for w in words[:2]):
+            return True
+    return False
+
+
+def ungated_renderers(procs):
+    """(owner, pid, "ungated Blender") for every Blender with no heavy-job.sh in its parent chain. A Blender
+    started by another Blender (none measured) counts once: the outermost one."""
+    out = []
+    for pid, (ppid, cmd) in sorted(procs.items()):
+        if is_blender(cmd) and not (ppid in procs and is_blender(procs[ppid][1])) and not gated(procs, pid):
+            out.append((owner(procs, pid), pid, "ungated Blender"))
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ps", default="")
     parser.add_argument("--top", default="")
     parser.add_argument("--decoder-gb", type=float, default=4)
     parser.add_argument("--large-gb", type=float, default=6)
+    parser.add_argument("--ungated-renderers", action="store_true",
+                        help="print only the Blender processes not running under heavy-job.sh (the render gate)")
     args = parser.parse_args()
     procs = snapshot(args.ps)
+    if args.ungated_renderers:
+        for who, pid, what in ungated_renderers(procs):
+            print(f"{who}\t{pid}\t{what}")
+        return 0
     mem = footprints(args.top, bool(args.ps))
     out = []
     vm_done = False
