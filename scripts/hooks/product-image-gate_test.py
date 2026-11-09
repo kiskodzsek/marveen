@@ -168,6 +168,86 @@ def no_person_without_kind_blocked(root):
     return rc == 2 and 'MERCE hiányzik/hibás' in err
 
 
+# Klodel 34282 (Patrik TG 3788): an engine frame at an angle measures out of band (oa-seq3 f120: 1.74); it is
+# measured on a FRONT render of the same book, which must exist and be another image.
+def front_ref(root, name='szembol.png'):
+    ref = os.path.join(root, name)
+    open(ref, 'wb').write(b'\x89PNG')
+    return ref
+
+
+@case
+def no_person_angled_frame_still_blocked(root):
+    rc, err = no_person(root, 'nincs-ember nyitott 1096/630')  # 1.74, the measured oa-seq3 f120 frame
+    return rc == 2 and 'A5-ös keménytábla' in err and 'szembol' in err
+
+
+@case
+def no_person_front_render_open_allowed(root):
+    rc, _ = no_person(root, f'nincs-ember nyitott szembol 888/630 {front_ref(root)}')
+    return rc == 0
+
+
+@case
+def no_person_front_render_closed_accented_allowed(root):
+    rc, _ = no_person(root, f'nincs-ember zart szemből 444/630 {front_ref(root)}')
+    return rc == 0
+
+
+@case
+def no_person_front_render_path_with_space_allowed(root):
+    rc, _ = no_person(root, f'nincs-ember nyitott szembol 888/630 {front_ref(root, "szembol kep.png")}')
+    return rc == 0
+
+
+@case
+def no_person_front_render_out_of_band_blocked(root):
+    rc, err = no_person(root, f'nincs-ember nyitott szembol 1096/630 {front_ref(root)}')
+    return rc == 2 and 'A5-ös keménytábla' in err
+
+
+@case
+def no_person_front_render_missing_file_blocked(root):
+    rc, err = no_person(root, f'nincs-ember nyitott szembol 888/630 {os.path.join(root, "nincs-ilyen.png")}')
+    return rc == 2 and 'referencia-fájl' in err
+
+
+@case
+def no_person_front_render_without_file_blocked(root):
+    rc, err = no_person(root, 'nincs-ember nyitott szembol 888/630')
+    return rc == 2 and 'referencia-fájl' in err
+
+
+@case
+def no_person_front_render_not_an_image_blocked(root):
+    txt = os.path.join(root, 'meres.txt')
+    open(txt, 'w').write('888/630')
+    rc, err = no_person(root, f'nincs-ember nyitott szembol 888/630 {txt}')
+    return rc == 2 and 'referencia-fájl' in err
+
+
+@case
+def no_person_front_render_self_reference_blocked(root):
+    rc, err = no_person(root, f'nincs-ember nyitott szembol 888/630 {os.path.join(root, "kep.png")}')
+    return rc == 2 and 'referencia-fájl' in err
+
+
+@case
+def front_render_needs_no_person(root):
+    # "szembol" is the engine branch only: on the head branch it is not a kind, the line is malformed.
+    img = book_fixture(root, KEPES_OK, merce=f'nyitott szembol 888/630 {front_ref(root)}')
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'MERCE hiányzik/hibás' in err
+
+
+@case
+def front_render_still_needs_valodi(root):
+    img = book_fixture(root, KEPES_OK, merce=f'nincs-ember nyitott szembol 888/630 {front_ref(root)}',
+                       kez=NO_PERSON_KEZ, valodi=None)
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'VALODI' in err
+
+
 @case
 def short2_head_merce_without_hand_blocked(root):
     # The short2 sheet (11-06): "zart 1/1" on the head branch, KEZ: nincs, no person in the frame.

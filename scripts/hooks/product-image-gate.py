@@ -24,6 +24,9 @@ J1 paper "too white, almost glows" -- both passed a self-attested "A5: ok"):
            open A5 (30 cm) vs adult head (~15 cm): ratio 1.5-2.0; closed (14.8 cm): 0.8-1.2
            or, with no person in the frame (3D book engine, studio): "MERCE: nincs-ember nyitott|zart
            <book width px>/<book height px>" -- the book's own proportions: open 1.38-1.52, closed 0.64-0.74
+           an engine frame seen at an angle (3/4 view): perspective puts the ratio out of band, so the maker measures
+           a FRONT render of the same book: "MERCE: nincs-ember nyitott|zart szembol <px>/<px> <front render file>"
+           -- the file must exist and be another image; the front ratio is held to the same band (Klodel 34282)
            (A5 hardcover board 2x148-160 / 210-216 mm). Shape only: an A4 book has the same ratio.
            or, with the head seen in PROFILE: "MERCE: profil nyitott|zart <book px>/<head px>" -- no head band (a
            profile shows the head's length, ~20 cm, not its width, so an exact open A5 gives 1.41-1.48; card
@@ -658,6 +661,19 @@ def check(fp):
         profile = bool(m) and m[0].lower() == 'profil'
         if no_person or profile:
             m = m[1:]
+        # Klodel 34282 (2026-11-09, Patrik TG 3788): our own 3D book engine's open book seen at an angle measures out of
+        # band in the frame (oa-seq3 f120: 1.74 vs 1.38-1.52) because of perspective, not because the book is wrong. Such
+        # a frame is measured on a FRONT render of the same book: "nincs-ember nyitott|zart szembol <px>/<px> <file>".
+        # The file must exist and be an image other than this one; its ratio goes through the same A5 band below.
+        frontal = no_person and len(m) >= 2 and m[1].lower() in ('szembol', 'szemből')
+        if frontal:
+            ref = ' '.join(m[3:]).strip()
+            if (not ref or not ref.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')) or not os.path.isfile(ref)
+                    or os.path.abspath(ref) == os.path.abspath(fp)):
+                return (f'{base}: MERCE: nincs-ember ... szembol, de a szemből renderelt referencia-fájl hiányzik, nem kép, '
+                        'vagy maga a kocka. Alak: "MERCE: nincs-ember nyitott|zart szembol <könyv szélesség px>/<könyv '
+                        'magasság px> <a szemből renderelt referencia-kép útja>" (Klodel 34282).')
+            m = [m[0]] + m[2:3]
         try:
             kind = m[0].lower()
             if (no_person or profile) and not kind.startswith(('nyit', 'zar', 'zár')):
@@ -677,7 +693,9 @@ def check(fp):
             lo, hi = (1.38, 1.52) if kind.startswith('nyit') else (0.64, 0.74)
             if not (lo <= r <= hi):
                 return (f'{base}: a könyv aránya nem A5-ös keménytábla: {kind} szélesség/magasság {r:.2f}, '
-                        f'elvárt {lo}-{hi} (A5 tábla 2x148-160 / 210-216 mm).')
+                        f'elvárt {lo}-{hi} (A5 tábla 2x148-160 / 210-216 mm).'
+                        + ('' if frontal else ' Ferde nézetű motor-kockánál a szemből renderelt referencián mérj: '
+                           '"MERCE: nincs-ember nyitott|zart szembol <px>/<px> <referencia-kép>".'))
         else:
             lo, hi = (1.5, 2.0) if kind.startswith('nyit') else (0.8, 1.2)
             if not (lo <= r <= hi):
