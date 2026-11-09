@@ -94,14 +94,72 @@ def owner(procs, pid):
     return "-"
 
 
+# The heavy-process gate (Klodel 34315/34318, 2026-11-09): the Mac took its second kernel panic at 15:19 ("watchdog
+# timeout", 908 free pages, ~15 GiB wired) with two Blender renders resident at 11.2 + 6.4 GB on a 16 GiB machine
+# (/Library/Logs/DiagnosticReports/panic-full-2026-11-09-151916.0002.panic); Patrik restarted it by hand (TG 17017).
+# Neither render ran under heavy-job.sh, so nothing held the second one back and nothing stopped them when memory
+# ran out. Heavy = Blender, ffmpeg, mflux (Klodel 34318). A heavy process is "gated" when a process in its parent
+# chain RUNS heavy-job.sh (argv0 or argv1 ends with /heavy-job.sh), not when some ancestor's text merely mentions it.
+def heavy_kind(cmd):
+    words = cmd.split()
+    if not words:
+        return None
+    base = words[0].rsplit("/", 1)[-1]
+    if base == "Blender":
+        return "Blender"
+    if base == "ffmpeg":
+        return "ffmpeg"
+    # mflux runs as its console script (argv0) or under python (argv1 / `python -m mflux...`)
+    if any(w.rsplit("/", 1)[-1].startswith("mflux") for w in words[:3]):
+        return "mflux"
+    return None
+
+
+def gated(procs, pid):
+    for p in chain(procs, pid)[1:]:
+        words = procs[p][1].split()
+        if any(w.rsplit("/", 1)[-1] == "heavy-job.sh" for w in words[:2]):
+            return True
+    return False
+
+
+def heavy_roots(procs):
+    """(pid, kind) for every heavy process whose parent is not a heavy process of the same kind (counted once)."""
+    out = []
+    for pid, (ppid, cmd) in sorted(procs.items()):
+        kind = heavy_kind(cmd)
+        if kind and not (ppid in procs and heavy_kind(procs[ppid][1]) == kind):
+            out.append((pid, kind))
+    return out
+
+
+def ungated_heavy(procs):
+    """(owner, pid, "ungated <kind>") for every heavy process with no heavy-job.sh in its parent chain."""
+    return [(owner(procs, pid), pid, f"ungated {kind}") for pid, kind in heavy_roots(procs) if not gated(procs, pid)]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ps", default="")
     parser.add_argument("--top", default="")
     parser.add_argument("--decoder-gb", type=float, default=4)
     parser.add_argument("--large-gb", type=float, default=6)
+    parser.add_argument("--ungated-heavy", action="store_true",
+                        help="print only the heavy processes (Blender, ffmpeg, mflux) not running under heavy-job.sh")
+    parser.add_argument("--heavy", action="store_true",
+                        help="print every heavy process with its footprint, the largest first (gated or not)")
     args = parser.parse_args()
     procs = snapshot(args.ps)
+    if args.ungated_heavy:
+        for who, pid, what in ungated_heavy(procs):
+            print(f"{who}\t{pid}\t{what}")
+        return 0
+    if args.heavy:
+        mem = footprints(args.top, bool(args.ps) and not args.top)
+        rows = sorted(heavy_roots(procs), key=lambda r: -mem.get(r[0], 0))
+        for pid, kind in rows:
+            print(f"{owner(procs, pid)}\t{pid}\theavy {kind} {gb(mem.get(pid, 0))} GB")
+        return 0
     mem = footprints(args.top, bool(args.ps))
     out = []
     vm_done = False

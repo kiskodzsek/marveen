@@ -12,6 +12,16 @@
 # a stop on CRITICAL is "a separate, approved step, not a side effect of a monitor" (its header).
 # This is that step. Analysis: shared/cleanup-1103/panic-1103-elemzes.md.
 #
+# 0. The heavy-process gate, EVERY pass (60 s), whatever the memory band and the cooldown (Klodel 34315/34318): a
+#    heavy process (Blender, ffmpeg, mflux) that does not run under scripts/heavy-job.sh (scripts/swap-culprits.py
+#    --ungated-heavy) gets SIGTERM, SIGKILL after the wait, and its owner and the main agent are told how to run it.
+#    heavy-job.sh starts one heavy job at a time and only with free memory. And on a memory trigger (below), step 0b
+#    stops the LARGEST heavy process first, gated or not (a gated job can run with a low --kill-below). Why: the second kernel panic,
+#    2026-11-09 15:19 (panic-full-2026-11-09-151916.0002.panic: watchdog timeout, 908 free pages, ~15 GiB wired):
+#    two ungated Blender renders, 11.2 + 6.4 GB resident on the 16 GiB Mac. heavy-job.sh runs one heavy job at a
+#    time and stops it when free memory falls (its watchdog); steps 1-2c below never stop an unknown large process.
+#    MEM_RELIEF_RENDER_GATE=0 switches the gate off; MEM_RELIEF_DRY=1 only logs it.
+#
 # When it acts (both read fresh each pass):
 #   - store/.host-state says critical, is at most MEM_RELIEF_STATE_MAX_AGE (180) s old, and a
 #     reason is memory, swap or disk (a load- or thermal-only critical is left to the owner); or
@@ -100,6 +110,7 @@ LIMACTL="${MEM_RELIEF_LIMACTL:-$(command -v limactl || echo /opt/homebrew/bin/li
 KILL="${MEM_RELIEF_KILL:-kill}"
 AGENT_MSG="${MEM_RELIEF_AGENT_MSG:-$HERE/agent-msg.sh}"
 DRY="${MEM_RELIEF_DRY:-0}"
+RENDER_GATE="${MEM_RELIEF_RENDER_GATE:-1}"
 
 mkdir -p "$STORE" 2>/dev/null
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG" 2>/dev/null; }
@@ -231,6 +242,38 @@ kept_ports() {
   done < "$KEEP"
 }
 
+# 0. The heavy-process gate (see the header): every pass, before and apart from the memory trigger.
+ungated_now() {
+  python3 -I "$HERE/swap-culprits.py" --ungated-heavy ${MEM_RELIEF_PS:+--ps "$MEM_RELIEF_PS"} 2>/dev/null
+}
+render_gate() {
+  [[ "$RENDER_GATE" == "1" ]] || return 0
+  local list who pid what pids rc=0 stopped=() owners="" main="" from msg to
+  list="$(ungated_now)"
+  [[ -n "$list" ]] || return 0
+  PSDATA="$(ps_snapshot)"
+  while IFS=$'\t' read -r who pid what; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    if [[ "$DRY" == "1" ]]; then log "DRY would stop $what pid=$pid owner=$who"; continue; fi
+    # Viktor 26868 LOW-2, as for the decoder: a fresh snapshot right before the signal (pid reuse).
+    if ! ungated_now | awk -F'\t' -v p="$pid" '$2==p{f=1} END{exit !f}'; then log "SKIP $what pid=$pid: no longer an ungated heavy process"; continue; fi
+    pids="$(descendants "$pid" | sort -u | tr '\n' ' ')"
+    # shellcheck disable=SC2086
+    if stop_pids $pids; then log "STOP $what owner=$who pids=$pids"; stopped+=("${what#ungated } pid $pid ($who)")
+    else log "FAIL $what owner=$who pids=$pids: still alive after KILL"; rc=1; stopped+=("${what#ungated } pid $pid ($who, NEM sikerült leállítani)"); fi
+    owners+=" $who"
+  done <<< "$list"
+  (( ${#stopped[@]} )) || return "$rc"
+  [[ -f "$INSTALL_DIR/.env" ]] && main="$(grep -E '^MAIN_AGENT_ID=' "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r')"
+  from="${MEM_RELIEF_FROM:-$main}"
+  [[ -n "$from" ]] || { log "TELL nobody: no sender id (MAIN_AGENT_ID)"; return "$rc"; }
+  msg="[MEM-RELIEF] Nehéz folyamat heavy-job nélkül futott, leállítottam: $(printf '%s; ' "${stopped[@]}" | sed 's/; $//'). Blender, ffmpeg és mflux csak a kapun át indulhat: bash /Users/klodel/marveen/scripts/heavy-job.sh --name <név> --kill-below 12 -- <a parancs>. Így egyszerre egy nehéz futás megy, csak szabad memóriával, és a memória-őr megállítja, mielőtt a gép elfogy (kernel panic 2026-11-09 15:19: két kapu nélküli Blender). Fájlhoz nem nyúltam."
+  for to in $(echo "$owners $main" | tr ' ' '\n' | awk 'NF && $0!="-" && !s[$0]++'); do
+    echo "$msg" | bash "$AGENT_MSG" "$from" "$to" - >/dev/null 2>&1 && log "TELL $to" || log "TELL $to FAILED"
+  done
+  return "$rc"
+}
+
 main() {
   local why last list rc=0 done_lines=() large_lines=() owners=""
   why="$(trigger)"
@@ -242,6 +285,22 @@ main() {
   list="$(culprits)"
   local dl=""; [[ "$DRY" == "1" ]] && dl=" dry"
   log "ACT${dl} ($why) suspects=$(echo "$list" | grep -c . )"
+
+  # 0b. The largest heavy process, gated or not (Klodel 34318: "ha a memória kritikusra fogy, a kapu állítsa le a
+  # legnagyobbat, mielőtt a gép befagy"). Only the largest one: the others may finish once it is gone.
+  local hv hwho hpid hwhat hpids
+  hv="$(python3 -I "$HERE/swap-culprits.py" --heavy ${MEM_RELIEF_PS:+--ps "$MEM_RELIEF_PS"} ${MEM_RELIEF_TOP:+--top "$MEM_RELIEF_TOP"} 2>/dev/null | head -1)"
+  if [[ -n "$hv" ]]; then
+    IFS=$'\t' read -r hwho hpid hwhat <<< "$hv"
+    if [[ "$DRY" == "1" ]]; then done_lines+=("$hwhat (dry)"); owners+=" $hwho"
+    else
+      hpids="$(descendants "$hpid" | sort -u | tr '\n' ' ')"
+      # shellcheck disable=SC2086
+      if stop_pids $hpids; then log "STOP largest $hwhat owner=$hwho pids=$hpids"; done_lines+=("a legnagyobb nehéz folyamat: $hwhat (pid $hpid, $hwho)")
+      else log "FAIL largest $hwhat owner=$hwho pids=$hpids: still alive after KILL"; rc=1; done_lines+=("$hwhat (pid $hpid, NEM sikerült leállítani)"); fi
+      owners+=" $hwho"
+    fi
+  fi
 
   # 1. The VM.
   if echo "$list" | grep -q $'\tColima VM$'; then
@@ -357,4 +416,7 @@ main() {
   return "$rc"
 }
 
-main
+render_gate; RG=$?
+main; MR=$?
+(( RG || MR )) && exit 1
+exit 0
