@@ -266,7 +266,7 @@ rm -f "$SB/d2"
     HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name d2 --wait 5 -- bash -c 'sleep 3; echo done > "$0"' "$SB/d2" >/dev/null 2>&1 ) &
 CALLER=$!
 sleep 1.5
-r2="$(ls -1dt "$SB/store/heavy-jobs/"*-d2-* 2>/dev/null | head -1)"; SUP="$(cat "$r2/pid" 2>/dev/null)"
+r2="$(ls -1dt "$SB/store/heavy-jobs/"*-d2-* 2>/dev/null | head -1)"; SUP="$(sed -n 1p "$r2/pid" 2>/dev/null)"
 SUP_PPID="$(ps -o ppid= -p "${SUP:-0}" 2>/dev/null | tr -d ' ')"
 SUP_SID_OTHER="$( [ -n "$SUP" ] && [ "$(ps -o pgid= -p "$SUP" | tr -d ' ')" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] && echo yes)"
 pkill -TERM -P "$CALLER" 2>/dev/null; kill -TERM "$CALLER" 2>/dev/null; wait "$CALLER" 2>/dev/null
@@ -301,6 +301,43 @@ check "--attached: not detached" "$(ok -n "$(grep '\[d5 pid=.*START' "$SB/store/
 OUT="$(env -u HEAVY_JOB_DETACH -u CLAUDECODE HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
     HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name d6 --wait 5 -- true 2>&1)"
 check "outside an agent session (launchd scripts): attached, as before" "$(ok -z "$(grep '\[d6 pid=.*detached' "$SB/store/heavy-job.log")")" "$OUT"
+
+echo "== Viktor 34439: L1 nested call, L2 stale pid / name match, I1 modes, I2 old live run + --max-run"
+# L1: the job calls heavy-job.sh itself (attached inside): the outer run's pid/rc must stay the outer's
+hjd --name n1 --wait 5 -- bash -c 'env | grep -c "^HEAVY_JOB_RUN=" > "$0.env"; HEAVY_JOB_DETACH=0 bash "$1" --name n1in --wait 0 -- true; exit 4' "$SB/n1" "$HJ"
+rn="$(ls -1dt "$SB/store/heavy-jobs/"*-n1-* | head -1)"
+check "L1: the job does not see HEAVY_JOB_RUN" "$(ok "$(cat "$SB/n1.env" 2>/dev/null)" = 0)" "$(cat "$SB/n1.env" 2>/dev/null)"
+check "L1: a heavy-job.sh inside the job leaves the outer rc alone (4 = the job's own)" "$(ok "$RC" = 4 -a "$(cat "$rn/rc")" = 4)" "rc=$RC file=$(cat "$rn/rc") $OUT"
+# I1: modes
+check "I1: the run dir is 0700, out/err 0600" "$(ok "$(stat -f %Lp "$rn")" = 700 -a "$(stat -f %Lp "$rn/out")" = 600 -a "$(stat -f %Lp "$rn/err")" = 600)" "$(stat -f '%Lp %N' "$rn" "$rn/out")"
+# L2: a pid file whose pid is alive but is NOT that supervisor (pid reuse) -> --stop must not signal it
+sleep 30 & FOREIGN=$!
+fake="$SB/store/heavy-jobs/20260101-000000-l2-1"; mkdir -p "$fake"; printf '%s\n%s\n' "$FOREIGN" "Thu Jan  1 00:00:00 2026" > "$fake/pid"
+STOP_OUT="$(HEAVY_JOB_STORE="$SB/store" bash "$HJ" --stop l2 2>&1)"; STOP_RC=$?
+check "L2: --stop does not signal a reused pid (start time differs)" "$(ok "$STOP_RC" = 1 -a -n "$(kill -0 $FOREIGN 2>/dev/null && echo alive)")" "rc=$STOP_RC $STOP_OUT"
+printf '%s\n%s\n' "$FOREIGN" "$(ps -o lstart= -p $FOREIGN)" > "$fake/pid"
+STOP_OUT="$(HEAVY_JOB_STORE="$SB/store" bash "$HJ" --stop l2 2>&1)"; STOP_RC=$?
+check "L2: ...nor a live process with the right start time that is not heavy-job.sh" "$(ok "$STOP_RC" = 1 -a -n "$(kill -0 $FOREIGN 2>/dev/null && echo alive)")" "rc=$STOP_RC $STOP_OUT"
+kill $FOREIGN 2>/dev/null; wait $FOREIGN 2>/dev/null
+# L2: name match is exact: a running "x-job" is not stopped by --stop job
+( env HEAVY_JOB_DETACH=1 HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+    HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name x-job --wait 5 -- bash -c 'sleep 4; echo done > "$0"' "$SB/xjob" >/dev/null 2>&1 ) &
+CALLER=$!; sleep 1.5
+STOP_OUT="$(HEAVY_JOB_STORE="$SB/store" bash "$HJ" --stop job 2>&1)"; STOP_RC=$?
+wait "$CALLER"
+check "L2: --stop job does not stop a run named x-job" "$(ok "$STOP_RC" = 1 -a -e "$SB/xjob")" "rc=$STOP_RC $STOP_OUT"
+# I2: a >2-day-old run dir whose supervisor still runs is kept by the cleanup; a dead one goes
+( env HEAVY_JOB_DETACH=1 HEAVY_JOB_STORE="$SB/store" HEAVY_JOB_POLL=1 MEMGATE_PROC_MEMINFO="$SB/no-such-meminfo" MEMGATE_SYSCTL="$SB/sysctl" \
+    HEAVY_JOB_DF_KB=99999999 bash "$HJ" --name old --wait 5 -- sleep 6 >/dev/null 2>&1 ) &
+CALLER=$!; sleep 1.5
+rold="$(ls -1dt "$SB/store/heavy-jobs/"*-old-* | head -1)"; touch -t 202601010000 "$rold"
+dead="$SB/store/heavy-jobs/20260101-000000-dead-1"; mkdir -p "$dead"; echo 0 > "$dead/rc"; touch -t 202601010000 "$dead"
+hjd --name trig --wait 5 -- true
+check "I2: the cleanup keeps an old run that still runs, removes an old finished one" "$(ok -d "$rold" -a ! -d "$dead")" "$(ls "$SB/store/heavy-jobs")"
+wait "$CALLER"
+# I2: --max-run
+hjd --name mr --max-run 2 --wait 5 -- sleep 20
+check "I2: --max-run 2 stops the job (70), logged" "$(ok "$RC" = 70 -a -n "$(grep '\[mr pid=.*WATCHDOG STOP: max run time 2 s' "$SB/store/heavy-job.log")")" "rc=$RC $(tail -2 "$SB/store/heavy-job.log")"
 
 echo
 echo "$((DONE-FAILS))/$DONE passed"
