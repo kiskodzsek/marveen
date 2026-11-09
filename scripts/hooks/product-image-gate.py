@@ -44,6 +44,9 @@ Also (card 0ecad9e5, Patrik TG 14472): a reply to the owner's PRIVATE chat is bl
 text carries "PRIVÁT-OK: <reason>"; team work goes to the group chat. An open private window
 (store/privat-ablak.json, 0600, see private_window_open; Patrik TG 14496) lifts the marker rule only;
 the media checks still run.
+Idea gate (Klodel 33881, 2026-11-09): a private-chat text that mentions "ötlet" (ötlet, ötletek, ötletet) is blocked
+unless it carries an "ÖTLET-KAPU:" line with both "nem Marabel/könyv" and "termékpaletta ellenőrizve" (idea_check);
+an open private window does not lift it.
 Marketing video (Patrik csoport TG 3109, 2026-11-07: "Vegig legyen minden snitten marabel.hu"; TG 4539): the
 self-attested MARKA line does not decide. One frame per second is read with the macOS Vision framework
 (scripts/lib/video_text_ocr.swift) and every second must show "marabel.hu", or the gate blocks with the missing
@@ -70,6 +73,7 @@ import struct
 import subprocess
 import sys
 import time
+import unicodedata
 import urllib.request
 
 MEDIA = ('.jpg', '.jpeg', '.png', '.webp', '.gif', '.mp4', '.mov', '.webm')
@@ -745,6 +749,26 @@ def warm_ocr(paths):
     return 2 if bad else 0
 
 
+IDEA_WORD = 'ötlet'  # ötlet, ötletek, ötletet, Ötlet ... (case-insensitive substring)
+IDEA_MARK = 'ÖTLET-KAPU:'
+IDEA_NEEDS = ('nem marabel/könyv', 'termékpaletta ellenőrizve')
+
+
+def idea_check(text):
+    """Klodel 33881: a private-chat text that mentions an idea ("ötlet") passes only with an "ÖTLET-KAPU:" line that
+    contains both "nem Marabel/könyv" and "termékpaletta ellenőrizve". Returns the reason to block, or None."""
+    t = unicodedata.normalize('NFC', text)
+    if IDEA_WORD not in t.lower():
+        return None
+    for ln in t.splitlines():
+        s = ln.strip()
+        if s.upper().startswith(IDEA_MARK) and all(n in s.lower() for n in IDEA_NEEDS):
+            return None
+    return ('ÖTLET-KAPU: új irány ne legyen Marabel/könyv-variáció, AI-tanácsadás, saját rendszer eladása; vesd össze '
+            'a 6 termékkel (memória new-direction-start-from-market). Ha megvan, írd a szövegbe: "ÖTLET-KAPU: nem '
+            'Marabel/könyv, termékpaletta ellenőrizve <mivel vetetted össze>".')
+
+
 def main():
     if sys.argv[1:2] == ['--ocr']:
         return warm_ocr(sys.argv[2:])
@@ -767,6 +791,15 @@ def main():
             sys.stderr.write(
                 'PRIVÁT-KAPU (Patrik TG 14472: "elég a marabel csapat chat"): Patrik privát chatjébe csak indokkal '
                 'mehet üzenet. Küldd a csapat-csoportba, vagy írd a szövegbe: "PRIVÁT-OK: <miért privátban>".\n')
+            return 2
+    if chat and chat == owner_private_chat():
+        # Klodel 33881 (hibanapló 2026-11-09 12:1x, the third repeat; memory new-direction-start-from-market): a new
+        # business idea pitched to Patrik privately came back as yet another Marabel/book variation. A private reply
+        # that talks about an idea needs an "ÖTLET-KAPU:" line stating both checks. Applies with the window open too:
+        # the window lifts the PRIVÁT-OK marker only.
+        idea = idea_check(str(ti.get('text') or ''))
+        if idea:
+            sys.stderr.write(idea + '\n')
             return 2
     files = ti.get('files') or []
     errs = [e for e in (check(f) for f in files if f.lower().endswith(MEDIA)) if e]

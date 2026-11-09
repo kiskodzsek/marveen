@@ -1205,6 +1205,63 @@ def majsztro_line_substitute_follows_budget(root):
     low = 'helyettes-klodel csak akkor' in (mod.majsztro_ok('helyettes-klodel Májsztró heti kerete elfogyott') or '')
     return full and low
 
+PRIV_OK = 'PRIVÁT-OK: Patrik privátban kérdezte, privát ügy\n'
+IDEA_LINE = 'ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel összevetve)\n'
+
+
+@case
+def idea_private_without_line_blocked(root):
+    rc, err = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Van egy új ötletem: könyv a kutyáknak.'})
+    return rc == 2 and 'ÖTLET-KAPU' in err and 'new-direction-start-from-market' in err
+
+
+@case
+def idea_private_forms_blocked(root):
+    # ötletek / ötletet / capitalised Ötlet all count
+    texts = ('Három ötletek jönnek.', 'Hoztam egy ötletet.', 'Ötlet: AI-tanácsadás.')
+    return all(run(root, {'chat_id': PRIV, 'text': PRIV_OK + t})[0] == 2 for t in texts)
+
+
+@case
+def idea_private_decomposed_accent_blocked(root):
+    # NFD "ötlet" (o + combining diaeresis) is the same word
+    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Egy ötlet.'})
+    return rc == 2
+
+
+@case
+def idea_private_half_line_blocked(root):
+    # only one of the two statements: not enough
+    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'ÖTLET-KAPU: nem Marabel/könyv\nÚj ötlet.'})
+    return rc == 2
+
+
+@case
+def idea_private_with_line_allowed(root):
+    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + IDEA_LINE + 'Új ötlet: X piac, Y vevő.'})
+    return rc == 0
+
+
+@case
+def idea_private_window_open_still_gated(root):
+    window(root, time.time() + 3600)
+    blocked = run(root, {'chat_id': PRIV, 'text': 'Új ötlet: X.'})[0] == 2
+    allowed = run(root, {'chat_id': PRIV, 'text': IDEA_LINE + 'Új ötlet: X.'})[0] == 0
+    return blocked and allowed
+
+
+@case
+def idea_group_not_gated(root):
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'Új ötlet a csoportban.'})
+    return rc == 0
+
+
+@case
+def no_idea_private_unchanged(root):
+    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Kész a riport.'})
+    return rc == 0
+
+
 def main():
     bad = 0
     for fn in CASES:
