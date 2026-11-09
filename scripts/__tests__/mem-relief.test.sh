@@ -81,7 +81,7 @@ chmod +x "$SB/colima" "$SB/limactl" "$SB/kill" "$SB/agent-msg-stub" "$SB/tmux" "
 reset() {
   cp "$SB/ps.base" "$SB/ps"
   printf '%s\n' 200 201 202 300 301 302 > "$SB/alive"
-  rm -f "$SB/calls" "$SB/msgs" "$SB/stubborn" "$SB/store/.mem-relief.last" "$SB/store/mem-relief.log" "$SB/store/dev-keep.list"
+  rm -f "$SB/calls" "$SB/msgs" "$SB/stubborn" "$SB/store/.mem-relief.last" "$SB/store/mem-relief.log" "$SB/store/dev-keep.list" "$SB"/store/.mem-relief.gate-tell.*
 }
 state() { echo "$1 $(( $(date +%s) - ${2:-0} )) $3" > "$SB/store/.host-state"; }
 run() {
@@ -389,6 +389,25 @@ check "an ungated mflux (console script under python) is stopped" "$(ok -n "$(ca
 check "an ffmpeg under heavy-job.sh is left alone; a process naming ffmpeg in an argument is not matched" \
   "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ (1200|1300)$')")" "$(calls | tr '\n' ' ')"
 check "the log names the kind" "$(ok -n "$(logf | grep 'STOP ungated ffmpeg owner=mira')" -a -n "$(logf | grep 'STOP ungated mflux owner=dave')")" "$(logf)"
+
+# Viktor 34374 LOW-1: only argv0 / python argv1 / python -m count as mflux; a tail on an mflux log is not mflux.
+reset; render_ps; cat >> "$SB/ps" <<'EOF'
+ 1400     1 tail -f /Users/x/marveen/agents/dave/work/mflux-run.log
+ 1401     1 /usr/bin/less /tmp/mflux/out.txt
+ 1500     1 /Users/x/.venv/bin/python3.12 -m mflux.generate --model dev
+EOF
+printf '%s
+' 1400 1401 1500 >> "$SB/alive"; run
+check "LOW-1: tail/less on an mflux file is not stopped" "$(ok -z "$(calls | grep -E 'kill -[A-Z]+ (1400|1401)$')")" "$(calls | tr '\n' ' ')"
+check "LOW-1: python -m mflux.generate is still an ungated mflux" "$(ok -n "$(calls | grep -x 'kill -TERM 1500')")" "$(calls | tr '\n' ' ')"
+
+# Viktor 34374 LOW-2: a restarted ungated process is stopped every pass, but the message goes once per 10 min.
+reset; render_ps; run; first="$(wc -l < "$SB/msgs")"
+rm -f "$SB/calls" "$SB/msgs"; printf '%s\n' 701 702 901 >> "$SB/alive"; run
+check "LOW-2: the second pass within 10 min stops again but tells nobody" \
+  "$(ok "$first" -ge 3 -a -n "$(calls | grep -x 'kill -TERM 701')" -a ! -s "$SB/msgs" -a -n "$(logf | grep 'TELL dave suppressed')")" "first=$first $(cat "$SB/msgs" 2>/dev/null) $(logf | tail -3)"
+rm -f "$SB/calls" "$SB/msgs"; printf '%s\n' 701 702 901 >> "$SB/alive"; run env MEM_RELIEF_NOW=$(( $(date +%s) + 601 ))
+check "LOW-2: after the gap the owner is told again" "$(ok "$(grep -c '^klodel dave ' "$SB/msgs" 2>/dev/null)" = 1)" "$(cat "$SB/msgs" 2>/dev/null)"
 
 # 0b: a memory trigger with the gated render (802) the largest: it is stopped, the smaller gated ffmpeg (1200) is not.
 reset; heavy_ps; printf '  802  9.5G\n 1200  300M\n  201  2G\n' > "$SB/top"; state critical 10 "free memory 3%"

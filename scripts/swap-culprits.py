@@ -109,9 +109,14 @@ def heavy_kind(cmd):
         return "Blender"
     if base == "ffmpeg":
         return "ffmpeg"
-    # mflux runs as its console script (argv0) or under python (argv1 / `python -m mflux...`)
-    if any(w.rsplit("/", 1)[-1].startswith("mflux") for w in words[:3]):
+    # mflux runs as its console script (argv0) or under python (argv1 / `python -m mflux...`). Only these
+    # positions count: `tail -f .../mflux-run.log` is not mflux (Viktor 34374 LOW-1).
+    if base.startswith("mflux"):
         return "mflux"
+    if base.startswith("python") and len(words) > 1:
+        arg = words[1].rsplit("/", 1)[-1]
+        if arg.startswith("mflux") or (words[1] == "-m" and len(words) > 2 and words[2].startswith("mflux")):
+            return "mflux"
     return None
 
 
