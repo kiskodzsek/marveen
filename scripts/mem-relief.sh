@@ -91,6 +91,7 @@ KEEP="$STORE/dev-keep.list"
 STATE_MAX_AGE="${MEM_RELIEF_STATE_MAX_AGE:-180}"
 SWAP_GB="${MEM_RELIEF_SWAP_GB:-11}"
 COOLDOWN="${MEM_RELIEF_COOLDOWN:-600}"
+GATE_TELL_GAP="${MEM_RELIEF_GATE_TELL_GAP:-600}"   # one heavy-gate message per recipient per 10 min (Viktor 34374)
 COLIMA_WAIT="${MEM_RELIEF_COLIMA_WAIT:-60}"
 KILL_WAIT="${MEM_RELIEF_KILL_WAIT:-10}"
 KEEP_MAX="${MEM_RELIEF_KEEP_MAX:-2}"
@@ -268,8 +269,15 @@ render_gate() {
   from="${MEM_RELIEF_FROM:-$main}"
   [[ -n "$from" ]] || { log "TELL nobody: no sender id (MAIN_AGENT_ID)"; return "$rc"; }
   msg="[MEM-RELIEF] Nehéz folyamat heavy-job nélkül futott, leállítottam: $(printf '%s; ' "${stopped[@]}" | sed 's/; $//'). Blender, ffmpeg és mflux csak a kapun át indulhat: bash /Users/klodel/marveen/scripts/heavy-job.sh --name <név> --kill-below 12 -- <a parancs>. Így egyszerre egy nehéz futás megy, csak szabad memóriával, és a memória-őr megállítja, mielőtt a gép elfogy (kernel panic 2026-11-09 15:19: két kapu nélküli Blender). Fájlhoz nem nyúltam."
+  # Viktor 34374 LOW-2: a process restarted every minute must not mean a message every minute. One gate message
+  # per recipient per GATE_TELL_GAP; the stop itself is never rate-limited, only the message.
+  local stamp last
   for to in $(echo "$owners $main" | tr ' ' '\n' | awk 'NF && $0!="-" && !s[$0]++'); do
-    echo "$msg" | bash "$AGENT_MSG" "$from" "$to" - >/dev/null 2>&1 && log "TELL $to" || log "TELL $to FAILED"
+    stamp="$STORE/.mem-relief.gate-tell.$(printf %s "$to" | tr -c 'A-Za-z0-9_-' '_')"
+    last="$(cat "$stamp" 2>/dev/null)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    if (( $(now) - last < GATE_TELL_GAP )); then log "TELL $to suppressed (gate message within ${GATE_TELL_GAP}s)"; continue; fi
+    if echo "$msg" | bash "$AGENT_MSG" "$from" "$to" - >/dev/null 2>&1; then log "TELL $to"; now > "$stamp"
+    else log "TELL $to FAILED"; fi
   done
   return "$rc"
 }
