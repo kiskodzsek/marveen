@@ -116,6 +116,10 @@ jobs:
       # ezentúl" reply to Patrik's chats. Hermetic: throwaway CLAUDE_PROJECT_DIR,
       # synthetic chat ids, no network.
       - run: python3 -I scripts/hooks/mea-culpa-reply-gate_test.py
+      # MUTEVIDEO1110 (Klodel 35741, Patrik TG 4483 "a babás csak egy gif"): a video
+      # without an audio track is blocked from a Telegram reply. Hermetic: synthetic
+      # MP4 boxes; the real-ffmpeg cases skip where ffmpeg is missing.
+      - run: python3 -I scripts/hooks/mute-video-reply-gate_test.py
       # The render-state claim gate (Klodel 35696, Patrik TG 4381): no "renderel" to Patrik without a fresh measurement.
       - run: python3 -I scripts/hooks/render-claim-reply-gate_test.py
       # KEYCHAINGATE1106 (card c1921b55, Viktor 29950): the Bash gate that stops an
