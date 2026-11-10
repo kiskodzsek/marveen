@@ -218,6 +218,58 @@ describe('Bash: names as text (false-deny fix)', () => {
   })
 })
 
+// IMAGESAFETYPROSE1110 (Radar 36693, Viktor 36709): a python/node CODE body may name a screening dir in
+// prose; only path forms, exactly quoted tokens and exec primitives keep it denied there.
+describe('Bash: prose in a python/node heredoc body', () => {
+  const V = 'visszavonva'
+  const hd = (owner: string, body: string) => `${owner} <<'EOF'\n${body}\nEOF`
+  it.each([
+    hd('python3 -', `print("a ${V} mappa üres")`),
+    hd('python3 -I', `s = "Státusz: ${V.toUpperCase()} (Radar)"\nprint(s)`),
+    hd('python3 -', `# megjegyzés: ${V}\nx = 1`),
+    hd('python3 -', `"""A kérés ${V}, a kép nem kell."""\nprint(1)`),
+    hd('python3 -', `print("${V.toUpperCase()}: 3 kártya")`),
+    hd('node', `console.log("${V}: 0 kép")`),
+    hd('node -', `const t = \`a ${V} sor\`\nconsole.log(t)`),
+    hd('python3 -', 'print("_quarantine darabszám: 0")'),
+  ])('allows: %s', (command) => {
+    expect(decide('Bash', { command })).toEqual({ deny: false })
+  })
+
+  it.each([
+    // exactly quoted token (' " and backtick; triple quotes and prefixes reach the same pair)
+    hd('python3 -', `import os\nos.listdir("${V}")`),
+    hd('python3 -', `from pathlib import Path\nPath('${V}').iterdir()`),
+    hd('python3 -', `x = """${V}"""`),
+    hd('python3 -', `x = f"${V}"`),
+    hd('python3 -', `x = r'${V}'`),
+    hd('node', `require("fs").readdirSync(\`_unscreened\`)`),
+    hd('node', `require("fs").readdirSync('${V.toUpperCase()}')`),
+    // path forms
+    hd('python3 -', `open("agents/mira/${V}/a.png")`),
+    hd('python3 -', 'p = f"{b}/_quarantine/x"'),
+    hd('node', 'require("fs").readFileSync(`x/_unscreened`)'),
+    hd('python3 -', 'open("x/%5Fquarantine/a.png")'),
+    // (1) an exec primitive: the bare rule stays
+    hd('python3 -', `import os\nos.system("cd ${V} && cat *")`),
+    hd('python3 -', `import subprocess\nsubprocess.run("tar cf - ${V} | base64", shell=True)`),
+    hd('node', `require("child_process").execSync("cp -R _unscreened /tmp")`),
+    hd('python3 -', `eval("print(1)")  # ${V}`),
+    // (2) the marker-line tail is shell
+    `python3 - <<'EOF' && cp -R ${V} /tmp\nprint(1)\nEOF`,
+    `cat <<'EOF' && cp -R ${V} /tmp\nx\nEOF`,
+    // (3) ruby / perl / php keep the bare rule
+    hd('ruby', `puts Dir.children(${V})`),
+    hd('perl', `opendir(D, ${V})`),
+    hd('php', `<?php echo "a ${V} mappa";`),
+    // shell owners and name consumers unchanged
+    hd('bash', `cd ${V} && cat *`),
+    hd('xargs cat', V),
+  ])('denies: %s', (command) => {
+    expect(decide('Bash', { command })).toEqual(DENY)
+  })
+})
+
 // Review P2 (Klodel 9186): the main agent does not run self-pace-gate.mjs, so the
 // same decision runs from its own hook, wired in the repo-shipped settings.
 describe('main-agent hook (scripts/hooks/image-quarantine-gate.mjs)', () => {
