@@ -15,7 +15,12 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, 'render-claim-reply-gate.py')
 sys.path.insert(0, HERE)
-from render_claim_lib import lsof_path, output_of, output_of_process, read_stamp, write_stamp  # noqa: E402
+from render_claim_lib import lsof_path, output_of, output_of_process, generation_output, is_generation, read_stamp, write_stamp  # noqa: E402
+import importlib.util  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location('render_claim_reply_gate', HOOK)
+GATE = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(GATE)
 
 GROUP = '-1000000000001'  # synthetic
 PRIV = '5040302010'       # synthetic
@@ -176,6 +181,78 @@ def a_relative_output_resolves_against_the_process_cwd(root):
     setup(root)
     write_stamp(root, ['out/x.mp4', '/w/out/y.mp4', None])
     assert read_stamp(root)[1] == ['/w/out/y.mp4'], read_stamp(root)
+
+
+# --- Drawing / generation claims (Klodel 35719, Patrik TG 4424) ---
+# The 10:27 reply, word for word: the order only waited in Dave's queue, no fal-gen ran.
+THE_1027 = 'a papás új rajzai most a háttérben készülnek'
+
+
+@case
+def the_1027_reply_is_blocked_when_nothing_generates(root):
+    got = GATE.problem(THE_1027, gen_outputs=[])
+    assert got and 'nem fut fal-gen' in got[0] and got[1] == GATE.GEN_HINT, got
+    assert "kiadtam Dave-nek" in GATE.GEN_HINT
+
+
+@case
+def the_1027_reply_is_blocked_when_the_generation_output_is_stale(root):
+    stale = output(root, 'rajz-1.png', 12 * 60)
+    old = time.time() - 12 * 60
+    os.utime(os.path.dirname(stale), (old, old))  # the directory itself was last changed then too
+    got = GATE.problem(THE_1027, gen_outputs=[os.path.dirname(stale)])
+    assert got and 'nem íródott' in got[0], got
+
+
+@case
+def a_running_generation_with_a_fresh_output_lets_the_claim_go(root):
+    fresh = output(root, 'rajz-2.png', 10)
+    for text in [THE_1027, 'A fal most rajzolja a 3. jelenetet.', 'Generálódnak a képek.']:
+        assert GATE.problem(text, gen_outputs=[os.path.dirname(fresh)]) is None, text
+
+
+@case
+def generation_inflections_are_caught(root):
+    for text in [THE_1027, 'rajzolja a fal', 'generálódnak a képek', 'Most generálom', 'készülnek a rajzok',
+                 'a képek most készülnek', 'megrajzolja a borítót', 'A HÁTTÉRBEN KÉSZÜL', 'rajzol​ódnak']:
+        assert GATE.gen_claims(text), text
+
+
+@case
+def generation_plans_and_past_forms_pass(root):
+    for text in ['Kiadtam Dave-nek a papás rajzait.', 'A rajzok elkészültek: 12 kép.', 'Lerajzolta, kész.',
+                 'A generált képek a mappában.', 'Készül a szöveg, délre kész.', 'A képernyőkép kész.']:
+        assert not GATE.gen_claims(text) and GATE.problem(text, gen_outputs=[]) is None, text
+
+
+@case
+def a_generation_claim_through_the_hook_gets_its_own_hint(root):
+    # Through the real hook (the MacBook makes it deterministic: blocked whatever runs on this machine).
+    setup(root)
+    rc, err = run(root, THE_1027 + ', a MacBook-mappába')
+    assert rc == 2 and "kiadtam Dave-nek" in err, (rc, err)
+
+
+@case
+def generation_output_reads_fal_gen_blender_and_ffmpeg(root):
+    cwd = os.path.join(root, 'work')
+    os.makedirs(cwd)
+    with open(os.path.join(cwd, 'job.json'), 'w', encoding='utf-8') as f:
+        json.dump({'endpoint': 'x', 'out_dir': 'out/papa'}, f)
+    want = os.path.join(cwd, 'out', 'papa')
+    assert generation_output('node fal-gen.mjs run job.json', cwd) == want
+    # fal-gen resolves a relative out_dir against its own cwd: unknown cwd -> unknown output (gate closed).
+    assert generation_output('node /t/fal-gen.mjs tts ' + os.path.join(cwd, 'job.json'), None) is None
+    with open(os.path.join(cwd, 'abs.json'), 'w', encoding='utf-8') as f:
+        json.dump({'out_dir': '/w/out/mama'}, f)
+    assert generation_output('node /t/fal-gen.mjs run ' + os.path.join(cwd, 'abs.json'), None) == '/w/out/mama'
+    assert generation_output('node fal-gen.mjs run job.json --dry', cwd) is None
+    assert generation_output('node fal-gen.mjs status', cwd) is None
+    assert generation_output('node fal-gen.mjs run missing.json', cwd) is None
+    assert generation_output('/opt/homebrew/bin/ffmpeg -i a.mov out/b.mp4', cwd) == os.path.join(cwd, 'out', 'b.mp4')
+    assert generation_output('/opt/homebrew/bin/ffmpeg -i a.mov out/b.mp4', None) is None
+    assert generation_output('/Applications/Blender.app/Contents/MacOS/Blender -b x.blend -o /w/seq/f####', cwd) == '/w/seq'
+    assert is_generation('node fal-gen.mjs run job.json') and not is_generation('node render.mjs /w export /w/a.mp4')
 
 
 def main():

@@ -126,3 +126,82 @@ def newest_write(path):
     except OSError:
         pass
     return newest
+
+
+# --- Generation claims (Klodel 35719, Patrik TG 4424) --------------------------------------------------------------
+# 10:27: "a papás új rajzai most a háttérben készülnek" went to Patrik while the order only waited in Dave's queue (no
+# fal-gen ran). A drawing / generation claim is measured at send time, here: a running fal-gen.mjs run/tts (not --dry),
+# Blender or ffmpeg, and the output it writes (fal-gen: the job's out_dir; Blender/ffmpeg: as output_of()).
+
+def ps_path():
+    """ps lives in /bin on macOS and Linux; an agent shell's PATH may be thin."""
+    return shutil.which('ps') or ('/bin/ps' if os.access('/bin/ps', os.X_OK) else None)
+
+
+def processes():
+    """[(pid, command)] of the running, not stopped, processes; [] when ps cannot be run (the gate then stays closed)."""
+    ps = ps_path()
+    if not ps:
+        return []
+    try:
+        out = subprocess.run([ps, '-axo', 'pid=,stat=,command='], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return []
+    rows = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3 or parts[1].startswith(('T', 'Z')):
+            continue
+        rows.append((parts[0], parts[2]))
+    return rows
+
+
+def _absolute(path, cwd):
+    if not path:
+        return None
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    return os.path.normpath(os.path.join(cwd, path)) if cwd else None
+
+
+def is_generation(cmd):
+    args = cmd.split()
+    if not args:
+        return False
+    if any(a.endswith('fal-gen.mjs') for a in args):
+        return True
+    return args[0].endswith('/Blender') or args[0].endswith('ffmpeg')
+
+
+def generation_output(cmd, cwd):
+    """The absolute output of a generation command run in cwd, or None (unknown: the gate stays closed).
+    fal-gen.mjs run|tts <job.json> -> the job's out_dir (a --dry run generates nothing); Blender/ffmpeg -> output_of()."""
+    args = cmd.split()
+    for i, a in enumerate(args):
+        if a.endswith('fal-gen.mjs'):
+            if '--dry' in args or i + 2 >= len(args) or args[i + 1] not in ('run', 'tts'):
+                return None
+            job = _absolute(args[i + 2], cwd)
+            try:
+                if not job or os.path.getsize(job) > 1_000_000:
+                    return None
+                with open(job, encoding='utf-8') as f:
+                    out_dir = json.load(f).get('out_dir')
+            except Exception:
+                return None
+            return _absolute(out_dir, cwd) if isinstance(out_dir, str) else None
+    if is_generation(cmd):
+        return _absolute(output_of(cmd), cwd)
+    return None
+
+
+def running_generation_outputs():
+    """The outputs of the generation processes running now (measured, not remembered)."""
+    outs = []
+    for pid, cmd in processes():
+        if not is_generation(cmd):
+            continue
+        o = generation_output(cmd, proc_cwd(pid))
+        if o:
+            outs.append(o)
+    return outs

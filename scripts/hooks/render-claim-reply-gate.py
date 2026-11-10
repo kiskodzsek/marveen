@@ -13,6 +13,12 @@ minin / MacBookon / gépen", and their plain inflections), unless
   2. an output it listed was written at most MAX_AGE_S ago, measured now (a file's mtime; a frames directory's newest
      entry); when the text names a video file (x.mp4), that file must be one of those fresh outputs.
 A claim about the MacBook is always blocked: this machine cannot measure it (ask Dave for the measured file and time).
+Drawing / generation claims (Klodel 35719, the third case: 10:27, Patrik TG 4424, "a papás új rajzai most a háttérben
+készülnek" while the order only waited in Dave's queue): "a háttérben készül(nek)", "rajzol(ja|ják|ódnak)",
+"generál(ja|ódik|ódnak)", "készülnek a rajzok/képek" pass only when, measured at send time (ps + lsof, no stamp needed),
+a fal-gen.mjs run/tts (not --dry), Blender or ffmpeg process runs AND one of its outputs (fal-gen: the job's out_dir)
+was written at most MAX_AGE_S ago; else the block ends "mérd meg; tervnél: 'kiadtam Dave-nek'". A queued order is not
+work. Known limit: a fal queue wait longer than MAX_AGE_S between two images blocks the claim (the safe direction).
 Past or planned forms ("renderelt", "a renderelés kész", "Dave indítja") are not claims.
 
 Matching: NFKC, zero-width characters dropped, accents folded, case-insensitive, whole words. Which chats are gated:
@@ -29,7 +35,7 @@ import time
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render_claim_lib import newest_write, read_stamp  # noqa: E402
+from render_claim_lib import newest_write, read_stamp, running_generation_outputs  # noqa: E402
 
 ROOT = os.environ.get('CLAUDE_PROJECT_DIR', '/Users/klodel/marveen')
 STORE = os.path.join(ROOT, 'store')
@@ -44,9 +50,20 @@ CLAIMS = [
     re.compile(r'\bkeszul\w*\b.{0,30}\b' + MACHINES + r'\b'),
     re.compile(r'\b' + MACHINES + r'\b.{0,30}\bkeszul\w*'),
 ]
+# Drawing / generation claims (Klodel 35719, Patrik TG 4424: "a papás új rajzai most a háttérben készülnek" while the
+# order only waited in Dave's queue). Measured live: a fal-gen.mjs / Blender / ffmpeg process and its fresh output.
+GEN_CLAIMS = [
+    re.compile(r'\bhatterben\b.{0,30}\bkeszul(?:nek|ok|unk)?\b'),
+    re.compile(r'\bkeszul(?:nek|ok|unk)?\b.{0,30}\bhatterben\b'),
+    re.compile(r'\b(?:meg|at|ujra)?rajzol(?:ja|jak|om|juk|ok|unk|nak|odik|odnak)?\b'),
+    re.compile(r'\b(?:le)?general(?:ja|jak|om|juk|ok|unk|nak|odik|odnak)?\b'),
+    re.compile(r'\bkeszul(?:nek)?\b.{0,20}\b(?:rajz|kep|illusztraci|jelenet)\w*'),
+    re.compile(r'\b(?:rajz|kep|illusztraci|jelenet)\w*\b.{0,30}\bkeszul(?:nek)?\b'),
+]
 VIDEO = re.compile(r'([\w.\-]+\.(?:mp4|mov|webm|mkv))\b', re.I)
 ZERO_WIDTH = dict.fromkeys(map(ord, '​‌‍⁠﻿­'))
 HINT = "mérd meg; tervnél: 'Dave indítja'"
+GEN_HINT = "mérd meg; tervnél: 'kiadtam Dave-nek'"
 
 
 def norm(text):
@@ -79,13 +96,44 @@ def claims(text):
     return any(rx.search(plain) for rx in CLAIMS)
 
 
-def problem(text, now=None):
-    """None when the text may go, else the reason (without the hint)."""
-    if not claims(text):
+def gen_claims(text):
+    plain = norm(text)
+    return any(rx.search(plain) for rx in GEN_CLAIMS)
+
+
+def gen_problem(text, now, outputs):
+    """A drawing / generation claim: a generation process runs now and one of its outputs was written <= MAX_AGE_S ago."""
+    if not outputs:
+        return 'rajz/generálás-állítás, de nem fut fal-gen.mjs / Blender / ffmpeg (sorban álló utasítás nem munka)'
+    for o in outputs:
+        w = newest_write(o)
+        if w is not None and now - w <= MAX_AGE_S:
+            return None
+    return f'fut generálás, de a kimenete {MAX_AGE_S // 60} percen belül nem íródott'
+
+
+def problem(text, now=None, gen_outputs=None):
+    """None when the text may go, else (reason, hint). gen_outputs: the running generation outputs (measured live when
+    None; the tests pass them)."""
+    render, gen = claims(text), gen_claims(text)
+    if not render and not gen:
         return None
     now = time.time() if now is None else now
+    hint = HINT if render else GEN_HINT
     if 'macbook' in norm(text):
-        return 'a MacBookot ez a gép nem méri: Dave mért fájlja és ideje kell, nem állapot'
+        return 'a MacBookot ez a gép nem méri: Dave mért fájlja és ideje kell, nem állapot', hint
+    if render:
+        why = render_problem(text, now)
+        if why:
+            return why, HINT
+    if gen:
+        why = gen_problem(text, now, running_generation_outputs() if gen_outputs is None else gen_outputs)
+        if why:
+            return why, GEN_HINT
+    return None
+
+
+def render_problem(text, now):
     ran, outputs = read_stamp(ROOT)
     if ran is None or now - ran > MAX_AGE_S:
         return f'render-állapot mérés nélkül (ops/video_export_status.py {MAX_AGE_S // 60} percen belül nem futott)'
@@ -115,9 +163,10 @@ def main():
     chats = owner_chats()
     if chats and str(ti.get('chat_id') or '').strip() not in chats:
         return 0
-    why = problem(ti.get('text') or '')
-    if why:
-        sys.stderr.write(f'RENDER-ÁLLAPOT-KAPU (Klodel 35696, TG 4381): {why} - {HINT}\n')
+    got = problem(ti.get('text') or '')
+    if got:
+        why, hint = got
+        sys.stderr.write(f'RENDER-ÁLLAPOT-KAPU (Klodel 35696/35719, TG 4381/4424): {why} - {hint}\n')
         return 2
     return 0
 
