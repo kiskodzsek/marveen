@@ -559,6 +559,10 @@ def main():
         # reply / forward / send-draft by message id: the body and the logo are on the server, not in the call.
         sig = lambda: [("az uzenet-azonositoval kuldott level torzse es logoja a hivasbol nem ellenorizheto; "  # noqa: E731
                         "piszkozatbol csak az ops/mail-attach/send-draft.mjs kuldhet, az ellenorzi")]
+    elif cls == "unanchorable" and _MS365_MAIL_INDIRECT.search(tool):
+        # graph-batch, mail rules, group threads: they can put a letter out without a checkable signature.
+        sig = lambda: [("ez a muvelet kozvetve levelet kuldhet (Graph-koteg, tovabbito szabaly, csoport-szal, automatikus valasz), "  # noqa: E731
+                        "aminek az alairasa a hivasbol nem ellenorizheto")]
     else:
         sig = None
     _decide(lambda: collect_email_envelope(tool, tool_input), content_anchor, sig)
@@ -578,6 +582,11 @@ SIGNATURE_CID = "myshp-logo-klodel"
 _MS365_MAIL_BY_ID = re.compile(r"__(send-draft-message|reply-mail-message|reply-all-mail-message|forward-mail-message"
                                r"|send-shared-mailbox-mail|send-shared-mailbox-draft|reply-shared-mailbox-mail"
                                r"|reply-all-shared-mailbox-mail|forward-shared-mailbox-mail)$")
+# Operations that can put a letter out INDIRECTLY (Viktor 36499 INFO 1): a Graph batch may carry
+# POST /me/sendMail, a mail rule may forward, a group-thread reply mails the group, mailbox settings
+# set the automatic reply. Level 3 too.
+_MS365_MAIL_INDIRECT = re.compile(r"__(graph-batch|create-mail-rule|update-mail-rule|reply-to-group-thread"
+                                  r"|update-mailbox-settings)$")
 SIGNATURE_HINT = ("lasd patrik-level-piszkozat 4. lepes: piszkozat a klodel-signature-fixed.html "
                   "alairassal, attach.mjs --inline-logo, kuldes: ops/mail-attach/send-draft.mjs")
 

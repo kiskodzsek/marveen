@@ -719,6 +719,32 @@ with tempfile.TemporaryDirectory() as td:
         code, _, err = run_gate(make_store(os.path.join(td, f"ms1c{i}"), level=3), {"tool_name": tool, "tool_input": {}})
         check(f"signature: {tool.split('__')[-1]} by message id is DENIED at level 3 (cannot be checked)",
               code == 2 and "send-draft.mjs" in err, f"exit={code} err={err[:200]!r}")
+    for i, tool in enumerate(("mcp__ms365__graph-batch", "mcp__ms365__create-mail-rule",
+                              "mcp__outlook__update-mail-rule", "mcp__ms365__reply-to-group-thread",
+                              "mcp__ms365__update-mailbox-settings")):
+        code, _, err = run_gate(make_store(os.path.join(td, f"ms1d{i}"), level=3), {"tool_name": tool, "tool_input": {}})
+        check(f"signature: {tool.split('__')[-1]} (can mail indirectly) is DENIED at level 3",
+              code == 2 and "kozvetve levelet" in err, f"exit={code} err={err[:200]!r}")
+    # Drift (Viktor 36499 INFO 2): every letter-shaped name on the policy's outbound list must stop at
+    # level 3 without a signature. A new mail/draft/reply/forward operation added to the policy fails here
+    # until the gate knows it -- or until it is named below as not a letter, with the reason.
+    NOT_A_LETTER = {
+        "reply-to-chat-message": "Teams chat, not e-mail",
+        "reply-to-channel-message": "Teams channel, not e-mail",
+        "update-channel-message-reply": "Teams channel, not e-mail",
+        "forward-calendar-event": "meeting invitation, calendar (not a letter with a body we write)",
+    }
+    with open(os.path.join(os.path.dirname(GATE), "ms365-tool-policy.json"), encoding="utf-8") as fh:
+        outbound = json.load(fh)["outbound"]
+    check("drift: the NOT_A_LETTER names are still on the policy outbound list", set(NOT_A_LETTER) <= set(outbound),
+          f"{set(NOT_A_LETTER) - set(outbound)}")
+    letter_ops = [op for op in outbound if re.search(r"mail|draft|reply|forward", op) and op not in NOT_A_LETTER]
+    check("drift: the policy lists letter-shaped outbound operations", len(letter_ops) >= 10, f"{letter_ops}")
+    for i, op in enumerate(letter_ops):
+        code, _, err = run_gate(make_store(os.path.join(td, f"ms1e{i}"), level=3),
+                                {"tool_name": f"mcp__ms365__{op}", "tool_input": {}})
+        check(f"drift: outbound {op} stops at level 3 without a checked signature",
+              code == 2 and "Hianyzik a Klodel HTML-alairas" in err, f"exit={code} err={err[:160]!r}")
     for name, payload in (
             ("an attachment", ms365(msg_extra={"attachments": [{"name": "x.pdf"}]})),
             ("a replyTo", ms365(msg_extra={"replyTo": [{"emailAddress": {"address": "x@y.hu"}}]})),
@@ -1005,6 +1031,13 @@ with tempfile.TemporaryDirectory() as td:
     check("send-draft: the same letter WITHOUT the attachment is DENIED", code == 2, f"exit={code}")
     code, _, err = run_draft(store, draft_env(atts=[PDF_A], bcc="x@example.invalid"))
     check("send-draft: an added bcc is DENIED", code == 2, f"exit={code}")
+    # Viktor 36499 INFO 3: the envelope mutations once covered on send-mail, now on the draft path.
+    for what, mutated in (("another recipient", draft_env(to="masik@example.invalid", atts=[PDF_A])),
+                          ("an added cc", draft_env(cc="x@example.invalid", atts=[PDF_A])),
+                          ("another subject", draft_env(subject="TIG 2026-11", atts=[PDF_A])),
+                          ("another body", draft_env(body="<p>Csatolom, sürgős.</p>", atts=[PDF_A]))):
+        code, _, err = run_draft(store, mutated)
+        check(f"send-draft: the approved letter with {what} is DENIED", code == 2, f"exit={code}")
     code, out, err = run_draft(store, draft_env(atts=[PDF_A]))
     check("send-draft: the approved letter with the approved attachment is ALLOWED", code == 0, f"exit={code} err={err[:200]}")
     code, _, err = run_draft(store, draft_env(atts=[PDF_A]))
