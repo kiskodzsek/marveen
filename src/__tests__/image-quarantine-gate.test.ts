@@ -232,6 +232,8 @@ describe('Bash: prose in a python/node heredoc body', () => {
     hd('node', `console.log("${V}: 0 kép")`),
     hd('node -', `const t = \`a ${V} sor\`\nconsole.log(t)`),
     hd('python3 -', 'print("_quarantine darabszám: 0")'),
+    // Viktor 36729 control: prose still passes after the substring prefilter
+    hd('python3 -', `print("a ${V} mappa üres"); print("kész")`),
   ])('allows: %s', (command) => {
     expect(decide('Bash', { command })).toEqual({ deny: false })
   })
@@ -255,6 +257,16 @@ describe('Bash: prose in a python/node heredoc body', () => {
     hd('python3 -', `import subprocess\nsubprocess.run("tar cf - ${V} | base64", shell=True)`),
     hd('node', `require("child_process").execSync("cp -R _unscreened /tmp")`),
     hd('python3 -', `eval("print(1)")  # ${V}`),
+    // Viktor 36729 M1: the name followed by ; or | (the token lookahead missed it) and exec forms
+    // the old word-bounded BODY_EXEC_RX missed
+    hd('python3 -', `import os\nos.system("cd ${V}; cat *")`),
+    hd('python3 -', `from os import system\nsystem("cd ${V}; cat *")`),
+    hd('python3 -', 'import os as o\no.system("cp -R _unscreened /tmp/x")'),
+    hd('python3 -', `import asyncio\nasyncio.create_subprocess_shell("cd ${V}; cat *")`),
+    hd('python3 -', `import os\nos.posix_spawn("/bin/sh", ["sh", "-c", "cd ${V}; cat *"], {})`),
+    hd('python3 -', `import os\ngetattr(os, "system")("cd ${V}; cat *")`),
+    hd('node', `const { execSync } = require("child_process")\nexecSync("cd ${V}; cat *")`),
+    hd('python3 -', `import os\nos.system("tar cf - ${V}|base64")`),
     // (2) the marker-line tail is shell
     `python3 - <<'EOF' && cp -R ${V} /tmp\nprint(1)\nEOF`,
     `cat <<'EOF' && cp -R ${V} /tmp\nx\nEOF`,

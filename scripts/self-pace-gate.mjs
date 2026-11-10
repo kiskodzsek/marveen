@@ -775,7 +775,13 @@ function markerTail(body) {
 // (3) python and node only; ruby/perl/php keep the bare rule (barewords, qw(), %w[], PHP<8 constants are live strings).
 const PROSE_RELAX_OWNER_RX = /^(?:python[0-9.]*|node|nodejs)$/
 // (1) an exec primitive puts a shell string in the body (os.system("cd <dir> && ...")): bare rule stays.
-const BODY_EXEC_RX = /\b(?:os\s*\.\s*(?:system|popen|exec\w*|spawn\w*)|subprocess|pty|commands|__import__|eval\s*\(|exec\s*\(|child_process|execSync|execFile\w*|spawnSync|spawn\s*\(|new\s+Function)/
+// Substring match without word boundaries, case-insensitive (Viktor 36729 M1b): `from os import system`,
+// `o.system`, getattr(os, "system"), asyncio.create_subprocess_shell, os.posix_spawn all hit. Conservative on
+// purpose ('execute' in prose also trips it): a false deny is cheap, a false allow is not.
+const BODY_EXEC_RX = /(?:system|popen|spawn|exec|subprocess|shell|child_process|getattr|__import__|eval|Function|ctypes|pexpect|binding|dlopen|\bpty\b|\bsh\b|commands)/i
+// Prefilter: a plain substring search for a dir name (Viktor 36729 M1a). The token regex's lookahead missed a
+// name followed by ; | > (`cd <dir>; cat *`), which blanked the whole body before BODY_EXEC_RX ran.
+const BODY_DIR_NAME_RX = new RegExp(dirAlt(SCREENING_DIR_NAMES), 'i')
 // (4) a path form (with a slash; backtick and ')' end it too) or an exactly quoted token: ' " or backtick
 // (python triple quotes and f/r/b/u prefixes reach the same quote pair).
 const BODY_SCREENING_PATH_RX = new RegExp(String.raw`\/(?:${dirAlt(SCREENING_DIR_NAMES)})(?=[\/\s'"\x60)]|$)|(?:^|[\s'"\x60=:(])(?:${dirAlt(SCREENING_DIR_NAMES)})\/`, 'im')
@@ -794,7 +800,7 @@ const bodyNamesScreening = (code) => {
 function proseBodyAllowed(before, body) {
   if (!proseOwner(before)) return false
   const code = bodyCode(body)
-  if (!SCREENING_TOKEN_RX.test(code)) return true
+  if (!BODY_DIR_NAME_RX.test(code) && !BODY_DIR_NAME_RX.test(withDecoded(code))) return true
   return !BODY_EXEC_RX.test(code) && !bodyNamesScreening(code)
 }
 // The explicit deny for python/node code bodies: a path form or an exactly quoted token. The segment scan alone
