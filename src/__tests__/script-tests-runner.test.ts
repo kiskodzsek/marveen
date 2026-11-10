@@ -28,12 +28,32 @@ const SUITES = readdirSync(DIR)
   .filter((f) => /\.test\.(sh|py)$/.test(f) || /-test\.py$/.test(f))
   .sort()
 
+// Suites that assert macOS behaviour and cannot pass on the Linux runner (Klodel 35937/35952, run 42805724668: the
+// first run since 10-14). Skipped ONLY off macOS; on the Mac they run as before. Each reason is the measured failure.
+const MACOS_ONLY: Record<string, string> = {
+  'clone-dedupe.test.py': 'APFS clonefile (cp -c) keeps the target mode/times; GNU cp has no clone flag (2 failures)',
+  'daily-cleanup.test.sh': 'its dedupe step clones with APFS cp -c ("STEP dedupe rc=1 failed=1" on ubuntu)',
+  'host-restart-watchdog-macos.test.sh': 'reads the macOS boot time and panic reports (DiagnosticReports); Linux has neither',
+  'mem-relief.test.sh': 'stops the colima/limactl VM and installs a launchd plist ("this installer is macOS-only")',
+  'memgate-macos-heavy-job.test.sh': 'macOS memorystatus and sysctl vm.swapusage readings, BSD stat -f (src=memorystatus)',
+  'ssh-unlock-setup.test.sh': 'mirrors the live /etc/ssh drop-ins and macOS Remote Login; the runner\'s 50-cloud-init.conf is unreadable',
+}
+const ON_MAC = process.platform === 'darwin'
+
 describe('scripts/__tests__ suites', () => {
+  it('every MACOS_ONLY entry names a suite on disk (a rename must not keep a dead skip)', () => {
+    expect(Object.keys(MACOS_ONLY).filter((n) => !SUITES.includes(n))).toEqual([])
+  })
+
   it('finds the suites on disk (a rename must not silently empty this run)', () => {
     expect(SUITES.length).toBeGreaterThan(20)
   })
 
   it.each(SUITES)('%s passes', (name) => {
+    if (!ON_MAC && name in MACOS_ONLY) {
+      console.log(`skip ${name} off macOS: ${MACOS_ONLY[name]}`)
+      return
+    }
     const runner = name.endsWith('.py') ? 'python3' : 'bash'
     const res = spawnSync(runner, [join(DIR, name)], {
       encoding: 'utf-8',
