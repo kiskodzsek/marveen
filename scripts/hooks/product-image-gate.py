@@ -63,6 +63,11 @@ price/CTA). The gate measures the file itself (sips / ffprobe), so the format mu
 equal 10 % / 10 % (4:5, 1:1, landscape) or 14 % top / 35 % bottom (9:16) of the real height (+-2 px), and the box
 must stay out of them. 1:1 and landscape (any width > height) carry 10 % / 10 % too (Klodel 31805); only an upright
 format other than 4:5 and 9:16 is blocked.
+The 9:16 bottom band may not be EMPTY (TG 4283, Klodel 35878): measured with ffmpeg on the image or on three frames of
+a video (20/50/80 %), the band is empty when its luminance std < BAND_EMPTY_SD and its mean neighbour difference
+< BAND_EMPTY_EDGE; empty on most frames blocks (band_empty). Without ffmpeg (CI) it is not measured.
+HANG is not a lap row: no code reads it; the audio is measured by mute-video-reply-gate.py (ffprobe, #151). Do not
+write it on a lap (Klodel 35878).
 Tests: product-image-gate_test.py next to this file.
 Exit 0 = allow, exit 2 = block (stderr to the model).
 """
@@ -353,6 +358,16 @@ SUB_REASON_MIN = 10  # SZERZO: helyettes-klodel <reason> (Klodel 33823)
 SAV_RX = re.compile(r'^(4x5|9x16|1x1|fekv[oő])\s+fels[oő]\s+(\d+)\s+als[oó]\s+(\d+)\s+(\d+)\s*-\s*(\d+)\s*$',
                     re.I)
 FFPROBE_PATHS = ('/opt/homebrew/bin/ffprobe', '/usr/local/bin/ffprobe')
+FFMPEG_PATHS = ('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg')
+# A SÁV NEM ÜRES (hibanapló 2026-11-10, TG 4283: "a kép alja nagyon üres ... furán fel van tolva egybe minden"; Klodel
+# 35878). Measured on a 96 px wide raster of the frame: the band is empty when its luminance spread AND its mean
+# neighbour difference are both low. Calibration (Kernel, 2026-11-10, the SAV laps of store/kep-kapu with their media):
+# the TG 4283 film's bottom band 3.8-4.5 / 0.23-0.36 (every sampled frame); the films fixed after it 21-74 / 2.3-15.
+# Only the 9:16 bottom (35 %) band is enforced: flat 4:5 bands and flat 9:16 top bands were approved after the rule
+# (meseld-el-feed-45, aranyevek ...), so a threshold there has no measured complaint behind it.
+BAND_EMPTY_SD = 10.0
+BAND_EMPTY_EDGE = 1.0
+BAND_RASTER_W = 96
 
 
 def image_size(fp):
@@ -424,6 +439,77 @@ def media_size(fp):
         return None
 
 
+def _ffmpeg():
+    return shutil.which('ffmpeg') or next((p for p in FFMPEG_PATHS if os.path.exists(p)), None)
+
+
+def video_duration(fp):
+    probe = shutil.which('ffprobe') or next((p for p in FFPROBE_PATHS if os.path.exists(p)), None)
+    if not probe:
+        return None
+    try:
+        r = subprocess.run([probe, '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', fp],
+                           capture_output=True, text=True, timeout=10)
+        return float(r.stdout.strip().splitlines()[0])
+    except Exception:
+        return None
+
+
+def band_stats(fp, size, frac, at=None):
+    """(luminance std, mean neighbour difference) of the bottom `frac` of the frame (a video: the frame at `at` s), on
+    a BAND_RASTER_W wide raster; None if it cannot be decoded."""
+    ff = _ffmpeg()
+    w, h = BAND_RASTER_W, max(2, round(size[1] * BAND_RASTER_W / size[0]))
+    cmd = [ff, '-v', 'error'] + (['-ss', f'{at:.2f}'] if at is not None else []) + [
+        '-i', fp, '-frames:v', '1', '-vf', f'scale={w}:{h}:flags=area,format=gray', '-f', 'rawvideo', '-']
+    try:
+        raw = subprocess.run(cmd, capture_output=True, timeout=15).stdout
+    except Exception:
+        return None
+    if len(raw) != w * h:
+        return None
+    y0 = h - max(1, round(h * frac))
+    rows = [raw[y * w:(y + 1) * w] for y in range(y0, h)]
+    vals = [v for r in rows for v in r]
+    mean = sum(vals) / len(vals)
+    sd = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+    diff = n = 0
+    for j, r in enumerate(rows):
+        for i in range(w):
+            if i + 1 < w:
+                diff += abs(r[i + 1] - r[i])
+                n += 1
+            if j + 1 < len(rows):
+                diff += abs(rows[j + 1][i] - r[i])
+                n += 1
+    return sd, diff / max(n, 1)
+
+
+def band_empty(fp, fmt, size):
+    """A SÁV NEM ÜRES: the reason to block when the 9:16 bottom band is empty on most sampled frames, else None.
+    No ffmpeg (CI on Linux): not measured, None. ffmpeg there but the file does not decode: blocked."""
+    if fmt != '9x16' or not _ffmpeg():
+        return None
+    frac = SAFE_BANDS[fmt][1]
+    if fp.lower().endswith(VIDEO):
+        d = video_duration(fp)
+        if not d or d <= 0:
+            return 'SAV: a videó hossza nem mérhető (ffprobe), az alsó sáv kitöltését nem tudom ellenőrizni.'
+        frames = [band_stats(fp, size, frac, d * f) for f in (0.2, 0.5, 0.8)]
+    else:
+        frames = [band_stats(fp, size, frac)]
+    if any(f is None for f in frames):
+        return 'SAV: a fájl képe nem olvasható (ffmpeg), az alsó sáv kitöltését nem tudom ellenőrizni.'
+    empty = [f for f in frames if f[0] < BAND_EMPTY_SD and f[1] < BAND_EMPTY_EDGE]
+    if len(empty) * 2 <= len(frames):
+        return None
+    sd, edge = max(f[0] for f in empty), max(f[1] for f in empty)
+    return (f'SAV: a 9:16 alsó {frac:.0%}-os sávja üres (mérve: {len(empty)}/{len(frames)} kockán szórás <= {sd:.1f}, '
+            f'él <= {edge:.2f}; kitöltött: szórás >= {BAND_EMPTY_SD:.0f} vagy él >= {BAND_EMPTY_EDGE:.1f}). A kép ott is '
+            'legyen kitöltve (háttér, jelenet), csak a fontos elem ne legyen ott (CLAUDE.md BIZTONSÁGI SÁV; TG 4283: '
+            '"a kép alja nagyon üres").')
+
+
 def safe_band(fp, value):
     """Patrik TG 15669: "lathatonak kell lennie a fontos reszeknek scrollozasnal is.. levag alul felul vmennyit a fb".
     Returns the reason to block, or None."""
@@ -455,7 +541,7 @@ def safe_band(fp, value):
         return (f'SAV: a fontos elem ({y1}-{y2}) belelóg a levágott sávba: a szabad rész {want_top}-{h - want_bot} px. '
                 'Görgetésnél a hírfolyam és a Reel-felület ezt eltakarja (Patrik TG 15669). Told beljebb, és nézd meg '
                 'a levágott változatot Read-del.')
-    return None
+    return band_empty(fp, fmt, (w, h))
 
 
 CAPTION_META_PREFIXES = ('ZENE:', 'SZERZO:', 'SZERZŐ:')
