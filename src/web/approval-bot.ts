@@ -310,7 +310,10 @@ export async function handleCallback(cq: CallbackQuery, cfg: ApprovalBotConfig, 
         text: 'az üzenet szövege megváltozott', edited: 'az üzenetet utólag szerkesztették',
         markup: 'a gombok nem azok, amiket a szerver küldött', nonce: 'érvénytelen vagy elhasznált gomb',
       }[outcome.reason]
-      deps.alert(`⚠️ Jóváhagyó bot: gyanús gombnyomás elutasítva (${what}). Ha nem te voltál, vagy a szöveg nem az, amit küldtünk, szólj.`)
+      // Viktor 36403 INFO 1: after a send retry an earlier copy of the request may stand in the chat; its press is
+      // refused here as 'message', which is our own duplicate, not an attack.
+      const dup = outcome.reason === 'message' ? ' Ha ugyanaz a kérés többször is kiment, a legutolsó üzenet gombja él.' : ''
+      deps.alert(`⚠️ Jóváhagyó bot: gyanús gombnyomás elutasítva (${what}). Ha nem te voltál, vagy a szöveg nem az, amit küldtünk, szólj.${dup}`)
       logger.warn({ reason: outcome.reason }, 'approval bot: press refused, binding mismatch')
       break
     }

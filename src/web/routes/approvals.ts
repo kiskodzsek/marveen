@@ -229,6 +229,8 @@ export function unsignableFallbackText(approval: Approval): string {
 }
 
 function alertUnsignableFallback(approval: Approval): void {
+  // Viktor 36403 INFO 2: the send also throws when the row was resolved meanwhile; then there is nothing to ask again.
+  if (getApproval(approval.id)?.status !== 'pending') return
   const text = unsignableFallbackText(approval)
   for (const to of new Set([approval.agent_id, MAIN_AGENT_ID])) {
     try { createSystemMessage(to, text) } catch (err) {
