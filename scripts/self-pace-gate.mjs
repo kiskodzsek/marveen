@@ -738,7 +738,7 @@ function scriptOperandTakesStdin(tokens) {
 // a list of names that a command will open, so it stays visible.
 const HEREDOC_NAME_CONSUMER_RX = /^(?:xargs|parallel|done)$/
 
-function heredocOwnerRunsBody(before, opts = {}) {
+function heredocOwnerTokens(before) {
   // `before` is the command text up to the << redirect; the owner is the first
   // word of the last command segment. Quoted text is emptied first, so a `;` in
   // `python3 -c 'a; b' <<'EOF'` does not cut the owner off (found with 9266).
@@ -749,6 +749,11 @@ function heredocOwnerRunsBody(before, opts = {}) {
     ['sudo', 'env', 'nice', 'time', 'exec', 'command', 'nohup', 'stdbuf'].includes(tokens[0]))) {
     tokens.shift()
   }
+  return tokens
+}
+
+function heredocOwnerRunsBody(before, opts = {}) {
+  const tokens = heredocOwnerTokens(before)
   if (!tokens.length) return false
   const word = tokens[0].split('/').pop()
   if (HEREDOC_INTERPRETER_RX.test(word)) {
@@ -757,6 +762,56 @@ function heredocOwnerRunsBody(before, opts = {}) {
   if (opts.screening && HEREDOC_NAME_CONSUMER_RX.test(word)) return true
   // docker/podman/kubectl exec run the body through a shell in the target.
   if (['docker', 'podman', 'kubectl'].includes(word) && tokens.slice(1).includes('exec')) return true
+  return false
+}
+
+// IMAGESAFETYPROSE1110 helpers (Viktor 36709 modifications 1-4).
+// The body group of the heredoc regex starts right after the marker, so its first line is the TAIL of the
+// marker line (`python3 - <<'EOF' && cp -R <dir> /tmp`): shell, judged by the full rule.
+function markerTail(body) {
+  const nl = body.indexOf('\n')
+  return nl === -1 ? body : body.slice(0, nl)
+}
+// (3) python and node only; ruby/perl/php keep the bare rule (barewords, qw(), %w[], PHP<8 constants are live strings).
+const PROSE_RELAX_OWNER_RX = /^(?:python[0-9.]*|node|nodejs)$/
+// (1) an exec primitive puts a shell string in the body (os.system("cd <dir> && ...")): bare rule stays.
+// Substring match without word boundaries, case-insensitive (Viktor 36729 M1b): `from os import system`,
+// `o.system`, getattr(os, "system"), asyncio.create_subprocess_shell, os.posix_spawn all hit. Conservative on
+// purpose ('execute' in prose also trips it): a false deny is cheap, a false allow is not.
+const BODY_EXEC_RX = /(?:system|popen|spawn|exec|subprocess|shell|child_process|getattr|__import__|eval|Function|ctypes|pexpect|binding|dlopen|\bpty\b|\bsh\b|commands)/i
+// Prefilter: a plain substring search for a dir name (Viktor 36729 M1a). The token regex's lookahead missed a
+// name followed by ; | > (`cd <dir>; cat *`), which blanked the whole body before BODY_EXEC_RX ran.
+const BODY_DIR_NAME_RX = new RegExp(dirAlt(SCREENING_DIR_NAMES), 'i')
+// (4) a path form (with a slash; backtick and ')' end it too) or an exactly quoted token: ' " or backtick
+// (python triple quotes and f/r/b/u prefixes reach the same quote pair).
+const BODY_SCREENING_PATH_RX = new RegExp(String.raw`\/(?:${dirAlt(SCREENING_DIR_NAMES)})(?=[\/\s'"\x60)]|$)|(?:^|[\s'"\x60=:(])(?:${dirAlt(SCREENING_DIR_NAMES)})\/`, 'im')
+const BODY_QUOTED_TOKEN_RX = new RegExp(String.raw`(['"\x60])(?:${dirAlt(SCREENING_DIR_NAMES)})\1`, 'i')
+const proseOwner = (before) => {
+  const tokens = heredocOwnerTokens(before)
+  return tokens.length > 0 && PROSE_RELAX_OWNER_RX.test(tokens[0].split('/').pop())
+}
+const bodyCode = (body) => { const nl = body.indexOf('\n'); return nl === -1 ? '' : body.slice(nl + 1) }
+const bodyNamesScreening = (code) => {
+  const text = withDecoded(code)
+  return BODY_SCREENING_PATH_RX.test(text) || BODY_QUOTED_TOKEN_RX.test(text)
+}
+// May a python/node body be blanked for the segment scan? Not with an exec primitive (bare rule stays) and not
+// when it names a dir as a path or an exactly quoted token (heredocBodyScreeningDenied denies those outright).
+function proseBodyAllowed(before, body) {
+  if (!proseOwner(before)) return false
+  const code = bodyCode(body)
+  if (!BODY_DIR_NAME_RX.test(code) && !BODY_DIR_NAME_RX.test(withDecoded(code))) return true
+  return !BODY_EXEC_RX.test(code) && !bodyNamesScreening(code)
+}
+// The explicit deny for python/node code bodies: a path form or an exactly quoted token. The segment scan alone
+// would miss a backtick-quoted or %-encoded name, which this rule names (Viktor 36709 (4)).
+export function heredocBodyScreeningDenied(command) {
+  const cmd = String(command ?? '')
+  for (const m of cmd.matchAll(/(<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2)([\s\S]*?)(^\s*\3\s*$)/gm)) {
+    const before = cmd.slice(0, m.index)
+    if (!heredocOwnerRunsBody(before, { screening: true }) || !proseOwner(before)) continue
+    if (bodyNamesScreening(bodyCode(m[4]))) return true
+  }
   return false
 }
 
@@ -770,7 +825,15 @@ export function stripHeredocBodies(command, opts = {}) {
       if (!literal && (body.includes('$(') || body.includes('`'))) return full
       // A quoted body the shell will not expand is still executed when an
       // interpreter/remote-executor owns the redirect -- keep it visible then.
-      if (heredocOwnerRunsBody(string.slice(0, offset), opts)) return full
+      if (heredocOwnerRunsBody(string.slice(0, offset), opts)) {
+        // IMAGESAFETYPROSE1110 (Radar 36693, Viktor 36709): a python/node CODE body may name a screening
+        // dir in prose. Only there, and only without an exec primitive, the body is judged by path forms and
+        // exactly quoted tokens; everything else keeps the bare-token rule (the body stays visible).
+        if (opts.screening && proseBodyAllowed(string.slice(0, offset), body)) return `${open}${markerTail(body)}\n${close}`
+        return full
+      }
+      // The rest of the marker line is shell, not body (Viktor 36709 B): in screening mode it stays visible.
+      if (opts.screening) return `${open}${markerTail(body)}\n${close}`
       return `${open}\n${close}`
     },
   )
@@ -899,6 +962,7 @@ export function screeningDecision(toolName, toolInput, opts = {}) {
   }
   if (name !== 'Bash') return { deny: false }
   const raw = String(toolInput?.command ?? '')
+  if (heredocBodyScreeningDenied(raw)) return { deny: true, reason: 'image-quarantine' }
   const heredocOpts = { screening: true }
   const safe = stripProseArguments(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw, heredocOpts))))
   for (const seg of splitSegments(safe)) {
