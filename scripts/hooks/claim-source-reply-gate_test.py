@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for claim-source-reply-gate.py (Klodel 35761, Patrik group TG 4477, audit item 3).
+"""Tests for claim-source-reply-gate.py (Klodel 35761, Patrik group TG 4477, audit item 3; site state: Klodel 36285).
 
 Hermetic: throwaway CLAUDE_PROJECT_DIR, synthetic chat ids, no network, no ledger. The sentences are modelled on the
 replay of 2026-11-08/10 (828 real replies): what must block, and the false blocks the rules were cut against.
@@ -77,6 +77,47 @@ PASS_WITH_SOURCE = [
     'A konverzió 3 % (becslés (Szigma szerint), a heti adatból).',
 ]
 
+# Site state (hibanapló 2026-11-10 12:06, Patrik TG 4564; Klodel 36285): only with a MEASUREMENT.
+SITE_BLOCK = [
+    'A mySHP-oldal úgyis alszik',                                  # the original sentence (TG 4563)
+    'A mySHP-oldal úgyis alszik, ezért nem sürgős.',
+    'A marabel.hu leállt.',
+    'A webshop alvó állapotban van, nem kell vele foglalkozni.',
+    'A myshp.hu le van állva.',
+    'A Marabel nyitóoldala leállt tegnap este.',
+    # a source that is not a measurement does not clear a site's state
+    'A mySHP-oldal alszik (CLAUDE.md szerint).',
+    'A mySHP-oldal alszik, TG 4563.',
+    'A myshp.hu alszik: https://myshp.hu',
+    'A marabel.hu leállt, PR #1263.',
+]
+SITE_PASS_NO_CLAIM = [
+    'A mySHP részleg alvó, Kernel viszi.',                          # the department label, not the site
+    'mySHP: alvó részleg.',
+    'A szabályaimban a mySHP mint csapatrészleg van alvónak jelölve (CLAUDE.md), és ezt vittem át az oldalra.',  # TG 4567
+    'Nem alszik a myshp oldal.',                                    # negated
+    'Leállt a mySHP-oldal?',                                        # a question
+    'Ha a marabel.hu leállt, Pulzus kapcsol.',                     # conditional
+    'Patrik: «a myshp oldal alszik»',                               # quoted
+    'A render leállt a minin.',                                     # no site
+    'A földalatti leállt.',                                         # "oldal" inside another word
+]
+SITE_PASS_MEASURED = [
+    'A marabel.hu leállt (mérve: HTTP 503, 14:58).',
+    'A mySHP-oldal alszik: Pulzus mérte 15:02-kor.',
+    'A myshp.hu leállt, státusz 502 (mértem 15:01).',
+]
+for text in SITE_BLOCK:
+    ok(f'site state, no measurement: {text!r} -> blocks', gate.SITE_LABEL in gate.unsourced(text, []),
+       (gate.claims(text), gate.unsourced(text, [])))
+for text in SITE_PASS_NO_CLAIM:
+    ok(f'site: no claim: {text!r}', gate.SITE_LABEL not in gate.claims(text), gate.claims(text))
+for text in SITE_PASS_MEASURED:
+    ok(f'site: measured: {text!r}', gate.SITE_LABEL in gate.claims(text) and gate.unsourced(text, []) == [],
+       (gate.claims(text), gate.unsourced(text, [])))
+ok('site: a screenshot attached is the measurement', gate.unsourced('A marabel.hu leállt.', ['/x/shot.png']) == [])
+ok('site: the general claims keep their old rule', gate.unsourced('Kész, PR 150 mergelhető.', []) == [])
+
 for text, label in BLOCK:
     got = gate.claims(text)
     ok(f'claim: {text!r} -> {label}', label in got, got)
@@ -126,6 +167,13 @@ rc, _ = run('111', 'Kész a papás film (Dave mérte, 11:06).')
 ok('hook: with a source -> passes', rc == 0)
 rc, _ = run('999', 'Most egy render fut.')
 ok('hook: another chat is not gated', rc == 0)
+rc, err = run('111', 'A mySHP-oldal úgyis alszik')
+ok('hook: the original sentence (TG 4563) -> exit 2, names the site rule', rc == 2 and 'oldal-állapot' in err
+   and 'mérve' in err, f'rc={rc} {err}')
+rc, _ = run('111', 'A marabel.hu leállt (mérve: HTTP 503, 14:58).')
+ok('hook: site state with a measurement -> passes', rc == 0)
+rc, _ = run('-222', 'A mySHP részleg alvó, Kernel viszi.')
+ok('hook: the department label -> passes', rc == 0)
 rc, _ = run('-222', 'Szia, mikor jó a hívás?')
 ok('hook: no claim -> passes', rc == 0)
 r = subprocess.run([sys.executable, '-I', GATE], input='not json', capture_output=True, text=True,
