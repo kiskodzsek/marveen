@@ -366,3 +366,47 @@ is refused by the other.
 
 A 409 means: do not send, and check the sent mailbox before deciding anything,
 because the earlier attempt may already have gone out.
+
+# The research reader: one local tool (webread)
+
+Research (K+F, Radar) reads public pages with its own headless browser, because
+the quarantine reader returns a model summary, not the page's bytes, and an
+empty shell on JavaScript pages (`shared/kf/webgyujtes-1110.md`). That path ran
+outside every egress control: `agents/radar/tools/getfile.mjs` launched Chromium
+with `--no-sandbox`, wrote wherever the caller said, and reached `file://`,
+localhost and the LAN. `scripts/webread/webread.mjs` replaces it with the
+controls of Viktor's review (`agents/viktor/reports/2026-11-10-getfile-renderelo-olvaso-itelet.md`):
+
+- **Sandbox (A).** `chromiumSandbox: true` and an environment of `PATH` and
+  `TMPDIR` only, so no agent token reaches the browser. If the sandbox does not
+  start, the run fails; there is no fallback to `--no-sandbox`.
+- **Output (B).** Only `agents/<agent>/work/untrusted/webread/<run>/`, every
+  directory on the way checked with `realpath`, every file created with `wx`
+  (no overwrite, no planted link followed), every name made by the tool. There
+  is no output-path argument.
+- **Addresses (C).** `https` on port 443 only. The browser is forced through a
+  local forward proxy (`--proxy-bypass-list=<-loopback>`, QUIC off, WebRTC
+  proxied only) that resolves each `CONNECT` itself, refuses the name if any
+  answer is loopback, private, link-local, CGNAT, multicast, reserved,
+  documentation, NAT64, 6to4, Teredo or IPv4-mapped private, and connects to the
+  address it checked (no DNS-rebinding gap). `file` mode uses no browser: plain
+  Node `https` with the same lookup, a literal-IP check on every hop and at most
+  5 redirects, each re-checked.
+- **Limits (D).** A byte limit (`file`: 25 MB default, 200 MB max, also on a
+  stream without a length; `page`: 2 000 000 characters), 50 s per page, a hard
+  wall clock for the run (Chromium exits with the process), downloads and
+  service workers blocked, at most 12 pages at once and 4 per host.
+- **Output to the model (E).** stdout is fixed fields only (status, size,
+  sha256, tool-made file name, flag), sanitised; the page text lands in files
+  that open with an `UNTRUSTED WEB CONTENT` banner. Read them in slices. The
+  request log (`requests.log` next to the runs) keeps host, time, status, size
+  and flag, and the path + query only as `length:sha256-8`, never their text.
+- **No host allowlist.** Any public https host is reachable, so the tool is an
+  outbound channel too: an agent misled by a page could carry data out in a
+  query. URLs are capped at 2048 characters, and the log's length:hash column is
+  what shows a long or repeated query (Viktor, webread delta LOW).
+
+Still open: the browser engine itself (a renderer exploit chained with a
+sandbox escape), which only a separate, unprivileged OS user closes; that is the next step if the
+tool is opened to arbitrary hosts. Bot walls (403, captcha) are reported as
+`http_403` / `captcha` and never worked around.
