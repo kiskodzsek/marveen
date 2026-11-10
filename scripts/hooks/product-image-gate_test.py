@@ -588,6 +588,7 @@ def caption_check(root, caption):
     mod.ROOT = root
     mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
     mod.majsztro_ok = lambda _value: None
+    mod.izles_ref = lambda _fp, _value: None  # IZLES-REF has its own cases (izles_*)
     os.makedirs(mod.KAPU, exist_ok=True)
     video = os.path.join(root, 'short.mp4')
     open(video, 'wb').write(b'\x00')
@@ -843,6 +844,7 @@ def marketing_image_still_needs_marka(root):
     mod.ROOT = root
     mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
     mod.majsztro_ok = lambda _value: None
+    mod.izles_ref = lambda _fp, _value: None  # IZLES-REF has its own cases (izles_*)
     return 'MARKA sor hiányzik' in (mod.check(img) or '')
 
 
@@ -851,6 +853,7 @@ def caption_check_setup(root, marka=True):
     mod.ROOT = root
     mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
     mod.majsztro_ok = lambda _value: None
+    mod.izles_ref = lambda _fp, _value: None  # IZLES-REF has its own cases (izles_*)
     os.makedirs(mod.KAPU, exist_ok=True)
     video = os.path.join(root, 'short.mp4')
     open(video, 'wb').write(b'\x00')
@@ -940,6 +943,7 @@ def sav_check(root, w, h, sav, name='poszt.png'):
     mod.ROOT = root
     mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
     mod.majsztro_ok = lambda _value: None
+    mod.izles_ref = lambda _fp, _value: None  # IZLES-REF has its own cases (izles_*)
     os.makedirs(mod.KAPU, exist_ok=True)
     img = os.path.join(root, name)
     if w:
@@ -1136,6 +1140,7 @@ def sav_real_video_measured_with_ffprobe(root):
     mod.ROOT = root
     mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
     mod.majsztro_ok = lambda _value: None
+    mod.izles_ref = lambda _fp, _value: None  # IZLES-REF has its own cases (izles_*)
     os.makedirs(mod.KAPU, exist_ok=True)
     if mod.media_size(video) != (1080, 1920):
         return False
@@ -1322,7 +1327,191 @@ def majsztro_substitute_on_five_hour_window(root):
     partial = mod.majsztro_budget_full()
     return out and not reset and not partial
 
-PRIV_OK = 'PRIVÁT-OK: Patrik privátban kérdezte, privát ügy\n'
+
+# IZLES-REF (Patrik TG 4793, 2026-11-10, Klodel 36836): a marketing piece goes to Patrik only next to an earlier piece
+# he praised. Synthetic ledger (store/claudeclaw.db under the throw-away root): inbound 4741 in a group chat, and an
+# OUTBOUND 5555 (our own reply: not a praise).
+def izles_setup(root, ledger=True):
+    import sqlite3
+    mod = gate_module()
+    mod.ROOT = root
+    os.makedirs(os.path.join(root, 'store'), exist_ok=True)
+    if ledger:
+        con = sqlite3.connect(os.path.join(root, 'store', 'claudeclaw.db'))
+        con.execute('CREATE TABLE conversation_log (id INTEGER PRIMARY KEY, agent_id TEXT, chat_id TEXT, direction TEXT, '
+                    'message_id TEXT, text TEXT, ts TEXT, created_at INTEGER, source TEXT)')
+        con.execute("INSERT INTO conversation_log (agent_id, chat_id, direction, message_id, created_at, source) "
+                    "VALUES ('klodel', ?, 'in', '4741', 1, 'plugin:telegram:telegram')", (GROUP,))
+        con.execute("INSERT INTO conversation_log (agent_id, chat_id, direction, message_id, created_at, source) "
+                    "VALUES ('klodel', ?, 'out', '5555', 1, 'plugin:telegram:telegram')", (GROUP,))
+        con.commit()
+        con.close()
+    paths = {}
+    for name in ('uj.png', 'dicsert.png', 'osszevetes.png'):
+        paths[name] = os.path.join(root, name)
+        open(paths[name], 'wb').write(b'\x89PNG')
+    now = time.time()
+    os.utime(paths['dicsert.png'], (now - 86400, now - 86400))
+    os.utime(paths['uj.png'], (now - 60, now - 60))
+    os.utime(paths['osszevetes.png'], (now, now))
+    return mod, paths
+
+
+def izles_line(p, tg='4741', ref=None, cmp_=None):
+    return f"{ref or p['dicsert.png']} | {tg} | {cmp_ or p['osszevetes.png']}"
+
+
+def izles(root, value=None, ledger=True, **kw):
+    mod, p = izles_setup(root, ledger)
+    return mod.izles_ref(p['uj.png'], izles_line(p, **kw) if value is None else value) or ''
+
+
+@case
+def izles_valid_passes(root):
+    return izles(root) == ''
+
+
+@case
+def izles_tg_prefix_passes(root):
+    return izles(root, tg='TG 4741') == ''
+
+
+@case
+def izles_missing_line_blocked(root):
+    return 'IZLES-REF sor hiányzik' in izles(root, value='')
+
+
+@case
+def izles_nincs_blocked(root):
+    return 'IZLES-REF: nincs' in izles(root, value='nincs')
+
+
+@case
+def izles_nincs_with_reason_blocked(root):
+    return 'IZLES-REF: nincs' in izles(root, value='nincs, még semmit nem dicsért')
+
+
+@case
+def izles_two_parts_blocked(root):
+    mod, p = izles_setup(root)
+    return 'sor hibás' in (mod.izles_ref(p['uj.png'], f"{p['dicsert.png']} | 4741") or '')
+
+
+@case
+def izles_empty_part_blocked(root):
+    mod, p = izles_setup(root)
+    return 'sor hibás' in (mod.izles_ref(p['uj.png'], f"{p['dicsert.png']} |  | {p['osszevetes.png']}") or '')
+
+
+@case
+def izles_missing_reference_file_blocked(root):
+    return 'referencia-fájl nem létezik' in izles(root, ref=os.path.join(root, 'nincs-ilyen.png'))
+
+
+@case
+def izles_reference_not_media_blocked(root):
+    txt = os.path.join(root, 'dicseret.txt')
+    open(txt, 'w').write('szép')
+    return 'nem kép/videó' in izles(root, ref=txt)
+
+
+@case
+def izles_reference_is_the_file_blocked(root):
+    return 'maga a vizsgált fájl' in izles(root, ref=os.path.join(root, 'uj.png'))
+
+
+@case
+def izles_tg_not_a_number_blocked(root):
+    return 'nem szám' in izles(root, tg='tegnap')
+
+
+@case
+def izles_tg_unknown_id_blocked(root):
+    return 'nincs a bejövő naplóban' in izles(root, tg='9999')
+
+
+@case
+def izles_tg_outbound_only_blocked(root):
+    return 'nincs a bejövő naplóban' in izles(root, tg='5555')
+
+
+@case
+def izles_no_ledger_blocked(root):
+    return 'nincs a bejövő naplóban' in izles(root, ledger=False)
+
+
+@case
+def izles_missing_comparison_blocked(root):
+    return 'összehasonlító kép nem létezik' in izles(root, cmp_=os.path.join(root, 'nincs.png'))
+
+
+@case
+def izles_comparison_not_an_image_blocked(root):
+    vid = os.path.join(root, 'osszevetes.mp4')
+    open(vid, 'wb').write(b'\x00')
+    return 'nem kép' in izles(root, cmp_=vid)
+
+
+@case
+def izles_comparison_is_the_reference_blocked(root):
+    return 'külön lap legyen' in izles(root, cmp_=os.path.join(root, 'dicsert.png'))
+
+
+@case
+def izles_comparison_older_than_file_blocked(root):
+    mod, p = izles_setup(root)
+    old = time.time() - 3600
+    os.utime(p['osszevetes.png'], (old, old))
+    return 'nem frissebb' in (mod.izles_ref(p['uj.png'], izles_line(p)) or '')
+
+
+@case
+def izles_comparison_same_mtime_blocked(root):
+    mod, p = izles_setup(root)
+    t = os.path.getmtime(p['uj.png'])
+    os.utime(p['osszevetes.png'], (t, t))
+    return 'nem frissebb' in (mod.izles_ref(p['uj.png'], izles_line(p)) or '')
+
+
+def izles_check_run(root, line):
+    """The whole check() on a marketing video (caption_check_setup) with the REAL izles_ref, bound to this root."""
+    mod = caption_check_setup(root)
+    real, p = izles_setup(root)
+    mod.izles_ref = real.izles_ref
+    mod.run_ocr = lambda fp, budget: {0: 'marabel.hu', 1: 'marabel.hu'}
+    okf = os.path.join(mod.KAPU, 'short.mp4.ok')
+    if line is not None:
+        open(okf, 'a', encoding='utf-8').write(f'IZLES-REF: {line(p)}\n')
+    later = time.time() + 5
+    os.utime(okf, (later, later))
+    os.utime(p['osszevetes.png'], (later, later))
+    return mod.check(os.path.join(root, 'short.mp4')) or ''
+
+
+@case
+def izles_marketing_video_without_line_blocked(root):
+    return 'IZLES-REF sor hiányzik' in izles_check_run(root, None)
+
+
+@case
+def izles_marketing_video_nincs_blocked(root):
+    return 'IZLES-REF: nincs' in izles_check_run(root, lambda p: 'nincs')
+
+
+@case
+def izles_marketing_video_with_reference_passes(root):
+    return izles_check_run(root, izles_line) == ''
+
+
+@case
+def izles_not_asked_on_non_marketing(root):
+    # book_fixture is "MAJSZTRO: nem-marketing" and carries no IZLES-REF line: allowed as before.
+    img = book_fixture(root, KEPES_OK)
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 0 and 'IZLES-REF' not in err
+
+
+PRIV_OK ='PRIVÁT-OK: Patrik privátban kérdezte, privát ügy\n'
 IDEA_LINE = 'ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel összevetve)\n'
 
 
