@@ -120,4 +120,10 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from gate_log import watch as _gate_log_watch  # one line per block, store/gate-blocks.jsonl (Klodel 35878)
+    except Exception:
+        from contextlib import nullcontext as _gate_log_watch
+    with _gate_log_watch('private-topic'):
+        sys.exit(main())

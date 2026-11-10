@@ -759,17 +759,23 @@ def draft_main():
 
 if __name__ == "__main__":
     try:
-        if sys.argv[1:] == [DRAFT_ENVELOPE_FLAG]:
-            draft_main()
-        main()
-    except SystemExit:
-        raise
-    except Exception as exc:  # noqa: BLE001 -- deliberate fail-closed net
-        # Same contract as the copy gate: an unhandled crash would exit 1,
-        # which PreToolUse treats as NON-blocking -- the send would run
-        # unchecked. On this gate every matched path is a send path, so
-        # blocking is always the safe failure mode.
-        sys.stderr.write(
-            f"EMAIL JOVAHAGYASI KAPU: TILTVA, belso hiba a vizsgalat kozben ({exc!r}).\n"
-            "Fail-closed: tedd vizsgalhatova a hivast, aztan kuldd ujra.\n")
-        sys.exit(2)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from gate_log import watch as _gate_log_watch  # one line per block, store/gate-blocks.jsonl (Klodel 35878)
+    except Exception:
+        from contextlib import nullcontext as _gate_log_watch
+    with _gate_log_watch("email-approval"):
+        try:
+            if sys.argv[1:] == [DRAFT_ENVELOPE_FLAG]:
+                draft_main()
+            main()
+        except SystemExit:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- deliberate fail-closed net
+            # Same contract as the copy gate: an unhandled crash would exit 1,
+            # which PreToolUse treats as NON-blocking -- the send would run
+            # unchecked. On this gate every matched path is a send path, so
+            # blocking is always the safe failure mode.
+            sys.stderr.write(
+                f"EMAIL JOVAHAGYASI KAPU: TILTVA, belso hiba a vizsgalat kozben ({exc!r}).\n"
+                "Fail-closed: tedd vizsgalhatova a hivast, aztan kuldd ujra.\n")
+            sys.exit(2)

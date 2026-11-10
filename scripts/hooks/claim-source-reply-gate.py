@@ -147,6 +147,15 @@ def log_block(kind, found, length):
         pass
 
 
+def _gate_reason(code):
+    """Name this block's reason in the shared gate log (gate_log.py); never changes the verdict."""
+    try:
+        import gate_log
+        gate_log.reason(code)
+    except Exception:
+        pass
+
+
 def main():
     try:
         ti = json.load(sys.stdin).get('tool_input') or {}
@@ -165,6 +174,7 @@ def main():
     kind = chats.get(chat, '?') if isinstance(chats, dict) else '?'
     log_mode = os.environ.get('CLAIM_SOURCE_GATE_MODE') == 'log'
     log_block(kind + (' (log-only)' if log_mode else ''), found, len(text))
+    _gate_reason(','.join(found))
     if log_mode:  # a measuring day before enforcing: logged, let through
         return 0
     sys.stderr.write(
@@ -175,4 +185,10 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from gate_log import watch as _gate_log_watch  # one line per block, store/gate-blocks.jsonl (Klodel 35878)
+    except Exception:
+        from contextlib import nullcontext as _gate_log_watch
+    with _gate_log_watch('claim-source'):
+        sys.exit(main())
