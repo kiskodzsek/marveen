@@ -552,10 +552,73 @@ def main():
     else:
         sys.exit(0)
 
-    _decide(lambda: collect_email_envelope(tool, tool_input), content_anchor)
+    cls = ms365_class(tool)
+    if cls == "send":
+        sig = lambda: ms365_signature_problems(tool_input)  # noqa: E731
+    elif cls == "unanchorable" and _MS365_MAIL_BY_ID.search(tool):
+        # reply / forward / send-draft by message id: the body and the logo are on the server, not in the call.
+        sig = lambda: [("az uzenet-azonositoval kuldott level torzse es logoja a hivasbol nem ellenorizheto; "  # noqa: E731
+                        "piszkozatbol csak az ops/mail-attach/send-draft.mjs kuldhet, az ellenorzi")]
+    elif cls == "unanchorable" and _MS365_MAIL_INDIRECT.search(tool):
+        # graph-batch, mail rules, group threads: they can put a letter out without a checkable signature.
+        sig = lambda: [("ez a muvelet kozvetve levelet kuldhet (Graph-koteg, tovabbito szabaly, csoport-szal, automatikus valasz), "  # noqa: E731
+                        "aminek az alairasa a hivasbol nem ellenorizheto")]
+    else:
+        sig = None
+    _decide(lambda: collect_email_envelope(tool, tool_input), content_anchor, sig)
 
 
-def _decide(env_fn, anchor_fn):
+# KLODELALAIRAS1110 (Klodel 36473/36478, Patrik csoport TG 4661/4666: "minden levél amit
+# kiküldesz"): a klodel@ letter goes out only with the Klodel HTML signature of
+# store/email-signature/klodel-signature-fixed.html -- an HTML body with the logo by cid
+# and the "AI Asszisztens | mySHP Solutions" line, AND the logo as an inline attachment.
+# send-mail cannot carry an anchored attachment (email_extract: Message.attachments is
+# refused), so a send-mail can never be complete: the route is the draft
+# (patrik-level-piszkozat 4.) + attach.mjs --inline-logo + ops/mail-attach/send-draft.mjs,
+# which checks the same signature on the draft it reads. Checked before the standing list
+# and before an approval is consumed, at level 2 and 3 alike.
+SIGNATURE_CID = "myshp-logo-klodel"
+# The ms365 operations that send a LETTER by message id (any server name): checked at level 3 too.
+_MS365_MAIL_BY_ID = re.compile(r"__(send-draft-message|reply-mail-message|reply-all-mail-message|forward-mail-message"
+                               r"|send-shared-mailbox-mail|send-shared-mailbox-draft|reply-shared-mailbox-mail"
+                               r"|reply-all-shared-mailbox-mail|forward-shared-mailbox-mail)$")
+# Operations that can put a letter out INDIRECTLY (Viktor 36499 INFO 1): a Graph batch may carry
+# POST /me/sendMail, a mail rule may forward, a group-thread reply mails the group, mailbox settings
+# set the automatic reply. Level 3 too.
+_MS365_MAIL_INDIRECT = re.compile(r"__(graph-batch|create-mail-rule|update-mail-rule|reply-to-group-thread"
+                                  r"|update-mailbox-settings)$")
+SIGNATURE_HINT = ("lasd patrik-level-piszkozat 4. lepes: piszkozat a klodel-signature-fixed.html "
+                  "alairassal, attach.mjs --inline-logo, kuldes: ops/mail-attach/send-draft.mjs")
+
+
+def ms365_signature_problems(tool_input):
+    """What is missing from the Klodel HTML signature of an ms365 send-mail call ([] = complete)."""
+    body = tool_input.get("body") if isinstance(tool_input, dict) else None
+    msg = body.get("Message") if isinstance(body, dict) else None
+    msg = msg if isinstance(msg, dict) else {}
+    mbody = msg.get("body") if isinstance(msg.get("body"), dict) else {}
+    ctype = str(mbody.get("contentType") or "text").lower()
+    content = mbody.get("content") if isinstance(mbody.get("content"), str) else ""
+    problems = []
+    if ctype != "html":
+        problems.append("a torzs nem HTML (sima szoveges level)")
+    else:
+        if f"cid:{SIGNATURE_CID}" not in content:
+            problems.append(f"a torzsben nincs logo-hivatkozas (cid:{SIGNATURE_CID})")
+        if not re.search(r"AI\s+asszisztens", content, re.I) or not re.search(r"mySHP\s+Solutions", content):
+            problems.append('a torzsben nincs "AI Asszisztens | mySHP Solutions" sor')
+    atts = msg.get("attachments") if isinstance(msg.get("attachments"), list) else []
+    if not any(isinstance(a, dict) and a.get("isInline") is True
+               and str(a.get("contentId") or "").strip("<>") == SIGNATURE_CID for a in atts):
+        problems.append("a logo nincs inline mellekletkent a levelen (a send-mail nem visz horgonyozhato mellekletet)")
+    return problems
+
+
+def deny_unsigned(problems, prefix=""):
+    deny(prefix + "Hianyzik a Klodel HTML-alairas: " + "; ".join(problems) + ".\n" + SIGNATURE_HINT + ".")
+
+
+def _decide(env_fn, anchor_fn, signature_fn=None):
     """The level switch and the level-2 decision, shared by the PreToolUse hook
     (main) and the send-draft CLI (draft_main). Exits 0 (allow) or 2 (deny).
     env_fn builds the envelope only once the level needs it; anchor_fn turns it
@@ -563,6 +626,8 @@ def _decide(env_fn, anchor_fn):
     level, note = read_email_level()
     prefix = f"({note})\n" if note else ""
     if level >= 3:
+        if signature_fn and signature_fn():
+            deny_unsigned(signature_fn(), prefix)
         sys.exit(0)
     if level <= 1:
         deny(prefix +
@@ -584,6 +649,11 @@ def _decide(env_fn, anchor_fn):
         deny(prefix +
              "A hivasbol nem nyerheto ki cimzett (a horgony a cimzettet is fedi).\n"
              "Hasznalj explicit --to flaget vagy MCP to-mezot, aztan kuldd ujra.")
+    # KLODELALAIRAS1110: before the standing list and before any approval is consumed.
+    if signature_fn:
+        missing = signature_fn()
+        if missing:
+            deny_unsigned(missing, prefix)
 
     # The standing list is checked BEFORE the anchor, and only here -- i.e.
     # only at level 2. Level 1 stays a hard deny: "signal only" must not have a
