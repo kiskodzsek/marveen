@@ -41,6 +41,14 @@
 #   MARVEEN_TOKEN_FILE bearer token file (default <repo>/store/.dashboard-token)
 #   MARVEEN_HOMOGLYPH_BIN  the checker (default <repo>/scripts/lib/homoglyph.py)
 #   MARVEEN_QUEUE_WARN_AT  queue depth that triggers the stderr notice (default 3, 0 = off)
+#   MARVEEN_MAJSZTRO_STATE Majsztro's usage state (default <repo>/store/mod-state/majsztro.json)
+# MAJSZTRO SUBSTITUTE COPY (Klodel 36866, CLAUDE.md MÁJSZTRÓ HELYETTES): on 2026-11-10 18:35 Radar delivered research
+# Patrik was waiting for to Majsztro while his budget stood at 100 %; Patrik asked "Na?" (private TG 17341) before it
+# reached Klodel, who substitutes for Majsztro then. So after a successful send to majsztro, when his seven_day limit
+# is >= 100 % or his five_hour limit is >= 100 % before its resetsAt (the same rule as majsztro_budget_full() in
+# scripts/hooks/product-image-gate.py), the same text goes to klodel too, prefixed "[MAJSZTRO-HELYETTES MÁSOLAT]".
+# Not when klodel himself is the sender. A missing or unreadable state file means no copy. A failed copy does not
+# fail the send (the original was accepted): it is said on stderr and logged.
 # MEASURED 2026-09-13: a remote agent runs this helper OUTSIDE this repo, where localhost:3420
 # does not exist -- it had to fall back to raw curl, i.e. exactly the unchecked pattern this file was
 # written to eliminate. A hardcoded base URL silently un-installs the helper for everyone not on this
@@ -115,6 +123,60 @@ fi
 
 BODY="$(FROM="$FROM" TO="$TO" C="$C" P="$PRIORITY" python3 -c 'import json,os; d={"from":os.environ["FROM"],"to":os.environ["TO"],"content":os.environ["C"]}; d.update({"priority":"urgent"} if os.environ["P"]=="urgent" else {}); print(json.dumps(d))')"
 
+MAJSZTRO_STATE="${MARVEEN_MAJSZTRO_STATE:-$BASE/store/mod-state/majsztro.json}"
+
+majsztro_budget_full() {
+  [ -r "$MAJSZTRO_STATE" ] || return 1
+  python3 - "$MAJSZTRO_STATE" <<'PY' 2>/dev/null
+import datetime as dt, json, sys
+try:
+    rl = json.load(open(sys.argv[1])).get('usage', {}).get('rateLimits', [])
+    sd = [r for r in rl if r.get('kind') == 'seven_day']
+    if sd and float(sd[0].get('percentUsed', 0)) >= 100:
+        sys.exit(0)
+    fh = [r for r in rl if r.get('kind') == 'five_hour']
+    if fh and float(fh[0].get('percentUsed', 0)) >= 100:
+        ra = fh[0].get('resetsAt')
+        if not ra or dt.datetime.fromisoformat(ra.replace('Z', '+00:00')) > dt.datetime.now(dt.timezone.utc):
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+PY
+}
+
+majsztro_copy() {
+  # $1 = id of the accepted original
+  local to_lc from_lc cbody cresp ccode cid i
+  to_lc="$(printf '%s' "$TO" | tr '[:upper:]' '[:lower:]')"
+  from_lc="$(printf '%s' "$FROM" | tr '[:upper:]' '[:lower:]')"
+  [ "$to_lc" = "majsztro" ] || return 0
+  [ "$from_lc" = "klodel" ] && return 0
+  majsztro_budget_full || return 0
+  cbody="$(FROM="$FROM" C="$C" P="$PRIORITY" OID="$1" python3 -c 'import json,os
+c="[MAJSZTRO-HELYETTES MÁSOLAT] (eredeti: id=%s, %s -> majsztro; Májsztró kerete 100 %%)\n%s" % (os.environ["OID"], os.environ["FROM"], os.environ["C"])
+d={"from":os.environ["FROM"],"to":"klodel","content":c}
+d.update({"priority":"urgent"} if os.environ["P"]=="urgent" else {})
+print(json.dumps(d))')"
+  for i in 1 2 3; do
+    cresp="$(curl -s -X POST "$URL" -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" -d "$cbody" -w $'\n%{http_code}' 2>/dev/null || true)"
+    ccode="$(printf '%s' "$cresp" | tail -n1)"
+    cid="$(printf '%s' "$cresp" | sed '$d' | python3 -c 'import sys,json
+try:
+  d=json.load(sys.stdin); print(d.get("id","") if isinstance(d,dict) else "")
+except Exception:
+  print("")' 2>/dev/null)"
+    if { [ "$ccode" = "200" ] || [ "$ccode" = "201" ]; } && [ -n "$cid" ]; then
+      echo "MAJSZTRO-HELYETTES: Májsztró kerete 100 %, másolat klodelnek: id=$cid" >&2
+      return 0
+    fi
+    sleep 1
+  done
+  echo "WARN: Májsztró kerete 100 %, de a klodel-másolat NEM ment ki (http=${ccode:-?}); szólj Klodelnek kézzel." >&2
+  printf '%s\tFAIL\tfrom=%s\tto=klodel\turl=%s\thttp=%s\tresp=majsztro-substitute-copy of id=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$FROM" "$URL" "${ccode:-?}" "$1" >> "$LOG" 2>/dev/null || true
+  return 0
+}
+
 attempt=0; max=3; CODE=""; ID=""
 while [ "$attempt" -lt "$max" ]; do
   attempt=$((attempt+1))
@@ -173,6 +235,7 @@ EOF
       echo "NOTICE: $DEPTH message(s) are waiting for $TO${MINS:+, measured delay ~${MINS} min}." >&2
       echo "  It is busy; prefer adding to an existing message or a shared card over another message." >&2
     fi
+    majsztro_copy "$ID"
     exit 0
   fi
   sleep 1
