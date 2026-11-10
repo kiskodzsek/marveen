@@ -149,6 +149,31 @@ def the_idle_macbook_1020_1032_alerts_by_1025(_root):
 
 
 @case
+def only_render_work_makes_a_free_machine_alert(_root):
+    # 2026-11-10 11:00, the first live run: four [SZABAD GÉP] messages for requests that named no render work.
+    for text, promise in [
+        ('egy induló webshop vagyunk, a márka bevezetése a cél', 'Átállítom rá a csapatot, Májsztró átírja a tervet.'),
+        ('nézzétek meg mások miként csinálták, mik a mai trendek', 'Radar 12:00-ra összegyűjti.'),
+        ('ha felderítunk egy hibát, legyen rá kapu', 'A két kaput kiadtam Kernelnek, ma készül.'),
+        ('képes vagy rá holnapra?', 'Megnézem, ma készül.'),
+    ]:
+        assert not W.render_related({'text': text, 'promise': promise}), text
+    for text, promise in [
+        ('a babás még mindig nem jó', 'Dave most javítja, amint kész, küldöm.'),
+        ('mikor lesz meg?', 'A papás kisfilm most renderel a MacBookon.'),
+        ('kérem a TikTok-videókat', 'Indul.'),
+        ('csináljatok új képeket a receptkönyvhöz', 'Átadtam Dave-nek.'),
+        ('a 3D könyv nem A5', 'Dave most javítja.'),
+        ('Reels kell belőle', 'Amint kész, küldöm.'),
+        ('a záró felirat ez legyen', 'Amint kész, küldöm.'),
+    ]:
+        assert W.render_related({'text': text, 'promise': promise}), text
+    # The day's baby-film requests in the fixture are render work.
+    reqs = W.open_requests(TODAY, {}, at('10:29:10'))
+    assert all(W.render_related(q) for q in reqs), [q['text'] for q in reqs]
+
+
+@case
 def machines_busy_reads_the_processes(_root):
     procs = [('1', 'ssh -n -F /x/ssh_config render-mac render 1901ea62-c9e7-4093-83e3-da4f1f50fd7c'),
              ('2', 'grep render-mac')]

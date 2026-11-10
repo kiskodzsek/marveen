@@ -19,7 +19,8 @@ never Patrik) when a request has waited too long, and Klodel + Dave when a rende
    Open for WAIT_S (15 min) -> one alert to Klodel listing every such request, its age and who is working (the tmux
    panes that are busy). At most one such message every WAIT_S; a request is named at most MAX_ALERTS times, and one
    older than MAX_AGE_S is no longer chased.
-2. Free-machine guard. While a work request is open, a render machine that has not rendered for IDLE_S (5 min) ->
+2. Free-machine guard. While a RENDER work request is open (render_related: the request or the promise names a film,
+   video, image, render or one of the films' products), a render machine that has not rendered for IDLE_S (5 min) ->
    one alert to Klodel and Dave ("üres gép: <gép>, sorban: <ami vár>"), again every WAIT_S. The mini renders when a
    render.mjs export/frames, Blender or ffmpeg runs here; the MacBook when our ssh to its render gate (render-mac
    render|export) runs here (measured on this side: the gate itself has no status in the installed version).
@@ -101,6 +102,19 @@ PROMISE = re.compile(
 TOPICS = ('babas', 'papas', 'recept', 'aranyev', 'meseld', 'elso eved', 'marabello', 'koszonjuk', 'tiktok', 'chat',
           'messenger', 'whatsapp', 'aszf', 'terms', 'privacy', 'dns', 'logo', 'poszt', 'reel', 'landing', 'szamla',
           'billingo', 'konyvbemutato', 'hirdetes', 'banner', 'video', 'film')
+
+
+# Free-machine guard (Klodel 35727 follow-up): a machine is "free while Patrik waits" only when what he waits for is
+# render work. Measured 2026-11-10 11:00, the first live run: the three open requests (brand launch, market research,
+# a team rule) and Klodel's promises named no film, image or render, yet four [SZABAD GÉP] messages went to Klodel and
+# Dave. Folded text (no accents); a request counts when the request OR the promising reply names one of these.
+RENDER_WORK = re.compile(
+    r'\b(babas|papas|recept|aranyev|meseld|elso eved|koszonjuk|tiktok|reels?|shorts?|render|blender|3d|export'
+    r'|kep|kepe[kt]?|kepeket|kepsor|illusztrac|animac|mintakep|boritokep)\b|film|video|felirat')
+
+
+def render_related(q):
+    return any(RENDER_WORK.search(' '.join(fold(t or '').split())) for t in (q.get('text'), q.get('promise')))
 
 
 def is_promise(text):
@@ -314,7 +328,7 @@ def check(dry, now):
             lines.append(f'Panelek: {p}.')
         lines.append('Lezárás: eredmény reply_to-val a kérésre, vagy python3 -I scripts/patrik-varakozas.py close <msg> "<mi lett>".')
         send(MAIN_AGENT, '\n'.join(lines), dry)
-    waiting = [q for q in reqs if q['promise'] is not None]
+    waiting = [q for q in reqs if q['promise'] is not None and render_related(q)]
     for machine, idle in machine_alerts(state, machines_busy(processes()), bool(waiting), now):
         queue = '; '.join(f"«{short(q['text'], 60)}» ({int((now - q['at']) // 60)} p)" for q in waiting[:3])
         text = (f"[SZABAD GÉP] üres gép: {machine}, {int(idle // 60)} perce nem renderel, miközben Patrik vár. "
