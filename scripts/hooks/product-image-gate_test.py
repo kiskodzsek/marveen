@@ -600,6 +600,7 @@ def caption_check(root, caption):
              'MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)', f'FEED: ok {sheet}', f'POSZTSZOVEG: {cap}',
              SAV_9X16_OK]
     mod.media_size = lambda _fp: (1080, 1920)  # the video here is a 1-byte stub; the safe band has its own cases
+    mod.band_empty = lambda *_a: None  # a 1-byte stub has no picture; the empty-band cases are below
     open(os.path.join(mod.KAPU, 'short.mp4.ok'), 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
     later = time.time() + 5
     os.utime(sheet, (later, later))
@@ -865,6 +866,7 @@ def caption_check_setup(root, marka=True):
              'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
              f'FEED: ok {sheet}', f'POSZTSZOVEG: {cap}', SAV_9X16_OK]
     mod.media_size = lambda _fp: (1080, 1920)  # the video here is a 1-byte stub; the safe band has its own cases
+    mod.band_empty = lambda *_a: None  # a 1-byte stub has no picture; the empty-band cases are below
     if marka:
         lines.append('MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)')
     open(os.path.join(mod.KAPU, 'short.mp4.ok'), 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
@@ -940,6 +942,7 @@ def sav_check(root, w, h, sav, name='poszt.png'):
     mod.ROOT = root
     mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
     mod.majsztro_ok = lambda _value: None
+    mod.band_empty = lambda *_a: None  # header-only PNGs have no picture; the empty-band cases are below
     os.makedirs(mod.KAPU, exist_ok=True)
     img = os.path.join(root, name)
     if w:
@@ -1114,8 +1117,9 @@ def sav_real_video_measured_with_ffprobe(root):
         print('  (skip: no ffmpeg)')
         return True
     video = os.path.join(root, 'reel.mp4')
-    subprocess.run([ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=white:s=1080x1920:d=1', '-pix_fmt',
-                    'yuv420p', video], check=True, timeout=60)
+    # a textured frame (noise): a flat white one would now be blocked for its empty bottom band (TG 4283)
+    subprocess.run([ffmpeg, '-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=gray:s=1080x1920:d=1', '-vf',
+                    'noise=alls=60:allf=t', '-pix_fmt', 'yuv420p', video], check=True, timeout=60)
     mod = gate_module()
     mod.ROOT = root
     mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
@@ -1340,6 +1344,96 @@ def idea_group_not_gated(root):
 def no_idea_private_unchanged(root):
     rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Kész a riport.'})
     return rc == 0
+
+
+# --- A SÁV NEM ÜRES (TG 4283, Klodel 35878): the 9:16 bottom band is measured with ffmpeg ---
+def _ff():
+    import shutil as sh
+    return sh.which('ffmpeg') or next((p for p in ('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg')
+                                       if os.path.exists(p)), None)
+
+
+def _frame(ff, out, empty_bottom, video=False):
+    """1080x1920: noise everywhere, or noise on top and a flat colour on the bottom 40 % (the TG 4283 film's look)."""
+    src = ['-f', 'lavfi', '-i', 'color=c=gray:s=1080x1920' + (':d=2' if video else '')]
+    vf = 'noise=alls=60:allf=t'
+    if empty_bottom:
+        vf += ',drawbox=x=0:y=1152:w=1080:h=768:color=0xEDE6DA:t=fill'
+    tail = ['-pix_fmt', 'yuv420p', out] if video else ['-frames:v', '1', out]
+    subprocess.run([ff, '-v', 'error', '-y'] + src + ['-vf', vf] + tail, check=True, timeout=60)
+    return out
+
+
+def _band(root, name, empty_bottom, video=False, fmt_size=(1080, 1920), fmt='9x16'):
+    ff = _ff()
+    if not ff:
+        print('  (skip: no ffmpeg)')
+        return None
+    mod = gate_module()
+    fp = _frame(ff, os.path.join(root, name), empty_bottom, video)
+    return mod.band_empty(fp, fmt, fmt_size)
+
+
+@case
+def band_9x16_image_with_empty_bottom_blocked(root):
+    r = _band(root, 'ures.png', True)
+    return r is None and not _ff() or 'alsó 35%-os sávja üres' in (r or '')
+
+
+@case
+def band_9x16_image_filled_passes(root):
+    return _band(root, 'teli.png', False) is None
+
+
+@case
+def band_9x16_video_with_empty_bottom_blocked(root):
+    r = _band(root, 'ures.mp4', True, video=True)
+    return r is None and not _ff() or ('3/3 kockán' in (r or ''))
+
+
+@case
+def band_9x16_video_filled_passes(root):
+    return _band(root, 'teli.mp4', False, video=True) is None
+
+
+@case
+def band_only_9x16_is_measured(root):
+    # flat 4:5 bands were approved after the rule (meseld-el-feed-45): no measured complaint, not enforced
+    return _band(root, 'ures45.png', True, fmt='4x5') is None
+
+
+@case
+def band_undecodable_file_blocked_where_ffmpeg_exists(root):
+    if not _ff():
+        print('  (skip: no ffmpeg)')
+        return True
+    mod = gate_module()
+    fp = os.path.join(root, 'csonk.png')
+    png(fp, 1080, 1920)  # header only, no picture
+    return 'nem olvasható' in (mod.band_empty(fp, '9x16', (1080, 1920)) or '')
+
+
+@case
+def band_through_check_names_the_band(root):
+    # the full check(): a valid SAV line on a real 9:16 image with an empty bottom is blocked by the band measure
+    ff = _ff()
+    if not ff:
+        print('  (skip: no ffmpeg)')
+        return True
+    mod = gate_module()
+    mod.ROOT = root
+    mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
+    mod.majsztro_ok = lambda _value: None
+    os.makedirs(mod.KAPU, exist_ok=True)
+    img = _frame(ff, os.path.join(root, 'poszt916.png'), True)
+    lines = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
+             'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
+             'MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)', SAV_9X16_OK]
+    okf = os.path.join(mod.KAPU, 'poszt916.png.ok')
+    open(okf, 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+    later = time.time() + 5
+    os.utime(okf, (later, later))
+    return 'sávja üres' in (mod.check(img) or '')
 
 
 def main():
