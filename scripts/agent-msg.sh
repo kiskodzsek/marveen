@@ -8,7 +8,11 @@
 # the HTTP status AND the returned message id, and RETRIES on failure. A message counts as sent only
 # when an id came back.
 #
-# Usage:  bash scripts/agent-msg.sh <from> <to> "<content>"
+# Usage:  bash scripts/agent-msg.sh [--urgent] <from> <to> "<content>"
+#   --urgent (Klodel 35737, Patrik group TG 4465 "mehet"): the message jumps the recipient's queue and is typed
+#   into its pane even while it is busy (Claude Code takes it in at the running turn's next step); never into a
+#   permission prompt, a first-run gate or the usage limit. Only for what carries Patrik's or Balázs's request
+#   (CLAUDE.md "SÜRGŐS ÜZENET ÉS KÖZVETLEN ÁTADÁS"); everything else stays normal.
 #   content: plain text (quotes / newlines OK) -- the body is built with json.dumps (no quoting pitfalls).
 #   large / multi-line content may come from STDIN when the 3rd arg is "-":
 #     echo "<long text>" | bash scripts/agent-msg.sh <from> <to> -
@@ -52,6 +56,8 @@ TOKEN_FILE="${MARVEEN_TOKEN_FILE:-$BASE/store/.dashboard-token}"
 URL="${API_BASE}/api/messages"
 LOG="$BASE/store/agent-msg-failures.log"
 
+PRIORITY=normal
+if [ "${1:-}" = "--urgent" ]; then PRIORITY=urgent; shift; fi
 FROM="${1:?from required}"; TO="${2:?to required}"; C="${3:?content required (or - for STDIN)}"
 [ "$C" = "-" ] && C="$(cat)"
 [ -r "$TOKEN_FILE" ] || { echo "FAIL: no token file at $TOKEN_FILE"; exit 1; }
@@ -107,7 +113,7 @@ else
   echo "WARN: homoglyph checker not found at $HG -- sending UNCHECKED." >&2
 fi
 
-BODY="$(FROM="$FROM" TO="$TO" C="$C" python3 -c 'import json,os; print(json.dumps({"from":os.environ["FROM"],"to":os.environ["TO"],"content":os.environ["C"]}))')"
+BODY="$(FROM="$FROM" TO="$TO" C="$C" P="$PRIORITY" python3 -c 'import json,os; d={"from":os.environ["FROM"],"to":os.environ["TO"],"content":os.environ["C"]}; d.update({"priority":"urgent"} if os.environ["P"]=="urgent" else {}); print(json.dumps(d))')"
 
 attempt=0; max=3; CODE=""; ID=""
 while [ "$attempt" -lt "$max" ]; do
