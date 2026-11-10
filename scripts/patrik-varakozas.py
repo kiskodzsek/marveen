@@ -314,6 +314,17 @@ def send(to, text, dry):
         print(f'send to {to} failed: {r.stdout.strip()} {r.stderr.strip()}', file=sys.stderr)
 
 
+def free_machine_text(free, waiting, now):
+    """One message for one event (Klodel 35768): every idle machine in one line, or None when none is idle.
+    11:00 on 2026-11-10 the mini and the MacBook went out as two messages to each recipient."""
+    if not free:
+        return None
+    machines = ', '.join(f"{m} ({int(idle // 60)} perce nem renderel)" for m, idle in free)
+    queue = '; '.join(f"«{short(q['text'], 60)}» ({int((now - q['at']) // 60)} p)" for q in waiting[:3])
+    return (f"[SZABAD GÉP] üres gép: {machines}, miközben Patrik vár. "
+            f"Sorban: {queue}. Blender-render a MacBookra mehet (render-gate).")
+
+
 def check(dry, now):
     state = load_state()
     closed = state.get('closed') or {}
@@ -329,10 +340,9 @@ def check(dry, now):
         lines.append('Lezárás: eredmény reply_to-val a kérésre, vagy python3 -I scripts/patrik-varakozas.py close <msg> "<mi lett>".')
         send(MAIN_AGENT, '\n'.join(lines), dry)
     waiting = [q for q in reqs if q['promise'] is not None and render_related(q)]
-    for machine, idle in machine_alerts(state, machines_busy(processes()), bool(waiting), now):
-        queue = '; '.join(f"«{short(q['text'], 60)}» ({int((now - q['at']) // 60)} p)" for q in waiting[:3])
-        text = (f"[SZABAD GÉP] üres gép: {machine}, {int(idle // 60)} perce nem renderel, miközben Patrik vár. "
-                f"Sorban: {queue}. Blender-render a MacBookra mehet (render-gate).")
+    free = machine_alerts(state, machines_busy(processes()), bool(waiting), now)
+    text = free_machine_text(free, waiting, now)
+    if text:
         for to in (MAIN_AGENT, 'dave'):
             send(to, text, dry)
     if not dry:

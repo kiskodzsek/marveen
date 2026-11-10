@@ -174,6 +174,16 @@ def only_render_work_makes_a_free_machine_alert(_root):
 
 
 @case
+def two_idle_machines_are_one_message(_root):
+    now = at('11:00:00')
+    waiting = [{'text': 'a babás még mindig nem jó', 'at': at('10:40:00'), 'promise': 'Dave most javítja.'}]
+    one = W.free_machine_text([('Mac mini', 300), ('MacBook', 360)], waiting, now)
+    assert one.count('[SZABAD GÉP]') == 1 and 'Mac mini (5 perce' in one and 'MacBook (6 perce' in one, one
+    assert '«a babás még mindig nem jó» (20 p)' in one, one
+    assert W.free_machine_text([], waiting, now) is None
+
+
+@case
 def machines_busy_reads_the_processes(_root):
     procs = [('1', 'ssh -n -F /x/ssh_config render-mac render 1901ea62-c9e7-4093-83e3-da4f1f50fd7c'),
              ('2', 'grep render-mac')]
