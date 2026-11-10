@@ -893,6 +893,9 @@ export function initDatabase(dbPathOverride?: string): void {
   try { db.exec('ALTER TABLE agent_messages ADD COLUMN trace_id TEXT') } catch { /* exists */ }
   try { db.exec('ALTER TABLE agent_messages ADD COLUMN span_id TEXT') } catch { /* exists */ }
   try { db.exec('ALTER TABLE agent_messages ADD COLUMN parent_span_id TEXT') } catch { /* exists */ }
+  // Klodel 35737 (Patrik group TG 4465 "mehet"): an urgent message jumps the recipient's queue and is typed into
+  // a busy pane (message-router.ts). Measured cause: Patrik's baby-film fixes waited 13.5 min in Dave's queue.
+  try { db.exec("ALTER TABLE agent_messages ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'") } catch { /* exists */ }
 
   // INVARIANT: a row that says 'delivered' must carry a delivered_at.
   //
@@ -3513,6 +3516,16 @@ export interface AgentMessage {
   trace_id: string | null
   span_id: string | null
   parent_span_id: string | null
+  // Klodel 35737: 'urgent' = queue-jump + typed into a busy pane. Older rows and every caller that passes
+  // nothing are 'normal' (the column default); optional here so test fixtures without it stay valid.
+  priority?: MessagePriority
+}
+
+export type MessagePriority = 'normal' | 'urgent'
+
+/** The priority a request asked for: only the exact string 'urgent' is urgent, anything else is normal. */
+export function parseMessagePriority(value: unknown): MessagePriority {
+  return value === 'urgent' ? 'urgent' : 'normal'
 }
 
 // RESERVEDSENDER1013: a caller-supplied sender can never be the reserved
@@ -3525,9 +3538,10 @@ export function createAgentMessage(
   content: string,
   originNote?: string | null,
   traceCtx?: { trace_id: string; span_id: string; parent_span_id: string | null } | null,
+  priority: MessagePriority = 'normal',
 ): AgentMessage {
   if (isReservedSender(from)) throw new ReservedSenderError(from)
-  return insertAgentMessage(from, to, content, originNote, traceCtx)
+  return insertAgentMessage(from, to, content, originNote, traceCtx, priority)
 }
 
 // The only writer of from_agent='system' rows. In-process callers only: it takes
@@ -3547,12 +3561,14 @@ function insertAgentMessage(
   content: string,
   originNote?: string | null,
   traceCtx?: { trace_id: string; span_id: string; parent_span_id: string | null } | null,
+  priority: MessagePriority = 'normal',
 ): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
   const info = db.prepare(
-    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, origin_note, trace_id, span_id, parent_span_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now, originNote ?? null, traceCtx?.trace_id ?? null, traceCtx?.span_id ?? null, traceCtx?.parent_span_id ?? null)
+    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, origin_note, trace_id, span_id, parent_span_id, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(from, to, content, 'pending', now, originNote ?? null, traceCtx?.trace_id ?? null, traceCtx?.span_id ?? null, traceCtx?.parent_span_id ?? null, priority)
   return {
+    priority,
     id: Number(info.lastInsertRowid),
     from_agent: from, to_agent: to, content, status: 'pending',
     result: null, created_at: now, delivered_at: null, completed_at: null,

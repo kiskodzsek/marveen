@@ -307,6 +307,29 @@ export function urgentEmitRefusal(pane: string | null): string | null {
   return null
 }
 
+// ---- urgent inter-agent messages (Klodel 35737, Patrik group TG 4465 "mehet") ---------------------------------
+// Measured cause: Patrik's baby-film fixes (35704/35705) waited 13.5 min in Dave's queue, behind a busy pane and
+// older rows. An urgent row (agent_messages.priority = 'urgent', `agent-msg.sh --urgent`) therefore
+//   1. goes first in its recipient's queue (orderPendingByPriority), and
+//   2. is typed into a BUSY pane at once instead of waiting for an idle gap. Claude Code takes text typed while
+//      it works as a queued command and hands it to the model at the running turn's next step: measured on
+//      2026-10-08 (delivery-turn-check.ts) 41 of 5038 deliveries landed exactly so, none lost. Escape is not
+//      used: it aborts the running tool call (work lost), and on a permission prompt it answers "no".
+// Never typed into a pane that asks something (permission prompt, first-run gate, usage limit, a blocking menu,
+// an unreadable pane: urgentEmitRefusal), and never into an idle-but-not-ready pane (parked input, an unknown
+// surface): those keep the normal path. Normal rows keep waiting for an idle gap, as before.
+
+/** Pure: urgent rows first, each group in its original (oldest-first) order. */
+export function orderPendingByPriority(rows: readonly AgentMessage[]): AgentMessage[] {
+  return [...rows.filter((m) => m.priority === 'urgent'), ...rows.filter((m) => m.priority !== 'urgent')]
+}
+
+/** Pure: may an urgent row be typed into this not-ready pane now? Only a plainly busy pane that asks nothing. */
+export function urgentTypeIntoBusyPane(pane: string | null): boolean {
+  if (urgentEmitRefusal(pane) != null) return false
+  return detectPaneState(pane as string) === 'busy'
+}
+
 // ---- reconnect-backlog batching (card 2922e380 thread b) --------------------
 // When a session was absent and reconnects, old pending messages are summarized
 // into ONE batch delivery instead of FIFO-bursting them one by one (the pattern
@@ -674,7 +697,9 @@ export async function runMessageRouterTick(): Promise<void> {
     const localPending: AgentMessage[] = []
     const federatedPending: AgentMessage[] = []
     for (const m of allPending) (isQualifiedId(m.to_agent) ? federatedPending : localPending).push(m)
-    const pending = selectTickWindow(localPending, MAX_MESSAGES_PER_TICK, MAIN_AGENT_ID)
+    // Klodel 35737: urgent rows first in every recipient's queue (selectTickWindow keeps each recipient's order),
+    // and a recipient with an urgent row is visited first in the round-robin, so a full window never leaves it out.
+    const pending = selectTickWindow(orderPendingByPriority(localPending), MAX_MESSAGES_PER_TICK, MAIN_AGENT_ID)
     const now = Date.now()
     pruneGuardHolds(now)
     // ROUTERHOLD1028: a held row still counts only while it is still queued.
@@ -887,7 +912,14 @@ export async function runMessageRouterTick(): Promise<void> {
         }
       }
 
-      if (!worksourceServing && !(await isSessionReadyForPrompt(session, host))) {
+      const ready = worksourceServing || (await isSessionReadyForPrompt(session, host))
+      // Klodel 35737: an urgent row does not wait for the busy pane's idle gap (see urgentTypeIntoBusyPane).
+      const urgentIntoBusy = !ready && msg.priority === 'urgent' && urgentTypeIntoBusyPane(capturePane(session, host))
+      if (urgentIntoBusy) {
+        logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, session },
+          'message-router: urgent message -- typing into the busy pane (queued command), not waiting for idle')
+      }
+      if (!ready && !urgentIntoBusy) {
         // A self-drafted feedback modal ("Bug report drafted ... 0 to dismiss")
         // holds the pane in a not-ready state, and the pre-flight dismissal in
         // sendPromptToSession never runs because this gate short-circuits
@@ -1135,8 +1167,17 @@ export async function runMessageRouterTick(): Promise<void> {
           // own envelope. Opt-in per recipient (ROUTER_BATCH_INJECT_AGENTS), so
           // it is measured on one agent before it is widened. Channel-inbound
           // rows (user messages, possibly voice/STT) stay on the serial path.
-          const mates = collectBatchMates(pending, msg, now, agentSessionCache)
-          if (mates.items.length > 0) {
+          // An urgent row typed into a busy pane goes alone: its batch mates are normal rows that wait for idle.
+          const mates = urgentIntoBusy ? { items: [], rows: [], remaining: 0, lastTraceCtx: null } : collectBatchMates(pending, msg, now, agentSessionCache)
+          if (urgentIntoBusy) {
+            // The last look happens inside the send lane, right before the first key: a pane that turned into a
+            // permission prompt meanwhile gets nothing, and the row stays pending for the next tick.
+            const sent = await sendPromptToSession(session, prefix + wrapped, host, { waitForIdle: false, emitGuard: urgentEmitRefusal })
+            if (sent !== 'sent') {
+              logger.warn({ id: msg.id, to: msg.to_agent, sent }, 'message-router: urgent busy-pane send refused at the last look; will retry')
+              continue
+            }
+          } else if (mates.items.length > 0) {
             const text = composeBatchInjection([{ prefix, wrapped }, ...mates.items], mates.remaining)
             await sendPromptToSession(session, text, host)
             // The head row is marked delivered by the shared code below; the

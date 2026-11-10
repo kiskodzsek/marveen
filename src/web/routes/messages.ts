@@ -1,5 +1,5 @@
 import {
-  createAgentMessage, createSystemMessage, getPendingMessages, listAgentMessages, getRecipientQueueState,
+  createAgentMessage, createSystemMessage, getPendingMessages, parseMessagePriority, listAgentMessages, getRecipientQueueState,
   getAgentConversation, getAgentConversationThreads,
   getKanbanSeqByIdPrefix,
   markMessageDone, markMessageFailed, getAgentMessage,
@@ -147,8 +147,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/messages' && method === 'POST') {
     const body = await readBody(req)
-    const { from, to, content, origin_note } = JSON.parse(body.toString()) as
-      { from: string; to: string; content: string; origin_note?: string }
+    const { from, to, content, origin_note, priority } = JSON.parse(body.toString()) as
+      { from: string; to: string; content: string; origin_note?: string; priority?: unknown }
     if (!from?.trim() || !to?.trim() || !content?.trim()) {
       json(res, { error: 'from, to, and content are required' }, 400)
       return true
@@ -387,7 +387,13 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     // Card 06f062e4: optional attributability tag, self-declared like `from`
     // itself -- capped short so it stays a label, not a second content field.
     const trimmedOriginNote = origin_note?.trim().slice(0, 120) || null
-    const msg = createAgentMessage(from.trim(), storedTo, normalizedContent, trimmedOriginNote)
+    // Klodel 35737: "priority":"urgent" jumps the queue and is typed into a busy pane; any other value is refused
+    // rather than silently downgraded, so a typo ("urgnet") is seen by the sender.
+    if (priority !== undefined && priority !== 'urgent' && priority !== 'normal') {
+      json(res, { error: 'priority must be "urgent" or "normal"' }, 400)
+      return true
+    }
+    const msg = createAgentMessage(from.trim(), storedTo, normalizedContent, trimmedOriginNote, null, parseMessagePriority(priority))
     if (isVoiceMailbox) {
       markMessageDone(msg.id, VOICE_MAILBOX_RESULT)
       logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent }, 'Voice-channel answer stored in the mailbox (no session delivery)')
@@ -404,7 +410,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     const queue = isQualifiedId(storedTo) ? undefined : getRecipientQueueState(storedTo)
     const queueField = queue ? { queue } : {}
     logger.info(
-      { id: msg.id, from: msg.from_agent, to: msg.to_agent, originNote: msg.origin_note, queueDepth: queue?.queueDepth },
+      { id: msg.id, from: msg.from_agent, to: msg.to_agent, originNote: msg.origin_note, priority: msg.priority, queueDepth: queue?.queueDepth },
       'Agent message created',
     )
     // A LOCAL recipient that is not running never receives this: the router
