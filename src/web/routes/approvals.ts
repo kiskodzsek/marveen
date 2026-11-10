@@ -178,6 +178,10 @@ export function buildOwnerApprovalText(approval: Approval, withButtons = false):
     withButtons
       ? `Döntés: a lenti gombokkal, vagy Dashboard -> Jóváhagyások (id: ${approval.id})`
       : `Döntés: Dashboard -> Jóváhagyások (id: ${approval.id})`,
+    // TG 17304: a Billingo invoice is signed only by the approval bot's button.
+    ...(approval.category === BILLINGO_ISSUE_CATEGORY && !withButtons
+      ? ['FIGYELEM: a gombos üzenet nem ment ki, ez a kérés így NEM hagyható jóvá. Új kérés jön a jóváhagyó botból.']
+      : []),
     ...ownerDescriptionLines(approval),
   ].join('\n')
 }
@@ -218,6 +222,21 @@ function fallbackInBand(approval: Approval, reason: string): void {
 // must not wait on the Telegram round-trip, and a failed send must not fail
 // the request -- but it must be LOUD in the logs, because a silently
 // undelivered approval is exactly the closed loop this fixes.
+export function unsignableFallbackText(approval: Approval): string {
+  return `[APPROVAL-BOT HIBA] A(z) ${approval.id} ${BILLINGO_ISSUE_CATEGORY} kérés gombja NEM ment ki (a jóváhagyó bot küldése többszöri próbára is elbukott); `
+    + 'a fő bot gomb nélkül küldte, ez a kérés gombbal nem hagyható jóvá. Teendő: a kérő ágens POST-olja újra UGYANAZT a kérést '
+    + '(issue_preview, ugyanaz a content_hash) a /api/approvals-ra, és az új id-t adja tovább; a régit ne használja.'
+}
+
+function alertUnsignableFallback(approval: Approval): void {
+  const text = unsignableFallbackText(approval)
+  for (const to of new Set([approval.agent_id, MAIN_AGENT_ID])) {
+    try { createSystemMessage(to, text) } catch (err) {
+      logger.warn({ err, approvalId: approval.id, to }, 'unsignable-fallback alert failed')
+    }
+  }
+}
+
 function notifyOwner(approval: Approval): void {
   void (async () => {
     // APPROVALBOT1013: with the dedicated approval bot configured, the request
@@ -230,6 +249,11 @@ function notifyOwner(approval: Approval): void {
         return
       } catch (err) {
         logger.warn({ approvalId: approval.id, status: (err as { status?: number })?.status }, 'approval bot send FAILED -- falling back to the main bot')
+        // Patrik TG 17304 (c2991a35): only the approval bot's press signs a
+        // billingo_issue, so the main bot's copy below can never be approved.
+        // Say so to the requester and the main agent at once: the fix is a
+        // fresh request, and nobody should wait on a press that cannot work.
+        if (approval.category === BILLINGO_ISSUE_CATEGORY) alertUnsignableFallback(approval)
       }
     }
     if (!TELEGRAM_BOT_TOKEN) {

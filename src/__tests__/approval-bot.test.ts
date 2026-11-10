@@ -122,6 +122,33 @@ describe('sending', () => {
     expect(JSON.stringify(a)).not.toContain(nonce)
     expect(text).toContain('Döntés: a lenti gombokkal')
   })
+  // Patrik TG 17304 (2026-11-10, c2991a35): one network error sent the request without buttons.
+  it('retries a network error or a 5xx, then stores the binding of the message that went out', async () => {
+    let n = 0
+    const api = fakeApi({ sendMessage: (body) => {
+      n++
+      if (n === 1) throw new TypeError('fetch failed')
+      if (n === 2) return { status: 502, body: { ok: false, error_code: 502 } }
+      return { body: { ok: true, result: { message_id: 777, chat: { id: Number(body.chat_id) }, text: body.text } } }
+    } })
+    const a = newApproval()
+    const msgId = await sendApprovalWithButtons(a, buildOwnerApprovalText(a, true), cfg, api.fetchImpl, [0, 0])
+    expect(msgId).toBe(777)
+    expect(n).toBe(3)
+    expect(getApproval(a.id)!.bot_message_id).toBe(777)
+  })
+  it('gives up after the last retry, and never retries a 4xx', async () => {
+    let n = 0
+    const net = fakeApi({ sendMessage: () => { n++; throw new TypeError('fetch failed') } })
+    const a = newApproval()
+    await expect(sendApprovalWithButtons(a, 'x', cfg, net.fetchImpl, [0, 0])).rejects.toThrow(/network/)
+    expect(n).toBe(3)
+    expect(getApproval(a.id)!.bot_message_id).toBeNull()
+    let m = 0
+    const bad = fakeApi({ sendMessage: () => { m++; return { status: 400, body: { ok: false, error_code: 400 } } } })
+    await expect(sendApprovalWithButtons(newApproval(), 'x', cfg, bad.fetchImpl, [0, 0])).rejects.toThrow(/400/)
+    expect(m).toBe(1)
+  })
 })
 
 describe('deciding a press (Viktor 2302)', () => {

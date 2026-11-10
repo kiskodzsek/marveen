@@ -47,6 +47,7 @@ const BOT_TOKEN_RE = /^\d{5,15}:[A-Za-z0-9_-]{30,64}$/
 export const CALLBACK_RE = /^a:([on]):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):([A-Za-z0-9_-]{22})$/
 const API = 'https://api.telegram.org'
 const SEND_TIMEOUT_MS = 10_000
+const SEND_RETRY_DELAYS_MS = [1_000, 3_000] as const   // three attempts in ~4 s plus the sends
 const POLL_TIMEOUT_S = 25
 const STATE_FILE = 'approval-bot-state.json'
 
@@ -148,13 +149,32 @@ interface SentMessage { message_id: number; chat: { id: number }; text?: string 
 
 /** Send the request with two buttons; stamp the binding onto the row. Returns
  *  the message id, or throws (the caller falls back to the main bot). */
-export async function sendApprovalWithButtons(approval: Approval, text: string, cfg: ApprovalBotConfig, fetchImpl?: FetchLike): Promise<number> {
+export async function sendApprovalWithButtons(approval: Approval, text: string, cfg: ApprovalBotConfig, fetchImpl?: FetchLike, retryDelaysMs: readonly number[] = SEND_RETRY_DELAYS_MS): Promise<number> {
   const nonce = randomBytes(16).toString('base64url')
-  const msg = await tg<SentMessage>(cfg.token, 'sendMessage', {
+  const body = {
     chat_id: cfg.ownerId,
     text: markIfTestRun(text),
     reply_markup: { inline_keyboard: expectedKeyboard(approval.id, nonce) },
-  }, SEND_TIMEOUT_MS, fetchImpl)
+  }
+  // Patrik TG 17304 (2026-11-10 16:47, approval c2991a35): one sendMessage failed
+  // in 0.18 s with a network error, the main bot sent the request without
+  // buttons, and a billingo_issue can only be signed by a press here. A network
+  // error or a Telegram 5xx is retried; a 4xx is not (it would fail the same).
+  // A retry after a send that did reach Telegram leaves an extra message whose
+  // buttons are refused (no stored binding), never a second valid one.
+  let msg: SentMessage | undefined
+  for (let attempt = 0; ; attempt++) {
+    try {
+      msg = await tg<SentMessage>(cfg.token, 'sendMessage', body, SEND_TIMEOUT_MS, fetchImpl)
+      break
+    } catch (err) {
+      const e = err as TgError
+      const retryable = e instanceof TgError && (e.kind === 'network' || e.status >= 500)
+      if (!retryable || attempt >= retryDelaysMs.length) throw err
+      logger.warn({ approvalId: approval.id, attempt: attempt + 1, status: e.status, kind: e.kind }, 'approval bot send failed, retrying')
+      await new Promise((r) => setTimeout(r, retryDelaysMs[attempt]))
+    }
+  }
   if (typeof msg?.message_id !== 'number' || typeof msg.text !== 'string') throw new TgError(200, null, 'http')
   // The hash is over the text AS TELEGRAM STORED IT: that is what a callback
   // carries back, whatever normalisation Telegram applied on the way in.

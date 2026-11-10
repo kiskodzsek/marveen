@@ -25,7 +25,7 @@ import {
   renderIssueText, signIssueApproval, type IssueSigningKey,
 } from '../web/billingo-issue-approval.js'
 import { sendApprovalWithButtons, handleCallback, CALLBACK_RE, expectedKeyboard, type ApprovalBotConfig, type CallbackQuery, type FetchLike } from '../web/approval-bot.js'
-import { tryHandleApprovals, buildOwnerApprovalText } from '../web/routes/approvals.js'
+import { tryHandleApprovals, buildOwnerApprovalText, unsignableFallbackText } from '../web/routes/approvals.js'
 import { isServerOnlyVaultId } from '../web/routes/connectors.js'
 import type { RouteContext } from '../web/routes/types.js'
 
@@ -256,5 +256,17 @@ describe('the press and the signature route', () => {
     const alerts: string[] = []
     await handleCallback(press(send.body.reply_markup.inline_keyboard[0][0].callback_data, msgId, send.body.text), cfg, { fetchImpl: api.fetchImpl, alert: (t) => alerts.push(t), onResolved: () => {}, signIssue: () => false })
     expect(alerts.join('\n')).toMatch(/NEM állítható ki/)
+  })
+})
+
+describe('the approval bot could not send (Patrik TG 17304, c2991a35)', () => {
+  it("the main bot's copy says it cannot be approved, and the alert asks for the same request again", () => {
+    const a = newIssueApproval()
+    const owner = buildOwnerApprovalText(a, false)
+    expect(owner).toContain('NEM hagyható jóvá')
+    expect(buildOwnerApprovalText(a, true)).not.toContain('NEM hagyható jóvá')
+    const alert = unsignableFallbackText(a)
+    expect(alert).toContain(a.id)
+    expect(alert).toContain('ugyanaz a content_hash')
   })
 })
