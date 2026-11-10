@@ -15,6 +15,13 @@ whose text makes a CLAIM and carries no SOURCE.
   "<X> jelzése", "forrással", "becslés (... szerint)", msg_id / msg 123,
   TG 1234, a PR (#123, PR 123), a file path (a/b.ext or /abs/path), a URL, a commit sha (7-40 hex with a digit and
   a letter), or an attached file (the reply's `files`: the result itself is the evidence).
+  SITE STATE (hibanapló 2026-11-10 12:06, Patrik TG 4564 "nem alszik a myshp oldal... mirol beszélsz.."; Klodel
+  36285): a down word (alszik / alvó / aludt / leállt / le van állva / leállítva) in one clause with a site or product
+  (myshp, marabel, oldal, weboldal, honlap, webshop, *.hu). A department label is not a site ("a mySHP részleg
+  alvó", CLAUDE.md "mySHP: alvó"). This claim needs a MEASUREMENT, not just any source: "mérve" / "mérés:" /
+  "X mérte" / "mértem", an HTTP status ("HTTP 503", "státusz 200"), or an attached file (a screenshot). A TG number,
+  a PR, a file path, a link or "X szerint" is not a measurement of a site's state: "CLAUDE.md szerint" was the
+  error itself.
 Quoted text is not a claim of ours: «...», "...", „...", `...` are dropped before matching (Patrik's own words).
 Every block is logged to store/claim-source-gate.log as one JSON line (time, chat kind, the claim labels, the text
 length): never the text itself, it may hold personal data.
@@ -63,6 +70,16 @@ NUMBERS = [
     ('perc múlva', NUM + r'\s?perc(en belul| mulva)\b'),
 ]
 CLAIMS = [(label, re.compile(rx)) for label, rx in STATE + NUMBERS]
+SITE_LABEL = 'oldal-állapot'
+PAGE = r'\w*?oldal(a|ak|at|on|an|unk|uk|ad|ra|rol|hoz|nak)?'  # oldal, nyitooldal, oldala; not "foldalatti"
+SITE = re.compile(r'\b(myshp|marabel|webshop|weboldal\w*|honlap\w*|' + PAGE + r')\b|\w[.\u00b7]hu\b')
+SITE_EXPLICIT = re.compile(r'\b(webshop|weboldal\w*|honlap\w*|' + PAGE + r')\b|\w[.\u00b7]hu\b')
+DOWN = re.compile(r'\b(alszik|alszanak|alvo\w*|aludt\w*|leallt\w*|le van allva|leallitva)\b')
+DEPT = re.compile(r'\b\w*reszleg\w*\b')  # reszleg, csapatreszleg (replay 2026-11-10: the correction itself blocked)
+MEASURED = [re.compile(rx) for rx in (
+    r'\bmerve\b|\bmeres\s*:|\bmert(e|em|uk|ek|ed)\b|\bmeresevel\b|\belo(ben)? meres',
+    r'\bhttp\s?[1-5]\d\d\b|\bstatusz(kod)?\s*:?\s*[1-5]\d\d\b|\bstatus\s*:?\s*[1-5]\d\d\b',
+)]
 SOURCES = [re.compile(rx) for rx in (
     r'(^|\n)\s*forras\s*:',
     r'\bmerve\b|\bmeres\s*:|\bmert(e|em|uk|ek|ed)\b|\bmeresevel\b|\belo(ben)? meres',
@@ -98,7 +115,8 @@ IDIOM = re.compile(r'\bes kesz\s*[.!]?\s*$')
 
 def claims(text):
     """The claim labels in the text, outside quotes, questions, conditional and negated clauses."""
-    plain = QUOTED.sub(' ', norm(text))
+    # A dot inside a word ("marabel.hu", "a/b.md") is not a sentence end: kept as a middle dot for the split.
+    plain = re.sub(r'(?<=\w)\.(?=\w)', '\u00b7', QUOTED.sub(' ', norm(text)))
     found = []
     for sent in sentences(plain):
         if sent.endswith('?'):
@@ -110,6 +128,9 @@ def claims(text):
             for label, rx in CLAIMS:
                 if label not in found and rx.search(clause):
                     found.append(label)
+            if (SITE_LABEL not in found and DOWN.search(clause) and SITE.search(clause)
+                    and not (DEPT.search(clause) and not SITE_EXPLICIT.search(clause))):
+                found.append(SITE_LABEL)
     return found
 
 
@@ -118,6 +139,26 @@ def has_source(text, files):
         return True
     plain = norm(text)
     return any(rx.search(plain) for rx in SOURCES)
+
+
+def has_measurement(text, files):
+    """A site's state needs a measurement (or an attached screenshot), not just any source."""
+    if files:
+        return True
+    plain = norm(text)
+    return any(rx.search(plain) for rx in MEASURED)
+
+
+def unsourced(text, files):
+    """The claim labels that lack what they need: a source in general, a measurement for a site's state."""
+    found = claims(text)
+    out = []
+    general = [l for l in found if l != SITE_LABEL]
+    if general and not has_source(text, files):
+        out += general
+    if SITE_LABEL in found and not has_measurement(text, files):
+        out.append(SITE_LABEL)
+    return out
 
 
 def owner_chats():
@@ -159,8 +200,8 @@ def main():
     if chats and chat not in chats:
         return 0
     text = str(ti.get('text') or '')
-    found = claims(text)
-    if not found or has_source(text, ti.get('files') or []):
+    found = unsourced(text, ti.get('files') or [])
+    if not found:
         return 0
     kind = chats.get(chat, '?') if isinstance(chats, dict) else '?'
     log_mode = os.environ.get('CLAIM_SOURCE_GATE_MODE') == 'log'
@@ -170,7 +211,9 @@ def main():
     sys.stderr.write(
         f'ÁLLÍTÁS-FORRÁS-KAPU (Klodel 35761, ÁLLAPOT CSAK MÉRVE): {", ".join(found)} forrás nélkül. Írd mellé, honnan '
         'tudod: "FORRÁS: <fájl / msg_id / parancs>", "mérve: ...", TG-szám, PR-szám, fájlút vagy link. Ha nem mérted, '
-        'ne állítsd: "Dave indítja", "becslés (X szerint)".\n')
+        'ne állítsd: "Dave indítja", "becslés (X szerint)".'
+        + (' Oldal/termék állapota (alszik, leállt) CSAK mérve: "mérve: HTTP 200, 15:02" vagy Pulzus mérése; a '
+           'szervezeti címke ("mySHP: alvó" részleg) nem az oldal állapota.' if SITE_LABEL in found else '') + '\n')
     return 2
 
 
