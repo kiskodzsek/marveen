@@ -14,6 +14,7 @@ silently vanish from the transcript. Register one PostToolUse matcher per
 installed channel plugin -- see docs/conversation-continuity.md.
 """
 import sys
+import time
 import os
 import json
 import re
@@ -123,6 +124,36 @@ def _extract_message_id(payload):
     return None
 
 
+def _record_meta(agent_id, chat_id, text, message_id, tool_input):
+    """Klodel 35735 (the waiting clock, scripts/patrik-varakozas.py): a reply's quote target (reply_to) and whether it
+    carried files are what tell a RESULT from a quick acknowledgement, so they go onto the row log_outbound just wrote:
+    reply_to_message_id, and attachment_kind='file' when files were attached (the file paths themselves are not kept).
+    The row is found by its message_id, or (no id) as this chat's newest outbound row with the same text from the last
+    minute. Best effort: a failure here never touches the recorded reply."""
+    reply_to = tool_input.get("reply_to")
+    reply_to = str(reply_to).strip() if reply_to is not None and str(reply_to).strip() else None
+    files = tool_input.get("files")
+    has_files = isinstance(files, list) and any(isinstance(f, str) and f.strip() for f in files)
+    if reply_to is None and not has_files:
+        return
+    con = ledger_lib.connect()
+    try:
+        if message_id is not None:
+            where, args = "agent_id=? AND chat_id=? AND direction='out' AND message_id=?", (str(agent_id), str(chat_id), str(message_id))
+        else:
+            where = ("id=(SELECT id FROM conversation_log WHERE agent_id=? AND chat_id=? AND direction='out'"
+                     " AND text=? AND created_at>=? ORDER BY id DESC LIMIT 1)")
+            args = (str(agent_id), str(chat_id), text, int(time.time()) - 60)
+        con.execute(
+            "UPDATE conversation_log SET reply_to_message_id=COALESCE(?, reply_to_message_id),"
+            " attachment_kind=COALESCE(?, attachment_kind) WHERE " + where,
+            (reply_to, "file" if has_files else None) + args,
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -145,6 +176,10 @@ def main():
     if chat_id and text is not None:
         try:
             ledger_lib.log_outbound(agent_id, chat_id, str(text), message_id)
+            try:
+                _record_meta(agent_id, chat_id, str(text), message_id, tool_input)
+            except Exception:
+                pass
         except Exception as exc:
             # SILENTOLLAMA926: a reply that never reaches the conversation
             # ledger breaks the reply-guard's picture of the thread; say so.
