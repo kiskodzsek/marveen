@@ -787,6 +787,15 @@ def idea_check(text):
             'Marabel/könyv, termékpaletta ellenőrizve <mivel vetetted össze>".')
 
 
+def _gate_reason(code):
+    """Name this block's reason in the shared gate log (gate_log.py); never changes the verdict."""
+    try:
+        import gate_log
+        gate_log.reason(code)
+    except Exception:
+        pass
+
+
 def main():
     if sys.argv[1:2] == ['--ocr']:
         return warm_ocr(sys.argv[2:])
@@ -809,6 +818,7 @@ def main():
             sys.stderr.write(
                 'PRIVÁT-KAPU (Patrik TG 14472: "elég a marabel csapat chat"): Patrik privát chatjébe csak indokkal '
                 'mehet üzenet. Küldd a csapat-csoportba, vagy írd a szövegbe: "PRIVÁT-OK: <miért privátban>".\n')
+            _gate_reason('privat')
             return 2
     if chat and chat == owner_private_chat():
         # Klodel 33881 (hibanapló 2026-11-09 12:1x, the third repeat; memory new-direction-start-from-market): a new
@@ -818,6 +828,7 @@ def main():
         idea = idea_check(str(ti.get('text') or ''))
         if idea:
             sys.stderr.write(idea + '\n')
+            _gate_reason('otlet')
             return 2
     files = ti.get('files') or []
     errs = [e for e in (check(f) for f in files if f.lower().endswith(MEDIA)) if e]
@@ -867,9 +878,16 @@ def main():
             + '\n'.join(errs) + '\n'
             'Teendő: nagyítsd ki a könyvet (sips/ffmpeg crop), nézd meg Read-del, és írd meg: '
             f'{KAPU}/<fájlnév>.ok  KONYV/A5/PAPIR/SAJAT/KERES/NAGYITVA sorokkal.\n')
+        _gate_reason('kep')
         return 2
     return 0
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from gate_log import watch as _gate_log_watch  # one line per block, store/gate-blocks.jsonl (Klodel 35878)
+    except Exception:
+        from contextlib import nullcontext as _gate_log_watch
+    with _gate_log_watch('product-image'):
+        sys.exit(main())

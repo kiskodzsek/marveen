@@ -1590,21 +1590,27 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
-    except SystemExit:
-        raise
-    except Exception as exc:  # noqa: BLE001 -- deliberate blanket: fail-closed net
-        # An unhandled crash exits 1, and PreToolUse treats 1 as NON-blocking,
-        # so the send would run UNCHECKED -- the exact opposite of the email
-        # path's fail-closed contract (e.g. a non-dict tool_input used to
-        # AttributeError inside collect_mcp_body). The channel paths never
-        # reach here: channel_gate() catches its own errors and exits 0
-        # (fail-open by design), so this net only ever catches the email/Bash
-        # send paths, where blocking is the safe failure mode.
-        sys.stderr.write(
-            "KIMENO-SZOVEG KAPU: TILTVA, belso hiba a vizsgalat kozben "
-            f"({exc!r}).\n"
-            "Fail-closed: egy vizsgalhatatlan kuldes pont a kaput utne ki. "
-            "Tedd vizsgalhatova a hivast, aztan kuldd ujra.\n"
-        )
-        sys.exit(2)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from gate_log import watch as _gate_log_watch  # one line per block, store/gate-blocks.jsonl (Klodel 35878)
+    except Exception:
+        from contextlib import nullcontext as _gate_log_watch
+    with _gate_log_watch("outgoing-copy"):
+        try:
+            main()
+        except SystemExit:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- deliberate blanket: fail-closed net
+            # An unhandled crash exits 1, and PreToolUse treats 1 as NON-blocking,
+            # so the send would run UNCHECKED -- the exact opposite of the email
+            # path's fail-closed contract (e.g. a non-dict tool_input used to
+            # AttributeError inside collect_mcp_body). The channel paths never
+            # reach here: channel_gate() catches its own errors and exits 0
+            # (fail-open by design), so this net only ever catches the email/Bash
+            # send paths, where blocking is the safe failure mode.
+            sys.stderr.write(
+                "KIMENO-SZOVEG KAPU: TILTVA, belso hiba a vizsgalat kozben "
+                f"({exc!r}).\n"
+                "Fail-closed: egy vizsgalhatatlan kuldes pont a kaput utne ki. "
+                "Tedd vizsgalhatova a hivast, aztan kuldd ujra.\n"
+            )
+            sys.exit(2)
