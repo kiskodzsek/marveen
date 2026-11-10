@@ -12,7 +12,15 @@ minin / MacBookon / gépen", and their plain inflections), unless
   1. ops/video_export_status.py ran at most MAX_AGE_S ago (its store/video-export-status.json, render_claim_lib), and
   2. an output it listed was written at most MAX_AGE_S ago, measured now (a file's mtime; a frames directory's newest
      entry); when the text names a video file (x.mp4), that file must be one of those fresh outputs.
-A claim about the MacBook is always blocked: this machine cannot measure it (ask Dave for the measured file and time).
+A claim about the MacBook (a clause naming it; Klodel 35878, 2026-11-10: "a MacBookon ... exportál" was blocked
+together with the measured file) passes on either measurement, else it is blocked:
+  a. the stamp is at most MAX_AGE_S old and lists a running MacBook export client (mac-export.sh; render_claim_lib
+     macbook_out), and a video the text names is one of those outputs; or
+  b. the clause is not progressive (no "most", "éppen", "jelenleg", "még mindig", "készül", "fut") and the reply
+     carries the result: an attached video, or a named video path (absolute or under the project) that exists and
+     was written at most FINISHED_S ago ("A MacBook mostantól exportál, mérve: /.../x.mp4").
+The mini's render check runs on the other clauses only, so a MacBook clause does not need a fresh mini output.
+A generation claim in a MacBook clause is always blocked: generation there is not measured.
 Drawing / generation claims (Klodel 35719, the third case: 10:27, Patrik TG 4424, "a papás új rajzai most a háttérben
 készülnek" while the order only waited in Dave's queue): "a háttérben készül(nek)", "rajzol(ja|ják|ódnak)",
 "generál(ja|ódik|ódnak)", "készülnek a rajzok/képek" pass only when, measured at send time (ps + lsof, no stamp needed),
@@ -35,11 +43,12 @@ import time
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render_claim_lib import newest_write, read_stamp, running_generation_outputs  # noqa: E402
+from render_claim_lib import newest_write, read_stamp, read_stamp_macbook, running_generation_outputs  # noqa: E402
 
 ROOT = os.environ.get('CLAUDE_PROJECT_DIR', '/Users/klodel/marveen')
 STORE = os.path.join(ROOT, 'store')
 MAX_AGE_S = 120
+FINISHED_S = 30 * 60  # a finished MacBook export's result, named or attached, counts as its measurement this long
 
 MACHINES = r'(?:minin|minire|macbookon|macbookra|gepen)'
 CLAIMS = [
@@ -112,22 +121,70 @@ def gen_problem(text, now, outputs):
     return f'fut generálás, de a kimenete {MAX_AGE_S // 60} percen belül nem íródott'
 
 
-def problem(text, now=None, gen_outputs=None):
+PROGRESSIVE = re.compile(r'\b(?:most|eppen|epp|jelenleg|meg mindig|keszul\w*|fut(?:nak)?)\b')
+PATHS = re.compile(r'(?:^|[\s(«„"\'`])((?:/|[\w.\-]+/)[^\s)»"\'`,;]*\.(?:mp4|mov|webm|mkv))\b', re.I)
+
+
+def clauses(text):
+    """The text cut at sentence ends, newlines, commas and semicolons (one claim, one machine, as a rule); not inside a
+    file name (babas.mp4) or a number (27,5)."""
+    return [c for c in re.split(r'[.!?]+(?=\s|$)|[\n,;]+(?!\d)', str(text)) if c and c.strip()]
+
+
+def is_video(path):
+    return path.lower().endswith(('.mp4', '.mov', '.webm', '.mkv'))
+
+
+def finished_result(text, files, now):
+    """An attached or named video that exists and was written at most FINISHED_S ago: a finished export's result."""
+    cands = [f for f in files or [] if isinstance(f, str)] + [m.group(1) for m in PATHS.finditer(str(text))]
+    for c in cands:
+        p = c if os.path.isabs(c) else os.path.join(ROOT, c)
+        if not is_video(p) or not os.path.isfile(p):
+            continue
+        if now - os.stat(p).st_mtime <= FINISHED_S:
+            return p
+    return None
+
+
+def macbook_problem(text, clause, now, files):
+    """None when a MacBook render claim is measured (see the module doc, a/b), else the reason."""
+    ran, outs = read_stamp_macbook(ROOT)
+    if ran is not None and now - ran <= MAX_AGE_S and outs:
+        named = {m.group(1) for m in VIDEO.finditer(str(text))}
+        if not named or named <= {os.path.basename(o) for o in outs}:
+            return None
+    if not PROGRESSIVE.search(norm(clause)) and finished_result(text, files, now):
+        return None
+    return ('MacBook-állítás mérés nélkül: nem fut MacBook-export (ops/video_export_status.py, '
+            f'{MAX_AGE_S // 60} percen belül), és a válaszban nincs {FINISHED_S // 60} percnél frissebb eredményfájl')
+
+
+def problem(text, now=None, gen_outputs=None, files=None):
     """None when the text may go, else (reason, hint). gen_outputs: the running generation outputs (measured live when
-    None; the tests pass them)."""
+    None; the tests pass them). files: the reply's attachments."""
     render, gen = claims(text), gen_claims(text)
     if not render and not gen:
         return None
     now = time.time() if now is None else now
-    hint = HINT if render else GEN_HINT
-    if 'macbook' in norm(text):
-        return 'a MacBookot ez a gép nem méri: Dave mért fájlja és ideje kell, nem állapot', hint
-    if render:
-        why = render_problem(text, now)
+    rest = []  # the clauses that are not about the MacBook: the mini's checks read these
+    for clause in clauses(text):
+        if 'macbook' not in norm(clause):
+            rest.append(clause)
+            continue
+        if gen_claims(clause):
+            return 'rajz/generálás a MacBookon: ezt semmi nem méri', GEN_HINT
+        if claims(clause):
+            why = macbook_problem(text, clause, now, files)
+            if why:
+                return why, HINT
+    rest = '. '.join(rest)
+    if claims(rest):
+        why = render_problem(rest, now)
         if why:
             return why, HINT
-    if gen:
-        why = gen_problem(text, now, running_generation_outputs() if gen_outputs is None else gen_outputs)
+    if gen_claims(rest):
+        why = gen_problem(rest, now, running_generation_outputs() if gen_outputs is None else gen_outputs)
         if why:
             return why, GEN_HINT
     return None
@@ -163,7 +220,8 @@ def main():
     chats = owner_chats()
     if chats and str(ti.get('chat_id') or '').strip() not in chats:
         return 0
-    got = problem(ti.get('text') or '')
+    files = ti.get('files') if isinstance(ti.get('files'), list) else []
+    got = problem(ti.get('text') or '', files=files)
     if got:
         why, hint = got
         sys.stderr.write(f'RENDER-ÁLLAPOT-KAPU (Klodel 35696/35719, TG 4381/4424): {why} - {hint}\n')
