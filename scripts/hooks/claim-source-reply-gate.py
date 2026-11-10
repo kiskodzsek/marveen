@@ -10,7 +10,8 @@ What blocks (exit 2, one line naming what was found): a reply or an edit to the 
 whose text makes a CLAIM and carries no SOURCE.
   CLAIM, in a sentence that is not a question: a state word (kész / elkészült / készen, beállítottam / beállítva,
   élesben / élesítve / élesítettem, fut / futnak, kint van, kiment) that is not negated or conditional just before
-  ("nincs kész", "még nem fut", "ha kész", "amint kész") nor future ("kész lesz"), or a number with a unit (%, Ft / forint / HUF, $ / USD / EUR / €, db, "N perc múlva").
+  ("nincs kész", "még nem fut", "ha kész", "amint kész") nor the consequent of a conditional ("Ha így van, kész.")
+  nor future ("kész lesz"), or a number with a unit (%, Ft / forint / HUF, $ / USD / EUR / €, db, "N perc múlva").
   SOURCE, anywhere in the message: a "FORRÁS:" line, "mérve" / "mérés:" / "X mérte" / "mértem", "<X> szerint",
   "<X> jelzése", "forrással", "becslés (... szerint)", msg_id / msg 123,
   TG 1234, a PR (#123, PR 123), a file path (a/b.ext or /abs/path), a URL, a commit sha (7-40 hex with a digit and
@@ -92,6 +93,10 @@ def sentences(text):
 # nem változik") states nothing; nor does the idiom "..., és kész". Replay 2026-11-08/10 (828 replies): these were the
 # false blocks left after the quote, question and attributive-"kész" rules.
 COND = re.compile(r'^(ha|amint|amikor|mire|mielott|ahogy|hogy|ameddig|amig)\b')
+# The consequent of a conditional ("Ha így van, kész.", Klodel 35878, 2026-11-10 12:0x: blocked as a claim) is as
+# conditional as its condition: the clause right after a COND clause states nothing, nor does one opening "akkor".
+# Only the next clause: "Ha kérdésed van, szólj, a film kész." still claims the film.
+THEN = re.compile(r'^akkor\b')
 NEGW = re.compile(r'\b(nem|nincs|sincs|semmi|sem|meg nem)\b')
 IDIOM = re.compile(r'\bes kesz\s*[.!]?\s*$')
 
@@ -103,9 +108,13 @@ def claims(text):
     for sent in sentences(plain):
         if sent.endswith('?'):
             continue
+        after_cond = False
         for clause in re.split(r'[,;:\u2013\u2014]| - ', sent):
             clause = ' '.join(clause.split())
-            if not clause or COND.search(clause) or NEGW.search(clause) or IDIOM.search(clause):
+            if not clause:
+                continue
+            consequent, after_cond = after_cond, bool(COND.search(clause))
+            if after_cond or consequent or THEN.search(clause) or NEGW.search(clause) or IDIOM.search(clause):
                 continue
             for label, rx in CLAIMS:
                 if label not in found and rx.search(clause):

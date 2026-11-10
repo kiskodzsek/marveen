@@ -75,11 +75,23 @@ def output_of_process(pid, cmd):
     return os.path.normpath(os.path.join(cwd, o)) if cwd else None
 
 
-def write_stamp(root, outputs, now=None):
+def macbook_out(cmd):
+    """The <out.mp4> of a MacBook export client (agents/kernel/tools/remote-render/mac-export.sh <film> <out.mp4>), or
+    None. The export itself runs on the MacBook; on this machine its live trace is this client process."""
+    args = cmd.split()
+    i = next((k for k, a in enumerate(args[:3]) if a == 'mac-export.sh' or a.endswith('/mac-export.sh')), None)
+    if i is None or i + 2 >= len(args):
+        return None
+    return args[i + 2]
+
+
+def write_stamp(root, outputs, now=None, macbook=()):
     """outputs: the absolute paths (or None) of the running exports; a relative path is dropped (we cannot know what
-    it is relative to). Written atomically, 0644."""
+    it is relative to). macbook: the <out.mp4> of every running MacBook export client (Klodel 35878: a MacBook claim
+    is measured too, not always blocked). Written atomically, 0644."""
     data = {'v': 1, 'ran_at': time.time() if now is None else now,
-            'outputs': [o if o and os.path.isabs(o) else None for o in outputs]}
+            'outputs': [o if o and os.path.isabs(o) else None for o in outputs],
+            'macbook': [o for o in macbook if o and os.path.isabs(o)]}
     d = os.path.join(root, 'store')
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix='.vexport-')
@@ -103,6 +115,16 @@ def read_stamp(root):
         ran = float(d['ran_at'])
         outs = [o for o in d.get('outputs') or [] if isinstance(o, str) and o]
         return ran, outs
+    except Exception:
+        return None, []
+
+
+def read_stamp_macbook(root):
+    """(ran_at, [out.mp4 of the MacBook exports running at that run]); (None, []) when unreadable."""
+    try:
+        with open(stamp_path(root), encoding='utf-8') as f:
+            d = json.load(f)
+        return float(d['ran_at']), [o for o in d.get('macbook') or [] if isinstance(o, str) and o]
     except Exception:
         return None, []
 

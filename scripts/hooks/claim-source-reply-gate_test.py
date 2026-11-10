@@ -47,6 +47,9 @@ BLOCK = [
     ('A fal-keret 25 $ maradt.', '$/EUR'),
     ('Ma 12 db próba indult.', 'db'),
     ('A pontos számok 15 percen belül jönnek.', 'perc múlva'),
+    # Only the clause right after the condition is conditional; a later one still claims.
+    ('Ha kérdésed van, szólj, a film kész.', 'kész'),
+    ('Ha így van, kész. A film is kész.', 'kész'),
 ]
 PASS_NO_CLAIM = [
     'Kész van már a papás?',                                   # a question
@@ -61,6 +64,10 @@ PASS_NO_CLAIM = [
     'Patrik azt írta: «kész van már a film?»',                 # quoted
     'Írd át „élesben fut” helyett erre.',                       # quoted
     'Dave indítja a renderelést, utána szólok.',               # plan, no state word
+    # Klodel 35878 (2026-11-10 12:0x): the consequent of a conditional was blocked as a claim.
+    'Ha így van, kész.',                                       # consequent of a conditional
+    'Nézd meg a képet. Ha jó, akkor kész.',                    # consequent opening "akkor"
+    'Amint Dave szól, élesben van.',                           # consequent of "amint"
 ]
 PASS_WITH_SOURCE = [
     'Kész a papás film. FORRÁS: agents/dave/work/papa-film-1110/out/tt/papa.mp4',

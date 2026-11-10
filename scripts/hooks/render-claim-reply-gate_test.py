@@ -15,7 +15,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, 'render-claim-reply-gate.py')
 sys.path.insert(0, HERE)
-from render_claim_lib import lsof_path, output_of, output_of_process, generation_output, is_generation, read_stamp, write_stamp  # noqa: E402
+from render_claim_lib import lsof_path, macbook_out, read_stamp_macbook, output_of, output_of_process, generation_output, is_generation, read_stamp, write_stamp  # noqa: E402
 import importlib.util  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location('render_claim_reply_gate', HOOK)
@@ -47,9 +47,12 @@ def output(root, name, age_s):
     return p
 
 
-def run(root, text, chat=GROUP, raw=None):
+def run(root, text, chat=GROUP, raw=None, files=None):
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root}
-    payload = raw if raw is not None else json.dumps({'tool_input': {'chat_id': chat, 'text': text}})
+    ti = {'chat_id': chat, 'text': text}
+    if files is not None:
+        ti['files'] = files
+    payload = raw if raw is not None else json.dumps({'tool_input': ti})
     p = subprocess.run([sys.executable, '-I', HOOK], input=payload, capture_output=True, text=True, env=env, timeout=20)
     return p.returncode, p.stderr
 
@@ -183,6 +186,70 @@ def a_relative_output_resolves_against_the_process_cwd(root):
     assert read_stamp(root)[1] == ['/w/out/y.mp4'], read_stamp(root)
 
 
+# --- MacBook claims are measured, not always blocked (Klodel 35878, 2026-11-10 12:0x) ---
+# The 12:0x case: "a MacBook ... exportál" was blocked although the measured result file went with it.
+def mac_stamp(root, outs, age_s=5):
+    write_stamp(root, [], now=time.time() - age_s, macbook=outs)
+
+
+@case
+def a_macbook_capability_claim_with_its_fresh_result_passes(root):
+    setup(root)
+    res = output(root, 'aranyevek-tt.mp4', 6 * 60)
+    text = f'A MacBook mostantól videót is exportál, mérve 12:00: {res} (178,5 mp).'
+    rc, err = run(root, text)
+    assert rc == 0, (rc, err)
+    rc, err = run(root, 'A MacBook mostantól videót is exportál.', files=[res])
+    assert rc == 0, (rc, err)
+
+
+@case
+def a_macbook_claim_with_an_old_or_missing_result_is_blocked(root):
+    setup(root)
+    old = output(root, 'regi.mp4', 40 * 60)
+    for text, files in [(f'A MacBook exportál: {old}', None), ('A MacBook exportál.', None),
+                        ('A MacBook exportál.', [os.path.join(root, 'out', 'nincs.mp4')])]:
+        rc, err = run(root, text, files=files)
+        assert rc == 2 and 'MacBook' in err, (text, rc, err)
+
+
+@case
+def a_progressive_macbook_claim_needs_a_running_export_not_a_file(root):
+    setup(root)
+    res = output(root, 'papas.mp4', 60)
+    for text in [f'A papás most a MacBookon exportál: {res}', 'A MacBookon készül a papás.']:
+        rc, err = run(root, text)
+        assert rc == 2 and 'MacBook' in err, (text, rc, err)
+    mac_stamp(root, ['/w/out/papas.mp4'])
+    for text in ['A papás most a MacBookon exportál.', 'A MacBookon készül a papás, papas.mp4.']:
+        rc, err = run(root, text)
+        assert rc == 0, (text, rc, err)
+    rc, err = run(root, 'A MacBookon most exportál a nagyi.mp4')
+    assert rc == 2, (rc, err)
+    mac_stamp(root, ['/w/out/papas.mp4'], age_s=3 * 60)
+    assert run(root, 'A papás most a MacBookon exportál.')[0] == 2, 'an old stamp is no measurement'
+
+
+@case
+def mixed_reply_checks_each_machine_on_its_own(root):
+    setup(root)
+    write_stamp(root, [output(root, 'babas.mp4', 5)], macbook=['/w/out/papas.mp4'])
+    assert run(root, 'a babás most renderel a minin, a papás a MacBookon exportál')[0] == 0
+    write_stamp(root, [output(root, 'babas.mp4', 12 * 60)], macbook=['/w/out/papas.mp4'])
+    rc, err = run(root, 'a babás most renderel a minin, a papás a MacBookon exportál')
+    assert rc == 2 and 'sem íródott' in err, (rc, err)
+
+
+@case
+def macbook_out_reads_the_client_command(root):
+    assert macbook_out('/bin/bash /x/tools/remote-render/mac-export.sh /w/film /w/out/a.mp4') == '/w/out/a.mp4'
+    assert macbook_out('bash mac-export.sh /w/film out/a.mp4 1920') == 'out/a.mp4'
+    assert macbook_out('bash mac-export.sh /w/film') is None
+    assert macbook_out('node render.mjs /w/film export /w/a.mp4') is None
+    write_stamp(root, [], macbook=['/w/a.mp4', 'rel/b.mp4', None])
+    assert read_stamp_macbook(root)[1] == ['/w/a.mp4'], read_stamp_macbook(root)
+
+
 # --- Drawing / generation claims (Klodel 35719, Patrik TG 4424) ---
 # The 10:27 reply, word for word: the order only waited in Dave's queue, no fal-gen ran.
 THE_1027 = 'a papás új rajzai most a háttérben készülnek'
@@ -227,9 +294,9 @@ def generation_plans_and_past_forms_pass(root):
 
 @case
 def a_generation_claim_through_the_hook_gets_its_own_hint(root):
-    # Through the real hook (the MacBook makes it deterministic: blocked whatever runs on this machine).
+    # Through the real hook (a MacBook clause makes it deterministic: generation there is never measured).
     setup(root)
-    rc, err = run(root, THE_1027 + ', a MacBook-mappába')
+    rc, err = run(root, 'a MacBook most rajzolja a papás képeit')
     assert rc == 2 and "kiadtam Dave-nek" in err, (rc, err)
 
 
