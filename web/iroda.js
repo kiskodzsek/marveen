@@ -58,17 +58,54 @@
   const thumbs = {} // id -> { v, url, pending }
 
   // ---- projects + waiting ----
-  function renderProjects(list) {
-    $('#projects').innerHTML = list.length ? list.map((p) => {
-      const n = p.lepesek.length || 1, k = p.lepesek.filter((s) => s.kesz).length, pct = Math.round(k / n * 100)
-      const next = (p.lepesek.find((s) => !s.kesz) || { nev: 'kész' }).nev, C = 2 * Math.PI * 26
-      const due = p.hatarido ? p.hatarido.replace(/^\d{4}-/, '').replace('-', '.') + '.' : 'nincs határidő'
-      return `<div class="proj"><div class="ring"><svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="26" fill="none" stroke="#ECE6DC" stroke-width="7"/><circle cx="32" cy="32" r="26" fill="none" stroke="${pct === 100 ? '#3E8E66' : '#2F6F6A'}" stroke-width="7" stroke-linecap="round" stroke-dasharray="${C * pct / 100} ${C}"/></svg><div class="pct">${pct}%</div></div>
+  // The top of the page stays short (Patrik csoport TG 4538: "sok a 100as kártya ott fent"): a project at 100%
+  // leaves the grid for a folded "Kész (N)" row, and the grid shows the first PROJ_LIMIT open projects with a
+  // "Mind a N" button. Both choices are the viewer's own and survive the 5 s re-render (localStorage).
+  const PROJ_LIMIT = { wide: 8, narrow: 4 }
+  const narrow = matchMedia('(max-width:760px)')
+  const pref = (k, d) => { try { return localStorage.getItem(k) === null ? d : localStorage.getItem(k) === '1' } catch { return d } }
+  const setPref = (k, v) => { try { localStorage.setItem(k, v ? '1' : '0') } catch { /* storage blocked */ } }
+  let projAll = pref('iroda-proj-all', false)
+  let projDone = pref('iroda-proj-done', false)
+  let projList = []
+  const progressOf = (p) => {
+    const n = p.lepesek.length || 1, k = p.lepesek.filter((s) => s.kesz).length
+    return { k, pct: Math.round(k / n * 100) }
+  }
+  function projCard(p) {
+    const { k, pct } = progressOf(p)
+    const next = (p.lepesek.find((s) => !s.kesz) || { nev: 'kész' }).nev, C = 2 * Math.PI * 26
+    const due = p.hatarido ? p.hatarido.replace(/^\d{4}-/, '').replace('-', '.') + '.' : 'nincs határidő'
+    return `<div class="proj"><div class="ring"><svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="26" fill="none" stroke="#ECE6DC" stroke-width="7"/><circle cx="32" cy="32" r="26" fill="none" stroke="${pct === 100 ? '#3E8E66' : '#2F6F6A'}" stroke-width="7" stroke-linecap="round" stroke-dasharray="${C * pct / 100} ${C}"/></svg><div class="pct">${pct}%</div></div>
         <div style="min-width:0"><h3>${esc(p.cim)}</h3><div class="row"><span class="steps">${k}/${p.lepesek.length} lépés</span><span class="due ${p.hatarido ? '' : 'none'}">${esc(due)}</span></div>
         <div class="bars">${p.lepesek.map((s) => `<i class="${s.kesz ? 'on' : ''}"></i>`).join('')}</div>
         <div class="next"><b>Következő:</b> ${esc(next)}</div></div></div>`
-    }).join('') : '<div class="empty-note">Nincs nagy feladat a store/projektek.json-ban.</div>'
   }
+  function renderProjects(list) {
+    projList = list
+    const open = list.filter((p) => progressOf(p).pct < 100)
+    const done = list.filter((p) => progressOf(p).pct === 100)
+    const limit = narrow.matches ? PROJ_LIMIT.narrow : PROJ_LIMIT.wide
+    const shown = projAll ? open : open.slice(0, limit)
+    $('#projects').innerHTML = shown.length ? shown.map(projCard).join('')
+      : `<div class="empty-note">${list.length ? 'Minden nagy feladat kész.' : 'Nincs nagy feladat a store/projektek.json-ban.'}</div>`
+    const more = open.length > limit
+      ? `<button type="button" class="proj-btn" data-act="all" aria-expanded="${projAll}">${projAll ? 'Kevesebb' : `Mind a ${open.length} mutatása`}</button>` : ''
+    const doneRow = done.length
+      ? `<button type="button" class="proj-btn done" data-act="done" aria-expanded="${projDone}"><span class="tick">✓</span> Kész (${done.length}) <span class="chev">${projDone ? '▴' : '▾'}</span></button>`
+        + (projDone ? `<ul class="done-list">${done.map((p) => `<li><span class="tick">✓</span>${esc(p.cim)}</li>`).join('')}</ul>` : '')
+      : ''
+    $('#projFoot').innerHTML = more + doneRow
+    $('#projFoot').hidden = !more && !doneRow
+  }
+  $('#projFoot').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-act]')
+    if (!b) return
+    if (b.dataset.act === 'all') { projAll = !projAll; setPref('iroda-proj-all', projAll) }
+    if (b.dataset.act === 'done') { projDone = !projDone; setPref('iroda-proj-done', projDone) }
+    renderProjects(projList)
+  })
+  narrow.addEventListener('change', () => renderProjects(projList))
   function renderWaiting(cards, extra) {
     const items = cards.map((c) => `<li><span class="tag ${c.priority === 'urgent' || c.priority === 'high' ? '' : 'n'}">${esc(PRIO[c.priority] || c.priority)}</span><span>${esc(c.title)}</span></li>`)
       .concat(extra.map((t) => `<li><span class="tag n">teendő</span><span>${esc(t)}</span></li>`))
