@@ -207,7 +207,7 @@ export function urlFingerprint(u) {
  * nothing else (plain http, ws, other ports: 403). Each tunnel goes through `lookup` (the safe one), so
  * the browser's own DNS answer is never trusted. `log(host, verdict)` records host and verdict only.
  */
-export function startGuardProxy({ lookup, log = () => {}, marker = '1' }) {
+export function startGuardProxy({ lookup, log = () => {}, marker = '1', connect = net.connect }) {
   const server = http.createServer((req, res) => {
     // Absolute-form requests are plain http (or ws): never.
     let host = 'unknown'
@@ -237,7 +237,10 @@ export function startGuardProxy({ lookup, log = () => {}, marker = '1' }) {
       const why = blockedReason(host)
       if (why) return deny(why, host)
     }
-    const upstream = net.connect({ host, port: 443, lookup, autoSelectFamily: false })
+    const upstream = connect({ host, port: 443, lookup, autoSelectFamily: false })
+    // Tracked, so close() ends it too: a site's keep-alive tunnel must not hold the process open after the run.
+    sockets.add(upstream)
+    upstream.on('close', () => sockets.delete(upstream))
     upstream.once('connect', () => {
       log(host, 'tunnel')
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
@@ -251,6 +254,7 @@ export function startGuardProxy({ lookup, log = () => {}, marker = '1' }) {
       client.end('HTTP/1.1 502 Bad Gateway\r\nconnection: close\r\ncontent-length: 0\r\n\r\n')
     })
     client.on('error', () => upstream.destroy())
+    client.on('close', () => upstream.destroy())
     upstream.on('close', () => client.destroy())
   })
   return new Promise((resolve, reject) => {
