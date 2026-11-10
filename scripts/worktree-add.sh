@@ -97,6 +97,12 @@ store_for() { # <worktree>: the matching store's node_modules, physical, or noth
   done
 }
 main_serves() { [[ -f "$MAIN/node_modules/.package-lock.json" && -f "$MAIN/package-lock.json" ]] && cmp -s "$MAIN/package-lock.json" "$NEW/package-lock.json"; }
+# npm workspaces (measured 2026-11-10, mcp-connectors): a shared node_modules is never right. A store has none of
+# the workspace packages (deps-store.sh refuses it), and a clone's node_modules links the workspace packages to THAT
+# clone's sources, not to this branch's. Not even with --node-modules-from.
+if [[ -f "$NEW/package.json" ]] && python3 -I -c 'import json,sys; w=json.load(open(sys.argv[1])).get("workspaces"); sys.exit(0 if w else 1)' "$NEW/package.json" 2>/dev/null; then
+  not_linked "the repo uses npm workspaces: a shared node_modules would miss or mislink its workspace packages (add --ignore-scripts to the npm ci below)"
+fi
 SRC_DIR="${FROM:-$MAIN}"
 if [[ -z "$FROM" ]] && ! main_serves; then
   STORE_NM="$(store_for "$NEW")"

@@ -154,6 +154,17 @@ check "not under <prod>/agents/<agent>/: 64" "$(ok "$RC" = 64)" "$RC $OUT"
 mkdir -p "$FLEET/agents/carol/nolock"
 ds "$FLEET/agents/carol/nolock"
 check "no package-lock.json: 64" "$(ok "$RC" = 64)" "$RC $OUT"
+echo "== npm workspaces: refused, nothing installed (2026-11-10, mcp-connectors)"
+mkrepo "$FLEET/agents/carol/repos/mono" w
+echo '{"name":"mono","workspaces":["common"]}' > "$FLEET/agents/carol/repos/mono/package.json"
+git -C "$FLEET/agents/carol/repos/mono" add -A && git -C "$FLEET/agents/carol/repos/mono" commit -q -m ws
+ds "$FLEET/agents/carol/repos/mono"
+check "workspaces: exit 65" "$(ok "$RC" = 65)" "$RC $OUT"
+check "workspaces: says npm workspaces and the own install" "$(echo "$OUT" | grep -q 'npm workspaces' && echo "$OUT" | grep -q 'npm ci --ignore-scripts' && echo 0 || echo 1)" "$OUT"
+check "workspaces: npm and heavy-job never ran, no store dir" "$(ok ! -f "$SB/npm.log" -a ! -f "$SB/hj.log" -a -z "$(ls -d "$FLEET/agents/carol/deps/mono-"* 2>/dev/null)")"
+ds --dry "$FLEET/agents/carol/repos/mono"
+check "workspaces: --dry refuses too" "$(ok "$RC" = 65)" "$RC"
+
 ds
 check "no argument: 64" "$(ok "$RC" = 64)" "$RC"
 
