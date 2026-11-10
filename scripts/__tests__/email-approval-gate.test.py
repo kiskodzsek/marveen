@@ -695,28 +695,30 @@ with tempfile.TemporaryDirectory() as td:
         ti.update(top_extra or {})
         return {"tool_name": tool, "tool_input": ti}
 
+    # KLODELALAIRAS1110 (Klodel 36473/36478, Patrik csoport TG 4661/4666): every klodel@ letter carries
+    # the Klodel HTML signature with the logo inline. send-mail cannot carry an anchored attachment, so it
+    # never passes; the anchoring itself is tested on the send-draft path below (same extractor).
+    SIGNED = ('<p>Kedves Ügyfelünk! Törzs.</p><table><tr><td><b>Klodel</b><br>AI Asszisztens | mySHP Solutions</td>'
+              '<td><img src="cid:myshp-logo-klodel" width="190"></td></tr></table>')
+    signed_html = {"body": {"contentType": "html", "content": SIGNED}}
     store = make_store(os.path.join(td, "ms1"), level=2)
-    code, _, err = run_gate(store, ms365())
-    anchor = anchor_from_stderr(err)
-    check("ms365: send-mail without approval is DENIED at level 2",
-          code == 2 and "NINCS jovahagyas" in err and anchor, f"exit={code} err={err[:160]!r}")
-    approve(store, anchor)
-    code, out, _ = run_gate(store, ms365())
-    check("ms365: the approved, byte-identical send-mail is ALLOWED",
-          code == 0 and "felhasznalva" in out, f"exit={code}")
-    code, _, err = run_gate(store, ms365())
-    check("ms365: the same send a second time is DENIED (one-shot)",
-          code == 2 and "MAR FEL LETT HASZNALVA" in err, f"exit={code}")
-    for name, payload in (
-            ("a different recipient", ms365(to=("masik@b.hu",))),
-            ("an added bcc", ms365(bcc=("rejtett@b.hu",))),
-            ("an added cc", ms365(cc=("masolat@b.hu",))),
-            ("a changed subject", ms365(subject="Masik targy")),
-            ("a changed body", ms365(body="Kedves Ügyfelünk! Másik törzs."))):
-        approve(store, anchor)
+    for name, payload, why in (
+            ("a plain-text letter", ms365(), "nem HTML"),
+            ("an HTML letter without the signature", ms365(msg_extra={"body": {"contentType": "html", "content": "<p>x</p>"}}),
+             "logo-hivatkozas"),
+            ("the signed HTML body (no inline logo possible)", ms365(msg_extra=signed_html), "nincs inline"),
+            ("a renamed server", ms365(tool="mcp__outlook__send-mail"), "nem HTML")):
         code, _, err = run_gate(store, payload)
-        check(f"ms365: an approval does NOT authorize {name}",
-              code == 2 and "NINCS jovahagyas" in err, f"exit={code} err={err[:160]!r}")
+        check(f"signature: send-mail with {name} is DENIED, no anchor offered",
+              code == 2 and "Hianyzik a Klodel HTML-alairas" in err and why in err
+              and "patrik-level-piszkozat 4" in err and anchor_from_stderr(err) is None,
+              f"exit={code} err={err[:200]!r}")
+    code, _, err = run_gate(make_store(os.path.join(td, "ms1b"), level=3), ms365(msg_extra=signed_html))
+    check("signature: at level 3 too", code == 2 and "Hianyzik a Klodel HTML-alairas" in err, f"exit={code}")
+    for i, tool in enumerate(("mcp__ms365__send-draft-message", "mcp__ms365__reply-mail-message", "mcp__outlook__forward-mail-message")):
+        code, _, err = run_gate(make_store(os.path.join(td, f"ms1c{i}"), level=3), {"tool_name": tool, "tool_input": {}})
+        check(f"signature: {tool.split('__')[-1]} by message id is DENIED at level 3 (cannot be checked)",
+              code == 2 and "send-draft.mjs" in err, f"exit={code} err={err[:200]!r}")
     for name, payload in (
             ("an attachment", ms365(msg_extra={"attachments": [{"name": "x.pdf"}]})),
             ("a replyTo", ms365(msg_extra={"replyTo": [{"emailAddress": {"address": "x@y.hu"}}]})),
@@ -740,8 +742,8 @@ with tempfile.TemporaryDirectory() as td:
         check(f"ms365: {tool.split('__')[-1]} (id-addressed) is DENIED at level 2",
               code == 2 and "uzenet-azonositoval" in err, f"exit={code} err={err[:160]!r}")
     code, _, _ = run_gate(make_store(os.path.join(td, "ms3"), level=3),
-                          {"tool_name": "mcp__ms365__forward-mail-message", "tool_input": {}})
-    check("ms365: level 3 stays autonomous for the id-addressed tools too", code == 0, f"exit={code}")
+                          {"tool_name": "mcp__ms365__create-calendar-event", "tool_input": {}})
+    check("ms365: level 3 stays autonomous for the id-addressed tools that send no letter", code == 0, f"exit={code}")
     code, _, err = run_gate(make_store(os.path.join(td, "ms4"), level=1), ms365())
     check("ms365: level 1 is a hard deny", code == 2 and "szint 1" in err, f"exit={code}")
     store_l1 = make_store(os.path.join(td, "ms5"), level=1)
@@ -779,12 +781,8 @@ with tempfile.TemporaryDirectory() as td:
                   code == 2, f"exit={code} err={err[:160]!r}")
     store = make_store(os.path.join(td, "g3"), level=2)
     code, _, err = run_gate(store, ms365(tool="mcp__outlook__send-mail"))
-    anchor = anchor_from_stderr(err)
-    check("G3: a renamed server's send-mail still needs the per-letter approval",
-          code == 2 and anchor is not None, f"exit={code} err={err[:160]!r}")
-    approve(store, anchor)
-    code, _, _ = run_gate(store, ms365(tool="mcp__outlook__send-mail"))
-    check("G3: ... and goes with it", code == 0, f"exit={code}")
+    check("G3: a renamed server's send-mail is still gated (now: the signature, KLODELALAIRAS1110)",
+          code == 2 and "Hianyzik a Klodel HTML-alairas" in err, f"exit={code} err={err[:160]!r}")
     code, _, _ = run_gate(make_store(os.path.join(td, "g3b"), level=1),
                           {"tool_name": "mcp__outlook__list-mail-messages", "tool_input": {}})
     check("G3: a read on a non-ms365 server name is not this gate's business", code == 0, f"exit={code}")
@@ -846,8 +844,8 @@ with tempfile.TemporaryDirectory() as td:
         check(f"G2: {label} is unreadable -> DENIED",
               code == 2 and "nem horgonyozhato" in err, f"exit={code} err={err[:160]!r}")
     code, _, err = run_gate(store, ms365_named("a@b.hu", name="Kovács Éva"))
-    check("G2: a plain name with accents is still readable (anchor offered)",
-          code == 2 and anchor_from_stderr(err) is not None, f"exit={code} err={err[:160]!r}")
+    check("G2: a plain name with accents is still readable (reaches the signature check, KLODELALAIRAS1110)",
+          code == 2 and "Hianyzik a Klodel HTML-alairas" in err, f"exit={code} err={err[:160]!r}")
 
     # The standing check reads the raw address fields, not a re-parse of the
     # "name <addr>" display string.
@@ -903,15 +901,14 @@ with tempfile.TemporaryDirectory() as td:
     code, out, err = run_gate(store, mcp_send(to="kollega@pelda.hu", cc="gazda@pelda.hu"), NO_DASH)
     check("standing cc: to the colleague WITH the owner in cc goes without approval",
           code == 0 and "allando cimzett" in out, f"exit={code} err={err[:160]!r}")
-    code, out, _ = run_gate(store, ms365(to=("kollega@pelda.hu",), cc=("gazda@pelda.hu",)), NO_DASH)
-    check("standing cc: the same through ms365 send-mail", code == 0, f"exit={code}")
+    code, _, err = run_gate(store, ms365(to=("kollega@pelda.hu",), cc=("gazda@pelda.hu",)), NO_DASH)
+    check("standing cc: the same through ms365 send-mail stops on the signature first (KLODELALAIRAS1110)",
+          code == 2 and "Hianyzik a Klodel HTML-alairas" in err, f"exit={code}")
     for name, payload in (
             ("without the owner in cc", mcp_send(to="kollega@pelda.hu")),
             ("with another cc", mcp_send(to="kollega@pelda.hu", cc="idegen@pelda.hu")),
             ("with the owner AND another cc",
              mcp_send(to="kollega@pelda.hu", cc="gazda@pelda.hu, idegen@pelda.hu")),
-            ("with a bcc", ms365(to=("kollega@pelda.hu",), cc=("gazda@pelda.hu",),
-                                 bcc=("idegen@pelda.hu",))),
             ("to another address with the owner in cc",
              mcp_send(to="idegen@pelda.hu", cc="gazda@pelda.hu"))):
         code, _, err = run_gate(store, payload, NO_DASH)
@@ -1020,9 +1017,9 @@ with tempfile.TemporaryDirectory() as td:
         "toRecipients": [{"emailAddress": {"address": "ugyfel@example.invalid"}}], "subject": "TIG 2026-10",
         "body": {"contentType": "html", "content": "<p>Csatolom.</p>"}}}}}
     _, _, err_mail = run_gate(store, send_mail)
-    check("send-draft: no attachments -> the same anchor as ms365 send-mail",
-          anchor_from_stderr(err_draft) and anchor_from_stderr(err_draft) == anchor_from_stderr(err_mail),
-          f"{anchor_from_stderr(err_draft)} vs {anchor_from_stderr(err_mail)}")
+    check("send-draft: a letter without attachments still gets an anchor; the same through send-mail stops on the signature",
+          anchor_from_stderr(err_draft) is not None and "Hianyzik a Klodel HTML-alairas" in err_mail,
+          f"{anchor_from_stderr(err_draft)} / {err_mail[:120]!r}")
 
     # Fail-closed shapes.
     bad = [
