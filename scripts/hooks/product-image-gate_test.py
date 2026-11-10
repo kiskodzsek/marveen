@@ -1301,6 +1301,27 @@ def majsztro_line_substitute_follows_budget(root):
     low = 'helyettes-klodel csak akkor' in (mod.majsztro_ok('helyettes-klodel Májsztró heti kerete elfogyott') or '')
     return full and low
 
+
+@case
+def majsztro_substitute_on_five_hour_window(root):
+    import datetime as dt
+    mod = gate_module()
+    mod.ROOT = root
+    os.makedirs(os.path.join(root, 'store', 'mod-state'), exist_ok=True)
+    f = os.path.join(root, 'store', 'mod-state', 'majsztro.json')
+    fut = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)).isoformat().replace('+00:00', 'Z')
+    past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)).isoformat().replace('+00:00', 'Z')
+    json.dump({'usage': {'rateLimits': [{'kind': 'five_hour', 'percentUsed': 100, 'resetsAt': fut},
+                                        {'kind': 'seven_day', 'percentUsed': 50}]}}, open(f, 'w'))
+    out = mod.majsztro_budget_full()
+    json.dump({'usage': {'rateLimits': [{'kind': 'five_hour', 'percentUsed': 100, 'resetsAt': past},
+                                        {'kind': 'seven_day', 'percentUsed': 50}]}}, open(f, 'w'))
+    reset = mod.majsztro_budget_full()
+    json.dump({'usage': {'rateLimits': [{'kind': 'five_hour', 'percentUsed': 90, 'resetsAt': fut},
+                                        {'kind': 'seven_day', 'percentUsed': 50}]}}, open(f, 'w'))
+    partial = mod.majsztro_budget_full()
+    return out and not reset and not partial
+
 PRIV_OK = 'PRIVÁT-OK: Patrik privátban kérdezte, privát ügy\n'
 IDEA_LINE = 'ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel összevetve)\n'
 
