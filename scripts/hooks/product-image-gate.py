@@ -66,6 +66,12 @@ Reel C v10 closing logo at y 290 passed the Reel band and was caught by hand), s
 of that crop's 10 % / 10 % bands: on 1080x1920 the Reel band is 269-1248, the feed crop's 420-1500, together 420-1248.
 1:1 and landscape (any width > height) carry 10 % / 10 % too (Klodel 31805); only an upright
 format other than 4:5 and 9:16 is blocked.
+Taste reference (Patrik TG 4793, 2026-11-10: "Ezek ocsmany anyagotk", the third taste rejection; Klodel 36836): every
+marketing image and video (not "MAJSZTRO: nem-marketing") carries
+    IZLES-REF: <earlier file Patrik praised> | <TG msg id of the praise> | <side-by-side comparison image>
+Both files must exist, the TG id must be an inbound message in store/claudeclaw.db conversation_log (the ledger has no
+sender column: it proves the message arrived, not who wrote it), and the comparison image must be newer than the checked
+file. "IZLES-REF: nincs" blocks (see izles_ref).
 Tests: product-image-gate_test.py next to this file.
 Exit 0 = allow, exit 2 = block (stderr to the model).
 """
@@ -205,6 +211,77 @@ def majsztro_ok(val):
         return None if row.get('from_agent') == 'majsztro' else f'MAJSZTRO: a {parts[1]} üzenet nem Májsztrótól jött.'
     if row.get('from_agent') != 'majsztro' or 'MEHET' not in c or 'JAVÍTANDÓ' in c or 'JAVITANDO' in c or 'ELDOBANDÓ' in c:
         return f'MAJSZTRO: a {parts[1]} üzenet nem Májsztró MEHET-je.'
+    return None
+
+
+IZLES_FORM = ('Alak: "IZLES-REF: <Patrik által dicsért korábbi anyag fájlja> | <TG msg id a dicséretről> | '
+              '<egymás mellé tett összehasonlító kép útja>" (Patrik TG 4793: "Ezek ocsmany anyagotk", a 3. '
+              'ízlés-elutasítás).')
+IMAGE = ('.jpg', '.jpeg', '.png', '.webp')
+
+
+def tg_inbound_exists(msg_id):
+    """True if the conversation ledger (store/claudeclaw.db -> conversation_log) holds an inbound Telegram message
+    with this id. The ledger has no sender column, so this proves the message arrived, not that Patrik wrote it."""
+    import sqlite3
+    db = os.path.join(ROOT, 'store', 'claudeclaw.db')
+    if not os.path.exists(db):
+        return False
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=2)
+    try:
+        row = con.execute("SELECT 1 FROM conversation_log WHERE direction = 'in' AND message_id = ? "
+                          "AND (source IS NULL OR source LIKE '%telegram%') LIMIT 1", (str(msg_id),)).fetchone()
+    finally:
+        con.close()
+    return row is not None
+
+
+def izles_ref(fp, val):
+    """Patrik TG 4793 (2026-11-10 18:40, Klodel 36836): "Ezek ocsmany anyagotk" on the K6 FB/IG image and the Reel
+    v11, the third taste rejection; the defect checklists passed all three. A marketing image or video goes to him
+    only next to an earlier piece HE praised:
+        IZLES-REF: <praised earlier file> | <TG msg id of the praise> | <side-by-side comparison image>
+    The praised file and the comparison image must exist, the TG id must be an inbound message in the ledger, and the
+    comparison image must be newer than the checked file (made from its final state). "IZLES-REF: nincs" (no praised
+    reference) blocks: then the piece is not ready for him."""
+    v = (val or '').strip()
+    if not v:
+        return 'IZLES-REF sor hiányzik. ' + IZLES_FORM
+    if v.lower().startswith('nincs'):
+        return ('IZLES-REF: nincs -- Patrik által dicsért referencia nélkül marketing-anyag nem megy elé. Keress egy '
+                'korábbi anyagot, amit megdicsért (TG id), és tedd mellé. ' + IZLES_FORM)
+    parts = [p.strip() for p in v.split('|')]
+    if len(parts) != 3 or not all(parts):
+        return 'IZLES-REF sor hibás (három, |-vel elválasztott rész kell). ' + IZLES_FORM
+    ref, tg, cmp_ = parts
+    real = lambda p: os.path.realpath(os.path.expanduser(p))
+    ref, cmp_ = os.path.expanduser(ref), os.path.expanduser(cmp_)
+    if not os.path.isfile(ref):
+        return f'IZLES-REF: a dicsért referencia-fájl nem létezik ({ref}).'
+    if not ref.lower().endswith(MEDIA):
+        return f'IZLES-REF: a dicsért referencia nem kép/videó ({ref}).'
+    if real(ref) == real(fp):
+        return 'IZLES-REF: a referencia maga a vizsgált fájl; egy korábbi, Patrik által dicsért anyag kell.'
+    m = re.fullmatch(r'(?:TG\s*)?(\d+)', tg, re.I)
+    if not m:
+        return f'IZLES-REF: a TG-azonosító nem szám ({tg}). ' + IZLES_FORM
+    try:
+        found = tg_inbound_exists(m.group(1))
+    except Exception as e:
+        return f'IZLES-REF: a TG-napló nem olvasható ({e.__class__.__name__}).'
+    if not found:
+        return f'IZLES-REF: a TG {m.group(1)} üzenet nincs a bejövő naplóban (store/claudeclaw.db conversation_log).'
+    if not os.path.isfile(cmp_):
+        return f'IZLES-REF: az összehasonlító kép nem létezik ({cmp_}).'
+    if not cmp_.lower().endswith(IMAGE):
+        return f'IZLES-REF: az összehasonlító lap nem kép ({cmp_}).'
+    if real(cmp_) in (real(fp), real(ref)):
+        return 'IZLES-REF: az összehasonlító kép külön lap legyen (a referencia és az új anyag egymás mellett).'
+    try:
+        if os.path.exists(fp) and os.path.getmtime(cmp_) <= os.path.getmtime(fp):
+            return 'IZLES-REF: az összehasonlító kép nem frissebb a vizsgált fájlnál; a végső állapotból készítsd újra.'
+    except OSError as e:
+        return f'IZLES-REF: az időbélyeg nem olvasható ({e.__class__.__name__}).'
     return None
 
 
@@ -536,6 +613,10 @@ def check(fp):
     # Patrik TG 1946 (2026-11-05 19:00): "rajta van a logo de vhigy az h marabel.hu sehol a kepen".
     # Every marketing image carries the visible web address next to the logo.
     if not (d.get('MAJSZTRO') or '').lower().startswith('nem-marketing'):
+        # Patrik TG 4793 (2026-11-10): the third taste rejection -- every marketing piece stands next to one he praised.
+        ir = izles_ref(fp, d.get('IZLES-REF'))
+        if ir:
+            return f'{base}: {ir}'
         # a video's MARKA line is not enough: brand_check() reads every second (Patrik TG 3109), at the end of the
         # video branch below, after the cheap checks
         if not fp.lower().endswith(VIDEO) and 'marabel.hu' not in (d.get('MARKA') or '').lower():
