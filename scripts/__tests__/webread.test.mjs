@@ -127,6 +127,35 @@ describe('startGuardProxy (C: the browser\'s only way out)', () => {
   })
 })
 
+describe('startGuardProxy tunnels end with the run', () => {
+  it('close() ends every tunnel, upstream included: a half-open keep-alive does not hold the process (2026-11-10 hang)', async () => {
+    // Half-open, like a remote that does not answer our FIN: only a destroy frees our side of the socket.
+    const peers = []
+    const target = net.createServer({ allowHalfOpen: true }, (s) => peers.push(s))
+    await new Promise((r) => target.listen(0, '127.0.0.1', r))
+    // Test seam: the tunnel goes to a local server instead of the checked address (the check itself is tested above).
+    const upstreams = []
+    const connect = () => {
+      const u = net.connect(target.address().port, '127.0.0.1')
+      upstreams.push(u)
+      return u
+    }
+    const proxy = await startGuardProxy({ lookup: () => {}, connect })
+    const client = net.connect(proxy.port, '127.0.0.1')
+    await new Promise((r) => client.on('connect', r))
+    client.write('CONNECT site.test:443 HTTP/1.1\r\nHost: site.test:443\r\n\r\n')
+    await new Promise((r) => client.once('data', r))
+    // The browser side ends; the proxy's socket for it stays half-open (http.Server allows that), as in the hang.
+    client.end()
+    await new Promise((r) => setTimeout(r, 100))
+    await proxy.close()
+    expect(upstreams).toHaveLength(1)
+    expect(upstreams[0].destroyed).toBe(true)
+    for (const s of peers) s.destroy()
+    await new Promise((r) => target.close(r))
+  })
+})
+
 describe('output path (B: no caller-chosen path, no overwrite, no link)', () => {
   function root() {
     const r = tmp()
