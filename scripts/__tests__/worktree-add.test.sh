@@ -173,6 +173,28 @@ wa "$SB/main" "$SB/wt1" feat/x
 check "an existing path is refused (64)" "$(ok "$RC" = 64)" "$RC"
 wa "$SB/main" "$SB/wtX"
 check "missing branch (64)" "$(ok "$RC" = 64 -a ! -e "$SB/wtX")" "$RC"
+echo "== npm workspaces: never a shared node_modules (2026-11-10, mcp-connectors)"
+mkclone "$SB/ws" "node_modules"
+echo '{"name":"ws","workspaces":["common","billingo"]}' > "$SB/ws/package.json"
+git -C "$SB/ws" add package.json && git -C "$SB/ws" commit -q -m ws
+wa "$SB/ws" "$SB/wtW1" feat/ws1
+check "workspaces: exit 3, no link" "$(ok "$RC" = 3 -a ! -e "$SB/wtW1/node_modules")" "$RC $OUT"
+check "workspaces: says why and the own install" "$(echo "$OUT" | grep -q 'npm workspaces' && echo "$OUT" | grep -q 'npm ci --ignore-scripts' && echo 0 || echo 1)" "$OUT"
+check "workspaces: no npm ci line without --ignore-scripts (Viktor 36920 a)" "$(echo "$OUT" | grep 'npm ci' | grep -vq -- '--ignore-scripts' && echo 1 || echo 0)" "$OUT"
+check "workspaces: the worktree itself is created" "$(ok "$(git -C "$SB/wtW1" branch --show-current)" = feat/ws1)"
+wa --node-modules-from "$SB/other" "$SB/ws" "$SB/wtW2" feat/ws2
+check "workspaces: refused with --node-modules-from too" "$(ok "$RC" = 3 -a ! -e "$SB/wtW2/node_modules")" "$RC $OUT"
+mkclone "$SB/badpkg" "node_modules"
+echo '{"name":"bad","workspaces":' > "$SB/badpkg/package.json"
+git -C "$SB/badpkg" add package.json && git -C "$SB/badpkg" commit -q -m bad
+wa "$SB/badpkg" "$SB/wtW4" feat/ws4
+check "an unparsable package.json takes the old path (Viktor 36920 b, documented)" "$(ok "$RC" = 0 -a -L "$SB/wtW4/node_modules")" "$RC $OUT"
+mkclone "$SB/plainpkg" "node_modules"
+echo '{"name":"plain","workspaces":[]}' > "$SB/plainpkg/package.json"
+git -C "$SB/plainpkg" add package.json && git -C "$SB/plainpkg" commit -q -m plain
+wa "$SB/plainpkg" "$SB/wtW3" feat/ws3
+check "an empty workspaces list is not workspaces: linked as before" "$(ok "$RC" = 0 -a -L "$SB/wtW3/node_modules")" "$RC $OUT"
+
 wa "$SB/no-such" "$SB/wtY" feat/y
 check "not a work tree (64)" "$(ok "$RC" = 64)" "$RC"
 wa --bogus "$SB/main" "$SB/wtZ" feat/z

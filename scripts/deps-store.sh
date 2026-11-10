@@ -30,8 +30,8 @@
 # cannot serve that lockfile. A store nobody links to is the owner's to remove (rm -rf <store>).
 #
 # Exit codes: 0 = the store is ready (its path on stdout); 3 = the install failed; 64 = usage error (or an
-# .npmrc with a credential); 75 = heavy-job.sh did not start the install (busy host), or another install of the
-# same lockfile is running.
+# .npmrc with a credential); 65 = the repo uses npm workspaces (no store can serve it); 75 = heavy-job.sh did not
+# start the install (busy host), or another install of the same lockfile is running.
 
 set -uo pipefail
 
@@ -51,6 +51,15 @@ DRY=0
 WT="$(phys "$1")"
 [[ -n "$WT" ]] || { echo "deps-store: no such directory: $1" >&2; exit 64; }
 [[ -f "$WT/package-lock.json" && -f "$WT/package.json" ]] || { echo "deps-store: no package.json + package-lock.json in $WT" >&2; exit 64; }
+# npm workspaces (measured 2026-11-10, mcp-connectors): the store holds only package.json + the lockfile, so `npm ci`
+# there installs the root devDependencies and NONE of the workspace packages or their dependencies (3 packages,
+# 26 MB). A worktree linked to it then resolves zod and the MCP SDK from the nearest parent node_modules, the live
+# Marveen tree's, with other versions, and its own workspace package not at all. Such a repo is not served by a store.
+# A package.json that does not parse (or no python3) reads as "no workspaces": the old path, where npm ci fails anyway.
+if python3 -I -c 'import json,sys; w=json.load(open(sys.argv[1])).get("workspaces"); sys.exit(0 if w else 1)' "$WT/package.json" 2>/dev/null; then
+  echo "deps-store: $WT uses npm workspaces; a store can not hold its workspace packages. Own install in the worktree, under the gate: heavy-job.sh --name npm-ci -- npm ci --ignore-scripts" >&2
+  exit 65
+fi
 PROD="$(phys "$PROD_TREE")"
 REST="${WT#"$PROD"/agents/}"
 [[ -n "$PROD" && "$REST" != "$WT" ]] || { echo "deps-store: $WT is not under $PROD/agents/<agent>/" >&2; exit 64; }
