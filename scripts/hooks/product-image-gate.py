@@ -149,12 +149,25 @@ def parse(path):
 
 def majsztro_budget_full():
     """Patrik TG 15348/15489 (2026-11-07): when Majsztro's weekly budget is used up, Klodel takes over his whole
-    role. True ONLY while store/mod-state/majsztro.json shows the seven_day limit at >= 100 %; a missing or
+    role. True while store/mod-state/majsztro.json shows the seven_day limit at >= 100 %, or the five_hour
+    limit at >= 100 % before its resetsAt; a missing or
     unreadable file is False (the substitute is never the default)."""
     try:
         st = json.load(open(os.path.join(ROOT, 'store', 'mod-state', 'majsztro.json')))
-        sd = [r for r in st.get('usage', {}).get('rateLimits', []) if r.get('kind') == 'seven_day']
-        return bool(sd) and float(sd[0].get('percentUsed', 0)) >= 100
+        rl = st.get('usage', {}).get('rateLimits', [])
+        sd = [r for r in rl if r.get('kind') == 'seven_day']
+        if sd and float(sd[0].get('percentUsed', 0)) >= 100:
+            return True
+        # CLAUDE.md MÁJSZTRÓ HELYETTES (Patrik TG 15348: "Ha majsztro kifogy te veszed at a szerepet haladjatok"):
+        # the 5-hour window at 100 % also means he is out until its reset (Klodel, 2026-11-10, Patrik waiting on TikTok).
+        fh = [r for r in rl if r.get('kind') == 'five_hour']
+        if fh and float(fh[0].get('percentUsed', 0)) >= 100:
+            ra = fh[0].get('resetsAt')
+            if not ra:
+                return True
+            import datetime as _dt
+            return _dt.datetime.fromisoformat(ra.replace('Z', '+00:00')) > _dt.datetime.now(_dt.timezone.utc)
+        return False
     except Exception:
         return False
 
