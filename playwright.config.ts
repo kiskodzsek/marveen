@@ -1,4 +1,5 @@
 import { defineConfig } from '@playwright/test'
+import { installedChromium } from './tests/installed-chromium'
 
 // SMOKELIVE815: the suite must never default to the owner's LIVE dashboard.
 // Most specs read and stub, but one typo'd stub, one new un-stubbed route or a
@@ -27,5 +28,7 @@ export default defineConfig({
     baseURL,
     headless: true,
     screenshot: 'only-on-failure',
+    // the pinned chromium may be missing from the shared cache: the newest installed one (PWREV1110)
+    launchOptions: { executablePath: installedChromium() },
   },
 })
