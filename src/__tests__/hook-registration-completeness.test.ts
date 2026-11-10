@@ -68,6 +68,18 @@ const EXEMPT: Record<string, string> = {
     'shared library imported by clear-capture.py / clear-replay.py; not itself a hook',
   'memory_frontmatter_lib.py':
     'shared library: the one memory-frontmatter check, imported by memory-frontmatter-gate.py (Write/Edit) and memory-frontmatter-bash-gate.py (Bash, KAPUEGYUT918); not itself a hook',
+  'claim-source-reply-gate_test.py':
+    'the unit test of claim-source-reply-gate.py (run: python3 -I scripts/hooks/claim-source-reply-gate_test.py, in CI); not itself a hook (CLAIMSOURCE1110)',
+  'mea-culpa-reply-gate_test.py':
+    'the unit test of mea-culpa-reply-gate.py (run: python3 -I scripts/hooks/mea-culpa-reply-gate_test.py, in CI); not itself a hook',
+  'mute-video-reply-gate_test.py':
+    'the unit test of mute-video-reply-gate.py (run: python3 -I scripts/hooks/mute-video-reply-gate_test.py, in CI); not itself a hook',
+  'product-image-gate_test.py':
+    'the unit test of product-image-gate.py (run: python3 -I scripts/hooks/product-image-gate_test.py, in CI); not itself a hook (PRIVATEWINDOW1106)',
+  'render-claim-reply-gate_test.py':
+    'the unit test of render-claim-reply-gate.py (run: python3 -I scripts/hooks/render-claim-reply-gate_test.py, in CI); not itself a hook',
+  'render_claim_lib.py':
+    'library imported by render-claim-reply-gate.py and ops/video_export_status.py (the measured export stamp); not itself a hook',
   'private-topic-group-gate_test.py':
     'the unit test of private-topic-group-gate.py (run: python3 -I scripts/hooks/private-topic-group-gate_test.py); not itself a hook (6dbeadad)',
   'email_extract.py':
@@ -128,6 +140,16 @@ function registrationCorpus(): string {
 const CHECKOUT_ONLY: Record<string, string> = {
   'private-topic-group-gate.py':
     'the owner\'s private topics stay out of the team group (card 6dbeadad): it lets through only the owner\'s private chat with the MAIN agent (store/projektek.json elo_uzenet.privat) and gates every other chat, so on a sub-agent, whose chats are all "other", it would gate every message that names a private project',
+  'mea-culpa-reply-gate.py':
+    'owner-chat reply gate of the MAIN agent (Klodel 34240): it gates the owner\'s private chat and team group read from store/projektek.json elo_uzenet, which only the main agent keeps; with no chat known it gates EVERY chat, so on a seeded agent (or another install) it would gate all of that agent\'s own replies',
+  'render-claim-reply-gate.py':
+    'owner-chat reply gate of the MAIN agent (Klodel 35696): same chat scoping as mea-culpa-reply-gate.py (store/projektek.json elo_uzenet), and it measures this install\'s own export stamp (ops/video_export_status.py, not seeded)',
+  'claim-source-reply-gate.py':
+    'owner-chat reply gate of the MAIN agent (Klodel 35761): same chat scoping as mea-culpa-reply-gate.py (store/projektek.json elo_uzenet; none known = every chat)',
+  'mute-video-reply-gate.py':
+    'owner-chat reply gate of the MAIN agent (#151): same chat scoping as mea-culpa-reply-gate.py; the owner\'s rule (a marketing video goes with sound) is this install\'s, not a seed default',
+  'product-image-gate.py':
+    'owner-chat reply gate of the MAIN agent (Patrik TG 1694): its .ok attestations live in this install\'s store/kep-kapu and its private-chat rule reads store/projektek.json elo_uzenet.privat; a seeded agent has neither',
   'email-approval-gate.py':
     'level-aware email gate for the MAIN agent (EMAILKAPU901 PR2, #1149): its docstring scopes it to sessions rooted at PROJECT_ROOT, and sub-agents keep their unconditional hard-deny (email-send-gate.mjs), behind which this gate would be a no-op',
   'inbox-drain.py':

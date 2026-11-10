@@ -59,6 +59,9 @@ const EXPECTED: Record<string, string[]> = {
   PreToolUse: [
     'outgoing-copy-gate.py', 'email-approval-gate.py',
     'private-topic-group-gate.py', // 6dbeadad
+    // The owner-chat reply gates (wired live since #138-#154; the tracked file lagged, CI did not run 10-14 .. 11-10):
+    'product-image-gate.py', 'mute-video-reply-gate.py', 'claim-source-reply-gate.py', 'mea-culpa-reply-gate.py',
+    'render-claim-reply-gate.py',
     'channel-image-resize.sh', 'egress-gate.mjs', 'ms365-download-gate.mjs', 'memory-frontmatter-gate.py',
     'memory-frontmatter-bash-gate.py', 'image-quarantine-gate.mjs',
     'keychain-read-gate.py', // c1921b55

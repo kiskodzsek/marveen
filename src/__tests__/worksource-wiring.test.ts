@@ -127,7 +127,9 @@ describe('wiring contracts (source-level)', () => {
     // whole point.
     expect(routerSrc).toContain('!worksourceServing && shouldAbandon(')
     expect(routerSrc).toContain('!worksourceServing && !sessionExists')
-    expect(routerSrc).toContain('!worksourceServing && !(await isSessionReadyForPrompt(')
+    // #150 (Klodel 35737) folded the readiness gate into `ready` (an urgent row may type into a busy pane); a
+    // serving worksource agent still never waits on the keyboard-readiness check.
+    expect(routerSrc).toContain('const ready = worksourceServing || (await isSessionReadyForPrompt(')
     // The flag alone must never be what disarms a gate.
     expect(routerSrc).not.toContain('!usesWorksource && shouldAbandon(')
     expect(routerSrc).not.toContain('!usesWorksource && !sessionExists')
