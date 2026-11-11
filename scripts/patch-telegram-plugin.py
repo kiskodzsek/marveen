@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Take /status and /help away from the Telegram channel plugin (ELSOKOR922 D-4),
-mark forwarded messages in the inbound meta (forwarded="1"), and record every
-inbound message the bot receives (the evidence owner WRITE commands need).
+mark forwarded messages in the inbound meta (forwarded="1"), record every
+inbound message the bot receives (the evidence owner WRITE commands need), and
+cut the reply gates' marker lines (ÖTLET-KAPU, PRIVÁT-OK, BALAZS-OK, ...) out of
+the text the bot sends (Klodel 38054; see STRIP_JS).
 
 The official plugin (claude-plugins-official/telegram/<ver>/server.ts) answers
 /status ("Paired as ...") and /help itself, inside its bot poller -- those
@@ -75,6 +77,67 @@ EVID_INSERT = (
     "text, at: Date.now() }}) + '\\n', {{ flag: 'a', mode: 0o600 }}) }} catch {{}} " + EVID_MARKER + "\n"
 )
 
+# Gate markers out of the sent text (Klodel 38054, Balázs csoport TG 5404: "mi ez minden valaszod utan Balazs-ok
+# tudom hogy ok vagyok"). The reply gates (product-image-gate, balazs-task-reply-gate, claim-source-reply-gate)
+# want their marker line IN the reply text, so Patrik and Balázs read it. The hooks run on the tool input BEFORE
+# the call and keep seeing the marker; this patch cuts the marker out in the plugin, at send time, for reply and
+# edit_message. Not a PreToolUse updatedInput: nine hooks run in parallel on this tool, and which rewrite wins when
+# more than one rewrites is not documented; the plugin is one place, deterministic, and testable.
+# Cut: a line starting with ÖTLET-KAPU / BALAZS-OK (Balázs OK) / PATRIK-KÉRTE / ELVETETT-DE-KÉRT (any case, as the
+# gates accept them) and a PRIVÁT-OK: line. A FORRÁS: line is NOT cut (Klodel 38117, Viktor I1: Patrik must see
+# the source). The cut lines go to <STATE_DIR>/outbound-markers.jsonl (0600,
+# past 256 KiB the file becomes .1) for audit. A text that is ONLY markers is refused, not sent empty.
+# Uses only names server.ts already imports (writeFileSync, statSync, renameSync, rmSync, join) and req/args.
+STRIP_MARKER = "// MARVEEN-PATCH(kapu-jelolo-38054): gate markers out of the sent text"
+STRIP_ANCHORS = [
+    ("reply case", re.compile(r"^( *)case 'reply': \{\n", re.MULTILINE)),
+    ("edit_message case", re.compile(r"^( *)case 'edit_message': \{\n", re.MULTILINE)),
+]
+# Retention (Lex 38089): a log file is rotated to .1 when it is over 256 KiB or was CREATED more than 45 days ago,
+# and the .1 is removed once it was created more than 90 days ago, so while the log is written no line lives past
+# 90 days. Checked at every write: a log nobody writes to for months is not cleaned by this (birthtime: macOS APFS;
+# where it is 0, mtime is used). {f} is the JS name of the file path.
+def ROTATE_JS(f):
+    return (
+        r"try {{ const __s = statSync(" + f + r"); if (__s.size > 262144 || Date.now() - (__s.birthtimeMs || __s.mtimeMs) "
+        r"> 45 * 864e5) renameSync(" + f + r", " + f + r" + '.1') }} catch {{}}; "
+        r"try {{ const __o = statSync(" + f + r" + '.1'); if (Date.now() - (__o.birthtimeMs || __o.mtimeMs) > 90 * 864e5) "
+        r"rmSync(" + f + r" + '.1') }} catch {{}}; "
+    )
+
+
+# Viktor 38092: only a marker at a LINE START is cut (PRIVÁT-OK too: mid-sentence it stays, no text is lost
+# silently); if the audit line cannot be written, the text goes out unchanged (the marker visible, not gone without
+# a trace); only the marker lines change, the rest of the text is not normalised. Lex 38089: a logged line is cut
+# to 80 characters, its references (TG n, msg n, PR n) kept.
+STRIP_JS = (
+    r"{indent}  if (typeof args.text === 'string') {{ const __gone = []; const __cut = m => {{ __gone.push(m.trim()); "
+    r"return '' }}; const __t0 = args.text"
+    r".replace(/^[ \t]*(?:ÖTLET\\?-KAPU|BAL[AÁ]ZS[ \t\\-]?OK|PATRIK.K[EÉ]RTE|ELVETETT\\?-DE\\?-K[EÉ]RT|PRIVÁT\\?-OK)[ \t]*:[^\n]*(?:\r?\n|$)/gimu, __cut); "
+    r"if (__gone.length) {{ const __t = __t0.replace(/\s+$/u, ''); "
+    r"const __short = x => {{ if (x.length <= 80) return x; const r = x.match(/(?:TG|msg(?:_id)?|PR)\s*[#:=]?\s*\d{{2,}}/giu) || []; "
+    r"return x.slice(0, 80) + '…' + (r.length ? ' [' + r.join(', ') + ']' : '') }}; let __ok = false; "
+    r"try {{ const __f = join(STATE_DIR, 'outbound-markers.jsonl'); "
+) + ROTATE_JS("__f") + (
+    r"writeFileSync(__f, JSON.stringify({{ chat_id: String(args.chat_id ?? ''), tool: req.params.name, "
+    r"removed: __gone.map(__short), at: Date.now() }}) + '\n', {{ flag: 'a', mode: 0o600 }}); __ok = true }} catch {{}}; "
+    r"if (__ok) {{ if (!__t.trim()) throw new Error('the text was only gate markers (ÖTLET-KAPU, PRIVÁT-OK, ...); write the message too'); "
+    r"args.text = __t }} }} }} "
+) + STRIP_MARKER + "\n"
+
+# The sender of every inbound message (Klodel 38073, the Creatorz gate: "unless Balázs himself wrote it").
+# inbound-evidence.jsonl has no sender, so one more line per inbound message, right before the channel
+# notification: <STATE_DIR>/inbound-senders.jsonl {chat_id, message_id, user_id, at} -- no text, no name (Lex:
+# the user_id is a pseudonymous id; the text is already in the evidence log). 0600, same retention as above.
+# product-image-gate.py reads it; without it the Creatorz gate fails closed.
+WHO_MARKER = "// MARVEEN-PATCH(creatorz-38073-who): inbound sender for the reply gates"
+WHO_INSERT = (
+    r"{indent}try {{ const __wf = join(STATE_DIR, 'inbound-senders.jsonl'); "
+) + ROTATE_JS("__wf") + (
+    r"writeFileSync(__wf, JSON.stringify({{ chat_id, message_id: msgId != null ? String(msgId) : null, "
+    r"user_id: String(from.id), at: Date.now() }}) + '\n', {{ flag: 'a', mode: 0o600 }}) }} catch {{}} "
+) + WHO_MARKER + "\n"
+
 # Independent patches: each has its own marker and is all-or-nothing on its
 # own, so a plugin update that moves one anchor does not undo the other.
 PATCHES = [
@@ -86,6 +149,12 @@ PATCHES = [
     {"name": "evid", "marker": EVID_MARKER, "anchors": [EVID_ANCHOR], "mode": "insert-before",
      "insert": EVID_INSERT,
      "fallback": "no inbound evidence is recorded, owner write commands are refused"},
+    {"name": "strip", "marker": STRIP_MARKER, "anchors": STRIP_ANCHORS, "mode": "insert-after",
+     "insert": STRIP_JS,
+     "fallback": "gate marker lines (ÖTLET-KAPU, PRIVÁT-OK, BALAZS-OK, ...) are sent as written"},
+    {"name": "who", "marker": WHO_MARKER, "anchors": [EVID_ANCHOR], "mode": "insert-before",
+     "insert": WHO_INSERT,
+     "fallback": "no inbound sender is recorded, the Creatorz gate blocks every reply naming it"},
 ]
 
 
