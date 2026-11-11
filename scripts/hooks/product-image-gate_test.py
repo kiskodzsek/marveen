@@ -1579,6 +1579,90 @@ def idea_group_gated(root):
 
 
 @case
+def idea_refused_direction_blocked_despite_line(root):
+    # Klodel 38049 (Patrik TG 17453/17460): a valid ÖTLET-KAPU line does not let a refused direction through.
+    texts = ('Új ötlet: AI-recepciós szalonoknak.', 'Új irány: telefonos asszisztens kisboltoknak.',
+             'Ötlet: társasházi közös képviselet.', 'Ötlet: Recepciós MI fodrászoknak.')
+    res = [run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t}) for t in texts]
+    return all(rc == 2 and 'elutasított irányt' in err and 'ELVETETT-DE-KERT' in err for rc, err in res)
+
+
+@case
+def idea_refused_direction_names_the_word(root):
+    rc, err = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: AI-recepciós szalonoknak.'})
+    return rc == 2 and 'recepciós' in err
+
+
+@case
+def idea_refused_direction_asked_allowed(root):
+    # Patrik asked for it himself: an ELVETETT-DE-KERT line with his TG message number lets it pass.
+    ok = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'ELVETETT-DE-KERT: TG 17454\nÚj ötlet: AI-recepciós.'})[0]
+    ok2 = run(root, {'chat_id': PRIV, 'text': PRIV_OK + IDEA_LINE + 'Ötlet: recepciós.\nELVETETT-DE-KERT: TG 17454'})[0]
+    return ok == 0 and ok2 == 0
+
+
+@case
+def idea_refused_direction_asked_needs_number(root):
+    # Without a TG number, or not at a line start, the marker does not count.
+    texts = ('ELVETETT-DE-KERT: Patrik kérte\nÚj ötlet: AI-recepciós.',
+             'ELVETETT-DE-KERT:\nÚj ötlet: AI-recepciós.',
+             'Új ötlet: AI-recepciós. (ELVETETT-DE-KERT: TG 17454)')
+    return all(run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] == 2 for t in texts)
+
+
+@case
+def idea_refused_direction_asked_still_needs_idea_line(root):
+    # The ELVETETT-DE-KERT line lifts the refused-direction check only, not the ÖTLET-KAPU line.
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'ELVETETT-DE-KERT: TG 17454\nÚj ötlet: AI-recepciós.'})
+    return rc == 2 and 'new-direction-start-from-market' in err
+
+
+@case
+def idea_refused_direction_word_start_only(root):
+    # Same rule as the lint (Klodel 37971): "megtakarítás" is not "takarítás".
+    neg = ('Ötlet: megtakarítás-kalkulátor.', 'Új irány: nyugdíj-előtakarékosság.')
+    pos = ('Ötlet: takarítás-közvetítő.', 'Ötlet: takarításközvetítő.')
+    rn = [run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] for t in neg]
+    rp = [run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] for t in pos]
+    return all(r == 0 for r in rn) and all(r == 2 for r in rp)
+
+
+@case
+def idea_marabel_in_text_not_refused(root):
+    # "marabel" is in the lint list for idea titles, but a chat text may name Marabel (the ÖTLET-KAPU line covers it).
+    rc, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új irány: nem a Marabel, hanem kalkulátor-portál.'})
+    return rc == 0
+
+
+@case
+def no_idea_refused_word_unchanged(root):
+    # Without "ötlet"/"irány" the gate does not look at the text: a refused word alone blocks nothing.
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'Kész a runbook, a recepciós teszt-fiók törölve.'})
+    return rc == 0
+
+
+@case
+def idea_refused_list_missing_fails_closed(root):
+    # A copy of the hook without the lint next to it: an idea text stops, a non-idea text still passes.
+    import shutil
+    here = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(os.path.join(root, 'scripts', 'hooks'))
+    os.makedirs(os.path.join(root, 'scripts', 'lib'))
+    hook = os.path.join(root, 'scripts', 'hooks', 'product-image-gate.py')
+    shutil.copy(HOOK, hook)
+    shutil.copy(os.path.join(here, '..', 'lib', 'owner_chat.py'), os.path.join(root, 'scripts', 'lib', 'owner_chat.py'))
+    env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV}
+
+    def go(text):
+        p = subprocess.run([sys.executable, '-I', hook], input=json.dumps({'tool_input': {'chat_id': GROUP, 'text': text}}),
+                           capture_output=True, text=True, env=env, timeout=20)
+        return p.returncode, p.stderr
+    rc, err = go(IDEA_LINE + 'Új ötlet: kalkulátor-portál.')
+    rc2, _ = go('Radar dolgozik.')
+    return rc == 2 and 'nem olvasható' in err and rc2 == 0
+
+
+@case
 def no_idea_private_unchanged(root):
     rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Kész a riport.'})
     return rc == 0
