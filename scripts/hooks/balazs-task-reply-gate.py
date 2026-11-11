@@ -7,7 +7,8 @@ random, sőt". Klodel had sent Balázs a numbered Google Cloud step list (TG 486
 
 What blocks (exit 2): a reply/edit whose text names Balázs AND carries a task shape (numbered steps, "vár rád",
 "teendő", "lépés", "csináld", "kérlek ... Balázs"). Allowed only with a line "BALAZS-OK: <Patrik TG szám>" that cites
-Patrik's own assignment. Text is accent-folded and case-folded before matching.
+Patrik's own assignment. The value must be a TG number ("BALAZS-OK: TG 4864", "Patrik" before it is fine): a
+line with any other value does not count (Viktor 38148 L1). Text is accent-folded and case-folded before matching.
 Wiring: .claude/settings.json PreToolUse, matcher "mcp__plugin_telegram_telegram__reply|...__edit_message".
 """
 import json
@@ -37,7 +38,7 @@ def check(text):
     # Csak a Balázsnak SZÓLÓ szöveg (megszólítás), nem az, ami csak említi (pl. "Balázs tesztje" az állapot-üzenetben).
     if not re.search(r'(?m)^\s*balazs\b|\bbalazs,|\bbalazs:|\bbalazsnak\b', t):
         return None
-    if re.search(r'(?m)^\s*balazs ok:\s*\S', t.replace('-', ' ')):
+    if re.search(r'(?m)^\s*balazs ok:\s*(?:patrik\s+)?tg\s*#?\s*\d+', t.replace('-', ' ')):
         return None
     if any(rx.search(t) for rx in TASK):
         return ('BALAZS-KAPU (Patrik TG 4910: "nem kértem hogy basztasd random"): Balázsra feladatot/lépést csak '
@@ -65,7 +66,9 @@ def main():
         payload = json.load(sys.stdin)
     except Exception:
         return 0
-    ti = payload.get('tool_input') or {}
+    ti = payload.get('tool_input') if isinstance(payload, dict) else None
+    if not isinstance(ti, dict):
+        return 0
     msg = check(ti.get('text', '')) or check_pr(ti.get('text', ''))
     if msg:
         print(msg, file=sys.stderr)

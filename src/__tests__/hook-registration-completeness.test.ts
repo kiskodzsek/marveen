@@ -96,6 +96,10 @@ const EXEMPT: Record<string, string> = {
     'the unit test of render-claim-reply-gate.py (run: python3 -I scripts/hooks/render-claim-reply-gate_test.py); not itself a hook',
   'product-image-gate_test.py':
     'the unit test of product-image-gate.py (run: python3 -I scripts/hooks/product-image-gate_test.py); not itself a hook',
+  'react-emoji-gate_test.py':
+    'the unit test of react-emoji-gate.py (run: python3 -I scripts/hooks/react-emoji-gate_test.py); not itself a hook (#185)',
+  'balazs-task-reply-gate_test.py':
+    'the unit test of balazs-task-reply-gate.py (run: python3 -I scripts/hooks/balazs-task-reply-gate_test.py); not itself a hook (#185)',
   'render_claim_lib.py':
     'shared library imported by render-claim-reply-gate.py (the store/video-export-status.json reader); not itself a hook',
   'mio-orszem-precheck.sh':
@@ -166,6 +170,10 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'PreToolUse gate on the main agent\'s telegram reply: no .mp4/.mov without an audio track reaches Patrik (TG 4483, Klodel 35741). Docstring: "Wiring: .claude/settings.json PreToolUse"; until fix/ci-red-main-1111 it ran only from the prod checkout\'s uncommitted settings. Seeding it fleet-wide is a separate decision',
   'product-image-gate.py':
     'TERMEKKEP-KAPU (Patrik TG 1690/1694): an image/video to the owner on Telegram only with a store/kep-kapu/<file>.ok attestation in THIS checkout\'s store. Until fix/ci-red-main-1111 it ran only from the prod checkout\'s uncommitted settings. Seeding it fleet-wide is a separate decision',
+  'react-emoji-gate.py':
+    'PreToolUse gate on the main agent\'s telegram react tool: in Patrik\'s own chats (store/projektek.json elo_uzenet privat/csoport; none known = every chat gated) only 👍 👀 ❤ (Klodel 38093, Patrik TG 5436). The rule was about the main agent\'s reactions; same seeding objection as mea-culpa-reply-gate.py (#185)',
+  'balazs-task-reply-gate.py':
+    'PreToolUse gate on the main agent\'s telegram reply/edit_message: no task put on Balázs without BALAZS-OK: TG <n>, and no PR go-ask to Patrik without PATRIK-KERTE (Patrik TG 4910/4917). A rule for the main agent, the one that talks to Balázs and Patrik; it ran only from the prod checkout\'s uncommitted settings until #185. Seeding it fleet-wide is a separate decision',
   'telegram-react-ack.py':
     'the PostToolUse half of the reaction acknowledgement (Klodel 34050): it records a successful react in ledger_lib.record_reaction, and the only reader is telegram-reply-guard.py (reacted_since), which is itself CHECKOUT_ONLY on the main-only ledger; seeded alone it would write a stamp nobody reads',
   'telegram-reply-guard.py':

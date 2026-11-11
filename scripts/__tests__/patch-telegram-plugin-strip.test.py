@@ -180,7 +180,7 @@ with tempfile.TemporaryDirectory() as sd:
           and rec["message_id"] == "901" and stat.S_IMODE(os.stat(f).st_mode) == 0o600, f"{p.stderr[-200:]} {rec}")
 
 # 3. end to end with the real gate (ÖTLET-KAPU)
-pitch = "Új ötlet: kalkulátor-portál."
+pitch = "Új ötlet: hűtőmágnes-bolt."
 line = "ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel)"
 check("gate: no marker still blocks", gate(pitch) == 2)
 both = pitch + "\n" + line
