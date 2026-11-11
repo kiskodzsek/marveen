@@ -124,6 +124,16 @@ def placeholder_blocked_in_every_chat(root):
 
 
 @case
+def soft_hyphen_blocked_in_every_chat(root):
+    # Klodel 38201: U+00AD went out twice on 2026-11-11 (TG 17568, 5477). A ZWJ emoji (U+200D) is not affected.
+    setup(root)
+    res = [run(root, {'chat_id': chat, 'text': 'Kész: a recept\u00adkönyv minta elkészült.'}, tool=tool)
+           for chat in (GROUP, OTHER) for tool in ('reply', 'edit_message')]
+    family = run(root, {'chat_id': GROUP, 'text': 'Család: 👨\u200d👩\u200d👧 kész a fotó.'}, tool='reply')[0]
+    return all(rc == 2 and 'U+00AD' in err for rc, err in res) and family == 0
+
+
+@case
 def placeholder_word_in_prose_passes(root):
     setup(root)
     texts = ['3 TODO maradt a kódban, holnap zárom.', 'A placeholder szót mostantól a kapu fogja.',

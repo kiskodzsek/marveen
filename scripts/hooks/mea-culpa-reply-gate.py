@@ -26,7 +26,9 @@ Two more checks in the same hook (Klodel 38198, hibanapló 2026-11-11 17:02: an 
   "lorem ipsum" anywhere, a template variable {{...}}, a line that is only PLACEHOLDER / TODO / TBD / XXX (any case,
   punctuation around it allowed), a bracketed [TODO] / <TBD> / {XXX} / (PLACEHOLDER), and "...: TODO" / TBD / XXX at a
   line end (upper case). Prose that names the word passes ("3 TODO maradt a kódban", "a placeholder szót", "XXL").
-  An edit_message whose whole text is shorter than 15 characters (after trimming) is blocked too.
+  An edit_message whose whole text is shorter than 15 characters (after trimming) is blocked too. And an invisible
+  soft hyphen (U+00AD) anywhere in the text blocks (Klodel 38201: twice in sent messages on 2026-11-11, TG 17568, 5477;
+  checked on the raw text, before the zero-width characters are dropped).
 - ELO-ALLAPOT-KAPU: an edit_message to the live status message (store/projektek.json elo_uzenet "csoport" or
   "privat", its chat_id AND message_id) must start with "📊 ÉLŐ ÁLLAPOT" (or "ÉLŐ ÁLLAPOT"), the head that
   ops/elo_allapot.py writes. When the store does not name the message, this check has nothing to compare and passes.
@@ -99,6 +101,8 @@ LIVE_HEAD = re.compile(r'^\s*(📊\s*)?ÉLŐ ÁLLAPOT')
 
 
 def placeholder(text, is_edit):
+    if '\u00ad' in str(text):
+        return 'láthatatlan lágy kötőjel (U+00AD)'
     t = unicodedata.normalize('NFKC', str(text)).translate(ZERO_WIDTH)
     for rx in PLACEHOLDER_RX:
         m = rx.search(t)
