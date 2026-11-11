@@ -179,10 +179,20 @@ check "...rc 0, one STEP line per tool in the log" "$(ok "$RC" = 0 -a "$(grep -c
 check "...the tools' output is in last-run.txt, not on stdout" "$(ok -z "$OUT" -a -n "$(grep '== npm' "$SB/store/daily-cleanup.last-run.txt")")" "out=$OUT"
 STUB_ENV="STUB_RC_brew=1" LAST= dc run
 check "a failing step: rc 1, the other steps still run" "$(ok "$RC" = 1 -a "$(wc -l < "$SB/calls")" -eq 4)" "rc=$RC $(cat "$SB/calls")"
-mv "$SB/bin/go" "$SB/go.off"
-LAST= dc run
-check "a missing tool is skipped and logged, rc 0" "$(ok "$RC" = 0 -a -n "$(grep 'STEP go skipped: go not installed' "$SB/store/daily-cleanup.log")")" "rc=$RC"
-mv "$SB/go.off" "$SB/bin/go"
+# The missing tool is one the HOST does not have on dc's PATH tail (/usr/bin:/bin) either: hiding the stub
+# of a tool the host has (go on the GitHub ubuntu runner, CI run 42953744517) runs the host's copy instead.
+MISSING=; for pair in go:go brew:brew npm:npm pip:pip3; do
+  [ -z "$MISSING" ] && ! PATH=/usr/bin:/bin command -v "${pair#*:}" >/dev/null 2>&1 && MISSING="$pair"
+done
+if [ -n "$MISSING" ]; then
+  MNAME="${MISSING%%:*}"; MTOOL="${MISSING#*:}"
+  mv "$SB/bin/$MTOOL" "$SB/$MTOOL.off"
+  LAST= dc run
+  check "a missing tool ($MTOOL) is skipped and logged, rc 0" "$(ok "$RC" = 0 -a -n "$(grep "STEP $MNAME skipped: $MTOOL not installed" "$SB/store/daily-cleanup.log")")" "rc=$RC"
+  mv "$SB/$MTOOL.off" "$SB/bin/$MTOOL"
+else
+  echo "SKIP  a missing tool is skipped and logged: go, brew, npm and pip3 are all in this host's /usr/bin:/bin"
+fi
 
 echo "== scratch"
 S="$SB/scratch"; OUTSIDE="$SB/outside"
