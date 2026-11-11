@@ -249,6 +249,7 @@ const PLUGIN_PATCHES = [
   { name: 'fwd', marker: 'MARVEEN-PATCH(elsokor922-fwd)', label: ' (továbbítás-jelölő)', fallback: 'egy továbbított parancs úgy fut, mint a begépelt' },
   { name: 'evid', marker: 'MARVEEN-PATCH(cmd920-evid)', label: ' (bejövő-napló)', fallback: 'az író parancsok (/model, /context clear, saját parancsok) nem futnak, nincs mihez ellenőrizni őket' },
   { name: 'strip', marker: 'MARVEEN-PATCH(kapu-jelolo-38054)', label: ' (kapu-jelölő kivágás)', fallback: 'a kapu-jelölő sorok (ÖTLET-KAPU, PRIVÁT-OK, BALAZS-OK, ...) kimennek a Telegram-üzenetben' },
+  { name: 'who', marker: 'MARVEEN-PATCH(creatorz-38073-who)', label: ' (bejövő küldő)', fallback: 'a Creatorz-kapu minden Creatorz-t említő választ megállít, Balázs saját kérdésére adottat is' },
 ]
 
 export function telegramPluginPatchStatus(stateFile = join(STORE_DIR, 'telegram-plugin-patch.json')): string {

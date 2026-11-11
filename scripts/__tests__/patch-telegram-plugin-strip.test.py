@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""patch-telegram-plugin.py "strip" patch: gate markers leave the sent Telegram text (Klodel 38054, Balázs TG 5404).
+"""patch-telegram-plugin.py "strip" and "who" patches: gate markers leave the sent Telegram text (Klodel 38054,
+Balázs TG 5404), and the sender of each inbound message is recorded for the Creatorz gate (Klodel 38073).
 
 1. The patch lands once per handler (reply, edit_message) on a fixture, is idempotent, and is all-or-nothing.
 2. The inserted code, run under node with the handler's own names (args, req, STATE_DIR, fs, path), cuts the
@@ -52,25 +53,32 @@ def check(name, ok, detail=""):
         FAILS.append(name)
 
 
-def strip(text, chat="-100", tool="reply"):
-    """Runs the inserted JS once under node. Returns (sent text or None, error or None, log lines, log mode)."""
+def strip(text, chat="-100", tool="reply", state=None, ages=None):
+    """Runs the inserted JS once under node. state: an existing dir for STATE_DIR (default: a fresh one); ages:
+    {file name: days} fakes the creation time statSync reports. Returns (sent text or None, error or None, log
+    lines, log mode, state dir listing)."""
     snippet = STRIP["insert"].format(indent="")
     with tempfile.TemporaryDirectory() as d:
-        js = ("const { writeFileSync, statSync, renameSync } = require('fs'); const { join } = require('path');\n"
-              f"const STATE_DIR = {json.dumps(d)}; const req = {{ params: {{ name: {json.dumps(tool)} }} }};\n"
+        sd = state if state is not None else d
+        js = ("const fs = require('fs'); const { writeFileSync, renameSync, rmSync } = fs; const { join, basename } = require('path');\n"
+              f"const AGES = {json.dumps(ages or {})};\n"
+              "const statSync = p => { const s = fs.statSync(p); const a = AGES[basename(p)];\n"
+              "  return { size: s.size, mtimeMs: s.mtimeMs, birthtimeMs: a != null ? Date.now() - a * 864e5 : s.birthtimeMs } };\n"
+              f"const STATE_DIR = {json.dumps(sd)}; const req = {{ params: {{ name: {json.dumps(tool)} }} }};\n"
               f"const args = {{ chat_id: {json.dumps(chat)}, text: {json.dumps(text)} }};\n"
               "try {\n" + snippet + "process.stdout.write(JSON.stringify({ text: args.text }))\n"
               "} catch (e) { process.stdout.write(JSON.stringify({ error: String(e.message) })) }\n")
         p = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=20)
         if p.returncode != 0:
-            return None, "node: " + p.stderr[-300:], [], None
+            return None, "node: " + p.stderr[-300:], [], None, []
         out = json.loads(p.stdout)
-        logf = os.path.join(d, "outbound-markers.jsonl")
+        logf = os.path.join(sd, "outbound-markers.jsonl")
         lines, mode = [], None
         if os.path.exists(logf):
             lines = [json.loads(x) for x in open(logf, encoding="utf-8").read().splitlines() if x]
             mode = stat.S_IMODE(os.stat(logf).st_mode)
-        return out.get("text"), out.get("error"), lines, mode
+        listing = sorted(os.listdir(sd)) if os.path.isdir(sd) else []
+        return out.get("text"), out.get("error"), lines, mode, listing
 
 
 def gate(text, chat="-1000000000001"):
@@ -100,36 +108,80 @@ cases = [
     ("PATRIK-KERTE line", "PR #183 mehet?\nPATRIK-KÉRTE: TG 17000", "PR #183 mehet?"),
     ("ELVETETT-DE-KERT line", "ELVETETT-DE-KERT: TG 17454\nÚj irány: szalon.", "Új irány: szalon."),
     ("FORRÁS upper-case line", "A szám 12 100.\nFORRÁS: msg 38057, ads-1111.csv", "A szám 12 100."),
-    ("PRIVÁT-OK mid-line, to the line end", "Kész. PRIVÁT-OK: Patrik privátban kérdezte\nRészletek lent.",
-     "Kész.\nRészletek lent."),
+    ("PRIVÁT-OK line", "Kész.\nPRIVÁT-OK: Patrik privátban kérdezte\nRészletek lent.", "Kész.\nRészletek lent."),
     ("indented marker line", "Szöveg.\n  ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve x\nVége.", "Szöveg.\nVége."),
 ]
 for name, text, want in cases:
-    got, err, log, mode = strip(text)
+    got, err, log, mode, _ = strip(text)
     check("cut: " + name, got == want and err is None and len(log) == 1 and log[0]["removed"], f"got={got!r} err={err}")
 
 keep = "A Forrás: KSH 2024 szerint 48 141 vállalkozás.\nforrás: Eurostat\nA BALAZS-OK szó a mondat közepén marad."
-got, err, log, _ = strip(keep)
+got, err, log, _, _ = strip(keep)
 check("prose kept (Forrás:, forrás:, a marker word mid-sentence)", got == keep and not log, repr(got))
 
 nfd = "Café ma.\n"  # NFD, no marker: must go out byte for byte
-got, err, log, _ = strip(nfd)
+got, err, log, _, _ = strip(nfd)
 check("no marker: byte for byte, no log", got == nfd and not log, repr(got))
 
-got, err, log, mode = strip("PRIVÁT-OK: Patrik privátban kérdezte\nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve x")
+got, err, log, mode, _ = strip("PRIVÁT-OK: Patrik privátban kérdezte\nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve x")
 check("only markers: refused, not sent empty", got is None and err and "only gate markers" in err, f"{got!r} {err}")
 
-got, err, log, mode = strip("Szöveg.\nBALAZS-OK: TG 5400", chat="-42", tool="edit_message")
+got, err, log, mode, _ = strip("Szöveg.\nBALAZS-OK: TG 5400", chat="-42", tool="edit_message")
 check("audit log: chat, tool, the cut line, mode 0600",
       log and log[0]["chat_id"] == "-42" and log[0]["tool"] == "edit_message" and log[0]["removed"] == ["BALAZS-OK: TG 5400"]
       and mode == 0o600, f"{log} {oct(mode or 0)}")
+
+# Viktor 38092 L1: a marker mid-sentence stays (nothing after it is lost); L3: no audit line, no change;
+# I2: the rest of the text is not normalised. Lex 38089: a logged line is at most 80 characters, references kept.
+mid = "A számla 120 000 Ft. PRIVÁT-OK: igen. Erősítsd meg, mielőtt fizetsz."
+got, err, log, _, _ = strip(mid)
+check("PRIVÁT-OK mid-sentence stays, nothing lost", got == mid and not log, repr(got))
+got, err, log, _, _ = strip("Kész.\nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve x", state="/nonexistent/marveen-test")
+check("audit write fails: text unchanged (marker visible, not gone)", got == "Kész.\nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve x" and err is None, f"{got!r} {err}")
+nf = "Cafe\u0301 ma.  \nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve x\nMásodik sor  \nVége."
+got, err, log, _, _ = strip(nf)
+check("rest not normalised (NFD, two trailing spaces kept)", got == "Cafe\u0301 ma.  \nMásodik sor  \nVége.", repr(got))
+longl = "PRIVÁT-OK: " + "hosszú indoklás " * 10 + "TG 17454 msg 38073"
+got, err, log, _, _ = strip("Szöveg.\n" + longl)
+r = log[0]["removed"][0] if log else ""
+check("logged line cut to 80 chars, references kept", r.startswith(longl[:80]) and len(r) < len(longl) and "TG 17454" in r
+      and "msg 38073" in r, r)
+
+# Retention (Lex 38089): created > 45 days ago -> .1; a .1 created > 90 days ago is removed.
+with tempfile.TemporaryDirectory() as sd:
+    open(os.path.join(sd, "outbound-markers.jsonl"), "w").write('{"old": 1}\n')
+    open(os.path.join(sd, "outbound-markers.jsonl.1"), "w").write('{"older": 1}\n')
+    _, _, log, _, ls = strip("x\nBALAZS-OK: TG 1", state=sd, ages={"outbound-markers.jsonl": 46, "outbound-markers.jsonl.1": 10})
+    rotated = open(os.path.join(sd, "outbound-markers.jsonl.1")).read()
+    check("main file older than 45 days rotates to .1", '"old"' in rotated and len(log) == 1 and "old" not in log[0], f"{ls} {log}")
+with tempfile.TemporaryDirectory() as sd:
+    open(os.path.join(sd, "outbound-markers.jsonl.1"), "w").write('{"older": 1}\n')
+    _, _, _, _, ls = strip("x\nBALAZS-OK: TG 1", state=sd, ages={"outbound-markers.jsonl.1": 91})
+    check(".1 older than 90 days is removed", ls == ["outbound-markers.jsonl"], str(ls))
+with tempfile.TemporaryDirectory() as sd:
+    open(os.path.join(sd, "outbound-markers.jsonl.1"), "w").write('{"older": 1}\n')
+    _, _, _, _, ls = strip("x\nBALAZS-OK: TG 1", state=sd, ages={"outbound-markers.jsonl.1": 30})
+    check(".1 younger than 90 days stays", ls == ["outbound-markers.jsonl", "outbound-markers.jsonl.1"], str(ls))
+
+# The "who" patch: one line per inbound message, sender id and ids only, no text, 0600.
+WHO = next(p for p in ptp.PATCHES if p["name"] == "who")
+with tempfile.TemporaryDirectory() as sd:
+    js = ("const fs = require('fs'); const { writeFileSync, statSync, renameSync, rmSync } = fs; const { join } = require('path');\n"
+          f"const STATE_DIR = {json.dumps(sd)}; const chat_id = '-100'; const msgId = 901; const from = {{ id: 8366648365, username: 'b' }};\n"
+          + WHO["insert"].format(indent=""))
+    p = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=20)
+    f = os.path.join(sd, "inbound-senders.jsonl")
+    rec = json.loads(open(f).read().strip()) if os.path.exists(f) else {}
+    check("who: chat_id, message_id, user_id, at; no text, no name; 0600",
+          p.returncode == 0 and sorted(rec) == ["at", "chat_id", "message_id", "user_id"] and rec["user_id"] == "8366648365"
+          and rec["message_id"] == "901" and stat.S_IMODE(os.stat(f).st_mode) == 0o600, f"{p.stderr[-200:]} {rec}")
 
 # 3. end to end with the real gate (ÖTLET-KAPU)
 pitch = "Új ötlet: kalkulátor-portál."
 line = "ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel)"
 check("gate: no marker still blocks", gate(pitch) == 2)
 both = pitch + "\n" + line
-sent, err, _, _ = strip(both)
+sent, err, _, _, _ = strip(both)
 check("gate: with marker passes, and the sent text has no marker",
       gate(both) == 0 and sent == pitch and "ÖTLET-KAPU" not in (sent or ""), repr(sent))
 
@@ -144,6 +196,9 @@ for path in plugins:
         continue
     out, st = ptp.apply_patch(src, STRIP)
     check(f"installed {path.split('/')[-2]}: anchors found once", st == "patched", st)
+    if ptp.WHO_MARKER not in out:
+        out, st2 = ptp.apply_patch(out, WHO)
+        check(f"installed {path.split('/')[-2]}: who anchor found once", st2 == "patched", st2)
     bun = shutil.which("bun") or os.path.expanduser("~/.bun/bin/bun")
     if st == "patched" and os.path.exists(bun):
         with tempfile.TemporaryDirectory() as d:
