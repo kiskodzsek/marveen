@@ -19,6 +19,8 @@ hook adds NO new state model -- it reuses ledger_lib.open_question_with_age):
     per the standing rule a bare ack needs no reply.
   - If this agent REACTED (emoji, Telegram react tool) in that chat after the inbound arrived -> allow; the reaction
     is the acknowledgement (Klodel 34050, Balázs TG 3631: no extra 👍 messages in the group).
+  - If the agent CLOSED it as "not for me" (scripts/hooks/ledger-close.py; Klodel 37860, Patrik and Balázs talking
+    to each other) -> allow.
   - If the open inbound is older than STALE_SECONDS -> allow; never nag forever on
     an abandoned/old message (prevents an endless block loop).
   - If this same message_id has already been blocked MAX_BLOCKS times -> allow;
@@ -268,8 +270,9 @@ def main():
     # Klodel 34050 (Balázs csoport TG 3631: "ne újjazz már meg ennyiszer"): an emoji reaction in the same chat after
     # the inbound arrived acknowledges it without a new message (ledger-outbound.py records it on a successful
     # mcp__plugin_telegram_telegram__react). Without a reaction or a reply the guard still blocks.
+    # Klodel 37860: or the agent closed it as "not for me" (scripts/hooks/ledger-close.py, Patrik <-> Balázs).
     try:
-        if ledger_lib.reacted_since(agent_id, chat_id, created_at):
+        if ledger_lib.acknowledged(agent_id, chat_id, message_id, created_at):
             sys.exit(0)
     except SystemExit:
         raise
@@ -315,7 +318,10 @@ def main():
         f"A fordulót NEM zárhatod le, amíg NEM küldtél választ {how}. "
         f"A sima szöveges (assistant text) kimenet NEM jut el a felhasználóhoz -- "
         f"{sees}. Küldd el a választ a reply toollal MOST, "
-        f"utána zárhatod a fordulót."
+        f"utána zárhatod a fordulót.\n"
+        f"Ha az üzenet NEM neked szólt (pl. Patrik és Balázs egymásnak írnak), ne válaszolj, hanem zárd le "
+        f"csendben: python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ledger-close.py')} "
+        f"{chat_id} {message_id} \"nem nekem: <kinek szólt>\""
     )
     print(json.dumps({"decision": "block", "reason": reason}))
     sys.exit(0)

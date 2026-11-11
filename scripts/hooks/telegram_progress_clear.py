@@ -28,6 +28,26 @@ decision JSON when blocking. Token/state dir resolution mirrors the plugin
 """
 import sys, os, json, glob, urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import ledger_lib
+except Exception:  # the ledger is optional here: without it nothing counts as acknowledged (old behaviour)
+    ledger_lib = None
+
+
+def acknowledged(ev, p):
+    """Klodel 37860: the inbound behind this placeholder (src_mid) was closed as "not for me" (ledger-close.py) or
+    reacted to after it arrived. Then no reply is owed: the placeholder is deleted, and NOTHING is sent -- the
+    fallback below would otherwise post the transcript's last text into a conversation that was not ours."""
+    if ledger_lib is None or not p.get("src_mid"):
+        return False
+    try:
+        agent_id = ledger_lib.agent_id_from_payload(ev)
+        cid, mid = p.get("chat_id"), p.get("src_mid")
+        return ledger_lib.acknowledged(agent_id, cid, mid, ledger_lib.inbound_created_at(agent_id, cid, mid))
+    except Exception:
+        return False
+
 INSTRUCTION = (
     "KÖTELEZŐ: erre a Telegram-üzenetre még NEM küldtél választ a Telegram "
     "`reply` tool-lal (chat_id=%s). A CLI/transzkript szöveget a felhasználó a "
@@ -141,6 +161,26 @@ def main():
         pend = json.load(open(path))
     except Exception:
         pend = None
+
+    if pend:
+        done = [p for p in pend if acknowledged(ev, p)]
+        if done:
+            tok = token(sd)
+            for p in done:
+                if tok:
+                    try:
+                        api(tok, "deleteMessage", {"chat_id": p.get("chat_id"), "message_id": p.get("message_id")})
+                    except Exception as e:
+                        log(sd, f"[ack] delete failed: {e}")
+            pend = [p for p in pend if p not in done]
+            try:
+                if pend:
+                    json.dump(pend, open(path, "w"))
+                else:
+                    os.remove(path)
+            except Exception:
+                pass
+            log(sd, f"[ack] {len(done)} placeholder(s) of acknowledged/closed inbound(s) removed, no reply sid={sid}")
 
     if not pend:
         # Nothing pending: either not a Telegram turn, or the reply was already

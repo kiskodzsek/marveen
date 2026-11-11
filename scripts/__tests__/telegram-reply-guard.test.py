@@ -445,6 +445,116 @@ def main():
                    "tool_input": {"chat_id": GRP}}), capture_output=True, text=True, env=env, timeout=20)
     check("react: another telegram tool keeps the placeholder", os.path.exists(pend), True)
 
+    # 8. Klodel 37860 (Balázs TG 5277): "not for me" close -- guard, live drain and progress Stop hook accept it.
+    close_cli = os.path.join(HOOKS, "ledger-close.py")
+    drain = os.path.join(HOOKS, "ledger-live-drain.py")
+
+    def run_close(db, *args):
+        env = dict(os.environ)
+        env["LEDGER_DB_PATH"] = db
+        env["MARVEEN_AGENT_ID"] = AGENT
+        p = subprocess.run([sys.executable, close_cli, *args], capture_output=True, text=True, env=env,
+                           cwd=os.path.dirname(db), timeout=20)
+        return p.returncode
+
+    def run_drain(db):
+        env = dict(os.environ)
+        env["LEDGER_DB_PATH"] = db
+        env["MARVEEN_AGENT_ID"] = AGENT
+        p = subprocess.run([sys.executable, drain], capture_output=True, text=True, env=env,
+                           cwd=os.path.dirname(db), timeout=20)
+        return p.stdout.startswith("OPEN_QUESTION")
+
+    def aged(lib, mid, secs=300):
+        con = lib.connect()
+        con.execute("UPDATE conversation_log SET created_at=? WHERE message_id=?", (int(time.time()) - secs, mid))
+        con.commit(); con.close()
+
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound(AGENT, GRP, "5260", "regeljek be ? Patrik", "2026-11-11T13:00:00.000Z")
+    aged(lib, "5260")
+    check("close: without a close the guard blocks", run_hook(db)[0], "block")
+    check("close: without a close the drain surfaces it", run_drain(db), True)
+    check("close: a note without 'nem nekem:' is refused", run_close(db, GRP, "5260", "Balázsnak szólt"), 2)
+    check("close: an empty addressee is refused", run_close(db, GRP, "5260", "nem nekem:   "), 2)
+    check("close: an unknown message is refused", run_close(db, GRP, "9999", "nem nekem: Balázsnak"), 2)
+    check("close: a 1-letter addressee is refused (L1)", run_close(db, GRP, "5260", "nem nekem: x"), 2)
+    check("close: a non-integer message id is refused (I2)", run_close(db, GRP, "5260;x", "nem nekem: Balázsnak"), 2)
+    check("close: refused attempts wrote nothing", os.path.exists(lib._closed_file(AGENT)), False)
+    check("close: a valid close exits 0", run_close(db, GRP, "5260", "nem nekem: Patrik Balázsnak"), 0)
+    check("close: the guard allows the closed message", run_hook(db)[0], None)
+    check("close: audit log line written",
+          "nem nekem: Patrik Balázsnak" in open(lib._closed_file(AGENT)[:-5] + ".log", encoding="utf-8").read(), True)
+    check("close: no ledger 'out' row written", lib.connect().execute(
+        "SELECT COUNT(*) FROM conversation_log WHERE direction='out'").fetchone()[0], 0)
+    lib.log_inbound(AGENT, GRP, "5261", "és mikor?", "2026-11-11T13:01:00.000Z")
+    con = lib.connect()
+    con.execute("UPDATE conversation_log SET created_at=? WHERE message_id='5261'", (int(time.time()) - 200,))
+    con.commit(); con.close()
+    check("close: a newer, unclosed inbound blocks again", run_hook(db)[0], "block")
+    check("close: ... and the drain surfaces it", run_drain(db), True)
+
+    # the drain dedups a surfaced id, so the close is checked on a DB the drain has not seen yet
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound(AGENT, GRP, "5262", "Patrik, mehet?", "2026-11-11T13:02:00.000Z")
+    aged(lib, "5262")
+    run_close(db, GRP, "5262", "nem nekem: Balázs Patriknak")
+    check("close: the drain does not surface a closed message", run_drain(db), False)
+    lib.log_inbound(AGENT, GRP, "5263", "Patrik, és ez?", "2026-11-11T13:03:00.000Z")
+    aged(lib, "5263", 250)
+    check("close: control -- the drain does surface the next, unclosed one", run_drain(db), True)
+
+    # the drain honours a reaction too (measured 13:58: OPEN_QUESTION after a 👍)
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound(AGENT, GRP, "5270", "szerintetek?", "2026-11-11T13:50:00.000Z")
+    aged(lib, "5270", 200)
+    react(db, GRP)
+    check("drain: a reaction after the inbound silences it", run_drain(db), False)
+
+    # progress Stop hook: a closed inbound's placeholder goes, the stop is NOT blocked, nothing is sent
+    pclear = os.path.join(HOOKS, "telegram_progress_clear.py")
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound(AGENT, GRP, "5280", "Balázs, ránézel?", "2026-11-11T13:55:00.000Z")
+    sd2 = tempfile.TemporaryDirectory(prefix="tgprog-")
+    _TMPDIRS.append(sd2)
+    os.makedirs(os.path.join(sd2.name, "progress"))
+    pend2 = os.path.join(sd2.name, "progress", "sid2.json")
+
+    def run_pclear(db):
+        env = dict(os.environ)
+        env["LEDGER_DB_PATH"] = db
+        env["MARVEEN_AGENT_ID"] = AGENT
+        env["TELEGRAM_STATE_DIR"] = sd2.name
+        p = subprocess.run([sys.executable, pclear], input=json.dumps({"session_id": "sid2", "cwd": os.path.dirname(db),
+                           "stop_hook_active": False}), capture_output=True, text=True, env=env, timeout=20)
+        return (json.loads(p.stdout).get("decision") if p.stdout.strip() else None), p.returncode
+
+    json.dump([{"chat_id": GRP, "message_id": 91, "src_mid": "5280"}], open(pend2, "w"))
+    check("progress: an unclosed inbound's placeholder blocks the stop", run_pclear(db), ("block", 0))
+    os.remove(os.path.join(sd2.name, "progress", "enforce-sid2.marker"))
+    check("progress: close exits 0", run_close(db, GRP, "5280", "nem nekem: Patrik Balázsnak"), 0)
+    check("progress: a closed inbound does not block", run_pclear(db), (None, 0))
+    check("progress: its placeholder state is cleared", os.path.exists(pend2), False)
+
+    # 9. Viktor 37867 M1: the owner's private message and a reply to our own message cannot be closed.
+    db = fresh_db()
+    lib = load_lib(db)
+    PRIV = "4242001"
+    lib.log_inbound(AGENT, PRIV, "6001", "Kernel, ránézel?", "2026-11-11T14:00:00.000Z")
+    check("M1a: a private-chat inbound is refused", run_close(db, PRIV, "6001", "nem nekem: Balázsnak"), 2)
+    lib.log_outbound(AGENT, GRP, "itt a link", message_id="7001")
+    lib.log_inbound(AGENT, GRP, "5290", "és ezt hova?", "2026-11-11T14:01:00.000Z", reply_to_message_id="7001")
+    check("M1b: a reply to our own message is refused", run_close(db, GRP, "5290", "nem nekem: Balázsnak"), 2)
+    check("M1: refused attempts wrote nothing", os.path.exists(lib._closed_file(AGENT)), False)
+    check("M1b: ... and the guard still blocks it", run_hook(db)[0], "block")
+    lib.log_inbound(AGENT, GRP, "5291", "Balázs, ezt nézd", "2026-11-11T14:02:00.000Z", reply_to_message_id="99")
+    check("M1b control: a reply to someone else's message can be closed",
+          run_close(db, GRP, "5291", "nem nekem: Patrik Balázsnak"), 0)
+
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
         sys.exit(1)
