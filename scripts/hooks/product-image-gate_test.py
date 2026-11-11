@@ -1705,7 +1705,12 @@ def idea_refused_direction_inside_marker_line_blocked(root):
              'PRIVÁT-OK: telefonos asszisztens ügy, Patrik kérdezte\n' + IDEA_LINE + 'Új ötlet.')
     hits = [run(root, {'chat_id': GROUP, 'text': t})[0] for t in texts]
     ok, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: kalkulátor-portál.'})
-    return all(r == 2 for r in hits) and ok == 0
+    # A negation in the marker line is the declaration the gate asks for (TG 17460: "nem AI-tanácsadás"): it passes.
+    # In the body a negation gets no pass.
+    neg_line, _ = run(root, {'chat_id': GROUP, 'text': 'ÖTLET-KAPU: nem Marabel/könyv, nem AI-tanácsadás, nem telefonos '
+                                                       'asszisztens, termékpaletta ellenőrizve\nÚj ötlet: kalkulátor.'})
+    neg_body, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: nem recepciós, hanem kalkulátor.'})
+    return all(r == 2 for r in hits) and ok == 0 and neg_line == 0 and neg_body == 2
 
 
 @case

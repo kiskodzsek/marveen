@@ -902,6 +902,10 @@ IDEA_TEXT_SKIP = ('marabel',)
 # The gate's own required phrases are cut out before the match ("nem Marabel/könyv" would hit "marabel"); the rest of
 # a marker line stays under the check, so a refused direction written INTO an ÖTLET-KAPU line still stops (Viktor 38060 L2).
 IDEA_OWN_PHRASES = re.compile(r'ötlet-kapu:|privát-ok:|elvetett-de-kert:\s*tg\s*\d+|nem marabel/könyv|termékpaletta ellenőrizve')
+IDEA_MARKER_STARTS = ('ötlet-kapu:', 'privát-ok:', 'elvetett-de-kert:')
+# Inside a marker line a negation is the declaration the gate asks for ("ÖTLET-KAPU: ..., nem AI-tanácsadás"; TG 17460
+# was stopped for it, measured 2026-11-11): "nem <word>" is cut there. In the message body a negation gets no pass.
+IDEA_MARKER_NEGATION = re.compile(r'(?<!\w)nem\s+[\w/-]+')
 # Fewer entries than this = the list was emptied or cut, which would switch the check off silently: fail closed.
 IDEA_MIN_REFUSED = 10
 
@@ -929,7 +933,9 @@ def word_start(k, t):
 def refused_in_text(t):
     """Banned directions named in the text (the gate's own phrases cut out). Fail closed: without the list, an idea
     text stops."""
-    body = IDEA_OWN_PHRASES.sub(' ', t.lower())
+    lines = t.lower().splitlines()
+    body = IDEA_OWN_PHRASES.sub(' ', '\n'.join(
+        IDEA_MARKER_NEGATION.sub(' ', ln) if ln.strip().startswith(IDEA_MARKER_STARTS) else ln for ln in lines))
     try:
         banned = refused_directions()
     except Exception as e:
