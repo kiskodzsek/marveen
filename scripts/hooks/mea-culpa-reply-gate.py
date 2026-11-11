@@ -19,6 +19,19 @@ writes to Patrik's chats). A malformed hook payload is allowed (nothing to read)
 Wiring: .claude/settings.json PreToolUse, matcher "mcp__plugin_telegram_telegram__reply|...__edit_message" (the main
 agent's settings; the sub-agents have their own). No chat id is written in this file: the ids are personal data.
 Tests: mea-culpa-reply-gate_test.py next to this file.
+
+Two more checks in the same hook (Klodel 38198, hibanapló 2026-11-11 17:02: an edit_message with the text
+"PLACEHOLDER" went out to the live status message of the team group):
+- PLACEHOLDER-KAPU, in EVERY chat: the text is a placeholder. Blocks a whole-word upper-case PLACEHOLDER anywhere,
+  "lorem ipsum" anywhere, a template variable {{...}}, a line that is only PLACEHOLDER / TODO / TBD / XXX (any case,
+  punctuation around it allowed), a bracketed [TODO] / <TBD> / {XXX} / (PLACEHOLDER), and "...: TODO" / TBD / XXX at a
+  line end (upper case). Prose that names the word passes ("3 TODO maradt a kódban", "a placeholder szót", "XXL").
+  An edit_message whose whole text is shorter than 15 characters (after trimming) is blocked too.
+- ELO-ALLAPOT-KAPU: an edit_message to the live status message (store/projektek.json elo_uzenet "csoport" or
+  "privat", its chat_id AND message_id) must start with "📊 ÉLŐ ÁLLAPOT" (or "ÉLŐ ÁLLAPOT"), the head that
+  ops/elo_allapot.py writes. When the store does not name the message, this check has nothing to compare and passes.
+The edit is recognised by tool_name (...__edit_message), or, when the payload has no tool_name, by a message_id in
+tool_input.
 """
 import json
 import os
@@ -73,6 +86,44 @@ def owner_chats():
     return out
 
 
+PLACEHOLDER_RX = [
+    re.compile(r'\bPLACEHOLDER\b'),
+    re.compile(r'lorem\s+ipsum', re.IGNORECASE),
+    re.compile(r'\{\{[^{}\n]{0,80}\}\}'),
+    re.compile(r'(?im)^[\W_]*(placeholder|todo|tbd|xxx)[\W_]*$'),
+    re.compile(r'(?i)[\[<{(]\s*(placeholder|todo|tbd|xxx)\s*[\]>})]'),
+    re.compile(r'(?m):\s*(TODO|TBD|XXX)[\W_]*$'),
+]
+EDIT_MIN_CHARS = 15
+LIVE_HEAD = re.compile(r'^\s*(📊\s*)?ÉLŐ ÁLLAPOT')
+
+
+def placeholder(text, is_edit):
+    t = unicodedata.normalize('NFKC', str(text)).translate(ZERO_WIDTH)
+    for rx in PLACEHOLDER_RX:
+        m = rx.search(t)
+        if m:
+            return m.group(0).strip()[:30]
+    if is_edit and len(t.strip()) < EDIT_MIN_CHARS:
+        return f'{len(t.strip())} karakteres szerkesztés'
+    return None
+
+
+def live_messages():
+    """(chat_id, message_id) of the live status messages named in store/projektek.json elo_uzenet."""
+    try:
+        with open(os.path.join(STORE, 'projektek.json'), encoding='utf-8') as f:
+            elo = json.load(f).get('elo_uzenet')
+    except Exception:
+        return set()
+    out = set()
+    for key in ('privat', 'csoport'):
+        v = elo.get(key) if isinstance(elo, dict) else None
+        if isinstance(v, dict) and v.get('chat_id') is not None and v.get('message_id') is not None:
+            out.add((str(v['chat_id']).strip(), str(v['message_id']).strip()))
+    return out
+
+
 def hits(text):
     plain = norm(text)
     return [label for label, rx in COMPILED if rx.search(plain)]
@@ -80,15 +131,29 @@ def hits(text):
 
 def main():
     try:
-        ti = json.load(sys.stdin).get('tool_input') or {}
+        payload = json.load(sys.stdin)
+        ti = payload.get('tool_input') or {}
     except Exception:
         return 0
     if not isinstance(ti, dict):
         return 0
+    tool = str(payload.get('tool_name') or '')
+    is_edit = tool.endswith('edit_message') if tool else 'message_id' in ti
+    text = ti.get('text') if isinstance(ti.get('text'), str) else ''
+    ph = placeholder(text, is_edit)
+    if ph:
+        sys.stderr.write(f'PLACEHOLDER-KAPU (Klodel 38198, hibanapló 11-11 17:02): helyőrző szöveg nem megy ki ("{ph}"). '
+                         'Írd meg a valódi szöveget, vagy ne küldd el.\n')
+        return 2
+    target = (str(ti.get('chat_id') or '').strip(), str(ti.get('message_id') or '').strip())
+    if is_edit and target in live_messages() and not LIVE_HEAD.match(unicodedata.normalize('NFC', text)):
+        sys.stderr.write('ELO-ALLAPOT-KAPU (Klodel 38198): az élő állapot-üzenetet csak "📊 ÉLŐ ÁLLAPOT" kezdetű '
+                         'szöveg írhatja felül (ops/elo_allapot.py kimenete).\n')
+        return 2
     chats = owner_chats()
     if chats and str(ti.get('chat_id') or '').strip() not in chats:
         return 0
-    found = hits(ti.get('text') or '')
+    found = hits(text)
     if found:
         sys.stderr.write(
             f'MEA-CULPA-KAPU: {", ".join(found)} - Patriknak nincs "igazad van / hibáztam / ezentúl" válasz (TG 3795, '
