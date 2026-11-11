@@ -58,13 +58,13 @@ describe('patch-telegram-plugin.py', () => {
   it('2nd run is a no-op: returns `already`, byte-identical, silent', () => {
     const state = join(cache, 'state.json')
     run(['--state', state])
-    expect(readState(state).files).toEqual([{ version: '0.0.7', path: server, status: 'patched', patches: { d4: 'patched', fwd: 'patched', evid: 'patched' } }])
+    expect(readState(state).files).toEqual([{ version: '0.0.7', path: server, status: 'patched', patches: { d4: 'patched', fwd: 'patched', evid: 'patched', strip: 'patched' } }])
     const once = readFileSync(server, 'utf-8')
     const r = run(['--state', state])
     expect(r.status).toBe(0)
     expect(r.stderr).toBe('')
     expect(readFileSync(server, 'utf-8')).toBe(once)
-    expect(readState(state).files).toEqual([{ version: '0.0.7', path: server, status: 'already', patches: { d4: 'already', fwd: 'already', evid: 'already' } }])
+    expect(readState(state).files).toEqual([{ version: '0.0.7', path: server, status: 'already', patches: { d4: 'already', fwd: 'already', evid: 'already', strip: 'already' } }])
   })
 
   it('a changed anchor (plugin update): loud line, THAT patch left out, the other still applied, exit 0', () => {
@@ -79,7 +79,7 @@ describe('patch-telegram-plugin.py', () => {
     expect(text).toContain("bot.command('help', async ctx => {")
     expect(text).toContain('elsokor922-fwd')
     expect(syntaxErrors(text)).toEqual([])
-    expect(readState(state).files[0].patches).toEqual({ d4: 'anchor-missing:status handler', fwd: 'patched', evid: 'patched' })
+    expect(readState(state).files[0].patches).toEqual({ d4: 'anchor-missing:status handler', fwd: 'patched', evid: 'patched', strip: 'patched' })
   })
 
   // #1530 review: owner write commands need evidence the owner's chat sent
@@ -105,6 +105,21 @@ describe('patch-telegram-plugin.py', () => {
       expect(recs.map(r => [r.chat_id, r.message_id, r.text])).toEqual([['42', '901', '/model opus'], ['42', null, 'szia']])
       expect(typeof recs[0].at).toBe('number')
     } finally { rmSync(stateDir, { recursive: true, force: true }) }
+  })
+
+  // Klodel 38054 (Balázs TG 5404): the gate markers leave the sent text. One line at the top of the reply and the
+  // edit_message case, before the text is read; the behaviour itself: scripts/__tests__/patch-telegram-plugin-strip.test.py.
+  it('strip: one line at the top of the reply and the edit_message case, before the text is read, still parses', () => {
+    run()
+    const text = readFileSync(server, 'utf-8')
+    expect(text.match(/MARVEEN-PATCH\(kapu-jelolo-38054\)/g)).toHaveLength(2)
+    const lines = text.split('\n')
+    for (const head of ["case 'reply': {", "case 'edit_message': {"]) {
+      const i = lines.findIndex(l => l.trim() === head)
+      expect(lines[i + 1]).toContain('MARVEEN-PATCH(kapu-jelolo-38054)')
+      expect(lines[i + 1]).toMatch(/^ +if \(typeof args\.text === 'string'\)/)
+    }
+    expect(syntaxErrors(text)).toEqual([])
   })
 
   it('evid: the permission notification (a different method) is not an anchor; a moved anchor leaves evid out loudly', () => {

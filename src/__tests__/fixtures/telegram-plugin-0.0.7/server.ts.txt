@@ -163,3 +163,42 @@ async function handleInbound(
     process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
   })
 }
+
+// Verbatim: the head of the tool-call handler, the reply case up to its argument reads, and the edit_message case
+// (strip patch, Klodel 38054). The closing lines only make the excerpt parse on its own.
+declare const mcp: any
+declare const CallToolRequestSchema: any
+declare function assertAllowedChat(c: string): void
+mcp.setRequestHandler(CallToolRequestSchema, async req => {
+  const args = (req.params.arguments ?? {}) as Record<string, unknown>
+  try {
+    switch (req.params.name) {
+      case 'reply': {
+        const chat_id = args.chat_id as string
+        const text = args.text as string
+        const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
+        const files = (args.files as string[] | undefined) ?? []
+        const format = (args.format as string | undefined) ?? 'text'
+        const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        return { content: [{ type: 'text', text: String(text) + chat_id + reply_to + files + format + parseMode }] }
+      }
+      case 'edit_message': {
+        assertAllowedChat(args.chat_id as string)
+        const editFormat = (args.format as string | undefined) ?? 'text'
+        const editParseMode = editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const edited = await bot.api.editMessageText(
+          args.chat_id as string,
+          Number(args.message_id),
+          args.text as string,
+          ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
+        )
+        const id = typeof edited === 'object' ? edited.message_id : args.message_id
+        return { content: [{ type: 'text', text: `edited (id: ${id})` }] }
+      }
+      default:
+    }
+  } catch (err) {
+    return { content: [{ type: 'text', text: String(err) }], isError: true }
+  }
+  return {}
+})

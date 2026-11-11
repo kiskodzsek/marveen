@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Take /status and /help away from the Telegram channel plugin (ELSOKOR922 D-4),
-mark forwarded messages in the inbound meta (forwarded="1"), and record every
-inbound message the bot receives (the evidence owner WRITE commands need).
+mark forwarded messages in the inbound meta (forwarded="1"), record every
+inbound message the bot receives (the evidence owner WRITE commands need), and
+cut the reply gates' marker lines (ÖTLET-KAPU, PRIVÁT-OK, BALAZS-OK, ...) out of
+the text the bot sends (Klodel 38054; see STRIP_JS).
 
 The official plugin (claude-plugins-official/telegram/<ver>/server.ts) answers
 /status ("Paired as ...") and /help itself, inside its bot poller -- those
@@ -75,6 +77,37 @@ EVID_INSERT = (
     "text, at: Date.now() }}) + '\\n', {{ flag: 'a', mode: 0o600 }}) }} catch {{}} " + EVID_MARKER + "\n"
 )
 
+# Gate markers out of the sent text (Klodel 38054, Balázs csoport TG 5404: "mi ez minden valaszod utan Balazs-ok
+# tudom hogy ok vagyok"). The reply gates (product-image-gate, balazs-task-reply-gate, claim-source-reply-gate)
+# want their marker line IN the reply text, so Patrik and Balázs read it. The hooks run on the tool input BEFORE
+# the call and keep seeing the marker; this patch cuts the marker out in the plugin, at send time, for reply and
+# edit_message. Not a PreToolUse updatedInput: nine hooks run in parallel on this tool, and which rewrite wins when
+# more than one rewrites is not documented; the plugin is one place, deterministic, and testable.
+# Cut: a line starting with ÖTLET-KAPU / BALAZS-OK (Balázs OK) / PATRIK-KÉRTE / ELVETETT-DE-KÉRT (any case, as the
+# gates accept them) or an upper-case FORRÁS: line (a prose "Forrás: KSH" stays); and PRIVÁT-OK: up to the line end
+# wherever it stands (the gate finds it anywhere). The cut lines go to <STATE_DIR>/outbound-markers.jsonl (0600,
+# past 256 KiB the file becomes .1) for audit. A text that is ONLY markers is refused, not sent empty.
+# Uses only names server.ts already imports (writeFileSync, statSync, renameSync, join) and req/args of the handler.
+STRIP_MARKER = "// MARVEEN-PATCH(kapu-jelolo-38054): gate markers out of the sent text"
+STRIP_ANCHORS = [
+    ("reply case", re.compile(r"^( *)case 'reply': \{\n", re.MULTILINE)),
+    ("edit_message case", re.compile(r"^( *)case 'edit_message': \{\n", re.MULTILINE)),
+]
+STRIP_JS = (
+    r"{indent}  if (typeof args.text === 'string') {{ const __gone = []; const __cut = m => {{ __gone.push(m.trim()); "
+    r"return '' }}; let __t = args.text.normalize('NFC')"
+    r".replace(/^[ \t]*(?:ÖTLET\\?-KAPU|BAL[AÁ]ZS[ \t\\-]?OK|PATRIK.K[EÉ]RTE|ELVETETT\\?-DE\\?-K[EÉ]RT)[ \t]*:[^\n]*(?:\r?\n|$)/gimu, __cut)"
+    r".replace(/^[ \t]*FORRÁS[ \t]*:[^\n]*(?:\r?\n|$)/gmu, __cut)"
+    r".replace(/PRIVÁT-OK:[^\n]*/gu, __cut); "
+    r"if (__gone.length) {{ __t = __t.replace(/[ \t]+$/gmu, '').replace(/\n{{3,}}/g, '\n\n').trim(); "
+    r"try {{ const __f = join(STATE_DIR, 'outbound-markers.jsonl'); "
+    r"try {{ if (statSync(__f).size > 262144) renameSync(__f, __f + '.1') }} catch {{}}; "
+    r"writeFileSync(__f, JSON.stringify({{ chat_id: String(args.chat_id ?? ''), tool: req.params.name, "
+    r"removed: __gone, at: Date.now() }}) + '\n', {{ flag: 'a', mode: 0o600 }}) }} catch {{}}; "
+    r"if (!__t) throw new Error('the text was only gate markers (ÖTLET-KAPU, PRIVÁT-OK, ...); write the message too'); "
+    r"args.text = __t }} }} "
+) + STRIP_MARKER + "\n"
+
 # Independent patches: each has its own marker and is all-or-nothing on its
 # own, so a plugin update that moves one anchor does not undo the other.
 PATCHES = [
@@ -86,6 +119,9 @@ PATCHES = [
     {"name": "evid", "marker": EVID_MARKER, "anchors": [EVID_ANCHOR], "mode": "insert-before",
      "insert": EVID_INSERT,
      "fallback": "no inbound evidence is recorded, owner write commands are refused"},
+    {"name": "strip", "marker": STRIP_MARKER, "anchors": STRIP_ANCHORS, "mode": "insert-after",
+     "insert": STRIP_JS,
+     "fallback": "gate marker lines (ÖTLET-KAPU, PRIVÁT-OK, BALAZS-OK, ...) are sent as written"},
 ]
 
 
