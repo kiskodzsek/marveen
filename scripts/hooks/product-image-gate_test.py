@@ -1557,6 +1557,18 @@ def idea_private_window_open_still_gated(root):
 
 
 @case
+def idea_irany_word_start_only(root):
+    # Klodel 37827: "irány" only at a word start, not the verb irányít-; "ötlet" stays a substring (üzletötlet).
+    neg = ['A WP-oldalakról 301-es átirányítás megy a Next.js-re.', 'Útirány: Budapest.', 'Az irányítópult kész.',
+           'Az irányítás nálad van.']
+    pos = ['Új irány: évkönyv.', 'Új irányt javaslok.', 'Három irányban lépnénk.', 'Ötletek a hétre.',
+           'Üzletötlet: tabló.', 'Ez az IRÁNY jó.']
+    rn = [run(root, {'chat_id': GROUP, 'text': t})[0] for t in neg]
+    rp = [run(root, {'chat_id': GROUP, 'text': t})[0] for t in pos]
+    return all(r == 0 for r in rn) and all(r == 2 for r in rp)
+
+
+@case
 def idea_group_gated(root):
     # Patrik csoport TG 4978: the group is gated too, and "irány" triggers like "ötlet".
     rc, _ = run(root, {'chat_id': GROUP, 'text': 'Négy új irány: évkönyv.'})
