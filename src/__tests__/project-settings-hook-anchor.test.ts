@@ -69,6 +69,7 @@ const EXPECTED: Record<string, string[]> = {
     'mea-culpa-reply-gate.py', 'render-claim-reply-gate.py',
     'product-image-gate.py', 'mute-video-reply-gate.py', 'claim-source-reply-gate.py',
     'react-emoji-gate.py', 'balazs-task-reply-gate.py', // #185: wired then, never added here
+    'pr-kerdes-gate.py', // PRKERDES1111 (Klodel 37320)
   ],
   Stop: ['marveen-commands.py', 'telegram-reply-guard.py', 'telegram_progress_clear.py', 'slack_progress_clear.py'],
   SessionStart: ['ledger-replay.py', 'taskstate-replay.py', 'clear-replay.py', 'marveen-commands.py'],
