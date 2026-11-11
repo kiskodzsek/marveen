@@ -72,6 +72,10 @@ export const DENIED_PATH_PATTERNS: { pattern: RegExp; reason: string }[] = [
  * 2026-08-18, a bare `sk_` matches `task_name` and `skipIfBusy`, and a bare
  * `Bearer ` matches 64 files of `Bearer ${token}`. A gate that cries wolf gets
  * bypassed, and a bypassed gate protects nothing.
+ *
+ * Also read AT RUN TIME by scripts/lib/msg_gate.py (the agent-msg.sh send gate), which parses this
+ * list as text: keep one `{ name: '...', pattern: /.../flags },` entry per line, flags `i` at most.
+ * scripts/__tests__/agent-msg-send-gate.test.sh fails when an entry stops parsing.
  */
 export const SECRET_PATTERNS: { name: string; pattern: RegExp }[] = [
   { name: 'private key block', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },

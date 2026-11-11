@@ -42,6 +42,8 @@
 #   MARVEEN_HOMOGLYPH_BIN  the checker (default <repo>/scripts/lib/homoglyph.py)
 #   MARVEEN_QUEUE_WARN_AT  queue depth that triggers the stderr notice (default 3, 0 = off)
 #   MARVEEN_MAJSZTRO_STATE Majsztro's usage state (default <repo>/store/mod-state/majsztro.json)
+#   MARVEEN_MSG_GATE_BIN   the send gate (default <repo>/scripts/lib/msg_gate.py; its own env is documented there)
+# Exit 3: a gate refused the text (homoglyph, secret shape, Majsztro length/e-mail); exit 4: a gate crashed.
 # MAJSZTRO SUBSTITUTE COPY (Klodel 36866, CLAUDE.md MÁJSZTRÓ HELYETTES): on 2026-11-10 18:35 Radar delivered research
 # Patrik was waiting for to Majsztro while his budget stood at 100 %; Patrik asked "Na?" (private TG 17341) before it
 # reached Klodel, who substitutes for Majsztro then. So after a successful send to majsztro, when his seven_day limit
@@ -119,6 +121,36 @@ if [ -r "$HG" ] && command -v python3 >/dev/null 2>&1; then
   esac
 else
   echo "WARN: homoglyph checker not found at $HG -- sending UNCHECKED." >&2
+fi
+
+# --- Send gate: secret shapes, and Majsztro's length / e-mail rule (card aba42256) ---
+# What it refuses and why, with the measurements: scripts/lib/msg_gate.py. Same contract as the
+# homoglyph gate above: the raw text in, the exit code is the verdict, the text that goes out is
+# always the sender's own. 3 = refused (reasons on stderr), anything else = the gate broke, and
+# nothing is sent either way. A missing gate file is today's state on an install without it, so
+# that one sends, loudly (the reasoning above, FAIL-OPEN ON A MISSING CHECKER).
+MG="${MARVEEN_MSG_GATE_BIN:-$BASE/scripts/lib/msg_gate.py}"
+# Viktor 37183 (a): the fail-open is for the DEFAULT path only (an install without the file). An
+# explicitly named gate that cannot be read is a misconfiguration, not today's state: refuse.
+if [ -n "${MARVEEN_MSG_GATE_BIN:-}" ] && [ ! -r "$MG" ]; then
+  echo "FAIL: MARVEEN_MSG_GATE_BIN is set but $MG is not readable; nothing was sent." >&2
+  exit 4
+fi
+if [ -r "$MG" ] && command -v python3 >/dev/null 2>&1; then
+  MG_ERR="$(printf '%s' "$C" | python3 -I "$MG" --from "$FROM" --to "$TO" 2>&1 >/dev/null)"
+  MG_RC=$?
+  case "$MG_RC" in
+    0) : ;;
+    3) echo "FAIL: send gate refused the message to $TO; nothing was sent." >&2
+       printf '%s\n' "$MG_ERR" >&2
+       exit 3 ;;
+    *) echo "FAIL: send gate CRASHED (rc=$MG_RC) at $MG; nothing was sent." >&2
+       printf '%s\n' "$MG_ERR" | head -5 >&2
+       echo "  This is not a verdict on the text -- fix the gate or unset MARVEEN_MSG_GATE_BIN." >&2
+       exit 4 ;;
+  esac
+else
+  echo "WARN: send gate not found at $MG -- sending UNCHECKED." >&2
 fi
 
 BODY="$(FROM="$FROM" TO="$TO" C="$C" P="$PRIORITY" python3 -c 'import json,os; d={"from":os.environ["FROM"],"to":os.environ["TO"],"content":os.environ["C"]}; d.update({"priority":"urgent"} if os.environ["P"]=="urgent" else {}); print(json.dumps(d))')"

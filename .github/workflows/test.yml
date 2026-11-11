@@ -96,6 +96,9 @@ jobs:
       - run: bash scripts/__tests__/worktree-add.test.sh
       # Klodel 36866: curl and sleep stubbed on PATH, state file in a temp dir, no network.
       - run: bash scripts/__tests__/agent-msg-majsztro-copy.test.sh
+      # Card aba42256: secret shapes (read from src/security/secret-gate.ts) and Majsztro's length/e-mail rule;
+      # curl and sleep stubbed on PATH, no network.
+      - run: bash scripts/__tests__/agent-msg-send-gate.test.sh
       # WTPRUNESQUASH1106: the prune decides what `git worktree remove` takes;
       # its "keep unmerged work" cases are the gate. Throwaway git repos in a
       # temp dir, a stub lsof, no network.
