@@ -34,9 +34,17 @@ for chat in (PRIV, GROUP):
     res = [run({'chat_id': chat, 'message_id': '1', 'emoji': e}) for e in laugh]
     check(f'laughing blocked in {"private" if chat == PRIV else "group"}',
           all(rc == 2 and 'REAKCIÓ-KAPU' in err for rc, err in res))
-ok = ['👍', '👀', '❤', '❤️', '🔥', '🙏']
-check('👍 👀 ❤ and other non-laughing pass', all(run({'chat_id': GROUP, 'message_id': '1', 'emoji': e})[0] == 0 for e in ok))
+ok = ['👍', '👀', '❤', '❤️', '👍🏽', ' 👀 ', '']
+for chat in (PRIV, GROUP):
+    check(f'👍 👀 ❤ (any form) and no reaction pass in {"private" if chat == PRIV else "group"}',
+          all(run({'chat_id': chat, 'message_id': '1', 'emoji': e})[0] == 0 for e in ok))
+# Viktor 38120 L1: these passed the LAUGH-only version; the allowlist blocks them and every other emoji.
+other = ['😏', '😎', '🥲', '🤭', '😸', '🔥', '🙏', '🎉', '😁🏽', '😁\u00ad', '😁\u200e', '👍😁', '👍👍', 'x']
+check('every other emoji blocked (allowlist, Viktor 38120 L1)',
+      all(run({'chat_id': GROUP, 'message_id': '1', 'emoji': e})[0] == 2 for e in other))
 check('another chat is not gated', run({'chat_id': OTHER, 'message_id': '1', 'emoji': '😁'})[0] == 0)
+check('no chat_id: gated (Viktor 38120 INFO)', run({'message_id': '1', 'emoji': '😏'})[0] == 2
+      and run({'message_id': '1', 'emoji': '👍'})[0] == 0)
 check('int chat id is the same chat', run({'chat_id': int(GROUP), 'message_id': 1, 'emoji': '🤣'})[0] == 2)
 
 with tempfile.TemporaryDirectory() as root:

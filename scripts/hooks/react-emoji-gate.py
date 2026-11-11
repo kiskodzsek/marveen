@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""PreToolUse gate (telegram react): no laughing or grinning reaction in Patrik's chats.
+"""PreToolUse gate (telegram react): in Patrik's chats only 👍 👀 ❤ as a reaction (no laughing or grinning).
 
 Why: Klodel 38093, hibanapló 2026-11-11 16:05. The main agent put a 😁 reaction on Balázs's jokes in the team group,
 and Patrik answered in group TG 5436: "faszt vigyorogsz". A memory note alone is not a fix (UGYANAZ A HIBA KÉTSZER NEM).
 
-What blocks (exit 2, a one-line message): a react call whose emoji is in LAUGH (Klodel's list: 😁 🤣 😂 😆 😅 🤡, plus the
-other grinning/laughing faces 😀 😃 😄 😹 🤪), in the owner's private chat or the team group. 👍 👀 ❤ and every emoji not in
-LAUGH pass. The emoji is compared after NFC and with the variation selectors (U+FE0E/U+FE0F) and zero-width
-characters dropped, so "😁️" is the same reaction.
+What blocks (exit 2, a one-line message): in the owner's private chat or the team group, every react emoji that is not
+in ALLOW (👍 👀 ❤). An allowlist, not a blocklist (Viktor 38120 L1: 😏 😎 🥲 🤭 😸 passed the first, LAUGH-only
+version; Klodel 38093: "👍 👀 ❤ mehet"). The emoji is compared after NFC and with the variation selectors
+(U+FE0E/U+FE0F), zero-width and bidi marks, the soft hyphen and the skin-tone modifiers dropped, so "❤️" is ❤ and
+"😁️" is still not allowed. An empty emoji (no reaction) passes.
 
 Which chats are gated: store/projektek.json elo_uzenet "privat" and "csoport" (each a plain id or {"chat_id": ...}),
 or MARVEEN_OWNER_CHATS (comma-separated) when set; the same lookup as mea-culpa-reply-gate.py. When no chat is known,
-every chat is gated (fail closed). A malformed hook payload is allowed (nothing to read).
+every chat is gated (fail closed); a call without a chat_id is gated too (Viktor 38120 INFO). A malformed hook payload
+is allowed (nothing to read).
 Wiring: .claude/settings.json PreToolUse, matcher "mcp__plugin_telegram_telegram__react". No chat id is written in
 this file: the ids are personal data. Tests: react-emoji-gate_test.py next to this file.
 """
@@ -23,8 +25,9 @@ import unicodedata
 ROOT = os.environ.get('CLAUDE_PROJECT_DIR', '/Users/klodel/marveen')
 STORE = os.path.join(ROOT, 'store')
 
-LAUGH = {'😁', '🤣', '😂', '😆', '😅', '🤡', '😀', '😃', '😄', '😹', '🤪'}
-DROP = dict.fromkeys(map(ord, '︎️​‌‍⁠﻿'))
+ALLOW = {'👍', '👀', '❤'}
+DROP = dict.fromkeys([0xFE0E, 0xFE0F, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0x200E, 0x200F,
+                      *range(0x202A, 0x202F), *range(0x2066, 0x206A), *range(0x1F3FB, 0x1F400)])
 
 
 def owner_chats():
@@ -46,9 +49,9 @@ def owner_chats():
     return out
 
 
-def laughing(emoji):
+def allowed(emoji):
     e = unicodedata.normalize('NFC', str(emoji or '')).translate(DROP).strip()
-    return e in LAUGH or any(c in LAUGH for c in e)
+    return e == '' or e in ALLOW
 
 
 def main():
@@ -59,11 +62,12 @@ def main():
     if not isinstance(ti, dict):
         return 0
     chats = owner_chats()
-    if chats and str(ti.get('chat_id') or '').strip() not in chats:
+    chat = str(ti.get('chat_id') or '').strip()
+    if chats and chat and chat not in chats:
         return 0
-    if laughing(ti.get('emoji')):
-        sys.stderr.write('REAKCIÓ-KAPU (Patrik csoport TG 5436: "faszt vigyorogsz", Klodel 38093): nevető/vigyorgó reakció '
-                         'Patrik chatjeiben nem mehet. 👍, 👀 vagy ❤ mehet, vagy semmi.\n')
+    if not allowed(ti.get('emoji')):
+        sys.stderr.write('REAKCIÓ-KAPU (Patrik csoport TG 5436: "faszt vigyorogsz", Klodel 38093): Patrik chatjeiben csak '
+                         '👍, 👀 vagy ❤ reakció mehet, vagy semmi.\n')
         return 2
     return 0
 
