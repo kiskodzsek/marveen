@@ -44,6 +44,7 @@ const EXPECTED: Record<string, string[]> = {
   PostToolUse: [
     'ledger-outbound.py', 'tool-log-capture.py',
     'telegram_progress_reply_clear.py', 'slack_progress_reply_clear.py',
+    'telegram-react-ack.py', // Klodel 34050: a reaction acknowledges a group message (card f6aabc6e)
     'skill-usage-capture.py', 'memory-frontmatter-bash-gate.py',
     // The persona guard watches the main agent's own CLAUDE.md/SOUL.md and
     // every agents/*/ pair, and it must fire on EVERY tool call: the first

@@ -373,6 +373,78 @@ def main():
     check("capture -> guard names discord tool",
           DC_TOOL in run_hook(db)[1], True)
 
+    # 7. Klodel 34050 (Balázs csoport TG 3631): an emoji reaction acknowledges a group message, no new message.
+    outbound = os.path.join(HOOKS, "telegram-react-ack.py")
+
+    def react(db, chat, response="reacted", tool="mcp__plugin_telegram_telegram__react"):
+        env = dict(os.environ)
+        env["LEDGER_DB_PATH"] = db
+        env["MARVEEN_AGENT_ID"] = AGENT
+        payload = {"cwd": os.path.dirname(db), "tool_name": tool,
+                   "tool_input": {"chat_id": chat, "message_id": "5001", "emoji": "👍"},
+                   "tool_response": [{"type": "text", "text": response}] if isinstance(response, str) else response}
+        p = subprocess.run([sys.executable, outbound], input=json.dumps(payload),
+                           capture_output=True, text=True, env=env, timeout=20)
+        return p.returncode
+
+    GRP = "-1009990001"
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound(AGENT, GRP, "5001", "szerintem a B jobb, Patrik?", "2026-11-09T12:00:00.000Z")
+    check("react: unanswered group message blocks", run_hook(db)[0], "block")
+    check("react: hook exits clean", react(db, GRP), 0)
+    check("react: a reaction in the chat allows", run_hook(db)[0], None)
+    check("react: no ledger 'out' row written", lib.connect().execute(
+        "SELECT COUNT(*) FROM conversation_log WHERE direction='out'").fetchone()[0], 0)
+    # a later inbound after the reaction blocks again (the reaction answered the earlier one only)
+    con = lib.connect()
+    lib.log_inbound(AGENT, GRP, "5002", "és a C?", "2026-11-09T12:01:00.000Z")
+    con.execute("UPDATE conversation_log SET created_at=? WHERE message_id='5002'", (int(time.time()) + 5,))
+    con.commit(); con.close()
+    check("react: a newer inbound after the reaction blocks", run_hook(db)[0], "block")
+
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound(AGENT, GRP, "5003", "mi legyen?", "2026-11-09T12:02:00.000Z")
+    react(db, "-1000000000999")
+    check("react: a reaction in ANOTHER chat still blocks", run_hook(db)[0], "block")
+
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound(AGENT, GRP, "5004", "mi legyen?", "2026-11-09T12:03:00.000Z")
+    react(db, GRP, response={"isError": True, "content": [{"type": "text", "text": "reaction failed: REACTION_INVALID"}]})
+    check("react: a failed reaction (isError) still blocks", run_hook(db)[0], "block")
+    react(db, GRP, tool="mcp__plugin_telegram_telegram__edit_message")
+    check("react: another tool (edit_message) does not count", run_hook(db)[0], "block")
+
+    db = fresh_db()
+    lib = load_lib(db)
+    react(db, GRP)
+    rf = lib._reaction_file(AGENT)
+    json.dump({GRP: int(time.time()) - 600}, open(rf, "w"))  # the reaction is OLDER than the inbound
+    lib.log_inbound(AGENT, GRP, "5005", "új kérdés", "2026-11-09T12:04:00.000Z")
+    check("react: a reaction older than the inbound still blocks", run_hook(db)[0], "block")
+
+    # the "Dolgozom rajta" placeholder goes on a react too (no token -> no API call, only the state file)
+    clear = os.path.join(HOOKS, "telegram_progress_reply_clear.py")
+    sd = tempfile.TemporaryDirectory(prefix="tgprog-")
+    _TMPDIRS.append(sd)
+    os.makedirs(os.path.join(sd.name, "progress"))
+    pend = os.path.join(sd.name, "progress", "sid1.json")
+    json.dump([{"chat_id": GRP, "message_id": 77}], open(pend, "w"))
+    env = dict(os.environ)
+    env["TELEGRAM_STATE_DIR"] = sd.name
+    subprocess.run([sys.executable, clear], input=json.dumps({"session_id": "sid1",
+                   "tool_name": "mcp__plugin_telegram_telegram__react",
+                   "tool_input": {"chat_id": GRP, "message_id": "5001", "emoji": "👍"}}),
+                   capture_output=True, text=True, env=env, timeout=20)
+    check("react: placeholder cleared", os.path.exists(pend), False)
+    json.dump([{"chat_id": GRP, "message_id": 78}], open(pend, "w"))
+    subprocess.run([sys.executable, clear], input=json.dumps({"session_id": "sid1",
+                   "tool_name": "mcp__plugin_telegram_telegram__download_attachment",
+                   "tool_input": {"chat_id": GRP}}), capture_output=True, text=True, env=env, timeout=20)
+    check("react: another telegram tool keeps the placeholder", os.path.exists(pend), True)
+
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
         sys.exit(1)

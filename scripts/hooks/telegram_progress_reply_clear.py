@@ -55,7 +55,8 @@ def main():
     except Exception:
         return
     tool = ev.get("tool_name") or ev.get("toolName") or ""
-    if "telegram" not in tool or "reply" not in tool:
+    # Klodel 34050: a react acknowledges the message too, so its placeholder goes as well.
+    if "telegram" not in tool or ("reply" not in tool and not tool.endswith("__react")):
         return
     ti = ev.get("tool_input") or ev.get("toolInput") or {}
     chat_id = ti.get("chat_id")

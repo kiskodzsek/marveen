@@ -17,6 +17,8 @@ hook adds NO new state model -- it reuses ledger_lib.open_question_with_age):
   - If there is no open question -> allow the stop (exit 0, silent).
   - If the open inbound is a pure acknowledgement ("ok", "köszi", 👍, ...) -> allow;
     per the standing rule a bare ack needs no reply.
+  - If this agent REACTED (emoji, Telegram react tool) in that chat after the inbound arrived -> allow; the reaction
+    is the acknowledgement (Klodel 34050, Balázs TG 3631: no extra 👍 messages in the group).
   - If the open inbound is older than STALE_SECONDS -> allow; never nag forever on
     an abandoned/old message (prevents an endless block loop).
   - If this same message_id has already been blocked MAX_BLOCKS times -> allow;
@@ -262,6 +264,17 @@ def main():
     # Pure acknowledgement -> no reply owed.
     if _is_ack(text):
         sys.exit(0)
+
+    # Klodel 34050 (Balázs csoport TG 3631: "ne újjazz már meg ennyiszer"): an emoji reaction in the same chat after
+    # the inbound arrived acknowledges it without a new message (ledger-outbound.py records it on a successful
+    # mcp__plugin_telegram_telegram__react). Without a reaction or a reply the guard still blocks.
+    try:
+        if ledger_lib.reacted_since(agent_id, chat_id, created_at):
+            sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
 
     # Too old -> don't nag forever (abandoned / deliberately-unanswered message).
     try:
