@@ -41,6 +41,11 @@ check('task on Balázs blocked', all(rc == 2 and 'BALAZS-KAPU' in err for rc, er
 check('BALAZS-OK line lets it through', run('Balázs, kérlek nézd meg.\nBALAZS-OK: TG 5400')[0] == 0
       and run('Balázs, kérlek nézd meg.\nbalázs ok: TG 1')[0] == 0)
 check('BALAZS-OK without a value does not', run('Balázs, kérlek nézd meg.\nBALAZS-OK:')[0] == 2)
+# Viktor 38148 L1: the value must be a TG number
+check('BALAZS-OK with a non-TG value does not', all(run('Balázs, kérlek nézd meg.\nBALAZS-OK: ' + v)[0] == 2
+                                                    for v in ('x', '?', 'TG', 'Patrik kérte', 'msg 38093')))
+check('BALAZS-OK: Patrik TG n / TG #n passes', run('Balázs, kérlek nézd meg.\nBALAZS-OK: Patrik TG 4864')[0] == 0
+      and run('Balázs, kérlek nézd meg.\nBALAZS-OK: TG #4864')[0] == 0)
 check('Balázs only mentioned (not addressed): allowed', run('Kész a teszt, Balázs tesztje szerint is jó.\n1. pont')[0] == 0)
 check('addressed without a task shape: allowed', run('Balázs, köszi, jó lett!')[0] == 0)
 
@@ -51,7 +56,8 @@ check('PR go-ask with PATRIK-KERTE allowed', run('PR #183 mehet?\nPATRIK-KÉRTE:
 check('PR mentioned without a go-ask allowed', run('A PR #183 mergelve.')[0] == 0)
 
 # 4. malformed payload: nothing to read, allowed
-check('malformed payload allowed', run('', raw='not json')[0] == 0)
+check('malformed payload allowed (exit 0, not a crash)', run('', raw='not json')[0] == 0
+      and run('', raw='[1]')[0] == 0 and run('', raw='{"tool_input": "text"}')[0] == 0)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'All balazs-task-reply-gate tests passed.'}")
 sys.exit(1 if FAILS else 0)
