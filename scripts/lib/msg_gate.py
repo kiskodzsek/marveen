@@ -43,6 +43,40 @@ EMAIL = re.compile(r'[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za
 ENTRY = re.compile(r"\{\s*name:\s*'([^']+)',\s*pattern:\s*/((?:\\.|[^/\\\n])+)/([a-z]*)\s*\}")
 
 
+# Viktor 37183 F1: a JS regex without the u flag has an ASCII \b; Python's str \b is Unicode, so in
+# "é" + "sk_live_..." Python sees no boundary before the s and the key passes, while the commit gate
+# (JS) catches it. re.ASCII is not the fix: it would also narrow \s below JS. So \b and \B are
+# rewritten into ASCII lookarounds, outside character classes only.
+_W = '[A-Za-z0-9_]'
+_ASCII_B = '(?:(?<!%s)(?=%s)|(?<=%s)(?!%s))' % (_W, _W, _W, _W)
+_ASCII_NB = '(?:(?<=%s)(?=%s)|(?<!%s)(?!%s))' % (_W, _W, _W, _W)
+
+
+def js_to_py(body):
+    out, i, in_class = [], 0, False
+    while i < len(body):
+        ch = body[i]
+        if ch == '\\' and i + 1 < len(body):
+            nxt = body[i + 1]
+            if not in_class and nxt == 'b':
+                out.append(_ASCII_B)
+            elif not in_class and nxt == 'B':
+                out.append(_ASCII_NB)
+            elif nxt == '/':
+                out.append('/')
+            else:
+                out.append(body[i:i + 2])
+            i += 2
+            continue
+        if ch == '[' and not in_class:
+            in_class = True
+        elif ch == ']' and in_class:
+            in_class = False
+        out.append(ch)
+        i += 1
+    return ''.join(out)
+
+
 def die(msg):
     print('msg_gate: ' + msg, file=sys.stderr)
     sys.exit(4)
@@ -60,16 +94,23 @@ def load_secret_patterns(path):
     end = src.find('\n];', start)
     if end < 0:
         die('SECRET_PATTERNS has no end in %s' % path)
+    block = src[start:end]
     out = []
-    for name, body, flags in ENTRY.findall(src[start:end]):
+    for name, body, flags in ENTRY.findall(block):
         if set(flags) - {'i'}:
             die('pattern %r has flags %r this gate does not translate' % (name, flags))
         try:
-            out.append((name, re.compile(body, re.I if 'i' in flags else 0)))
+            out.append((name, re.compile(js_to_py(body), re.I if 'i' in flags else 0)))
         except re.error as e:
             die('pattern %r does not compile in Python: %s' % (name, e))
     if len(out) < MIN_PATTERNS:
         die('only %d secret patterns read from %s (expected at least %d)' % (len(out), path, MIN_PATTERNS))
+    # Viktor 37183 F2: an entry this parser cannot read (e.g. an unescaped "/" inside a character
+    # class, legal in JS) would drop out silently while the count stays above MIN_PATTERNS.
+    entries = block.count("name: '")
+    if len(out) != entries:
+        die('read %d of %d SECRET_PATTERNS entries from %s; an entry is not in the one-line form'
+            % (len(out), entries, path))
     return out
 
 

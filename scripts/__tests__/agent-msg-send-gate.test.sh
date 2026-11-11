@@ -153,11 +153,43 @@ PY
 )"
 ok "every SECRET_PATTERNS entry is parsed (parsed, entries: $PARITY)" "$(set -- $PARITY; [ -n "${1:-}" ] && [ "$1" = "${2:-x}" ] && echo 0 || echo 1)"
 
-# --- missing gate file: send, loudly ---
+# --- Viktor 37183 F2: an entry the parser cannot read stops the gate at run time, not only in CI ---
+python3 - "$ROOT/src/security/secret-gate.ts" "$SANDBOX/unparsed.ts" <<'PY'
+import sys
+s = open(sys.argv[1]).read()
+s = s.replace("export const SECRET_PATTERNS: { name: string; pattern: RegExp }[] = [\n",
+              "export const SECRET_PATTERNS: { name: string; pattern: RegExp }[] = [\n  { name: 'slash in class', pattern: /\\bzz[/]q_[0-9]{6}/ },\n", 1)
+open(sys.argv[2], 'w').write(s)
+PY
 text "ártalmatlan"
+GATE_ENV="MARVEEN_MSG_GATE_SECRET_SRC=$SANDBOX/unparsed.ts" run kernel dave
+ok "an unparsed entry (unescaped / in a class, legal in JS): exit 4, no POST (F2)" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+ok "F2: stderr says how many entries were read" "$(grep -q 'SECRET_PATTERNS entries' "$SANDBOX/err" && echo 0 || echo 1)"
+
+# --- Viktor 37183 F1: JS \b is ASCII; a non-ASCII letter next to the key must not hide it ---
+text "é$STRIPE"
+run kernel dave
+ok "é right before a Stripe key: refused (F1, leading \\b)" "$(refused)" "rc=$RC posts=$POSTS"
+AWS="AKIA""$(printf 'QWERTYUIOPASDFGH')"
+text "kulcs: ${AWS}é"
+run kernel dave
+ok "é right after an AWS key id: refused (F1, trailing \\b)" "$(refused)" "rc=$RC posts=$POSTS"
+text "kulcs: ${AWS}X"
+run kernel dave
+ok "an ASCII letter after the AWS key id: no boundary, sent (as in JS)" "$(sent)" "rc=$RC posts=$POSTS"
+
+# --- missing gate file at the DEFAULT path: send, loudly (an install without the file) ---
+mkdir -p "$SANDBOX/inst/scripts"; cp "$HELPER" "$SANDBOX/inst/scripts/agent-msg.sh"
+text "ártalmatlan"
+HELPER_SAVED="$HELPER"; HELPER="$SANDBOX/inst/scripts/agent-msg.sh"
+run kernel dave
+HELPER="$HELPER_SAVED"
+ok "missing gate at the default path: sent" "$(sent)" "rc=$RC posts=$POSTS"
+ok "missing gate at the default path: WARN on stderr" "$(grep -q 'send gate not found' "$SANDBOX/err" && echo 0 || echo 1)"
+
+# --- Viktor 37183 (a): an explicitly named gate that cannot be read: refused ---
 GATE_ENV="MARVEEN_MSG_GATE_BIN=/nonexistent" run kernel dave
-ok "missing gate: sent" "$(sent)" "rc=$RC posts=$POSTS"
-ok "missing gate: WARN on stderr" "$(grep -q 'send gate not found' "$SANDBOX/err" && echo 0 || echo 1)"
+ok "MARVEEN_MSG_GATE_BIN set but unreadable: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
 
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."

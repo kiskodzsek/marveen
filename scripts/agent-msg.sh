@@ -130,6 +130,12 @@ fi
 # nothing is sent either way. A missing gate file is today's state on an install without it, so
 # that one sends, loudly (the reasoning above, FAIL-OPEN ON A MISSING CHECKER).
 MG="${MARVEEN_MSG_GATE_BIN:-$BASE/scripts/lib/msg_gate.py}"
+# Viktor 37183 (a): the fail-open is for the DEFAULT path only (an install without the file). An
+# explicitly named gate that cannot be read is a misconfiguration, not today's state: refuse.
+if [ -n "${MARVEEN_MSG_GATE_BIN:-}" ] && [ ! -r "$MG" ]; then
+  echo "FAIL: MARVEEN_MSG_GATE_BIN is set but $MG is not readable; nothing was sent." >&2
+  exit 4
+fi
 if [ -r "$MG" ] && command -v python3 >/dev/null 2>&1; then
   MG_ERR="$(printf '%s' "$C" | python3 -I "$MG" --from "$FROM" --to "$TO" 2>&1 >/dev/null)"
   MG_RC=$?
