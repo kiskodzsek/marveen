@@ -27,12 +27,30 @@ Two rules:
    Other pairs are not length- or e-mail-gated: 94 fleet messages a week carry an address,
    mostly our own, in mail and order work where the address is the subject.
 
+3. A stop order from Klodel (--from in STOP_FROM, default "klodel"; Klodel 37876, UGYANAZ A HIBA
+   KÉTSZER NEM, 2nd time): Patrik's opinion ("senkik vannak", TG 5294) was read as a stop and Radar
+   was stopped; Patrik TG 5297: "ne allitsd le". First time: TG 4943 (memory aggaly-nem-elvetes).
+   A text with TÁRGYTALAN | állj le | leállít | ne folytasd | nem kell tovább, or (Viktor 37886 L1)
+   állítsd le | állítsuk le | zárd le | hagyd abba | abbahagy, is refused unless it carries a line
+       LEÁLLÍTÁS-OK: TG <number> "<Patrik's words, verbatim>"
+   whose quote holds an explicit stop word: zárd le | nem kell | állítsd le | állítsuk le | hagyjuk |
+   hagyom | ne csináld. Both sides are matched without accents (Patrik types "ne allitsd le"), and a
+   stop word right after "ne"/"nem" is a negation, not a stop ("ne állítsd le" does not count).
+   Measured 2026-11-11 on 30 days of Klodel's messages: 351 of 9584 match the trigger (about 12 a
+   day), many of them not a stop order ("a kérdésem tárgytalan", "Blender-leállítás"). A quote that
+   says NOT to stop ("nem kell leállítani", "ne hagyjuk abba") never counts, and a text that starts
+   with VISSZAVONVA <msg_id> (Klodel's revocation of a stop, 37875) exempts only that prefix. A stop
+   verb right after "ne"/"nem" is not a trigger either. Zero-width characters are ignored.
+   Known limit: the gate sees agent-msg.sh only; a raw POST /api/messages is not gated.
+
 Env (the suite uses them): MARVEEN_MSG_GATE_SECRET_SRC, MARVEEN_MSG_GATE_STRICT (comma list),
-MARVEEN_MSG_GATE_MAX_CHARS, MARVEEN_MSG_GATE_OWN_DOMAINS (comma list).
+MARVEEN_MSG_GATE_MAX_CHARS, MARVEEN_MSG_GATE_OWN_DOMAINS (comma list), MARVEEN_MSG_GATE_STOP_FROM
+(comma list).
 """
 import os
 import re
 import sys
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SRC = os.path.join(HERE, '..', '..', 'src', 'security', 'secret-gate.ts')
@@ -114,6 +132,69 @@ def load_secret_patterns(path):
     return out
 
 
+# Rule 3. Patterns are written WITHOUT accents and matched against fold(text). Whitespace inside a phrase is \s+
+# (Viktor 37886 L1: "állj  le", "állj\nle").
+_B = r'(?<![a-z0-9])'
+# Viktor 37886 L1: the imperative stop verbs are triggers too ("Állítsd le Radart", "Zárd le a feladatot").
+STOP_VERB = re.compile(_B + r'(?:allj\s+le|leallit|allitsd\s+le|allitsuk\s+le|zard\s+le|hagyd\s+abba|abbahagy)')
+STOP_PHRASE = re.compile(_B + r'(?:targytalan|ne\s+folytasd|nem\s+kell\s+tovabb)')
+STOP_OK_LINE = re.compile(r'^[ \t]*leallitas-ok:[ \t]*tg[ \t]*(\d+)[ \t]+["„“”](.+?)["“”][ \t]*$', re.M)
+STOP_WORD = re.compile(_B + r'(?:zard\s+le|nem\s+kell|allitsd\s+le|allitsuk\s+le|hagyjuk|hagyom|ne\s+csinald)(?![a-z0-9])')
+SELF_NEGATED = re.compile(r'(?:ne\s+csinald|nem\s+kell)$')
+# "ne állítsd le", "nem kell leállítani". Viktor 37910 L5: only a short window before the verb is searched
+# (NEG_WINDOW), so a text of many negated verbs stays linear; a longer gap reads as no negation (the safe side).
+NEGATION = re.compile(_B + r'(?:ne|nem(?:\s+kell)?)\s+$')
+NEG_WINDOW = 24
+# "nem kell leállítani", "ne hagyjuk abba": a quote that says NOT to stop is never a stop, whatever else it holds.
+NEG_STOP = re.compile(_B + r'(?:nem\s+kell\s+(?:leallit|lezar|abbahagy|befejez)|ne\s+(?:hagyjuk|hagyd)\s+abba)')
+# Klodel's revocation of a stop (37875: "VISSZAVONVA a 37874 leállítás: ..."). Viktor 37886 L2: the prefix needs the
+# msg_id, and it only exempts itself; the rest of the text is still checked ("... Közben: állj le Radar." is refused).
+REVOKE = re.compile(r'^\s*visszavonva[\s:]+(?:a\s+)?\d{4,}(?:\s+leallitas\w*)?')
+
+
+def fold(text):
+    """Lower case, accents removed (á -> a, ő -> o), so "ne allitsd le" and "ne állítsd le" read the same.
+    Format characters (zero-width space/joiner, soft hyphen; category Cf) are dropped (Viktor 37886 L4)."""
+    # Viktor 37910 L6: NFKD, so full-width letters fold to ASCII too.
+    return ''.join(c for c in unicodedata.normalize('NFKD', text)
+                   if not unicodedata.combining(c) and unicodedata.category(c) != 'Cf').lower()
+
+
+def is_stop_order(folded):
+    """A stop phrase, or a stop verb that is not negated ("ne állítsd le" is the opposite of a stop)."""
+    if STOP_PHRASE.search(folded):
+        return True
+    return any(not NEGATION.search(folded[max(0, m.start() - NEG_WINDOW):m.start()])
+               for m in STOP_VERB.finditer(folded))
+
+
+def quote_stops(quote):
+    """True if the quote holds an explicit stop word that is not negated ("ne allitsd le" is not a stop)."""
+    q = fold(quote)
+    if NEG_STOP.search(q):
+        return False
+    for m in STOP_WORD.finditer(q):
+        if SELF_NEGATED.match(m.group(0)) or not NEGATION.search(q[max(0, m.start() - NEG_WINDOW):m.start()]):
+            return True
+    return False
+
+
+def stop_reason(text):
+    """None if the text is not a stop order or carries a valid LEÁLLÍTÁS-OK line, else the refusal reason."""
+    folded = fold(text)
+    revoke = REVOKE.match(folded)
+    if not is_stop_order(folded[revoke.end():] if revoke else folded):
+        return None
+    for m in STOP_OK_LINE.finditer(folded):
+        if quote_stops(m.group(2)):
+            return None
+    return ('leállító üzenet (TÁRGYTALAN / állj le / leállít / állítsd le / zárd le / hagyd abba / ne folytasd / '
+            'nem kell tovább) Patrik kifejezett leállító szava nélkül. Patrik véleménye nem leállítás. Ha Patrik '
+            'tényleg leállította, tegyél bele egy sort: LEÁLLÍTÁS-OK: TG <szám> "<Patrik szó szerinti szava>", az '
+            'idézetben kifejezett leállító szóval (zárd le | nem kell | állítsd le | állítsuk le | hagyjuk | hagyom | '
+            'ne csináld; a "ne állítsd le" nem az). Ha nem állította le, ne állítsd le.')
+
+
 def csv_env(name, default):
     return [x.strip().lower() for x in os.environ.get(name, default).split(',') if x.strip()]
 
@@ -163,6 +244,11 @@ def main(argv):
             reasons.append('%d e-mail-cím nem a saját domainjeinkről (%s; %s forgalma). '
                            'Ne a címet küldd, hanem hogy kié és hol található.'
                            % (foreign, ', '.join(own), who))
+
+    if frm.lower() in csv_env('MARVEEN_MSG_GATE_STOP_FROM', 'klodel'):
+        r = stop_reason(text)
+        if r:
+            reasons.append(r)
 
     if reasons:
         for r in reasons:

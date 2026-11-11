@@ -191,6 +191,87 @@ ok "missing gate at the default path: WARN on stderr" "$(grep -q 'send gate not 
 GATE_ENV="MARVEEN_MSG_GATE_BIN=/nonexistent" run kernel dave
 ok "MARVEEN_MSG_GATE_BIN set but unreadable: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
 
+# --- Klodel 37876 (UGYANAZ A HIBA KÉTSZER NEM): a stop order from klodel needs Patrik's explicit stop word ---
+# negative: the 37874 text (Patrik's opinion "senkik vannak" read as a stop)
+text "37872 TÁRGYTALAN, állj le: Patrik TG 5294 a Creatorz-alkotókról: 'senkik vannak'. Nem kell lista. Köszi."
+run klodel radar
+ok "stop: 37874 (opinion read as a stop) klodel->radar: refused" "$(refused)" "rc=$RC posts=$POSTS"
+ok "stop: the refusal names the LEÁLLÍTÁS-OK line" "$(grep -q 'LEÁLLÍTÁS-OK: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+# positive: the Klodel-given example
+text 'Radar, állj le a K+F-szállal, az anyagok maradnak.
+LEÁLLÍTÁS-OK: TG 5282 "na én ezt most hagyom"'
+run klodel radar
+ok "stop: with LEÁLLÍTÁS-OK TG 5282 \"na én ezt most hagyom\": sent" "$(sent)" "rc=$RC posts=$POSTS"
+# Patrik types without accents, and "ne allitsd le" (TG 5297) is the opposite of a stop
+text 'TÁRGYTALAN, állj le.
+LEÁLLÍTÁS-OK: TG 5297 "ne allitsd le"'
+run klodel radar
+ok "stop: a negated quote \"ne allitsd le\" does not unlock: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Állj le.
+LEÁLLÍTÁS-OK: TG 5300 "nem kell leállítani"'
+run klodel radar
+ok "stop: \"nem kell leállítani\" does not unlock: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Állj le.
+LEÁLLÍTÁS-OK: TG 5294 "senkik vannak"'
+run klodel radar
+ok "stop: a quote without a stop word (an opinion) does not unlock: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Tárgytalan, LEÁLLÍTÁS-OK: TG 5282 "hagyom"'
+run klodel radar
+ok "stop: LEÁLLÍTÁS-OK not on its own line: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Tárgytalan, a 4949d8de lezárva.
+LEÁLLÍTÁS-OK: TG 5301 "ezt allitsuk le"'
+run klodel szigma
+ok "stop: accent-free quote \"ezt allitsuk le\": sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "targytalan, allj le"
+run klodel radar
+ok "stop: an accent-free trigger is caught too: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "VISSZAVONVA a 37874 leállítás: Patrik TG 5297 'ne allitsd le'. A 37872 MEGY tovább."
+run klodel radar
+ok "stop: Klodel's revocation of a stop (37875 shape): sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "TÁRGYTALAN, állj le."
+run viktor radar
+ok "stop: only klodel is gated, viktor->radar: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "Kész a riport, a 446b8283 marad nyitva."
+run klodel kernel
+ok "stop: a klodel message without a stop word: sent" "$(sent)" "rc=$RC posts=$POSTS"
+
+# --- Viktor 37886: L1 (stop verbs, \s+), L2 (revocation needs the msg_id and exempts only itself), L4 (zero-width) ---
+text "Állítsd le Radart most."
+run klodel radar
+ok "stop L1: \"Állítsd le\" (imperative verb): refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "Hagyd abba a kutatást."
+run klodel radar
+ok "stop L1: \"Hagyd abba\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "állj  le"
+run klodel radar
+ok "stop L1: double space \"állj  le\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "Patrik TG 5297: ne állítsd le, megy tovább."
+run klodel radar
+ok "stop L1: a negated verb \"ne állítsd le\" is not a stop: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "VISSZAVONVA: a 37875 leállítás. Közben: állj le Radar."
+run klodel radar
+ok "stop L2: a revocation does not exempt a new stop after it: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "VISSZAVONVA, állj le"
+run klodel radar
+ok "stop L2: VISSZAVONVA without a msg_id exempts nothing: refused" "$(refused)" "rc=$RC posts=$POSTS"
+printf 'á\342\200\213llj le' > "$SANDBOX/text"
+run klodel radar
+ok "stop L4: a zero-width space inside \"állj le\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+
+# --- Viktor 37910: L5 (linear on many negated verbs), L6 (full-width letters), "nem kell leállítani" in the text ---
+python3 -c 'import sys; sys.stdout.write("ne állj le " * 20000)' > "$SANDBOX/text"
+T0=$(python3 -c 'import time; print(time.time())')
+run klodel radar
+T1=$(python3 -c 'import time; print(time.time())')
+ok "stop L5: 220 KB of negated verbs finishes within 2 s and is sent" \
+   "$([ "$(python3 -c "print(int($T1 - $T0 < 2))")" = 1 ] && [ "$RC" = 0 ] && echo 0 || echo 1)" "rc=$RC secs=$(python3 -c "print(round($T1 - $T0, 2))")"
+printf '\357\275\201\357\275\214\357\275\214\357\275\212 \357\275\214\357\275\205' > "$SANDBOX/text"
+run klodel radar
+ok "stop L6: full-width \"allj le\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "Nem kell leállítani Radart, megy tovább."
+run klodel radar
+ok "stop: \"Nem kell leállítani\" in the text is not a stop: sent" "$(sent)" "rc=$RC posts=$POSTS"
+
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."
 run kernel klodel
