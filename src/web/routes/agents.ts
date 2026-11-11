@@ -172,6 +172,7 @@ import { configDirFor } from '../main-transcript-root.js'
 import { kindAllowed, FORBIDDEN_KIND } from './auth.js'
 import { isValidModelId, InvalidModelIdError } from '../../model-id.js'
 import { acceptAgentConfigSeal, agentConfigSealStatus, DEFAULT_SEAL_DEPS, DEFAULT_SEAL_PATHS, mayAcceptSeal, sealCaller, sealedWriteRefusal } from '../agent-config-seal.js'
+import { markLoginInFlight } from '../login-in-flight.js'
 
 // Which credential kinds may read a transcript. NAMED principals only: a
 // logged-in human, or a key enrolled to that human's own device. Deliberately
@@ -2226,6 +2227,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const session = agentSessionName(name)
     const host = readAgentRemoteHost(name)
     try {
+      // A human is about to authorize: keep the reauth-healer off this agent (login-in-flight.ts).
+      markLoginInFlight(name)
       await sendPromptToSession(session, '/login', host)
       // Wait for Claude Code to render the auth URL (typically 3-6s)
       let authUrl: string | null = null
