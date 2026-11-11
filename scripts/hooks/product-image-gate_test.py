@@ -1579,6 +1579,220 @@ def idea_group_gated(root):
 
 
 @case
+def idea_refused_direction_blocked_despite_line(root):
+    # Klodel 38049 (Patrik TG 17453/17460): a valid ÖTLET-KAPU line does not let a refused direction through.
+    texts = ('Új ötlet: AI-recepciós szalonoknak.', 'Új irány: telefonos asszisztens kisboltoknak.',
+             'Ötlet: társasházi közös képviselet.', 'Ötlet: Recepciós MI fodrászoknak.')
+    res = [run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t}) for t in texts]
+    return all(rc == 2 and 'elutasított irányt' in err and 'ELVETETT-DE-KERT' in err for rc, err in res)
+
+
+@case
+def idea_refused_direction_names_the_word(root):
+    rc, err = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: AI-recepciós szalonoknak.'})
+    return rc == 2 and 'recepciós' in err
+
+
+@case
+def idea_refused_direction_asked_allowed(root):
+    # Patrik asked for it himself: an ELVETETT-DE-KERT line with his TG message number lets it pass.
+    ok = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'ELVETETT-DE-KERT: TG 17454\nÚj ötlet: AI-recepciós.'})[0]
+    ok2 = run(root, {'chat_id': PRIV, 'text': PRIV_OK + IDEA_LINE + 'Ötlet: recepciós.\nELVETETT-DE-KERT: TG 17454'})[0]
+    return ok == 0 and ok2 == 0
+
+
+@case
+def idea_refused_direction_asked_needs_number(root):
+    # Without a TG number, or not at a line start, the marker does not count.
+    texts = ('ELVETETT-DE-KERT: Patrik kérte\nÚj ötlet: AI-recepciós.',
+             'ELVETETT-DE-KERT:\nÚj ötlet: AI-recepciós.',
+             'Új ötlet: AI-recepciós. (ELVETETT-DE-KERT: TG 17454)')
+    return all(run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] == 2 for t in texts)
+
+
+@case
+def idea_refused_direction_asked_still_needs_idea_line(root):
+    # The ELVETETT-DE-KERT line lifts the refused-direction check only, not the ÖTLET-KAPU line.
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'ELVETETT-DE-KERT: TG 17454\nÚj ötlet: AI-recepciós.'})
+    return rc == 2 and 'new-direction-start-from-market' in err
+
+
+@case
+def idea_refused_direction_word_start_only(root):
+    # Same rule as the lint (Klodel 37971): "megtakarítás" is not "takarítás".
+    neg = ('Ötlet: megtakarítás-kalkulátor.', 'Új irány: nyugdíj-előtakarékosság.')
+    pos = ('Ötlet: takarítás-közvetítő.', 'Ötlet: takarításközvetítő.')
+    rn = [run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] for t in neg]
+    rp = [run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] for t in pos]
+    return all(r == 0 for r in rn) and all(r == 2 for r in rp)
+
+
+@case
+def idea_marabel_in_text_not_refused(root):
+    # "marabel" is in the lint list for idea titles, but a chat text may name Marabel (the ÖTLET-KAPU line covers it).
+    rc, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új irány: nem a Marabel, hanem hűtőmágnes-bolt.'})
+    return rc == 0
+
+
+@case
+def no_idea_refused_word_unchanged(root):
+    # Without "ötlet"/"irány" the gate does not look at the text: a refused word alone blocks nothing.
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'Kész a runbook, a recepciós teszt-fiók törölve.'})
+    return rc == 0
+
+
+@case
+def idea_refused_list_missing_fails_closed(root):
+    # A copy of the hook without the lint next to it: an idea text stops, a non-idea text still passes.
+    import shutil
+    here = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(os.path.join(root, 'scripts', 'hooks'))
+    os.makedirs(os.path.join(root, 'scripts', 'lib'))
+    hook = os.path.join(root, 'scripts', 'hooks', 'product-image-gate.py')
+    shutil.copy(HOOK, hook)
+    shutil.copy(os.path.join(here, '..', 'lib', 'owner_chat.py'), os.path.join(root, 'scripts', 'lib', 'owner_chat.py'))
+    env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV}
+
+    def go(text):
+        p = subprocess.run([sys.executable, '-I', hook], input=json.dumps({'tool_input': {'chat_id': GROUP, 'text': text}}),
+                           capture_output=True, text=True, env=env, timeout=20)
+        return p.returncode, p.stderr
+    rc, err = go(IDEA_LINE + 'Új ötlet: hűtőmágnes-bolt.')
+    rc2, _ = go('Radar dolgozik.')
+    return rc == 2 and 'nem olvasható' in err and rc2 == 0
+
+
+def gate_copy(root, lint_text):
+    """A copy of the hook with the given text as its uzleti-otlet-kapu-lint.py; returns a runner for chat texts."""
+    import shutil
+    here = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(os.path.join(root, 'scripts', 'hooks'), exist_ok=True)
+    os.makedirs(os.path.join(root, 'scripts', 'lib'), exist_ok=True)
+    hook = os.path.join(root, 'scripts', 'hooks', 'product-image-gate.py')
+    shutil.copy(HOOK, hook)
+    shutil.copy(os.path.join(here, '..', 'lib', 'owner_chat.py'), os.path.join(root, 'scripts', 'lib', 'owner_chat.py'))
+    if lint_text is not None:
+        with open(os.path.join(root, 'scripts', 'uzleti-otlet-kapu-lint.py'), 'w', encoding='utf-8') as f:
+            f.write(lint_text)
+    env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV}
+
+    def go(text):
+        p = subprocess.run([sys.executable, '-I', hook], input=json.dumps({'tool_input': {'chat_id': GROUP, 'text': text}}),
+                           capture_output=True, text=True, env=env, timeout=20)
+        return p.returncode, p.stderr
+    return go
+
+
+@case
+def idea_refused_list_read_as_data(root):
+    # Viktor 38060 L1: the lint is parsed, not run. A lint that exits at import, or a short/emptied list, must not
+    # switch the check off.
+    words = ', '.join(f'"w{i}"' for i in range(12))
+    exiting = f'import sys\nsys.exit(0)\nELUTASITOTT = [{words}, "recepciós"]\n'
+    rc1, _ = gate_copy(os.path.join(root, 'a'), exiting)(IDEA_LINE + 'Új ötlet: AI-recepciós.')
+    rc2, err2 = gate_copy(os.path.join(root, 'b'), 'ELUTASITOTT = []\n')(IDEA_LINE + 'Új ötlet: kalkulátor.')
+    rc3, err3 = gate_copy(os.path.join(root, 'c'), 'ELUTASITOTT = ["recepciós"]\n')(IDEA_LINE + 'Új ötlet: kalkulátor.')
+    rc4, _ = gate_copy(os.path.join(root, 'd'), f'ELUTASITOTT = [{words}]\n')(IDEA_LINE + 'Új ötlet: kalkulátor.')
+    pyc = any(n.startswith('uzleti') and n.endswith('.pyc') for _, _, fs in os.walk(root) for n in fs)
+    return (rc1 == 2 and rc2 == 2 and 'nem olvasható' in err2 and rc3 == 2 and 'nem olvasható' in err3 and rc4 == 0
+            and not pyc)
+
+
+@case
+def idea_refused_direction_inside_marker_line_blocked(root):
+    # Viktor 38060 L2: only the gate's own phrases are cut out; a refused direction inside a marker line still stops.
+    texts = ('ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve, recepciós\nÚj ötlet.',
+             'PRIVÁT-OK: telefonos asszisztens ügy, Patrik kérdezte\n' + IDEA_LINE + 'Új ötlet.')
+    hits = [run(root, {'chat_id': GROUP, 'text': t})[0] for t in texts]
+    ok, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: hűtőmágnes-bolt.'})
+    # A negation in the marker line is the declaration the gate asks for (TG 17460: "nem AI-tanácsadás"): it passes.
+    # In the body a negation gets no pass.
+    neg_line, _ = run(root, {'chat_id': GROUP, 'text': 'ÖTLET-KAPU: nem Marabel/könyv, nem AI-tanácsadás, nem telefonos '
+                                                       'asszisztens, termékpaletta ellenőrizve\nÚj ötlet: kalkulátor.'})
+    neg_body, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: nem recepciós, hanem kalkulátor.'})
+    return all(r == 2 for r in hits) and ok == 0 and neg_line == 0 and neg_body == 2
+
+
+BALAZS = '8366648365'
+
+
+def tg_state(root, senders=(), evidence=()):
+    """Synthetic plugin logs under the throw-away project dir: inbound-senders.jsonl (who) and inbound-evidence.jsonl."""
+    d = os.path.join(root, '.claude', 'channels', 'telegram')
+    os.makedirs(d, exist_ok=True)
+    for name, rows in (('inbound-senders.jsonl', senders), ('inbound-evidence.jsonl', evidence)):
+        with open(os.path.join(d, name), 'w', encoding='utf-8') as f:
+            for r in rows:
+                f.write(json.dumps(r) + '\n')
+
+
+def balazs_asked(root, mid='901', text='Mi a helyzet a Creatorz-zal?', user=BALAZS, chat=GROUP):
+    tg_state(root, senders=[{'chat_id': chat, 'message_id': mid, 'user_id': user, 'at': 1}],
+             evidence=[{'chat_id': chat, 'message_id': mid, 'text': text, 'at': 1}])
+
+
+@case
+def creatorz_blocked_without_balazs_question(root):
+    # Klodel 38073 (Patrik csoport TG 5419): the Creatorz topic is not brought up again; every spelling counts.
+    texts = ('A Creatorz-féle megoldás jó volna.', 'CREATORZ', 'creatorz.hu', 'Creat\u200borz megint.')
+    res = [run(root, {'chat_id': GROUP, 'text': t}) for t in texts]
+    priv = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'A Creatorz-ról.'})
+    return all(rc == 2 and 'CREATORZ-KAPU' in err for rc, err in res) and priv[0] == 2
+
+
+@case
+def creatorz_reply_to_balazs_naming_it_allowed(root):
+    balazs_asked(root)
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról: nem visszük tovább.', 'reply_to': '901'})
+    rc_int, _ = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról: nem.', 'reply_to': 901})
+    return rc == 0 and rc_int == 0
+
+
+@case
+def creatorz_reply_not_enough(root):
+    # Balázs's message without the word, someone else's message with it, another chat, no record: still blocked.
+    balazs_asked(root, text='Mi a helyzet a kampánnyal?')
+    a = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})[0]
+    balazs_asked(root, user='5040302010')
+    b = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})[0]
+    balazs_asked(root, chat='-1000000000099')
+    c = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})[0]
+    balazs_asked(root)
+    d = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '902'})[0]
+    return a == b == c == d == 2
+
+
+@case
+def creatorz_no_sender_log_fails_closed(root):
+    # The "who" plugin patch not live yet: the evidence alone does not prove Balázs wrote it.
+    tg_state(root, evidence=[{'chat_id': GROUP, 'message_id': '901', 'text': 'Creatorz?', 'at': 1}])
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})
+    return rc == 2
+
+
+@case
+def creatorz_corrupt_log_still_blocks(root):
+    # Viktor 38110 L1: a non-object line ([1], a string) in either log must not crash the gate into letting it pass.
+    d = os.path.join(root, '.claude', 'channels', 'telegram')
+    os.makedirs(d, exist_ok=True)
+    for name in ('inbound-senders.jsonl', 'inbound-evidence.jsonl'):
+        with open(os.path.join(d, name), 'w', encoding='utf-8') as f:
+            f.write('[1]\n"x"\n')
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})
+    balazs_asked(root)
+    with open(os.path.join(d, 'inbound-senders.jsonl'), 'a', encoding='utf-8') as f:
+        f.write('[1]\n')
+    ok, _ = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})
+    return rc == 2 and 'CREATORZ-KAPU' in err and ok == 0
+
+
+@case
+def creatorz_absent_unchanged(root):
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'A kreatív anyag kész, a creator-oldal is.'})
+    return rc == 0
+
+
+@case
 def no_idea_private_unchanged(root):
     rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Kész a riport.'})
     return rc == 0
