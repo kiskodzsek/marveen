@@ -1630,7 +1630,7 @@ def idea_refused_direction_word_start_only(root):
 @case
 def idea_marabel_in_text_not_refused(root):
     # "marabel" is in the lint list for idea titles, but a chat text may name Marabel (the ÖTLET-KAPU line covers it).
-    rc, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új irány: nem a Marabel, hanem kalkulátor-portál.'})
+    rc, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új irány: nem a Marabel, hanem hűtőmágnes-bolt.'})
     return rc == 0
 
 
@@ -1657,7 +1657,7 @@ def idea_refused_list_missing_fails_closed(root):
         p = subprocess.run([sys.executable, '-I', hook], input=json.dumps({'tool_input': {'chat_id': GROUP, 'text': text}}),
                            capture_output=True, text=True, env=env, timeout=20)
         return p.returncode, p.stderr
-    rc, err = go(IDEA_LINE + 'Új ötlet: kalkulátor-portál.')
+    rc, err = go(IDEA_LINE + 'Új ötlet: hűtőmágnes-bolt.')
     rc2, _ = go('Radar dolgozik.')
     return rc == 2 and 'nem olvasható' in err and rc2 == 0
 
@@ -1704,7 +1704,7 @@ def idea_refused_direction_inside_marker_line_blocked(root):
     texts = ('ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve, recepciós\nÚj ötlet.',
              'PRIVÁT-OK: telefonos asszisztens ügy, Patrik kérdezte\n' + IDEA_LINE + 'Új ötlet.')
     hits = [run(root, {'chat_id': GROUP, 'text': t})[0] for t in texts]
-    ok, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: kalkulátor-portál.'})
+    ok, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: hűtőmágnes-bolt.'})
     # A negation in the marker line is the declaration the gate asks for (TG 17460: "nem AI-tanácsadás"): it passes.
     # In the body a negation gets no pass.
     neg_line, _ = run(root, {'chat_id': GROUP, 'text': 'ÖTLET-KAPU: nem Marabel/könyv, nem AI-tanácsadás, nem telefonos '
