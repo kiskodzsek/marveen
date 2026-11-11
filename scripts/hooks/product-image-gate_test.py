@@ -1771,6 +1771,22 @@ def creatorz_no_sender_log_fails_closed(root):
 
 
 @case
+def creatorz_corrupt_log_still_blocks(root):
+    # Viktor 38110 L1: a non-object line ([1], a string) in either log must not crash the gate into letting it pass.
+    d = os.path.join(root, '.claude', 'channels', 'telegram')
+    os.makedirs(d, exist_ok=True)
+    for name in ('inbound-senders.jsonl', 'inbound-evidence.jsonl'):
+        with open(os.path.join(d, name), 'w', encoding='utf-8') as f:
+            f.write('[1]\n"x"\n')
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})
+    balazs_asked(root)
+    with open(os.path.join(d, 'inbound-senders.jsonl'), 'a', encoding='utf-8') as f:
+        f.write('[1]\n')
+    ok, _ = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})
+    return rc == 2 and 'CREATORZ-KAPU' in err and ok == 0
+
+
+@case
 def creatorz_absent_unchanged(root):
     rc, _ = run(root, {'chat_id': GROUP, 'text': 'A kreatív anyag kész, a creator-oldal is.'})
     return rc == 0

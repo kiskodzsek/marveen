@@ -988,9 +988,11 @@ def _jsonl_rows(name):
             with open(path, encoding='utf-8') as f:
                 for ln in f:
                     try:
-                        yield json.loads(ln)
+                        row = json.loads(ln)
                     except Exception:
                         continue
+                    if isinstance(row, dict):  # Viktor 38110 L1: a non-object line must not crash the gate
+                        yield row
         except OSError:
             continue
 
@@ -1013,8 +1015,13 @@ def balazs_named_it(chat, reply_to):
 
 
 def creatorz_check(chat, text, reply_to):
-    if not creatorz_text(text) or balazs_named_it(chat, reply_to):
+    if not creatorz_text(text):
         return None
+    try:
+        if balazs_named_it(chat, reply_to):
+            return None
+    except Exception:  # any error reading the records = no proof = blocked (fail closed; a crash would let it pass)
+        pass
     return ('CREATORZ-KAPU (Patrik csoport TG 5419, Klodel 38073): a Creatorz-t Patriknak többé nem hozzuk fel. Csak '
             'akkor mehet, ha a válasz (reply_to) Balázs saját üzenetére megy, amelyben ő maga írta a szót.')
 
