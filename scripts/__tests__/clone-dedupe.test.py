@@ -56,6 +56,8 @@ class CloneDedupe(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    @unittest.skipUnless(sys.platform == "darwin", "the clone is APFS clonefile(2) via cp -c: macOS only "
+                         "(CI runs on Linux, where GNU cp has no -c)")
     def test_target_keeps_its_own_mode_and_times(self):
         src, dst = os.path.join(self.root, "a", "p.png"), os.path.join(self.root, "b", "p.png")
         write(src, mode=0o644, mtime=OLDER)
@@ -71,6 +73,8 @@ class CloneDedupe(unittest.TestCase):
         self.assertEqual(os.stat(src).st_mode & 0o7777, 0o644)
         self.assertEqual([n for n in os.listdir(os.path.dirname(dst)) if n.endswith(".clonetmp")], [])
 
+    @unittest.skipUnless(sys.platform == "darwin", "the clone is APFS clonefile(2) via cp -c: macOS only "
+                         "(CI runs on Linux, where GNU cp has no -c)")
     def test_target_written_after_the_scan_is_skipped(self):
         src, dst = os.path.join(self.root, "a", "p.png"), os.path.join(self.root, "b", "p.png")
         write(src)

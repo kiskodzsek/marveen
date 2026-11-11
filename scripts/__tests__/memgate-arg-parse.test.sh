@@ -122,6 +122,31 @@ run_gate 5 --verdict --dry-run
 check "--verdict still reports a status line" \
       "$(echo "$OUT" | grep -q 'used=' && echo 0 || echo 1)" "got: $OUT"
 
+# 6. The running-agent count with a stubbed tmux, so the host's own sessions do not decide the result
+#    (card ac602965, CI run 42805724668). `grep -c` prints 0 AND exits 1 on no match, so the old
+#    `grep -c ... || echo 0` made running="0<newline>0": the status line split in two and
+#    `(( running >= AGENT_CAP ))` was a syntax error. It passed on the Mac mini only because live
+#    agent-* sessions made grep exit 0.
+printf 'MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n' > "$SANDBOX/meminfo-ok"
+# run_counted <tmux ls output> <args...>: healthy memory, a tmux stub printing the given sessions
+run_counted() {
+  local sessions="$1"; shift
+  printf '#!/usr/bin/env bash\nprintf "%%s" "%s"\n' "$sessions" > "$SANDBOX/bin/tmux"; chmod +x "$SANDBOX/bin/tmux"
+  OUT="$(_timeout 5 env PATH="$SANDBOX/bin:$PATH" MEMGATE_PROC_MEMINFO="$SANDBOX/meminfo-ok" \
+      MARVEEN_STORE="$SANDBOX/store" MARVEEN_ALERT_CHAT_ID="111" MARVEEN_CORE_AGENTS="__no_core__" \
+      MARVEEN_MEM_GATE_OBSERVE=0 MARVEEN_AGENT_CAP=2 bash "$GATE" "$@" 2>&1)"
+  RC=$?
+}
+run_counted "" --verdict --dry-run
+check "no agent session: one status line, running_agents=0, src at its end" \
+      "$([ "$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')" = 1 ] && echo "$OUT" | grep -q 'running_agents=0 cap=2 .*src=meminfo$' && echo 0 || echo 1)" "got: $OUT"
+check "no agent session: --verdict allows (exit 0), no arithmetic error" \
+      "$([ "$RC" = 0 ] && ! echo "$OUT" | grep -q 'syntax error' && echo 0 || echo 1)" "rc=$RC got: $OUT"
+run_counted "$(printf 'agent-a: 1 windows\nagent-b: 1 windows\nother: 1 windows')" --verdict --dry-run
+check "two agent sessions at cap 2: running_agents=2 and --verdict blocks (exit 10)" \
+      "$([ "$RC" = 10 ] && echo "$OUT" | grep -q 'running_agents=2 cap=2' && echo 0 || echo 1)" "rc=$RC got: $OUT"
+rm -f "$SANDBOX/bin/tmux"
+
 echo
 echo "$((DONE-FAILS))/$DONE passed  (script under test: $GATE)"
 [ "$FAILS" = "0" ] || exit 1

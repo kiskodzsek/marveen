@@ -127,11 +127,14 @@ describe('wiring contracts (source-level)', () => {
     // whole point.
     expect(routerSrc).toContain('!worksourceServing && shouldAbandon(')
     expect(routerSrc).toContain('!worksourceServing && !sessionExists')
-    expect(routerSrc).toContain('!worksourceServing && !(await isSessionReadyForPrompt(')
+    // #150 (f4c5e5d8) split the readiness gate into `ready` so an urgent row can
+    // still type into a busy pane; `!ready` is the same carve-out by De Morgan.
+    expect(routerSrc).toContain('const ready = worksourceServing || (await isSessionReadyForPrompt(')
     // The flag alone must never be what disarms a gate.
     expect(routerSrc).not.toContain('!usesWorksource && shouldAbandon(')
     expect(routerSrc).not.toContain('!usesWorksource && !sessionExists')
     expect(routerSrc).not.toContain('!usesWorksource && !(await isSessionReadyForPrompt(')
+    expect(routerSrc).not.toContain('usesWorksource || (await isSessionReadyForPrompt(')
   })
 
   it('the carve-out demands POSITIVE evidence that the queue is served, not just the opt-in flag', () => {

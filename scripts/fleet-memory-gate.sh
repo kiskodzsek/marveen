@@ -143,7 +143,9 @@ avail_mb=$(( mem_avail / 1024 ))
 # --- count running non-core agents (tmux agent-* sessions; dependency-free) ---
 running=0
 if command -v tmux >/dev/null 2>&1; then
-  running="$(tmux ls 2>/dev/null | grep -c '^agent-' || echo 0)"
+  # grep -c prints 0 AND exits 1 on no match: `|| echo 0` would make it "0\n0" (card ac602965).
+  running="$(tmux ls 2>/dev/null | grep -c '^agent-')"
+  [[ "$running" =~ ^[0-9]+$ ]] || running=0
 fi
 
 is_core() {

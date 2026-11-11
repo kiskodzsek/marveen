@@ -50,6 +50,9 @@ printf '#!/bin/bash\ncase "$2" in hw.memsize) echo 17179869184 ;; kern.memorysta
 chmod +x "$SB/sysctl"
 
 NOW=2000000000; H=3600; GB=1048576
+# set_mtime <epoch> <path>...: an exact mtime, no BSD/GNU date or touch -t parsing in between (CI runs on
+# Linux: `date -r <epoch>` is a FILE reference in GNU date and `date -v` does not exist there).
+set_mtime() { python3 -c 'import os,sys; t=int(sys.argv[1]); [os.utime(p, (t, t)) for p in sys.argv[2:]]' "$@"; }
 # dc <tick|run> with: HOUR, DF_KB (default 50 GiB), LAST (stamp, empty = none), HJ_BIN (default the stub).
 # No VM (HEAVY_JOB_VM_PID empty): env -i would drop the export below, and the host may run a real one.
 dc() {
@@ -314,15 +317,15 @@ check "no install dir: skipped (the other steps' tests above rely on it)" "$(ok 
 echo "== the disk emergency (Klodel 25381, card 152400f3)"
 # Young (a source change 2 h before NOW: under the 24 h cache rule, over the 1 h emergency one), unmerged,
 # clean trees with a real node_modules and a .next.
-YOUNG="$(date -r $((NOW - 2 * H)) +%Y%m%d%H%M)"
+YOUNG=$((NOW - 2 * H))
 for w in em-idle em-busy em-dirty em-target em-linker em-fresh; do
   G -C "$I" worktree add -b "b-$w" "$A/wt-$w" origin/main
   echo "$w" > "$A/wt-$w/u" && G -C "$A/wt-$w" add u && G -C "$A/wt-$w" commit -m "$w"
-  mkdir -p "$A/wt-$w/node_modules/pkg" "$A/wt-$w/.next/cache"; echo m > "$A/wt-$w/node_modules/pkg/i.js"; touch -t "$YOUNG" "$A/wt-$w/u"
+  mkdir -p "$A/wt-$w/node_modules/pkg" "$A/wt-$w/.next/cache"; echo m > "$A/wt-$w/node_modules/pkg/i.js"; set_mtime "$YOUNG" "$A/wt-$w/u"
 done
-touch -t "$(date -r $((NOW - 600)) +%Y%m%d%H%M)" "$A/wt-em-fresh/u"
+set_mtime $((NOW - 600)) "$A/wt-em-fresh/u"
 rm -rf "$A/wt-em-linker/node_modules"; ln -s "$A/wt-em-target/node_modules" "$A/wt-em-linker/node_modules"
-echo changed >> "$A/wt-em-dirty/u"; touch -t "$YOUNG" "$A/wt-em-dirty/u"
+echo changed >> "$A/wt-em-dirty/u"; set_mtime "$YOUNG" "$A/wt-em-dirty/u"
 echo "$A/wt-em-busy" > "$SB/cwds"
 INST="$I" LAST= DF_KB=$((20 * GB)) dc run
 check "20 GiB free: a young tree keeps its .next and node_modules (not an emergency)" "$(ok -d "$A/wt-em-idle/.next" -a -d "$A/wt-em-idle/node_modules" -a -z "$(grep 'emergency=1' "$SB/store/daily-cleanup.log")")"
@@ -337,7 +340,7 @@ check "...a tree edited 10 min ago keeps both (the 1 h floor)" "$(ok -d "$A/wt-e
 : > "$SB/cwds"
 # Scratch: 14 h idle goes only in an emergency (the 12 h rule), 1 h idle never.
 S="$SB/scratch"; mkdir -p "$S/-projE/s14" "$S/-projE/s1"; echo x > "$S/-projE/s14/f"; echo x > "$S/-projE/s1/f"
-touch -t "$(date -v-14H +%Y%m%d%H%M)" "$S/-projE/s14/f" "$S/-projE/s14"; touch -t "$(date -v-1H +%Y%m%d%H%M)" "$S/-projE/s1/f" "$S/-projE/s1"
+RNOW=$(date +%s); set_mtime $((RNOW - 14 * H)) "$S/-projE/s14/f" "$S/-projE/s14"; set_mtime $((RNOW - H)) "$S/-projE/s1/f" "$S/-projE/s1"
 LAST= DF_KB=$((20 * GB)) dc run
 check "20 GiB free: a scratch session idle for 14 h stays (2-day rule)" "$(ok -d "$S/-projE/s14")"
 LAST= DF_KB=$((5 * GB)) dc run
@@ -351,8 +354,13 @@ NL=$(wc -l < "$SB/store/daily-cleanup.log")
 INST="$I" LAST= DF_KB=$((20 * GB)) dc run
 check "20 GiB free: no dedupe step" "$(ok -z "$(tail -n +$((NL + 1)) "$SB/store/daily-cleanup.log" | grep 'STEP dedupe')")"
 INST="$I" LAST= DF_KB=$((5 * GB)) dc run
-check "5 GiB free: the identical pair becomes one clone, logged" "$(ok -n "$(grep 'STEP dedupe rc=0 groups=1 cloned=1 failed=0' "$SB/store/daily-cleanup.log")")" "$(grep 'STEP dedupe' "$SB/store/daily-cleanup.log" | tail -1)"
-check "...both paths still there, byte for byte, the old mtime kept, no .clonetmp left" "$(ok "$(shasum -a 256 < "$I/agents/a/out/y/p.png")" = "$H1" -a "$(shasum -a 256 < "$I/shared/x/p.png")" = "$H1" -a "$(stat -f %Sm -t %Y "$I/agents/a/out/y/p.png")" = 2020 -a -z "$(find "$I" -name '*.clonetmp')")"
+# The clone itself is APFS clonefile(2) (cp -c, scripts/clone-dedupe.py): macOS only, so these two run on Darwin.
+if [ "$(uname -s)" = Darwin ]; then
+  check "5 GiB free: the identical pair becomes one clone, logged" "$(ok -n "$(grep 'STEP dedupe rc=0 groups=1 cloned=1 failed=0' "$SB/store/daily-cleanup.log")")" "$(grep 'STEP dedupe' "$SB/store/daily-cleanup.log" | tail -1)"
+  check "...both paths still there, byte for byte, the old mtime kept, no .clonetmp left" "$(ok "$(shasum -a 256 < "$I/agents/a/out/y/p.png")" = "$H1" -a "$(shasum -a 256 < "$I/shared/x/p.png")" = "$H1" -a "$(stat -f %Sm -t %Y "$I/agents/a/out/y/p.png")" = 2020 -a -z "$(find "$I" -name '*.clonetmp')")"
+else
+  echo "SKIP  dedupe clone checks (2): APFS clonefile is macOS-only, $(uname -s) here"
+fi
 touch "$I/agents/a/out/y/p.png" "$I/shared/x/p.png"
 python3 -I "$ROOT/scripts/clone-dedupe.py" --root "$I/shared" --root "$I/agents/a/out" > "$SB/dd.out"
 check "clone-dedupe: a file changed within the hour is left alone" "$(ok -n "$(grep 'groups=0 cloned=0' "$SB/dd.out")")" "$(cat "$SB/dd.out")"
