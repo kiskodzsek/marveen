@@ -11,6 +11,7 @@ Generic across all three channel agents (marveen / dia / erno-ba): agent_id is
 derived from the running session's cwd so each session only ever sees its OWN
 chat. Pure stdlib (sqlite3) -- no node startup, no jq.
 """
+import json
 import os
 import sqlite3
 import time
@@ -352,6 +353,42 @@ def source_for(agent_id, chat_id):
         return row[0] if row else None
     finally:
         con.close()
+
+
+def _reaction_file(agent_id):
+    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(agent_id))
+    return os.path.join(os.path.dirname(db_path()), f".tg-react-{safe}.json")
+
+
+def record_reaction(agent_id, chat_id):
+    """Klodel 34050 (Balázs csoport TG 3631: "ne újjazz már meg ennyiszer"): an emoji reaction acknowledges an
+    inbound without a new message. It is NOT written into conversation_log: a reaction is no reply text, and an 'out'
+    row would show up in the SessionStart replay as one. Instead {chat_id: unix ts of the last reaction} is kept in a
+    small JSON file next to the DB, which the Stop-hook reply guard reads (reacted_since)."""
+    path = _reaction_file(agent_id)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    data[str(chat_id)] = int(time.time())
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def reacted_since(agent_id, chat_id, since):
+    """True if this agent reacted in chat_id at or after `since` (unix ts). Any error -> False (the guard then blocks
+    as before: fail closed)."""
+    try:
+        with open(_reaction_file(agent_id), encoding="utf-8") as f:
+            at = json.load(f).get(str(chat_id))
+        return at is not None and since is not None and int(at) >= int(since)
+    except Exception:
+        return False
 
 
 def open_question_with_age(agent_id):

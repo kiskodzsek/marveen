@@ -164,6 +164,8 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'PreToolUse gate on the main agent\'s telegram reply: no .mp4/.mov without an audio track reaches Patrik (TG 4483, Klodel 35741). Docstring: "Wiring: .claude/settings.json PreToolUse"; until fix/ci-red-main-1111 it ran only from the prod checkout\'s uncommitted settings. Seeding it fleet-wide is a separate decision',
   'product-image-gate.py':
     'TERMEKKEP-KAPU (Patrik TG 1690/1694): an image/video to the owner on Telegram only with a store/kep-kapu/<file>.ok attestation in THIS checkout\'s store. Until fix/ci-red-main-1111 it ran only from the prod checkout\'s uncommitted settings. Seeding it fleet-wide is a separate decision',
+  'telegram-react-ack.py':
+    'the PostToolUse half of the reaction acknowledgement (Klodel 34050): it records a successful react in ledger_lib.record_reaction, and the only reader is telegram-reply-guard.py (reacted_since), which is itself CHECKOUT_ONLY on the main-only ledger; seeded alone it would write a stamp nobody reads',
   'telegram-reply-guard.py':
     'the Stop-hook half of the Telegram reply enforcement (#856) decides from ledger_lib.open_question_with_age, i.e. the conversation_log the main-only ledger trio writes; seeded alone it would read an empty ledger and allow every stop, a silent no-op -- seeding it means seeding the ledger trio with it, a separate design decision',
 }
