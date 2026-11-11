@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+// @ts-expect-error -- plain .mjs hook script, no types (same as governance-gates.test.ts)
 import { gateDecision as selfPaceDecision } from '../../scripts/self-pace-gate.mjs'
 
 // The sub-agent CLAUDE.md that generateClaudeMd() asks the model to copy verbatim
