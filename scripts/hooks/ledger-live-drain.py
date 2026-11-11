@@ -92,6 +92,16 @@ def main():
     # for ten days (#1028).
     chat_id, message_id, text, ts, created_at, att_kind, att_file_id = oq[:7]
 
+    # Klodel 37860 (measured 11-11 13:58: OPEN_QUESTION after a 👍 on the message): the same acknowledgement as the
+    # reply guard -- a reaction in the chat after the inbound, or a "not for me" close (ledger-close.py).
+    try:
+        if ledger_lib.acknowledged(agent_id, chat_id, message_id, created_at):
+            nothing()
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+
     # GRACE: skip a fresh inbound the agent may be answering right now.
     try:
         if created_at is None or (int(time.time()) - int(created_at)) < GRACE_SECONDS:

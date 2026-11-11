@@ -12,6 +12,7 @@ derived from the running session's cwd so each session only ever sees its OWN
 chat. Pure stdlib (sqlite3) -- no node startup, no jq.
 """
 import json
+import re
 import os
 import sqlite3
 import time
@@ -389,6 +390,72 @@ def reacted_since(agent_id, chat_id, since):
         return at is not None and since is not None and int(at) >= int(since)
     except Exception:
         return False
+
+
+# Klodel 37860 (Balázs csoport TG 5277: "nem téged kérdeztelek vagy úgy érzed?"): a group message that Patrik and
+# Balázs write to EACH OTHER is not owed a reply (memory patrik-to-balazs-not-me, TG 3366). The agent closes it
+# explicitly, silently, with scripts/hooks/ledger-close.py <chat_id> <message_id> "nem nekem: <kinek>", which writes
+# {"<chat_id>:<message_id>": {"t": unix ts, "note": ...}} next to the DB and one line into an append-only log. The
+# reply guard, the live drain and the progress Stop hook then treat that inbound as acknowledged. Only an inbound
+# that exists in this agent's ledger can be closed; without the close (or a reply / reaction) they still block.
+def _closed_file(agent_id):
+    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(agent_id))
+    return os.path.join(os.path.dirname(db_path()), f".tg-closed-{safe}.json")
+
+
+NOT_FOR_ME = re.compile(r"^nem nekem:\s*\S.{0,199}$", re.S)
+
+
+def inbound_created_at(agent_id, chat_id, message_id):
+    """created_at of this agent's inbound (chat_id, message_id), or None if the ledger has no such row."""
+    con = connect()
+    try:
+        row = con.execute(
+            "SELECT created_at FROM conversation_log WHERE agent_id=? AND direction='in' AND chat_id=? AND message_id=?"
+            " ORDER BY created_at DESC LIMIT 1", (str(agent_id), str(chat_id), str(message_id))).fetchone()
+        return row[0] if row else None
+    finally:
+        con.close()
+
+
+def close_inbound(agent_id, chat_id, message_id, note):
+    """Mark one inbound as "not for me". Raises ValueError on a bad note or an unknown inbound (nothing written)."""
+    note = (note or "").strip()
+    if not NOT_FOR_ME.match(note):
+        raise ValueError('a note is required: "nem nekem: <kinek szólt>"')
+    if inbound_created_at(agent_id, chat_id, message_id) is None:
+        raise ValueError(f"no inbound {chat_id}:{message_id} in this agent's ledger")
+    path = _closed_file(agent_id)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    now = int(time.time())
+    data[f"{chat_id}:{message_id}"] = {"t": now, "note": note}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+    with open(path[:-5] + ".log", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"t": now, "agent": str(agent_id), "chat_id": str(chat_id), "message_id": str(message_id),
+                            "note": note}, ensure_ascii=False) + "\n")
+
+
+def is_closed(agent_id, chat_id, message_id):
+    """True if this inbound was closed as "not for me". Any error -> False (the callers then block: fail closed)."""
+    try:
+        with open(_closed_file(agent_id), encoding="utf-8") as f:
+            return f"{chat_id}:{message_id}" in json.load(f)
+    except Exception:
+        return False
+
+
+def acknowledged(agent_id, chat_id, message_id, created_at):
+    """The inbound needs no reply: closed as "not for me", or this agent reacted in the chat after it arrived."""
+    return is_closed(agent_id, chat_id, message_id) or reacted_since(agent_id, chat_id, created_at)
 
 
 def open_question_with_age(agent_id):
