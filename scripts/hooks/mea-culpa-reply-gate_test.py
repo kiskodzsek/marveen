@@ -27,9 +27,12 @@ def setup(root, projektek=PROJEKTEK):
             f.write(projektek if isinstance(projektek, str) else json.dumps(projektek, ensure_ascii=False))
 
 
-def run(root, tool_input, env_extra=None, raw=None):
+def run(root, tool_input, env_extra=None, raw=None, tool=None):
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, **(env_extra or {})}
-    payload = raw if raw is not None else json.dumps({'tool_input': tool_input})
+    body = {'tool_input': tool_input}
+    if tool:
+        body['tool_name'] = 'mcp__plugin_telegram_telegram__' + tool
+    payload = raw if raw is not None else json.dumps(body)
     p = subprocess.run([sys.executable, '-I', HOOK], input=payload, capture_output=True, text=True, env=env, timeout=20)
     return p.returncode, p.stderr
 
@@ -108,6 +111,73 @@ def env_override_names_the_owner_chats(root):
     env = {'MARVEEN_OWNER_CHATS': f'{OTHER}, 123'}
     return (run(root, {'chat_id': OTHER, 'text': 'Igazad van.'}, env)[0] == 2
             and run(root, {'chat_id': GROUP, 'text': 'Igazad van.'}, env)[0] == 0)
+
+
+# Klodel 38198 (hibanapló 11-11 17:02): "PLACEHOLDER" edit_message on the group's live status message.
+@case
+def placeholder_blocked_in_every_chat(root):
+    setup(root)
+    texts = ['PLACEHOLDER', 'placeholder', 'Új ötlet: PLACEHOLDER', 'TODO', '  tbd. ', '[TODO] részletek', 'Ár: TBD',
+             'Határidő: XXX', 'Lorem ipsum dolor sit amet', 'Szia {{nev}}!', '<PLACEHOLDER>', '✅ TODO', 'PLACE​HOLDER']
+    res = [run(root, {'chat_id': chat, 'text': t}, tool='reply') for chat in (GROUP, PRIV, OTHER) for t in texts]
+    return all(rc == 2 and 'PLACEHOLDER-KAPU' in err for rc, err in res)
+
+
+@case
+def soft_hyphen_blocked_in_every_chat(root):
+    # Klodel 38201: U+00AD went out twice on 2026-11-11 (TG 17568, 5477). A ZWJ emoji (U+200D) is not affected.
+    setup(root)
+    res = [run(root, {'chat_id': chat, 'text': 'Kész: a recept\u00adkönyv minta elkészült.'}, tool=tool)
+           for chat in (GROUP, OTHER) for tool in ('reply', 'edit_message')]
+    family = run(root, {'chat_id': GROUP, 'text': 'Család: 👨\u200d👩\u200d👧 kész a fotó.'}, tool='reply')[0]
+    return all(rc == 2 and 'U+00AD' in err for rc, err in res) and family == 0
+
+
+@case
+def placeholder_word_in_prose_passes(root):
+    setup(root)
+    texts = ['3 TODO maradt a kódban, holnap zárom.', 'A placeholder szót mostantól a kapu fogja.',
+             'XXL póló készült, 12 db.', 'A TBD státuszú kártyákat Klodel rendezi.', 'Kész: PR #187, TODO-lista üres.',
+             'Ár: 4 990 Ft', '📊 ÉLŐ ÁLLAPOT · frissítve 17:05\n\nMarabel: 3 rendelés']
+    return all(run(root, {'chat_id': GROUP, 'text': t}, tool='reply')[0] == 0 for t in texts)
+
+
+@case
+def short_edit_blocked_short_reply_not(root):
+    setup(root)
+    return (run(root, {'chat_id': OTHER, 'message_id': '7', 'text': 'Dolgozom…'}, tool='edit_message')[0] == 2
+            and run(root, {'chat_id': OTHER, 'message_id': '7', 'text': ' '}, tool='edit_message')[0] == 2
+            and run(root, {'chat_id': OTHER, 'text': 'Kész.'}, tool='reply')[0] == 0
+            and run(root, {'chat_id': OTHER, 'message_id': '7', 'text': 'Kész: a kép elkészült, 2 db.'},
+                    tool='edit_message')[0] == 0)
+
+
+@case
+def live_status_edit_needs_the_head(root):
+    setup(root, projektek={'elo_uzenet': {'csoport': {'chat_id': GROUP, 'message_id': '1869'},
+                                          'privat': {'chat_id': PRIV, 'message_id': 55}}})
+    bad = [run(root, {'chat_id': GROUP, 'message_id': '1869', 'text': 'Frissítés: minden rendben, 3 rendelés.'},
+               tool='edit_message'),
+           run(root, {'chat_id': int(PRIV), 'message_id': 55, 'text': 'Frissítés: minden rendben, 3 rendelés.'},
+               tool='edit_message')]
+    good = [run(root, {'chat_id': GROUP, 'message_id': '1869', 'text': '📊 ÉLŐ ÁLLAPOT · frissítve 17:05\n\nx'},
+                tool='edit_message'),
+            run(root, {'chat_id': PRIV, 'message_id': '55', 'text': 'ÉLŐ ÁLLAPOT · frissítve 17:05, minden rendben'},
+                tool='edit_message'),
+            # another message in the same chat, and a reply to the live message, are not the live edit
+            run(root, {'chat_id': GROUP, 'message_id': '1870', 'text': 'Frissítés: minden rendben, 3 rendelés.'},
+                tool='edit_message'),
+            run(root, {'chat_id': GROUP, 'reply_to': '1869', 'text': 'Frissítés: minden rendben, 3 rendelés.'},
+                tool='reply')]
+    return (all(rc == 2 and 'ELO-ALLAPOT-KAPU' in err for rc, err in bad)
+            and all(rc == 0 for rc, _ in good))
+
+
+@case
+def live_status_check_without_store_ids_passes(root):
+    setup(root)  # PROJEKTEK names chat ids but the privat entry has no message_id
+    return run(root, {'chat_id': PRIV, 'message_id': '55', 'text': 'Frissítés: minden rendben, 3 rendelés.'},
+               tool='edit_message')[0] == 0
 
 
 @case
