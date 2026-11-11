@@ -132,6 +132,9 @@ jobs:
       - run: python3 -I scripts/hooks/claim-source-reply-gate_test.py
       # The render-state claim gate (Klodel 35696, Patrik TG 4381): no "renderel" to Patrik without a fresh measurement.
       - run: python3 -I scripts/hooks/render-claim-reply-gate_test.py
+      # PRKERDES1111 (hibanapló 2026-11-11, Klodel 37320): no "PR #<n> mehet?" to Patrik without the PR's full
+      # file list and a picture or a reason per file. Hermetic: throwaway CLAUDE_PROJECT_DIR, fake GitHub.
+      - run: python3 -I scripts/hooks/pr-kerdes-gate_test.py
       # KEYCHAINGATE1106 (card c1921b55, Viktor 29950): the Bash gate that stops an
       # agent shell from reading keychain secrets with `security`; its bypass forms
       # (wrappers, paths, escapes, bash -c, stdin mode) are the gate. Hermetic: the
