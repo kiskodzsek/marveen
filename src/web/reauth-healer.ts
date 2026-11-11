@@ -6,7 +6,7 @@ import { resolveFromPath } from '../platform.js'
 import { listAgentNames } from './agent-config.js'
 import { isAgentRunning, capturePane, startAgentProcess } from './agent-process.js'
 import { isRestartInFlight } from './restart-lock.js'
-import { isLoginInFlight } from './login-in-flight.js'
+import { isLoginInFlight, loginInFlightAgeMin } from './login-in-flight.js'
 import { quarantineFleetTokenIfDead } from './claude-credentials-guard.js'
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
@@ -300,10 +300,15 @@ function checkSession(label: string, session: string, isMain: boolean, quiet: bo
   // The reasons produced by the two first-run-gate markers in reauth-detect.
   const isFirstRunGate = /onboarding picker|sign-in screen/i.test(reauth.reason ?? '')
 
+  const loginInFlight = !isMain && isLoginInFlight(label)
   const decision = decideReauthAction(
-    { isDeadToken: reauth.needsReauth, sessionAlive, isMain, canInteractiveLogin: hostCanInteractiveLogin(), isFirstRunGate, loginInFlight: !isMain && isLoginInFlight(label), prev, nowMs: Date.now() },
+    { isDeadToken: reauth.needsReauth, sessionAlive, isMain, canInteractiveLogin: hostCanInteractiveLogin(), isFirstRunGate, loginInFlight, prev, nowMs: Date.now() },
     { threshold: DEAD_PROBE_THRESHOLD, cooldownMs: ESCALATION_COOLDOWN_MS },
   )
+  // The hold must be visible (Viktor 38639 L2): one line per sweep while it mutes the heal.
+  if (loginInFlight && reauth.needsReauth && sessionAlive) {
+    logger.info({ label, session, reason: reauth.reason, minutes: loginInFlightAgeMin(label) }, 'reauth-healer: held -- operator login in flight')
+  }
 
   if (decision.next.consecutiveDead === 0) {
     watchState.delete(session)

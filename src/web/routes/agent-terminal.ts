@@ -9,7 +9,7 @@ import { literalKeyArgs, specialKeyArgs, loginSequence, type LoginStep } from '.
 import { readTerminalInputEnabled, writeTerminalInputEnabled } from '../terminal-input-store.js'
 import type { RouteContext } from './types.js'
 import { exactTmuxTarget } from '../../tmux-target.js'
-import { markLoginInFlight } from '../login-in-flight.js'
+import { markLoginInFlight, clearLoginInFlight } from '../login-in-flight.js'
 
 // Per-agent dashboard terminal: live pane stream (SSE), keystroke injection,
 // and the scripted /login flow. All gated by the dashboard token (the SSE
@@ -293,6 +293,8 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
       logger.info({ name, phase }, 'agent-terminal: /login sequence sent')
       json(res, { ok: true, phase })
     } catch (err) {
+      // No live login after a failed start: do not keep the healer muted (Viktor 38639 L1).
+      if (phase === 'start') clearLoginInFlight(name)
       logger.warn({ err, name, phase }, 'agent-terminal: /login sequence failed')
       json(res, { error: 'login sequence failed' }, 500)
     }
