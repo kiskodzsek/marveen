@@ -84,8 +84,8 @@ EVID_INSERT = (
 # edit_message. Not a PreToolUse updatedInput: nine hooks run in parallel on this tool, and which rewrite wins when
 # more than one rewrites is not documented; the plugin is one place, deterministic, and testable.
 # Cut: a line starting with ÖTLET-KAPU / BALAZS-OK (Balázs OK) / PATRIK-KÉRTE / ELVETETT-DE-KÉRT (any case, as the
-# gates accept them) or an upper-case FORRÁS: line (a prose "Forrás: KSH" stays); and PRIVÁT-OK: up to the line end
-# wherever it stands (the gate finds it anywhere). The cut lines go to <STATE_DIR>/outbound-markers.jsonl (0600,
+# gates accept them) and a PRIVÁT-OK: line. A FORRÁS: line is NOT cut (Klodel 38117, Viktor I1: Patrik must see
+# the source). The cut lines go to <STATE_DIR>/outbound-markers.jsonl (0600,
 # past 256 KiB the file becomes .1) for audit. A text that is ONLY markers is refused, not sent empty.
 # Uses only names server.ts already imports (writeFileSync, statSync, renameSync, rmSync, join) and req/args.
 STRIP_MARKER = "// MARVEEN-PATCH(kapu-jelolo-38054): gate markers out of the sent text"
@@ -113,8 +113,7 @@ def ROTATE_JS(f):
 STRIP_JS = (
     r"{indent}  if (typeof args.text === 'string') {{ const __gone = []; const __cut = m => {{ __gone.push(m.trim()); "
     r"return '' }}; const __t0 = args.text"
-    r".replace(/^[ \t]*(?:ÖTLET\\?-KAPU|BAL[AÁ]ZS[ \t\\-]?OK|PATRIK.K[EÉ]RTE|ELVETETT\\?-DE\\?-K[EÉ]RT|PRIVÁT\\?-OK)[ \t]*:[^\n]*(?:\r?\n|$)/gimu, __cut)"
-    r".replace(/^[ \t]*FORRÁS[ \t]*:[^\n]*(?:\r?\n|$)/gmu, __cut); "
+    r".replace(/^[ \t]*(?:ÖTLET\\?-KAPU|BAL[AÁ]ZS[ \t\\-]?OK|PATRIK.K[EÉ]RTE|ELVETETT\\?-DE\\?-K[EÉ]RT|PRIVÁT\\?-OK)[ \t]*:[^\n]*(?:\r?\n|$)/gimu, __cut); "
     r"if (__gone.length) {{ const __t = __t0.replace(/\s+$/u, ''); "
     r"const __short = x => {{ if (x.length <= 80) return x; const r = x.match(/(?:TG|msg(?:_id)?|PR)\s*[#:=]?\s*\d{{2,}}/giu) || []; "
     r"return x.slice(0, 80) + '…' + (r.length ? ' [' + r.join(', ') + ']' : '') }}; let __ok = false; "

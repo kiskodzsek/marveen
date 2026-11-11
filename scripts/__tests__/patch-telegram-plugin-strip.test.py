@@ -107,7 +107,6 @@ cases = [
      "Balázs, nézd meg.\nKöszi."),
     ("PATRIK-KERTE line", "PR #183 mehet?\nPATRIK-KÉRTE: TG 17000", "PR #183 mehet?"),
     ("ELVETETT-DE-KERT line", "ELVETETT-DE-KERT: TG 17454\nÚj irány: szalon.", "Új irány: szalon."),
-    ("FORRÁS upper-case line", "A szám 12 100.\nFORRÁS: msg 38057, ads-1111.csv", "A szám 12 100."),
     ("PRIVÁT-OK line", "Kész.\nPRIVÁT-OK: Patrik privátban kérdezte\nRészletek lent.", "Kész.\nRészletek lent."),
     ("indented marker line", "Szöveg.\n  ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve x\nVége.", "Szöveg.\nVége."),
 ]
@@ -115,9 +114,13 @@ for name, text, want in cases:
     got, err, log, mode, _ = strip(text)
     check("cut: " + name, got == want and err is None and len(log) == 1 and log[0]["removed"], f"got={got!r} err={err}")
 
-keep = "A Forrás: KSH 2024 szerint 48 141 vállalkozás.\nforrás: Eurostat\nA BALAZS-OK szó a mondat közepén marad."
+keep = ("A Forrás: KSH 2024 szerint 48 141 vállalkozás.\nforrás: Eurostat\nA BALAZS-OK szó a mondat közepén marad.\n"
+        "FORRÁS: msg 38057, ads-1111.csv")
 got, err, log, _, _ = strip(keep)
-check("prose kept (Forrás:, forrás:, a marker word mid-sentence)", got == keep and not log, repr(got))
+check("kept: FORRÁS: line (Klodel 38117), prose Forrás:, a marker word mid-sentence", got == keep and not log, repr(got))
+
+got, err, log, _, _ = strip("A szám 12 100.\nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6)\nFORRÁS: msg 38057")
+check("ÖTLET-KAPU cut, FORRÁS kept beside it", got == "A szám 12 100.\nFORRÁS: msg 38057" and len(log) == 1, repr(got))
 
 nfd = "Café ma.\n"  # NFD, no marker: must go out byte for byte
 got, err, log, _, _ = strip(nfd)
