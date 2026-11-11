@@ -1662,6 +1662,52 @@ def idea_refused_list_missing_fails_closed(root):
     return rc == 2 and 'nem olvasható' in err and rc2 == 0
 
 
+def gate_copy(root, lint_text):
+    """A copy of the hook with the given text as its uzleti-otlet-kapu-lint.py; returns a runner for chat texts."""
+    import shutil
+    here = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(os.path.join(root, 'scripts', 'hooks'), exist_ok=True)
+    os.makedirs(os.path.join(root, 'scripts', 'lib'), exist_ok=True)
+    hook = os.path.join(root, 'scripts', 'hooks', 'product-image-gate.py')
+    shutil.copy(HOOK, hook)
+    shutil.copy(os.path.join(here, '..', 'lib', 'owner_chat.py'), os.path.join(root, 'scripts', 'lib', 'owner_chat.py'))
+    if lint_text is not None:
+        with open(os.path.join(root, 'scripts', 'uzleti-otlet-kapu-lint.py'), 'w', encoding='utf-8') as f:
+            f.write(lint_text)
+    env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV}
+
+    def go(text):
+        p = subprocess.run([sys.executable, '-I', hook], input=json.dumps({'tool_input': {'chat_id': GROUP, 'text': text}}),
+                           capture_output=True, text=True, env=env, timeout=20)
+        return p.returncode, p.stderr
+    return go
+
+
+@case
+def idea_refused_list_read_as_data(root):
+    # Viktor 38060 L1: the lint is parsed, not run. A lint that exits at import, or a short/emptied list, must not
+    # switch the check off.
+    words = ', '.join(f'"w{i}"' for i in range(12))
+    exiting = f'import sys\nsys.exit(0)\nELUTASITOTT = [{words}, "recepciós"]\n'
+    rc1, _ = gate_copy(os.path.join(root, 'a'), exiting)(IDEA_LINE + 'Új ötlet: AI-recepciós.')
+    rc2, err2 = gate_copy(os.path.join(root, 'b'), 'ELUTASITOTT = []\n')(IDEA_LINE + 'Új ötlet: kalkulátor.')
+    rc3, err3 = gate_copy(os.path.join(root, 'c'), 'ELUTASITOTT = ["recepciós"]\n')(IDEA_LINE + 'Új ötlet: kalkulátor.')
+    rc4, _ = gate_copy(os.path.join(root, 'd'), f'ELUTASITOTT = [{words}]\n')(IDEA_LINE + 'Új ötlet: kalkulátor.')
+    pyc = any(n.startswith('uzleti') and n.endswith('.pyc') for _, _, fs in os.walk(root) for n in fs)
+    return (rc1 == 2 and rc2 == 2 and 'nem olvasható' in err2 and rc3 == 2 and 'nem olvasható' in err3 and rc4 == 0
+            and not pyc)
+
+
+@case
+def idea_refused_direction_inside_marker_line_blocked(root):
+    # Viktor 38060 L2: only the gate's own phrases are cut out; a refused direction inside a marker line still stops.
+    texts = ('ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve, recepciós\nÚj ötlet.',
+             'PRIVÁT-OK: telefonos asszisztens ügy, Patrik kérdezte\n' + IDEA_LINE + 'Új ötlet.')
+    hits = [run(root, {'chat_id': GROUP, 'text': t})[0] for t in texts]
+    ok, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: kalkulátor-portál.'})
+    return all(r == 2 for r in hits) and ok == 0
+
+
 @case
 def no_idea_private_unchanged(root):
     rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Kész a riport.'})

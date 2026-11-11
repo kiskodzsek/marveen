@@ -899,24 +899,39 @@ IDEA_ASKED_RE = re.compile(r'(?m)^\s*ELVETETT-DE-KERT:\s*TG\s*\d+')
 # team's daily subject, and the ÖTLET-KAPU line already states "nem Marabel/könyv". Measured on Klodel's sent messages
 # of 14 days (2026-11-11): 299 trigger the idea gate, 121 hold a banned word, 91 of those only "marabel"; 47 without it.
 IDEA_TEXT_SKIP = ('marabel',)
-# Lines that are the gate's own markers, not the pitch ("nem Marabel/könyv" would match "marabel" at a word start).
-IDEA_MARKER_LINES = ('ötlet-kapu:', 'privát-ok:', 'elvetett-de-kert:')
+# The gate's own required phrases are cut out before the match ("nem Marabel/könyv" would hit "marabel"); the rest of
+# a marker line stays under the check, so a refused direction written INTO an ÖTLET-KAPU line still stops (Viktor 38060 L2).
+IDEA_OWN_PHRASES = re.compile(r'ötlet-kapu:|privát-ok:|elvetett-de-kert:\s*tg\s*\d+|nem marabel/könyv|termékpaletta ellenőrizve')
+# Fewer entries than this = the list was emptied or cut, which would switch the check off silently: fail closed.
+IDEA_MIN_REFUSED = 10
 
 
 def refused_directions():
-    """(ELUTASITOTT, szokezdet) from the lint. The lint reads sys.argv at import time only for its own --problema mode."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location('uzleti_otlet_kapu_lint', IDEA_LINT)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.ELUTASITOTT, mod.szokezdet
+    """ELUTASITOTT from the lint, read as DATA (ast.literal_eval), not executed (Viktor 38060 L1): no second file runs
+    in the hook, no .pyc is written, and a lint that exits at import cannot turn the gate off."""
+    import ast
+    with open(IDEA_LINT, encoding='utf-8') as f:
+        tree = ast.parse(f.read(), IDEA_LINT)
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(x, ast.Name) and x.id == 'ELUTASITOTT' for x in node.targets):
+            val = ast.literal_eval(node.value)
+            if isinstance(val, list) and len(val) >= IDEA_MIN_REFUSED and all(isinstance(k, str) and k for k in val):
+                return val
+            raise ValueError(f'ELUTASITOTT: {len(val) if isinstance(val, list) else type(val).__name__} elem')
+    raise ValueError('ELUTASITOTT nincs a fájlban')
+
+
+def word_start(k, t):
+    """The lint's szokezdet(): the refused word or stem at a word start ("megtakarítás" is not "takarítás")."""
+    return re.search(r'(?<!\w)' + re.escape(k), t) is not None
 
 
 def refused_in_text(t):
-    """Banned directions named in the text (marker lines left out). Fail closed: without the lint, an idea text stops."""
-    body = '\n'.join(ln for ln in t.lower().splitlines() if not ln.strip().startswith(IDEA_MARKER_LINES))
+    """Banned directions named in the text (the gate's own phrases cut out). Fail closed: without the list, an idea
+    text stops."""
+    body = IDEA_OWN_PHRASES.sub(' ', t.lower())
     try:
-        banned, word_start = refused_directions()
+        banned = refused_directions()
     except Exception as e:
         return [f'(az elutasított irányok listája nem olvasható: {IDEA_LINT}: {type(e).__name__})']
     return [k for k in banned if k not in IDEA_TEXT_SKIP and word_start(k, body)]
