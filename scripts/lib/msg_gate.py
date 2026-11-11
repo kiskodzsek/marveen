@@ -27,12 +27,29 @@ Two rules:
    Other pairs are not length- or e-mail-gated: 94 fleet messages a week carry an address,
    mostly our own, in mail and order work where the address is the subject.
 
+3. A stop order from Klodel (--from in STOP_FROM, default "klodel"; Klodel 37876, UGYANAZ A HIBA
+   KÉTSZER NEM, 2nd time): Patrik's opinion ("senkik vannak", TG 5294) was read as a stop and Radar
+   was stopped; Patrik TG 5297: "ne allitsd le". First time: TG 4943 (memory aggaly-nem-elvetes).
+   A text with TÁRGYTALAN | állj le | leállít | ne folytasd | nem kell tovább is refused unless it
+   carries a line
+       LEÁLLÍTÁS-OK: TG <number> "<Patrik's words, verbatim>"
+   whose quote holds an explicit stop word: zárd le | nem kell | állítsd le | állítsuk le | hagyjuk |
+   hagyom | ne csináld. Both sides are matched without accents (Patrik types "ne allitsd le"), and a
+   stop word right after "ne"/"nem" is a negation, not a stop ("ne állítsd le" does not count).
+   Measured 2026-11-11 on 30 days of Klodel's messages: 351 of 9584 match the trigger (about 12 a
+   day), many of them not a stop order ("a kérdésem tárgytalan", "Blender-leállítás"). A quote that
+   says NOT to stop ("nem kell leállítani", "ne hagyjuk abba") never counts, and a text that starts
+   with VISSZAVONVA (Klodel's revocation of a stop, 37875) is not a stop order.
+   Known limit: the gate sees agent-msg.sh only; a raw POST /api/messages is not gated.
+
 Env (the suite uses them): MARVEEN_MSG_GATE_SECRET_SRC, MARVEEN_MSG_GATE_STRICT (comma list),
-MARVEEN_MSG_GATE_MAX_CHARS, MARVEEN_MSG_GATE_OWN_DOMAINS (comma list).
+MARVEEN_MSG_GATE_MAX_CHARS, MARVEEN_MSG_GATE_OWN_DOMAINS (comma list), MARVEEN_MSG_GATE_STOP_FROM
+(comma list).
 """
 import os
 import re
 import sys
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_SRC = os.path.join(HERE, '..', '..', 'src', 'security', 'secret-gate.ts')
@@ -114,6 +131,48 @@ def load_secret_patterns(path):
     return out
 
 
+# Rule 3. Patterns are written WITHOUT accents and matched against fold(text).
+STOP_TRIGGER = re.compile(r'targytalan|allj le|leallit|ne folytasd|nem kell tovabb')
+STOP_OK_LINE = re.compile(r'^[ \t]*leallitas-ok:[ \t]*tg[ \t]*(\d+)[ \t]+["\u201e\u201c\u201d](.+?)["\u201c\u201d][ \t]*$', re.M)
+STOP_WORD = re.compile(r'(?<![a-z0-9])(?:zard le|nem kell|allitsd le|allitsuk le|hagyjuk|hagyom|ne csinald)(?![a-z0-9])')
+NEGATION = re.compile(r'(?<![a-z0-9])(?:ne|nem)\s+$')
+# "nem kell leállítani", "ne hagyjuk abba": a quote that says NOT to stop is never a stop, whatever else it holds.
+NEG_STOP = re.compile(r'(?<![a-z0-9])(?:nem kell (?:leallit|lezar|abbahagy|befejez)|ne (?:hagyjuk|hagyd) abba)')
+# Klodel's own revocation of a stop (37875 starts with the word VISSZAVONVA) must go through.
+REVOKE = re.compile(r'^\s*visszavonva(?![a-z0-9])')
+
+
+def fold(text):
+    """Lower case, accents removed (á -> a, ő -> o), so "ne allitsd le" and "ne állítsd le" read the same."""
+    return ''.join(c for c in unicodedata.normalize('NFD', text) if not unicodedata.combining(c)).lower()
+
+
+def quote_stops(quote):
+    """True if the quote holds an explicit stop word that is not negated ("ne allitsd le" is not a stop)."""
+    q = fold(quote)
+    if NEG_STOP.search(q):
+        return False
+    for m in STOP_WORD.finditer(q):
+        if m.group(0) in ('ne csinald', 'nem kell') or not NEGATION.search(q[:m.start()]):
+            return True
+    return False
+
+
+def stop_reason(text):
+    """None if the text is not a stop order or carries a valid LEÁLLÍTÁS-OK line, else the refusal reason."""
+    folded = fold(text)
+    if not STOP_TRIGGER.search(folded) or REVOKE.match(folded):
+        return None
+    for m in STOP_OK_LINE.finditer(folded):
+        if quote_stops(m.group(2)):
+            return None
+    return ('leállító üzenet (TÁRGYTALAN / állj le / leállít / ne folytasd / nem kell tovább) Patrik kifejezett '
+            'leállító szava nélkül. Patrik véleménye nem leállítás. Ha Patrik tényleg leállította, tegyél bele egy '
+            'sort: LEÁLLÍTÁS-OK: TG <szám> "<Patrik szó szerinti szava>", az idézetben kifejezett leállító szóval '
+            '(zárd le | nem kell | állítsd le | állítsuk le | hagyjuk | hagyom | ne csináld; a "ne állítsd le" '
+            'nem az). Ha nem állította le, ne állítsd le.')
+
+
 def csv_env(name, default):
     return [x.strip().lower() for x in os.environ.get(name, default).split(',') if x.strip()]
 
@@ -163,6 +222,11 @@ def main(argv):
             reasons.append('%d e-mail-cím nem a saját domainjeinkről (%s; %s forgalma). '
                            'Ne a címet küldd, hanem hogy kié és hol található.'
                            % (foreign, ', '.join(own), who))
+
+    if frm.lower() in csv_env('MARVEEN_MSG_GATE_STOP_FROM', 'klodel'):
+        r = stop_reason(text)
+        if r:
+            reasons.append(r)
 
     if reasons:
         for r in reasons:
