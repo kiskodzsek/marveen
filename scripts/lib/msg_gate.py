@@ -141,7 +141,10 @@ STOP_PHRASE = re.compile(_B + r'(?:targytalan|ne\s+folytasd|nem\s+kell\s+tovabb)
 STOP_OK_LINE = re.compile(r'^[ \t]*leallitas-ok:[ \t]*tg[ \t]*(\d+)[ \t]+["„“”](.+?)["“”][ \t]*$', re.M)
 STOP_WORD = re.compile(_B + r'(?:zard\s+le|nem\s+kell|allitsd\s+le|allitsuk\s+le|hagyjuk|hagyom|ne\s+csinald)(?![a-z0-9])')
 SELF_NEGATED = re.compile(r'(?:ne\s+csinald|nem\s+kell)$')
-NEGATION = re.compile(_B + r'(?:ne|nem)\s+$')
+# "ne állítsd le", "nem kell leállítani". Viktor 37910 L5: only a short window before the verb is searched
+# (NEG_WINDOW), so a text of many negated verbs stays linear; a longer gap reads as no negation (the safe side).
+NEGATION = re.compile(_B + r'(?:ne|nem(?:\s+kell)?)\s+$')
+NEG_WINDOW = 24
 # "nem kell leállítani", "ne hagyjuk abba": a quote that says NOT to stop is never a stop, whatever else it holds.
 NEG_STOP = re.compile(_B + r'(?:nem\s+kell\s+(?:leallit|lezar|abbahagy|befejez)|ne\s+(?:hagyjuk|hagyd)\s+abba)')
 # Klodel's revocation of a stop (37875: "VISSZAVONVA a 37874 leállítás: ..."). Viktor 37886 L2: the prefix needs the
@@ -152,7 +155,8 @@ REVOKE = re.compile(r'^\s*visszavonva[\s:]+(?:a\s+)?\d{4,}(?:\s+leallitas\w*)?')
 def fold(text):
     """Lower case, accents removed (á -> a, ő -> o), so "ne allitsd le" and "ne állítsd le" read the same.
     Format characters (zero-width space/joiner, soft hyphen; category Cf) are dropped (Viktor 37886 L4)."""
-    return ''.join(c for c in unicodedata.normalize('NFD', text)
+    # Viktor 37910 L6: NFKD, so full-width letters fold to ASCII too.
+    return ''.join(c for c in unicodedata.normalize('NFKD', text)
                    if not unicodedata.combining(c) and unicodedata.category(c) != 'Cf').lower()
 
 
@@ -160,7 +164,8 @@ def is_stop_order(folded):
     """A stop phrase, or a stop verb that is not negated ("ne állítsd le" is the opposite of a stop)."""
     if STOP_PHRASE.search(folded):
         return True
-    return any(not NEGATION.search(folded[:m.start()]) for m in STOP_VERB.finditer(folded))
+    return any(not NEGATION.search(folded[max(0, m.start() - NEG_WINDOW):m.start()])
+               for m in STOP_VERB.finditer(folded))
 
 
 def quote_stops(quote):
@@ -169,7 +174,7 @@ def quote_stops(quote):
     if NEG_STOP.search(q):
         return False
     for m in STOP_WORD.finditer(q):
-        if SELF_NEGATED.match(m.group(0)) or not NEGATION.search(q[:m.start()]):
+        if SELF_NEGATED.match(m.group(0)) or not NEGATION.search(q[max(0, m.start() - NEG_WINDOW):m.start()]):
             return True
     return False
 

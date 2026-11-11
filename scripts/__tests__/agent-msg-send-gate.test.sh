@@ -258,6 +258,20 @@ printf 'á\342\200\213llj le' > "$SANDBOX/text"
 run klodel radar
 ok "stop L4: a zero-width space inside \"állj le\": refused" "$(refused)" "rc=$RC posts=$POSTS"
 
+# --- Viktor 37910: L5 (linear on many negated verbs), L6 (full-width letters), "nem kell leállítani" in the text ---
+python3 -c 'import sys; sys.stdout.write("ne állj le " * 20000)' > "$SANDBOX/text"
+T0=$(python3 -c 'import time; print(time.time())')
+run klodel radar
+T1=$(python3 -c 'import time; print(time.time())')
+ok "stop L5: 220 KB of negated verbs finishes within 2 s and is sent" \
+   "$([ "$(python3 -c "print(int($T1 - $T0 < 2))")" = 1 ] && [ "$RC" = 0 ] && echo 0 || echo 1)" "rc=$RC secs=$(python3 -c "print(round($T1 - $T0, 2))")"
+printf '\357\275\201\357\275\214\357\275\214\357\275\212 \357\275\214\357\275\205' > "$SANDBOX/text"
+run klodel radar
+ok "stop L6: full-width \"allj le\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "Nem kell leállítani Radart, megy tovább."
+run klodel radar
+ok "stop: \"Nem kell leállítani\" in the text is not a stop: sent" "$(sent)" "rc=$RC posts=$POSTS"
+
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."
 run kernel klodel
