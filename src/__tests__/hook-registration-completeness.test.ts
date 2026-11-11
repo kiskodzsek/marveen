@@ -100,6 +100,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of react-emoji-gate.py (run: python3 -I scripts/hooks/react-emoji-gate_test.py); not itself a hook (#185)',
   'balazs-task-reply-gate_test.py':
     'the unit test of balazs-task-reply-gate.py (run: python3 -I scripts/hooks/balazs-task-reply-gate_test.py); not itself a hook (#185)',
+  'time-claim-gate_test.py':
+    'the unit test of time-claim-gate.py (run: python3 -I scripts/hooks/time-claim-gate_test.py); not itself a hook (Klodel 38401)',
   'render_claim_lib.py':
     'shared library imported by render-claim-reply-gate.py (the store/video-export-status.json reader); not itself a hook',
   'mio-orszem-precheck.sh':
