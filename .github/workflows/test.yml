@@ -96,6 +96,8 @@ jobs:
       - run: bash scripts/__tests__/worktree-add.test.sh
       # Klodel 36866: curl and sleep stubbed on PATH, state file in a temp dir, no network.
       - run: bash scripts/__tests__/agent-msg-majsztro-copy.test.sh
+      # Klodel 37971/37978: the business-idea gate lint (banned directions at a word start only); temp files, no network.
+      - run: python3 -I scripts/__tests__/uzleti-otlet-kapu-lint.test.py
       # Card aba42256: secret shapes (read from src/security/secret-gate.ts) and Majsztro's length/e-mail rule;
       # curl and sleep stubbed on PATH, no network.
       - run: bash scripts/__tests__/agent-msg-send-gate.test.sh
