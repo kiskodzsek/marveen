@@ -52,6 +52,11 @@ run_wd() {  # run_wd <btime> [extra env...]
 sends() { [ -f "$SENT" ] && grep -c '^---$' "$SENT" || echo 0; }
 
 # A minimal panic report in the real two-document shape (header line + body).
+# set_mtime <epoch> <file>: an exact mtime with no time zone and no BSD/GNU date flag in between.
+# CI runs this on Linux with TZ=UTC: there `date -r <epoch>` is a FILE reference (GNU date), and touch -t
+# reads its stamp in the caller's zone, so the 07:00 channels.log became "now" and the notice moved.
+set_mtime() { python3 -c 'import os,sys; t=int(sys.argv[1]); os.utime(sys.argv[2], (t, t))' "$1" "$2"; }
+
 write_panic() {  # write_panic <file> <mtime-epoch>
   printf '%s\n' '{"bug_type":"210","timestamp":"2026-10-20 07:55:50.00 +0200"}' > "$1"
   cat >> "$1" <<'JSON'
@@ -62,7 +67,7 @@ write_panic() {  # write_panic <file> <mtime-epoch>
 System Profile:
 Memory Module: LPDDR5
 JSON
-  touch -t "$(TZ=Europe/Budapest date -r "$2" '+%Y%m%d%H%M.%S')" "$1"
+  set_mtime "$2" "$1"
 }
 
 # (1) first run: baseline only, no notice
@@ -75,7 +80,7 @@ check "an unchanged boot time sends nothing" "$([ "$(sends)" = 0 ] && echo 0 || 
 
 # (3) a reboot after a panic: one notice with the boot, the downtime and the panic
 echo x > "$STORE/channels.log"
-touch -t "$(TZ=Europe/Budapest date -r 1792472446 '+%Y%m%d%H%M.%S')" "$STORE/channels.log"   # 07:00:46, before the boot
+set_mtime 1792472446 "$STORE/channels.log"   # 07:00:46, before the boot
 write_panic "$PANICS/panic-full-2026-10-20-075550.0002.panic" $((BOOT2 + 312))
 out="$(run_wd $BOOT2)"
 msg="$(cat "$SENT" 2>/dev/null)"
@@ -107,7 +112,7 @@ check "an older panic report is not blamed for this reboot" "$([ "$(sends)" = 1 
 rm -f "$SENT"
 BOOT5=$((BOOT4 + 86400))
 printf 'not a panic report\n{broken' > "$PANICS/panic-full-x.panic"
-touch -t "$(TZ=Europe/Budapest date -r $((BOOT5 + 60)) '+%Y%m%d%H%M.%S')" "$PANICS/panic-full-x.panic"
+set_mtime $((BOOT5 + 60)) "$PANICS/panic-full-x.panic"
 out="$(run_wd $BOOT5)"
 msg="$(cat "$SENT" 2>/dev/null)"
 check "a broken panic report still sends the notice, without an Ok line" "$([ "$(sends)" = 1 ] && ! printf '%s' "$msg" | grep -q '^Ok:' && echo 0 || echo 1)" "$msg"

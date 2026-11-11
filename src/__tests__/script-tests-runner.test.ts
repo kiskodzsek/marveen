@@ -28,12 +28,31 @@ const SUITES = readdirSync(DIR)
   .filter((f) => /\.test\.(sh|py)$/.test(f) || /-test\.py$/.test(f))
   .sort()
 
+// Suites that measure macOS-only code as a whole, so they run on Darwin only (CI is ubuntu-latest).
+// Measured 2026-11-11 (card ac602965) in an ubuntu:24.04 container as a non-root user, the same failures
+// as CI run 42805724668: each fails there because the code under test is macOS-only, not because it broke;
+// all pass on the Mac mini. A suite with only a FEW macOS-only cases guards those cases itself
+// (daily-cleanup.test.sh, clone-dedupe.test.py) and stays here in full. Keep every reason concrete.
+const MACOS_ONLY: Record<string, string> = {
+  'mem-relief.test.sh':
+    'stops the Colima VM (colima/limactl) and installs a launchd plist; install-mem-relief.sh refuses non-Darwin by design',
+  'memgate-macos-heavy-job.test.sh':
+    'the macOS memory gate of heavy-job.sh: sysctl vm.swapusage, the Colima VM check and BSD stat; Linux reads /proc/meminfo, covered by its own suites',
+  'ssh-unlock-setup.test.sh':
+    'stages the macOS Remote Login sshd drop-in and mirrors the LIVE /etc/ssh/sshd_config.d (100-macos.conf); on the GitHub runner that directory holds a root-only 50-cloud-init.conf',
+}
+const IS_DARWIN = process.platform === 'darwin'
+
 describe('scripts/__tests__ suites', () => {
   it('finds the suites on disk (a rename must not silently empty this run)', () => {
     expect(SUITES.length).toBeGreaterThan(20)
   })
 
-  it.each(SUITES)('%s passes', (name) => {
+  it('every MACOS_ONLY entry names a suite that exists (no ghost exemption)', () => {
+    expect(Object.keys(MACOS_ONLY).filter((name) => !SUITES.includes(name))).toEqual([])
+  })
+
+  it.each(SUITES.filter((name) => IS_DARWIN || !(name in MACOS_ONLY)))('%s passes', (name) => {
     const runner = name.endsWith('.py') ? 'python3' : 'bash'
     const res = spawnSync(runner, [join(DIR, name)], {
       encoding: 'utf-8',
@@ -46,4 +65,7 @@ describe('scripts/__tests__ suites', () => {
     }
     expect(res.status).toBe(0)
   }, 310_000)
+
+  // Off macOS the macOS-only suites show up as skipped, by name, rather than disappearing.
+  it.skipIf(IS_DARWIN).each(Object.keys(MACOS_ONLY))('%s: macOS-only, skipped on this platform', () => {})
 })

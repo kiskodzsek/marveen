@@ -84,6 +84,18 @@ const EXEMPT: Record<string, string> = {
     'scheduled/CLI gate (--only / --notify / --json), not a settings hook: it compares the channels a session DECLARES against the plugin processes actually alive under it, which is a periodic check rather than a per-tool-call one',
   'browser-content-notice.py':
     'OPT-IN by construction (BROWSERNOTICE920): it envelopes browser-MCP / WebSearch payloads as untrusted content, and an install without a browser MCP server gains nothing from it. Wiring it here would fire it on every fleet member, most of which have no browser. Operators add it to their own PostToolUse hooks -- the procedure is in docs/security-hardening.md.',
+  'claim-source-reply-gate_test.py':
+    'the unit test of claim-source-reply-gate.py (run: python3 -I scripts/hooks/claim-source-reply-gate_test.py); not itself a hook',
+  'mea-culpa-reply-gate_test.py':
+    'the unit test of mea-culpa-reply-gate.py (run: python3 -I scripts/hooks/mea-culpa-reply-gate_test.py); not itself a hook',
+  'mute-video-reply-gate_test.py':
+    'the unit test of mute-video-reply-gate.py (run: python3 -I scripts/hooks/mute-video-reply-gate_test.py); not itself a hook',
+  'render-claim-reply-gate_test.py':
+    'the unit test of render-claim-reply-gate.py (run: python3 -I scripts/hooks/render-claim-reply-gate_test.py); not itself a hook',
+  'product-image-gate_test.py':
+    'the unit test of product-image-gate.py (run: python3 -I scripts/hooks/product-image-gate_test.py); not itself a hook',
+  'render_claim_lib.py':
+    'shared library imported by render-claim-reply-gate.py (the store/video-export-status.json reader); not itself a hook',
   'mio-orszem-precheck.sh':
     'scheduler preCheck for the HOST-LOCAL marveen-io-kozosseg-orszem task (ORSICTX912): the mio community sentinel is this install\'s own and deliberately NOT seeded (a repo seed would ship it to every customer install), so its registration lives in the host ~/.claude/scheduled-tasks task-config -- outside this corpus by design. Wiring is gated on the ORSICTX912 activation order (host restart -> verify -> merge -> build+restart); the hermetic fail-direction tests are scripts/__tests__/mio-orszem-precheck.test.py.',
 }
@@ -142,6 +154,16 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'gates the ms365 MCP download-bytes-to-file tool, which only the MAIN agent has: the ms365 server is configured in the repo\'s own .mcp.json (the main session), no agents/*/.mcp.json carries it (measured 2026-10-16), and the tool is enabled only by that file\'s --enabled-tools. Its drop directory is ONE repo-wide store/mail-downloads; seeding the gate as-is would point every agent\'s downloads at that shared directory, so a sub-agent that ever gets ms365 needs its own drop-dir design first (a separate, reviewed decision, Viktor/Lex)',
   'persona-change-notify.py':
     'fleet-wide BY CONSTRUCTION, so one wiring already covers every agent: it resolves the repo root from its own file location, and watched() enumerates agents/*/CLAUDE.md and SOUL.md alongside the main pair. Seeding it per-agent would point every seeded session at the SAME store/.persona-hashes.json, and because the hook stamps the new digest BEFORE it sends, whichever session reaches it first silences the others -- the race can only LOSE an alert, so seeding would weaken the guard rather than extend it',
+  'mea-culpa-reply-gate.py':
+    'PreToolUse gate on the telegram reply/edit_message tool that guards replies to Patrik\'s own chats (store/projektek.json elo_uzenet privat/csoport; none known = every chat gated, fail-closed). Its docstring: "Wiring: .claude/settings.json PreToolUse ... (the main agent\'s settings; the sub-agents have their own)". Seeded, every sub-agent would be gated on Patrik\'s rule for the main agent (#141)',
+  'render-claim-reply-gate.py':
+    'PreToolUse gate on the telegram reply/edit_message tool that guards replies to Patrik\'s own chats: a render-state claim only on a fresh ops/video_export_status.py measurement of THIS machine (docstring: chats as mea-culpa-reply-gate.py). Main-agent rule from Klodel 35696 (#147); same seeding objection as mea-culpa-reply-gate.py',
+  'claim-source-reply-gate.py':
+    'PreToolUse gate on the telegram reply/edit_message tool that guards replies to Patrik\'s own chats: a state claim or number needs a source (Klodel 35761, Patrik TG 4477; chats as mea-culpa-reply-gate.py). Its docstring wires it in .claude/settings.json; until fix/ci-red-main-1111 it ran only from the prod checkout\'s uncommitted settings',
+  'mute-video-reply-gate.py':
+    'PreToolUse gate on the main agent\'s telegram reply: no .mp4/.mov without an audio track reaches Patrik (TG 4483, Klodel 35741). Docstring: "Wiring: .claude/settings.json PreToolUse"; until fix/ci-red-main-1111 it ran only from the prod checkout\'s uncommitted settings. Seeding it fleet-wide is a separate decision',
+  'product-image-gate.py':
+    'TERMEKKEP-KAPU (Patrik TG 1690/1694): an image/video to the owner on Telegram only with a store/kep-kapu/<file>.ok attestation in THIS checkout\'s store. Until fix/ci-red-main-1111 it ran only from the prod checkout\'s uncommitted settings. Seeding it fleet-wide is a separate decision',
   'telegram-reply-guard.py':
     'the Stop-hook half of the Telegram reply enforcement (#856) decides from ledger_lib.open_question_with_age, i.e. the conversation_log the main-only ledger trio writes; seeded alone it would read an empty ledger and allow every stop, a silent no-op -- seeding it means seeding the ledger trio with it, a separate design decision',
 }
