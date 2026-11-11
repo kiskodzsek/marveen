@@ -235,6 +235,29 @@ text "Kész a riport, a 446b8283 marad nyitva."
 run klodel kernel
 ok "stop: a klodel message without a stop word: sent" "$(sent)" "rc=$RC posts=$POSTS"
 
+# --- Viktor 37886: L1 (stop verbs, \s+), L2 (revocation needs the msg_id and exempts only itself), L4 (zero-width) ---
+text "Állítsd le Radart most."
+run klodel radar
+ok "stop L1: \"Állítsd le\" (imperative verb): refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "Hagyd abba a kutatást."
+run klodel radar
+ok "stop L1: \"Hagyd abba\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "állj  le"
+run klodel radar
+ok "stop L1: double space \"állj  le\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "Patrik TG 5297: ne állítsd le, megy tovább."
+run klodel radar
+ok "stop L1: a negated verb \"ne állítsd le\" is not a stop: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "VISSZAVONVA: a 37875 leállítás. Közben: állj le Radar."
+run klodel radar
+ok "stop L2: a revocation does not exempt a new stop after it: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "VISSZAVONVA, állj le"
+run klodel radar
+ok "stop L2: VISSZAVONVA without a msg_id exempts nothing: refused" "$(refused)" "rc=$RC posts=$POSTS"
+printf 'á\342\200\213llj le' > "$SANDBOX/text"
+run klodel radar
+ok "stop L4: a zero-width space inside \"állj le\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."
 run kernel klodel
