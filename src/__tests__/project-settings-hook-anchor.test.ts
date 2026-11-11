@@ -63,10 +63,12 @@ const EXPECTED: Record<string, string[]> = {
     'channel-image-resize.sh', 'egress-gate.mjs', 'ms365-download-gate.mjs', 'memory-frontmatter-gate.py',
     'memory-frontmatter-bash-gate.py', 'image-quarantine-gate.mjs',
     'keychain-read-gate.py', // c1921b55
+    'time-claim-gate.py', // Klodel 38401: Write/Edit/MultiEdit of shared/*.md + Bash card comments
     // Patrik's-chat reply gates (main agent only): #141, #147, and the three that ran
     // only from the prod checkout's uncommitted settings until fix/ci-red-main-1111.
     'mea-culpa-reply-gate.py', 'render-claim-reply-gate.py',
     'product-image-gate.py', 'mute-video-reply-gate.py', 'claim-source-reply-gate.py',
+    'react-emoji-gate.py', 'balazs-task-reply-gate.py', // #185: wired then, never added here
   ],
   Stop: ['marveen-commands.py', 'telegram-reply-guard.py', 'telegram_progress_clear.py', 'slack_progress_clear.py'],
   SessionStart: ['ledger-replay.py', 'taskstate-replay.py', 'clear-replay.py', 'marveen-commands.py'],

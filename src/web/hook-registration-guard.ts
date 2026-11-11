@@ -56,6 +56,8 @@ export const KNOWN_HOOK_SCRIPTS: readonly string[] = [
   'tool-log-capture.py',
   'memory-frontmatter-gate.py',
   'memory-frontmatter-bash-gate.py',
+  // Klodel 38401: no guessed "measured at" time in shared/*.md or a card comment.
+  'time-claim-gate.py',
   // The /clear continuity pair: SessionEnd capture + SessionStart replay.
   'clear-capture.py',
   'clear-replay.py',

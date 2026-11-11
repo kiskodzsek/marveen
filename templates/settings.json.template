@@ -218,6 +218,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/time-claim-gate.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/time-claim-gate.py; exit 0'",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [
