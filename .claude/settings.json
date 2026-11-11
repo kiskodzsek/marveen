@@ -18,7 +18,8 @@
   },
   "enabledPlugins": {
     "slack-channel@marveen-marketplace": false,
-    "telegram@claude-plugins-official": true
+    "telegram@claude-plugins-official": true,
+    "telegram@marveen-marketplace": true
   },
   "hooks": {
     "UserPromptSubmit": [
@@ -62,7 +63,7 @@
       { "matcher": "mcp__plugin_telegram_telegram__reply|mcp__plugin_telegram_telegram__edit_message", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/mute-video-reply-gate.py\"", "timeout": 20 } ] },
       { "matcher": "mcp__plugin_telegram_telegram__reply|mcp__plugin_telegram_telegram__edit_message", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/claim-source-reply-gate.py\"", "timeout": 10 } ] },
       { "matcher": "mcp__plugin_telegram_telegram__reply|mcp__plugin_telegram_telegram__edit_message", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/private-topic-group-gate.py\"", "timeout": 10 } ] },
-      { "matcher": "mcp__plugin_telegram_telegram__reply|mcp__plugin_telegram_telegram__edit_message", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/mea-culpa-reply-gate.py\"", "timeout": 10 } ] },
+      { "matcher": "mcp__plugin_telegram_telegram__reply|mcp__plugin_telegram_telegram__edit_message", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/mea-culpa-reply-gate.py\"", "timeout": 10 }, { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/balazs-task-reply-gate.py\"", "timeout": 10 } ] },
       { "matcher": "mcp__plugin_telegram_telegram__reply|mcp__plugin_telegram_telegram__edit_message", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/render-claim-reply-gate.py\"", "timeout": 10 } ] },
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/email-approval-gate.py\"", "timeout": 10 } ] },
       { "matcher": ".*send_email.*", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/email-approval-gate.py\"", "timeout": 10 } ] },
