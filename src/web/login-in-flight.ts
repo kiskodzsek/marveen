@@ -23,26 +23,50 @@
 
 /** How long an operator-started login is protected from the healer. */
 export const LOGIN_IN_FLIGHT_MS = 15 * 60 * 1000
+/**
+ * Hard cap from the FIRST mark of a spell (Viktor 38639 L2): the fleet shares
+ * one Bearer token, so any caller could re-mark an agent forever and keep a
+ * dead-token agent from its restart and its alert. A re-mark extends the
+ * window, but never past this.
+ */
+export const LOGIN_IN_FLIGHT_MAX_MS = 30 * 60 * 1000
 
-const startedAt = new Map<string, number>()
+const marks = new Map<string, { first: number; last: number }>()
 
-/** Record that an operator started an interactive /login for `name`. */
+/**
+ * Record that an operator started an interactive /login for `name`. A mark less
+ * than LOGIN_IN_FLIGHT_MS after the previous one continues the same spell (its
+ * first-mark time is kept), so steady re-marking cannot outlive the hard cap;
+ * only a quiet gap of LOGIN_IN_FLIGHT_MS starts a new spell.
+ */
 export function markLoginInFlight(name: string, nowMs: number = Date.now()): void {
-  startedAt.set(name, nowMs)
+  const m = marks.get(name)
+  const sameSpell = m != null && nowMs >= m.first && nowMs - m.last < LOGIN_IN_FLIGHT_MS
+  marks.set(name, { first: sameSpell ? (m as { first: number }).first : nowMs, last: nowMs })
 }
 
-/** Drop the mark (e.g. tests, or a caller that knows the login ended). */
+/** Drop the mark (a failed login start, tests, or a caller that knows the login ended). */
 export function clearLoginInFlight(name: string): void {
-  startedAt.delete(name)
+  marks.delete(name)
 }
 
-/** True while an operator-started login for `name` is younger than LOGIN_IN_FLIGHT_MS. */
+/**
+ * True while an operator-started login for `name` is younger than
+ * LOGIN_IN_FLIGHT_MS since its last mark and LOGIN_IN_FLIGHT_MAX_MS since its first.
+ */
 export function isLoginInFlight(name: string, nowMs: number = Date.now()): boolean {
-  const t = startedAt.get(name)
-  if (t == null) return false
-  if (nowMs - t >= LOGIN_IN_FLIGHT_MS || nowMs < t) {
-    startedAt.delete(name)
+  const m = marks.get(name)
+  if (m == null) return false
+  if (nowMs < m.first || nowMs - m.last >= LOGIN_IN_FLIGHT_MS) {
+    marks.delete(name) // the spell is over: a later mark starts a new one
     return false
   }
-  return true
+  // Past the cap the entry stays (it remembers the spell's start), but it no longer holds the healer.
+  return nowMs - m.first < LOGIN_IN_FLIGHT_MAX_MS
+}
+
+/** Whole minutes since the first mark of the live spell, or null when none. */
+export function loginInFlightAgeMin(name: string, nowMs: number = Date.now()): number | null {
+  if (!isLoginInFlight(name, nowMs)) return null
+  return Math.floor((nowMs - (marks.get(name) as { first: number }).first) / 60_000)
 }
