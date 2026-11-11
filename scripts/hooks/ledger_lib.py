@@ -403,7 +403,20 @@ def _closed_file(agent_id):
     return os.path.join(os.path.dirname(db_path()), f".tg-closed-{safe}.json")
 
 
-NOT_FOR_ME = re.compile(r"^nem nekem:\s*\S.{0,199}$", re.S)
+NOT_FOR_ME = re.compile(r"^nem nekem:\s*(\S.{0,199})$", re.S)
+_TG_ID = re.compile(r"^-?\d+$")
+
+
+def _replies_to_own(con, agent_id, chat_id, message_id):
+    """True if the inbound quotes one of this agent's own outbound messages in the same chat (Viktor 37867 M1 b)."""
+    row = con.execute(
+        "SELECT reply_to_message_id FROM conversation_log WHERE agent_id=? AND direction='in' AND chat_id=?"
+        " AND message_id=? ORDER BY created_at DESC LIMIT 1", (str(agent_id), str(chat_id), str(message_id))).fetchone()
+    if not row or not row[0]:
+        return False
+    return con.execute(
+        "SELECT 1 FROM conversation_log WHERE agent_id=? AND chat_id=? AND direction='out' AND message_id=? LIMIT 1",
+        (str(agent_id), str(chat_id), str(row[0]))).fetchone() is not None
 
 
 def inbound_created_at(agent_id, chat_id, message_id):
@@ -419,12 +432,30 @@ def inbound_created_at(agent_id, chat_id, message_id):
 
 
 def close_inbound(agent_id, chat_id, message_id, note):
-    """Mark one inbound as "not for me". Raises ValueError on a bad note or an unknown inbound (nothing written)."""
+    """Mark one inbound as "not for me". Raises ValueError (nothing written) on a bad note, a non-integer id, a private
+    chat, an unknown inbound, or an inbound that replies to this agent's own message."""
     note = (note or "").strip()
-    if not NOT_FOR_ME.match(note):
-        raise ValueError('a note is required: "nem nekem: <kinek szólt>"')
+    m = NOT_FOR_ME.match(note)
+    # Viktor 37867 L1: the addressee needs at least 3 letters ("nem nekem: ." / "nem nekem: x" are refused).
+    if not m or sum(c.isalpha() for c in m.group(1)) < 3:
+        raise ValueError('a note is required: "nem nekem: <kinek szólt>" (the addressee, at least 3 letters)')
+    chat_id, message_id = str(chat_id).strip(), str(message_id).strip()
+    # Viktor 37867 I2: Telegram ids are integers.
+    if not _TG_ID.match(chat_id) or not _TG_ID.match(message_id):
+        raise ValueError("chat_id and message_id must be integers")
+    # Viktor 37867 M1 a: only a GROUP message can be "not for me" (Telegram groups have negative ids, private chats
+    # positive ones); the owner's private message is always owed a reply.
+    if not chat_id.startswith("-"):
+        raise ValueError("only a group message (negative chat_id) can be closed; a private chat is always answered")
     if inbound_created_at(agent_id, chat_id, message_id) is None:
         raise ValueError(f"no inbound {chat_id}:{message_id} in this agent's ledger")
+    # Viktor 37867 M1 b: a reply to our own message is addressed to us.
+    con = connect()
+    try:
+        if _replies_to_own(con, agent_id, chat_id, message_id):
+            raise ValueError("this message replies to our own message, so it is addressed to us: answer it")
+    finally:
+        con.close()
     path = _closed_file(agent_id)
     try:
         with open(path, encoding="utf-8") as f:

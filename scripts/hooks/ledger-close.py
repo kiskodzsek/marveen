@@ -7,8 +7,9 @@ reply guard, the live drain and the progress Stop hook kept demanding a reply. T
 
     python3 scripts/hooks/ledger-close.py <chat_id> <message_id> "nem nekem: <kinek szólt>"
 
-The note must start with "nem nekem:" and name the addressee. Only an inbound that is in this agent's ledger can be
-closed (agent id from the cwd, like the hooks). Written: store/.tg-closed-<agent>.json (read by the hooks) and one
+The note must start with "nem nekem:" and name the addressee (at least 3 letters). Refused (Viktor 37867): a private
+chat (only a group message, negative chat_id, can be "not for me"), a message that replies to our own message, a
+non-integer id, and an inbound that is not in this agent's ledger (agent id from the cwd, like the hooks). Written: store/.tg-closed-<agent>.json (read by the hooks) and one
 line in store/.tg-closed-<agent>.log (append-only audit). Exit 0 = closed, 2 = refused (nothing written).
 """
 import os

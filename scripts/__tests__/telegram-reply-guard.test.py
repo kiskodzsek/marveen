@@ -479,6 +479,8 @@ def main():
     check("close: a note without 'nem nekem:' is refused", run_close(db, GRP, "5260", "Balázsnak szólt"), 2)
     check("close: an empty addressee is refused", run_close(db, GRP, "5260", "nem nekem:   "), 2)
     check("close: an unknown message is refused", run_close(db, GRP, "9999", "nem nekem: Balázsnak"), 2)
+    check("close: a 1-letter addressee is refused (L1)", run_close(db, GRP, "5260", "nem nekem: x"), 2)
+    check("close: a non-integer message id is refused (I2)", run_close(db, GRP, "5260;x", "nem nekem: Balázsnak"), 2)
     check("close: refused attempts wrote nothing", os.path.exists(lib._closed_file(AGENT)), False)
     check("close: a valid close exits 0", run_close(db, GRP, "5260", "nem nekem: Patrik Balázsnak"), 0)
     check("close: the guard allows the closed message", run_hook(db)[0], None)
@@ -537,6 +539,21 @@ def main():
     check("progress: close exits 0", run_close(db, GRP, "5280", "nem nekem: Patrik Balázsnak"), 0)
     check("progress: a closed inbound does not block", run_pclear(db), (None, 0))
     check("progress: its placeholder state is cleared", os.path.exists(pend2), False)
+
+    # 9. Viktor 37867 M1: the owner's private message and a reply to our own message cannot be closed.
+    db = fresh_db()
+    lib = load_lib(db)
+    PRIV = "4242001"
+    lib.log_inbound(AGENT, PRIV, "6001", "Kernel, ránézel?", "2026-11-11T14:00:00.000Z")
+    check("M1a: a private-chat inbound is refused", run_close(db, PRIV, "6001", "nem nekem: Balázsnak"), 2)
+    lib.log_outbound(AGENT, GRP, "itt a link", message_id="7001")
+    lib.log_inbound(AGENT, GRP, "5290", "és ezt hova?", "2026-11-11T14:01:00.000Z", reply_to_message_id="7001")
+    check("M1b: a reply to our own message is refused", run_close(db, GRP, "5290", "nem nekem: Balázsnak"), 2)
+    check("M1: refused attempts wrote nothing", os.path.exists(lib._closed_file(AGENT)), False)
+    check("M1b: ... and the guard still blocks it", run_hook(db)[0], "block")
+    lib.log_inbound(AGENT, GRP, "5291", "Balázs, ezt nézd", "2026-11-11T14:02:00.000Z", reply_to_message_id="99")
+    check("M1b control: a reply to someone else's message can be closed",
+          run_close(db, GRP, "5291", "nem nekem: Patrik Balázsnak"), 0)
 
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
