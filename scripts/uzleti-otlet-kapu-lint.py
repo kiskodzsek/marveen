@@ -16,7 +16,8 @@ ELUTASITOTT = ["ágenscsapat", "ügynökség", "tanácsadás", "képzés", "kurz
     "halál", "elhunyt", "temet", "gyász", "hagyaték", "végrendelet",  # TG 4859 "hagyjál már a halállal"
     "titkár",  # Klodel 38081: az AI-titkárság a recepciós irány másik neve (TG 17453/17460)
     "repülőjárat-kártérítés", "járat-kártérítés", "lejárat-őr", "robotpilóta", "bébiszitter", "előfizetés-őr",
-    "számlaőr", "kalkulátor-portál", "trend-oldal", "fordítás", "szalon"]  # Patrik 11-11 TG 17467/17473/17479/17480 (Klodel 38081)
+    "számlaőr", "kalkulátor-portál", "trend-oldal", "fordítás", "szalon",  # Patrik 11-11 TG 17467/17473/17479/17480 (Klodel 38081)
+    "társasjáték", "kártyajáték"]  # Patrik TG 17490 "utalom a tarsasjatekokat nem érdekel" (Klodel 38096)
 # --problema mód (Patrik TG 4847: "valos nagy kozonseget erinto problema"): a magyar-specifikus
 # probléma nem lehet külföldön bevált/virális, ezért ezek nem kötelezők; helyettük PROBLEMA kell számmal.
 PROBLEMA_OPCIONALIS = ["BEVALT", "VIRALIS", "KULFOLD", "PENZ"]
