@@ -156,6 +156,11 @@ def only_render_work_makes_a_free_machine_alert(_root):
         ('nézzétek meg mások miként csinálták, mik a mai trendek', 'Radar 12:00-ra összegyűjti.'),
         ('ha felderítunk egy hibát, legyen rá kapu', 'A két kaput kiadtam Kernelnek, ma készül.'),
         ('képes vagy rá holnapra?', 'Megnézem, ma készül.'),
+        # Dave 38764: a purchase answered with the images it leads to is still not render work.
+        ('ultrat be kell szerezni holnap',
+         'Így értem: holnap megveszed az Ultrát, és indul az első AI-influenszer, a képeket Dave készíti.'),
+        ('melyik csomagot vegyem?', 'Megnézem, utána indul a videó.'),
+        ('döntsd el te, melyiket', 'Átadtam Dave-nek, a film utána jön.'),
     ]:
         assert not W.render_related({'text': text, 'promise': promise}), text
     for text, promise in [
@@ -166,6 +171,8 @@ def only_render_work_makes_a_free_machine_alert(_root):
         ('a 3D könyv nem A5', 'Dave most javítja.'),
         ('Reels kell belőle', 'Amint kész, küldöm.'),
         ('a záró felirat ez legyen', 'Amint kész, küldöm.'),
+        # A request naming render work stays render work, even with a purchase in it.
+        ('vegyük meg és csináljatok vele képeket', 'Indul.'),
     ]:
         assert W.render_related({'text': text, 'promise': promise}), text
     # The day's baby-film requests in the fixture are render work.

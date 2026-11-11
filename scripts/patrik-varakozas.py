@@ -113,8 +113,21 @@ RENDER_WORK = re.compile(
     r'|kep|kepe[kt]?|kepeket|kepsor|illusztrac|animac|mintakep|boritokep)\b|film|video|felirat')
 
 
+# A purchase, a payment or a decision is not render work, even when the promising reply talks about the images or the
+# film it will lead to (Dave 38764, 2026-11-11: «ultrat be kell szerezni holnap» was answered with "indul az első
+# AI-influenszer ... a képeket ...", and the free-machine alert went out twice). Then only the request's own words count.
+NON_RENDER = re.compile(
+    r'(szerez|megve(sz|tt|nn)|\bvesz(ek|ed|unk|ik|em)?\b|\bveg(yem|yuk|yel|yek|ye|yetek)\b|vasarl|\bfizet|elofizet'
+    r'|szamla|csomag|\bdont(es|s|sd|sek|sunk|ottam)?\b|valassz|valasszak|melyiket)')
+
+
 def render_related(q):
-    return any(RENDER_WORK.search(' '.join(fold(t or '').split())) for t in (q.get('text'), q.get('promise')))
+    text = ' '.join(fold(q.get('text') or '').split())
+    if RENDER_WORK.search(text):
+        return True
+    if NON_RENDER.search(text):
+        return False
+    return bool(RENDER_WORK.search(' '.join(fold(q.get('promise') or '').split())))
 
 
 def is_promise(text):
