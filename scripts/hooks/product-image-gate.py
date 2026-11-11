@@ -967,6 +967,58 @@ def idea_check(text):
             'Marabel/könyv, termékpaletta ellenőrizve <mivel vetetted össze>".')
 
 
+# Klodel 38073 (hibanapló 11-11 15:55, Patrik csoport TG 5419): the Creatorz topic is not brought up to Patrik again.
+# A Telegram reply naming it is blocked, unless it answers (reply_to) a message in which Balázs himself named it.
+# "Balázs wrote it" is read from what only the plugin process sees: <state>/inbound-senders.jsonl (chat_id,
+# message_id, user_id; the "who" plugin patch) and the text from <state>/inbound-evidence.jsonl (the "evid" patch).
+# Without those records (the patch not live yet, a rotated-away message) the reply is blocked: fail closed.
+CREATORZ_RE = re.compile(r'creatorz')
+BALAZS_USER_ID = '8366648365'
+ZERO_WIDTH_RE = re.compile('[­​-‏⁠-⁤﻿]')
+
+
+def channel_state_dir():
+    return os.environ.get('TELEGRAM_STATE_DIR') or os.path.join(ROOT, '.claude', 'channels', 'telegram')
+
+
+def _jsonl_rows(name):
+    base = os.path.join(channel_state_dir(), name)
+    for path in (base + '.1', base):
+        try:
+            with open(path, encoding='utf-8') as f:
+                for ln in f:
+                    try:
+                        yield json.loads(ln)
+                    except Exception:
+                        continue
+        except OSError:
+            continue
+
+
+def creatorz_text(text):
+    return CREATORZ_RE.search(ZERO_WIDTH_RE.sub('', unicodedata.normalize('NFKC', text)).lower()) is not None
+
+
+def balazs_named_it(chat, reply_to):
+    """True if message <reply_to> in <chat> came from Balázs (inbound-senders) and its text names Creatorz (evidence)."""
+    if not chat or reply_to in (None, ''):
+        return False
+    rid = str(reply_to).strip()
+    sent_by_balazs = any(str(r.get('chat_id')) == chat and str(r.get('message_id')) == rid
+                         and str(r.get('user_id')) == BALAZS_USER_ID for r in _jsonl_rows('inbound-senders.jsonl'))
+    if not sent_by_balazs:
+        return False
+    return any(str(r.get('chat_id')) == chat and str(r.get('message_id')) == rid and creatorz_text(str(r.get('text') or ''))
+               for r in _jsonl_rows('inbound-evidence.jsonl'))
+
+
+def creatorz_check(chat, text, reply_to):
+    if not creatorz_text(text) or balazs_named_it(chat, reply_to):
+        return None
+    return ('CREATORZ-KAPU (Patrik csoport TG 5419, Klodel 38073): a Creatorz-t Patriknak többé nem hozzuk fel. Csak '
+            'akkor mehet, ha a válasz (reply_to) Balázs saját üzenetére megy, amelyben ő maga írta a szót.')
+
+
 def main():
     if sys.argv[1:2] == ['--ocr']:
         return warm_ocr(sys.argv[2:])
@@ -998,6 +1050,10 @@ def main():
         idea = idea_check(str(ti.get('text') or ''))
         if idea:
             sys.stderr.write(idea + '\n')
+            return 2
+        cz = creatorz_check(chat, str(ti.get('text') or ''), ti.get('reply_to'))
+        if cz:
+            sys.stderr.write(cz + '\n')
             return 2
     files = ti.get('files') or []
     errs = [e for e in (check(f) for f in files if f.lower().endswith(MEDIA)) if e]

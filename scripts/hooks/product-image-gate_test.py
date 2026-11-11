@@ -1713,6 +1713,69 @@ def idea_refused_direction_inside_marker_line_blocked(root):
     return all(r == 2 for r in hits) and ok == 0 and neg_line == 0 and neg_body == 2
 
 
+BALAZS = '8366648365'
+
+
+def tg_state(root, senders=(), evidence=()):
+    """Synthetic plugin logs under the throw-away project dir: inbound-senders.jsonl (who) and inbound-evidence.jsonl."""
+    d = os.path.join(root, '.claude', 'channels', 'telegram')
+    os.makedirs(d, exist_ok=True)
+    for name, rows in (('inbound-senders.jsonl', senders), ('inbound-evidence.jsonl', evidence)):
+        with open(os.path.join(d, name), 'w', encoding='utf-8') as f:
+            for r in rows:
+                f.write(json.dumps(r) + '\n')
+
+
+def balazs_asked(root, mid='901', text='Mi a helyzet a Creatorz-zal?', user=BALAZS, chat=GROUP):
+    tg_state(root, senders=[{'chat_id': chat, 'message_id': mid, 'user_id': user, 'at': 1}],
+             evidence=[{'chat_id': chat, 'message_id': mid, 'text': text, 'at': 1}])
+
+
+@case
+def creatorz_blocked_without_balazs_question(root):
+    # Klodel 38073 (Patrik csoport TG 5419): the Creatorz topic is not brought up again; every spelling counts.
+    texts = ('A Creatorz-féle megoldás jó volna.', 'CREATORZ', 'creatorz.hu', 'Creat\u200borz megint.')
+    res = [run(root, {'chat_id': GROUP, 'text': t}) for t in texts]
+    priv = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'A Creatorz-ról.'})
+    return all(rc == 2 and 'CREATORZ-KAPU' in err for rc, err in res) and priv[0] == 2
+
+
+@case
+def creatorz_reply_to_balazs_naming_it_allowed(root):
+    balazs_asked(root)
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról: nem visszük tovább.', 'reply_to': '901'})
+    rc_int, _ = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról: nem.', 'reply_to': 901})
+    return rc == 0 and rc_int == 0
+
+
+@case
+def creatorz_reply_not_enough(root):
+    # Balázs's message without the word, someone else's message with it, another chat, no record: still blocked.
+    balazs_asked(root, text='Mi a helyzet a kampánnyal?')
+    a = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})[0]
+    balazs_asked(root, user='5040302010')
+    b = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})[0]
+    balazs_asked(root, chat='-1000000000099')
+    c = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})[0]
+    balazs_asked(root)
+    d = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '902'})[0]
+    return a == b == c == d == 2
+
+
+@case
+def creatorz_no_sender_log_fails_closed(root):
+    # The "who" plugin patch not live yet: the evidence alone does not prove Balázs wrote it.
+    tg_state(root, evidence=[{'chat_id': GROUP, 'message_id': '901', 'text': 'Creatorz?', 'at': 1}])
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'A Creatorz-ról.', 'reply_to': '901'})
+    return rc == 2
+
+
+@case
+def creatorz_absent_unchanged(root):
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'A kreatív anyag kész, a creator-oldal is.'})
+    return rc == 0
+
+
 @case
 def no_idea_private_unchanged(root):
     rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Kész a riport.'})
