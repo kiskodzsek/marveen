@@ -161,6 +161,11 @@ def only_render_work_makes_a_free_machine_alert(_root):
          'Így értem: holnap megveszed az Ultrát, és indul az első AI-influenszer, a képeket Dave készíti.'),
         ('melyik csomagot vegyem?', 'Megnézem, utána indul a videó.'),
         ('döntsd el te, melyiket', 'Átadtam Dave-nek, a film utána jön.'),
+        # Klodel 39419, Patrik TG 18037: an idea / product / research request is research, not render work.
+        ('akkor adj jobb ötleteket vagy termékeket mi a faszomra váar…',
+         'Radar most kutat, a legjobb ötletekhez Dave képeket és videót készít.'),
+        ('kérek új termékötleteket', 'Indul, utána jönnek a mintaképek.'),
+        ('nézzetek piackutatást a karácsonyi ajándékokra', 'Radar viszi, utána a film.'),
     ]:
         assert not W.render_related({'text': text, 'promise': promise}), text
     for text, promise in [
@@ -173,6 +178,9 @@ def only_render_work_makes_a_free_machine_alert(_root):
         ('a záró felirat ez legyen', 'Amint kész, küldöm.'),
         # A request naming render work stays render work, even with a purchase in it.
         ('vegyük meg és csináljatok vele képeket', 'Indul.'),
+        # A product-image or video idea request stays render work: the render word decides first.
+        ('ötlet a karácsonyi videóhoz', 'Indul.'),
+        ('csináljatok új termékképeket', 'Dave rendereli a képeket.'),
     ]:
         assert W.render_related({'text': text, 'promise': promise}), text
     # The day's baby-film requests in the fixture are render work.
