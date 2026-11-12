@@ -1044,6 +1044,33 @@ def atnezo_check(t):
     return need
 
 
+# Klodel 39550 (Patrik TG 18106, 2026-11-12: "nálunk is van chatgpt agent mégis állandóan a ti hülyeségeketek jön csak"):
+# the K+F lead is Majsztro (CLAUDE.md), and the idea rounds went to Patrik around him. An ÖTLET-KAPU text now also
+# needs "MAJSZTRO: MEHET <msg_id>" (a queue row from majsztro that says MEHET, checked by majsztro_ok) or
+# "MAJSZTRO: helyettes-klodel <reason>" (only while store/mod-state/majsztro.json shows the weekly or the 5-hour
+# limit at 100 %). The image-gate forms "nem-marketing" and "kivetel-1881" do not count here.
+MAJSZTRO_LINE_RE = re.compile(r'(?mi)^\s*MAJSZTR[OÓ]:[ \t]*(.*)$')
+MAJSZTRO_IDEA_FORMS = ('mehet', 'helyettes-klodel')
+
+
+def idea_majsztro_check(t):
+    """None if the ÖTLET-KAPU text has a valid MAJSZTRO line, else the reason to block."""
+    need = ('ÖTLET-KAPU (Klodel 39550, Patrik TG 18106): a K+F vezetője Májsztró, ötlet csak az ő MEHET-jével megy. '
+            'Írd a szövegbe: "MAJSZTRO: MEHET <Májsztró MEHET-üzenetének msg_id-je>", vagy ha a kerete 100 %-on áll '
+            '(store/mod-state/majsztro.json, heti vagy 5 órás): "MAJSZTRO: helyettes-klodel <indok>".')
+    why = None
+    for m in MAJSZTRO_LINE_RE.finditer(t):
+        v = m.group(1).strip()
+        head = v.split()[0].lower() if v else ''
+        if head not in MAJSZTRO_IDEA_FORMS:
+            continue
+        err = majsztro_ok(v)
+        if err is None:
+            return None
+        why = err
+    return need + (f' ({why})' if why else '')
+
+
 def idea_check(text):
     """Klodel 33881: a private-chat text that mentions an idea ("ötlet") passes only with an "ÖTLET-KAPU:" line that
     contains both "nem Marabel/könyv" and "termékpaletta ellenőrizve". Klodel 38049: and it names no direction Patrik
@@ -1062,7 +1089,7 @@ def idea_check(text):
     for ln in t.splitlines():
         s = ln.strip()
         if s.upper().startswith(IDEA_MARK) and all(n in s.lower() for n in IDEA_NEEDS):
-            return atnezo_check(t)
+            return atnezo_check(t) or idea_majsztro_check(t)
     return ('ÖTLET-KAPU: új irány ne legyen Marabel/könyv-variáció, AI-tanácsadás, saját rendszer eladása; vesd össze '
             'a 6 termékkel (memória new-direction-start-from-market). Ha megvan, írd a szövegbe: "ÖTLET-KAPU: nem '
             'Marabel/könyv, termékpaletta ellenőrizve <mivel vetetted össze>".')
