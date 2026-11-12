@@ -1511,13 +1511,24 @@ def izles_not_asked_on_non_marketing(root):
     return rc == 0 and 'IZLES-REF' not in err
 
 
+def run_idea(root, tool_input):
+    """run() with store/mod-state/majsztro.json at 100 % (synthetic): the idea cases carry "MAJSZTRO: helyettes-klodel",
+    because a subprocess run cannot reach the queue for a "MAJSZTRO: MEHET <id>" (those are in-process, idea_majsztro_*)."""
+    budget(root, 100)
+    return run(root, tool_input)
+
+
+MJ = '\nMAJSZTRO: helyettes-klodel teszt, Májsztró kerete 100 %-on'
+
+
 PRIV_OK ='PRIVÁT-OK: Patrik privátban kérdezte, privát ügy\n'
-IDEA_LINE = 'ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel összevetve)\nATNEZO: MEHET a1b2c3d4e5\n'
+IDEA_LINE = ('ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel összevetve)\nATNEZO: MEHET a1b2c3d4e5\n'
+             'MAJSZTRO: helyettes-klodel teszt, Májsztró kerete 100 %-on\n')
 
 
 @case
 def idea_private_without_line_blocked(root):
-    rc, err = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Van egy új ötletem: könyv a kutyáknak.'})
+    rc, err = run_idea(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Van egy új ötletem: könyv a kutyáknak.'})
     return rc == 2 and 'ÖTLET-KAPU' in err and 'new-direction-start-from-market' in err
 
 
@@ -1525,34 +1536,34 @@ def idea_private_without_line_blocked(root):
 def idea_private_forms_blocked(root):
     # ötletek / ötletet / capitalised Ötlet all count
     texts = ('Három ötletek jönnek.', 'Hoztam egy ötletet.', 'Ötlet: AI-tanácsadás.')
-    return all(run(root, {'chat_id': PRIV, 'text': PRIV_OK + t})[0] == 2 for t in texts)
+    return all(run_idea(root, {'chat_id': PRIV, 'text': PRIV_OK + t})[0] == 2 for t in texts)
 
 
 @case
 def idea_private_decomposed_accent_blocked(root):
     # NFD "ötlet" (o + combining diaeresis) is the same word
-    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Egy ötlet.'})
+    rc, _ = run_idea(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Egy ötlet.'})
     return rc == 2
 
 
 @case
 def idea_private_half_line_blocked(root):
     # only one of the two statements: not enough
-    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'ÖTLET-KAPU: nem Marabel/könyv\nÚj ötlet.'})
+    rc, _ = run_idea(root, {'chat_id': PRIV, 'text': PRIV_OK + 'ÖTLET-KAPU: nem Marabel/könyv\nÚj ötlet.'})
     return rc == 2
 
 
 @case
 def idea_private_with_line_allowed(root):
-    rc, _ = run(root, {'chat_id': PRIV, 'text': PRIV_OK + IDEA_LINE + 'Új ötlet: X piac, Y vevő.'})
+    rc, _ = run_idea(root, {'chat_id': PRIV, 'text': PRIV_OK + IDEA_LINE + 'Új ötlet: X piac, Y vevő.'})
     return rc == 0
 
 
 @case
 def idea_private_window_open_still_gated(root):
     window(root, time.time() + 3600)
-    blocked = run(root, {'chat_id': PRIV, 'text': 'Új ötlet: X.'})[0] == 2
-    allowed = run(root, {'chat_id': PRIV, 'text': IDEA_LINE + 'Új ötlet: X.'})[0] == 0
+    blocked = run_idea(root, {'chat_id': PRIV, 'text': 'Új ötlet: X.'})[0] == 2
+    allowed = run_idea(root, {'chat_id': PRIV, 'text': IDEA_LINE + 'Új ötlet: X.'})[0] == 0
     return blocked and allowed
 
 
@@ -1563,18 +1574,18 @@ def idea_irany_word_start_only(root):
            'Az irányítás nálad van.']
     pos = ['Új irány: évkönyv.', 'Új irányt javaslok.', 'Három irányban lépnénk.', 'Ötletek a hétre.',
            'Üzletötlet: tabló.', 'Ez az IRÁNY jó.']
-    rn = [run(root, {'chat_id': GROUP, 'text': t})[0] for t in neg]
-    rp = [run(root, {'chat_id': GROUP, 'text': t})[0] for t in pos]
+    rn = [run_idea(root, {'chat_id': GROUP, 'text': t})[0] for t in neg]
+    rp = [run_idea(root, {'chat_id': GROUP, 'text': t})[0] for t in pos]
     return all(r == 0 for r in rn) and all(r == 2 for r in rp)
 
 
 @case
 def idea_group_gated(root):
     # Patrik csoport TG 4978: the group is gated too, and "irány" triggers like "ötlet".
-    rc, _ = run(root, {'chat_id': GROUP, 'text': 'Négy új irány: évkönyv.'})
-    rc2, _ = run(root, {'chat_id': GROUP, 'text': 'Új irány.\nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve: 6 termék\nATNEZO: MEHET a1b2c3d4e5'})
-    rc3, _ = run(root, {'chat_id': GROUP, 'text': 'Radar dolgozik.'})
-    rc4, _ = run(root, {'chat_id': GROUP, 'text': '📊 ÉLŐ ÁLLAPOT · frissítve 10:31\nÚj üzletág: új irány'})
+    rc, _ = run_idea(root, {'chat_id': GROUP, 'text': 'Négy új irány: évkönyv.'})
+    rc2, _ = run_idea(root, {'chat_id': GROUP, 'text': 'Új irány.\nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve: 6 termék\nATNEZO: MEHET a1b2c3d4e5\nMAJSZTRO: helyettes-klodel teszt, Májsztró kerete 100 %-on'})
+    rc3, _ = run_idea(root, {'chat_id': GROUP, 'text': 'Radar dolgozik.'})
+    rc4, _ = run_idea(root, {'chat_id': GROUP, 'text': '📊 ÉLŐ ÁLLAPOT · frissítve 10:31\nÚj üzletág: új irány'})
     return rc == 2 and rc2 == 0 and rc3 == 0 and rc4 == 0
 
 
@@ -1583,21 +1594,21 @@ def idea_refused_direction_blocked_despite_line(root):
     # Klodel 38049 (Patrik TG 17453/17460): a valid ÖTLET-KAPU line does not let a refused direction through.
     texts = ('Új ötlet: AI-recepciós szalonoknak.', 'Új irány: telefonos asszisztens kisboltoknak.',
              'Ötlet: társasházi közös képviselet.', 'Ötlet: Recepciós MI fodrászoknak.')
-    res = [run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t}) for t in texts]
+    res = [run_idea(root, {'chat_id': GROUP, 'text': IDEA_LINE + t}) for t in texts]
     return all(rc == 2 and 'elutasított irányt' in err and 'ELVETETT-DE-KERT' in err for rc, err in res)
 
 
 @case
 def idea_refused_direction_names_the_word(root):
-    rc, err = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: AI-recepciós szalonoknak.'})
+    rc, err = run_idea(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: AI-recepciós szalonoknak.'})
     return rc == 2 and 'recepciós' in err
 
 
 @case
 def idea_refused_direction_asked_allowed(root):
     # Patrik asked for it himself: an ELVETETT-DE-KERT line with his TG message number lets it pass.
-    ok = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'ELVETETT-DE-KERT: TG 17454\nÚj ötlet: AI-recepciós.'})[0]
-    ok2 = run(root, {'chat_id': PRIV, 'text': PRIV_OK + IDEA_LINE + 'Ötlet: recepciós.\nELVETETT-DE-KERT: TG 17454'})[0]
+    ok = run_idea(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'ELVETETT-DE-KERT: TG 17454\nÚj ötlet: AI-recepciós.'})[0]
+    ok2 = run_idea(root, {'chat_id': PRIV, 'text': PRIV_OK + IDEA_LINE + 'Ötlet: recepciós.\nELVETETT-DE-KERT: TG 17454'})[0]
     return ok == 0 and ok2 == 0
 
 
@@ -1607,13 +1618,13 @@ def idea_refused_direction_asked_needs_number(root):
     texts = ('ELVETETT-DE-KERT: Patrik kérte\nÚj ötlet: AI-recepciós.',
              'ELVETETT-DE-KERT:\nÚj ötlet: AI-recepciós.',
              'Új ötlet: AI-recepciós. (ELVETETT-DE-KERT: TG 17454)')
-    return all(run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] == 2 for t in texts)
+    return all(run_idea(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] == 2 for t in texts)
 
 
 @case
 def idea_refused_direction_asked_still_needs_idea_line(root):
     # The ELVETETT-DE-KERT line lifts the refused-direction check only, not the ÖTLET-KAPU line.
-    rc, err = run(root, {'chat_id': GROUP, 'text': 'ELVETETT-DE-KERT: TG 17454\nÚj ötlet: AI-recepciós.'})
+    rc, err = run_idea(root, {'chat_id': GROUP, 'text': 'ELVETETT-DE-KERT: TG 17454\nÚj ötlet: AI-recepciós.'})
     return rc == 2 and 'new-direction-start-from-market' in err
 
 
@@ -1622,22 +1633,22 @@ def idea_refused_direction_word_start_only(root):
     # Same rule as the lint (Klodel 37971): "megtakarítás" is not "takarítás".
     neg = ('Ötlet: megtakarítás-kalkulátor.', 'Új irány: nyugdíj-előtakarékosság.')
     pos = ('Ötlet: takarítás-közvetítő.', 'Ötlet: takarításközvetítő.')
-    rn = [run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] for t in neg]
-    rp = [run(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] for t in pos]
+    rn = [run_idea(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] for t in neg]
+    rp = [run_idea(root, {'chat_id': GROUP, 'text': IDEA_LINE + t})[0] for t in pos]
     return all(r == 0 for r in rn) and all(r == 2 for r in rp)
 
 
 @case
 def idea_marabel_in_text_not_refused(root):
     # "marabel" is in the lint list for idea titles, but a chat text may name Marabel (the ÖTLET-KAPU line covers it).
-    rc, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új irány: nem a Marabel, hanem hűtőmágnes-bolt.'})
+    rc, _ = run_idea(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új irány: nem a Marabel, hanem hűtőmágnes-bolt.'})
     return rc == 0
 
 
 @case
 def no_idea_refused_word_unchanged(root):
     # Without "ötlet"/"irány" the gate does not look at the text: a refused word alone blocks nothing.
-    rc, _ = run(root, {'chat_id': GROUP, 'text': 'Kész a runbook, a recepciós teszt-fiók törölve.'})
+    rc, _ = run_idea(root, {'chat_id': GROUP, 'text': 'Kész a runbook, a recepciós teszt-fiók törölve.'})
     return rc == 0
 
 
@@ -1651,6 +1662,7 @@ def idea_refused_list_missing_fails_closed(root):
     hook = os.path.join(root, 'scripts', 'hooks', 'product-image-gate.py')
     shutil.copy(HOOK, hook)
     shutil.copy(os.path.join(here, '..', 'lib', 'owner_chat.py'), os.path.join(root, 'scripts', 'lib', 'owner_chat.py'))
+    budget(root, 100)
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV}
 
     def go(text):
@@ -1674,6 +1686,7 @@ def gate_copy(root, lint_text):
     if lint_text is not None:
         with open(os.path.join(root, 'scripts', 'uzleti-otlet-kapu-lint.py'), 'w', encoding='utf-8') as f:
             f.write(lint_text)
+    budget(root, 100)
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV}
 
     def go(text):
@@ -1703,13 +1716,13 @@ def idea_refused_direction_inside_marker_line_blocked(root):
     # Viktor 38060 L2: only the gate's own phrases are cut out; a refused direction inside a marker line still stops.
     texts = ('ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve, recepciós\nÚj ötlet.',
              'PRIVÁT-OK: telefonos asszisztens ügy, Patrik kérdezte\n' + IDEA_LINE + 'Új ötlet.')
-    hits = [run(root, {'chat_id': GROUP, 'text': t})[0] for t in texts]
-    ok, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: hűtőmágnes-bolt.'})
+    hits = [run_idea(root, {'chat_id': GROUP, 'text': t})[0] for t in texts]
+    ok, _ = run_idea(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: hűtőmágnes-bolt.'})
     # A negation in the marker line is the declaration the gate asks for (TG 17460: "nem AI-tanácsadás"): it passes.
     # In the body a negation gets no pass.
-    neg_line, _ = run(root, {'chat_id': GROUP, 'text': 'ÖTLET-KAPU: nem Marabel/könyv, nem AI-tanácsadás, nem telefonos '
-                                                       'asszisztens, termékpaletta ellenőrizve\nATNEZO: MEHET a1b2c3d4e5\nÚj ötlet: kalkulátor.'})
-    neg_body, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: nem recepciós, hanem kalkulátor.'})
+    neg_line, _ = run_idea(root, {'chat_id': GROUP, 'text': 'ÖTLET-KAPU: nem Marabel/könyv, nem AI-tanácsadás, nem telefonos '
+                                                       'asszisztens, termékpaletta ellenőrizve\nATNEZO: MEHET a1b2c3d4e5\nMAJSZTRO: helyettes-klodel teszt, Májsztró kerete 100 %-on\nÚj ötlet: kalkulátor.'})
+    neg_body, _ = run_idea(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: nem recepciós, hanem kalkulátor.'})
     return all(r == 2 for r in hits) and ok == 0 and neg_line == 0 and neg_body == 2
 
 
@@ -1942,14 +1955,14 @@ TG18074 = ('Megvan az első. Szigma és Mágnes egymástól függetlenül ugyano
 @case
 def idea_tg18074_without_reviewer_blocked(root):
     # The exact text of TG 18074: a valid ÖTLET-KAPU line, no ATNEZO line -> blocked, and the message says why.
-    rc, err = run(root, {'chat_id': PRIV, 'text': TG18074})
-    rc2, _ = run(root, {'chat_id': GROUP, 'text': TG18074})
+    rc, err = run_idea(root, {'chat_id': PRIV, 'text': TG18074})
+    rc2, _ = run_idea(root, {'chat_id': GROUP, 'text': TG18074})
     return rc == 2 and rc2 == 2 and 'ATNEZO: MEHET' in err and '18075' in err
 
 
 @case
 def idea_tg18074_with_reviewer_id_allowed(root):
-    return run(root, {'chat_id': PRIV, 'text': TG18074 + '\nATNEZO: MEHET agent-task-7f3a9c'})[0] == 0
+    return run_idea(root, {'chat_id': PRIV, 'text': TG18074 + MJ + '\nATNEZO: MEHET agent-task-7f3a9c'})[0] == 0
 
 
 @case
@@ -1959,21 +1972,95 @@ def idea_reviewer_file_must_say_mehet(root):
         f.write('Vak átnéző ítélete: MEHET (1. ötlet)\n')
     with open(os.path.join(root, 'shared', 'k-f', 'atnezo-javitando.md'), 'w', encoding='utf-8') as f:
         f.write('Vak átnéző ítélete: JAVÍTANDÓ, nem megy\n')
-    ok = run(root, {'chat_id': GROUP, 'text': TG18074 + '\nATNEZO: MEHET shared/k-f/atnezo-ok.md'})[0]
-    bad = run(root, {'chat_id': GROUP, 'text': TG18074 + '\nATNEZO: MEHET shared/k-f/atnezo-javitando.md'})[0]
-    missing = run(root, {'chat_id': GROUP, 'text': TG18074 + '\nATNEZO: MEHET shared/k-f/nincs-ilyen.md'})[0]
-    outside = run(root, {'chat_id': GROUP, 'text': TG18074 + '\nATNEZO: MEHET /etc/hosts'})[0]
+    ok = run_idea(root, {'chat_id': GROUP, 'text': TG18074 + MJ + '\nATNEZO: MEHET shared/k-f/atnezo-ok.md'})[0]
+    bad = run_idea(root, {'chat_id': GROUP, 'text': TG18074 + MJ + '\nATNEZO: MEHET shared/k-f/atnezo-javitando.md'})[0]
+    missing = run_idea(root, {'chat_id': GROUP, 'text': TG18074 + MJ + '\nATNEZO: MEHET shared/k-f/nincs-ilyen.md'})[0]
+    outside = run_idea(root, {'chat_id': GROUP, 'text': TG18074 + MJ + '\nATNEZO: MEHET /etc/hosts'})[0]
     return ok == 0 and bad == 2 and missing == 2 and outside == 2
 
 
 @case
 def idea_reviewer_line_forms(root):
-    texts_bad = [TG18074 + '\nATNEZO: MEHET', TG18074 + '\nATNEZO: MEHET abc', TG18074 + '\nATNEZO: JAVÍTANDÓ x1y2z3w4',
-                 TG18074 + '\nATNEZO: nincs-otlet ok', TG18074 + '\nMegjegyzés: ATNEZO: MEHET a1b2c3d4e5']
-    texts_ok = ['Állapot: Radar ötletei még jönnek.\n' + IDEA_LINE.split('\n')[0] + '\nATNEZO: nincs-otlet csak állapot, új ötlet nincs benne',
-                TG18074 + '\nATNÉZŐ: MEHET a1b2c3d4e5']
-    return (all(run(root, {'chat_id': GROUP, 'text': t})[0] == 2 for t in texts_bad)
-            and all(run(root, {'chat_id': GROUP, 'text': t})[0] == 0 for t in texts_ok))
+    texts_bad = [TG18074 + MJ + '\nATNEZO: MEHET', TG18074 + MJ + '\nATNEZO: MEHET abc', TG18074 + MJ + '\nATNEZO: JAVÍTANDÓ x1y2z3w4',
+                 TG18074 + MJ + '\nATNEZO: nincs-otlet ok', TG18074 + MJ + '\nMegjegyzés: ATNEZO: MEHET a1b2c3d4e5']
+    texts_ok = ['Állapot: Radar ötletei még jönnek.\n' + IDEA_LINE.split('\n')[0] + MJ + '\nATNEZO: nincs-otlet csak állapot, új ötlet nincs benne',
+                TG18074 + MJ + '\nATNÉZŐ: MEHET a1b2c3d4e5']
+    return (all(run_idea(root, {'chat_id': GROUP, 'text': t})[0] == 2 for t in texts_bad)
+            and all(run_idea(root, {'chat_id': GROUP, 'text': t})[0] == 0 for t in texts_ok))
+
+
+# Klodel 39550 (Patrik TG 18106 "nálunk is van chatgpt agent mégis állandóan a ti hülyeségeketek jön csak"): the K+F
+# lead is Majsztro; an ÖTLET-KAPU text needs "MAJSZTRO: MEHET <msg_id>" or, at a 100 % budget, "helyettes-klodel".
+# TG 18099 is the literal text Klodel sent around him (ledger, conversation_log, read-only).
+TG18099 = ('Ha a következő ötletkört a Gemini 4 Argon is megcsinálná: nálunk nincs bekötve, Kernel beköti, a használata '
+           'API-díjas. Kéred?\n\nPRIVÁT-OK: Patrik privát kérdése (TG 18092), új üzletág\nÖTLET-KAPU: nem Marabel/könyv, '
+           'termékpaletta ellenőrizve (Meséld el!, Első éved, Receptkönyv, Köszönjük, Marabello, Chats)')
+
+
+@case
+def idea_without_majsztro_blocked(root):
+    # A valid ATNEZO line is not enough: without a MAJSZTRO line the text stops, and the message says why.
+    rc, err = run(root, {'chat_id': PRIV, 'text': TG18074 + '\nATNEZO: MEHET agent-task-7f3a9c'})
+    rc2, err2 = run(root, {'chat_id': PRIV, 'text': TG18099 + '\nATNEZO: nincs-otlet csak kérdés, új ötlet nincs benne'})
+    budget(root, 100)  # a full budget does not make the line optional
+    rc3, _ = run(root, {'chat_id': GROUP, 'text': TG18074 + '\nATNEZO: MEHET agent-task-7f3a9c'})
+    return (rc == 2 and '18106' in err and 'MAJSZTRO: MEHET' in err and rc2 == 2 and '18106' in err2 and rc3 == 2)
+
+
+@case
+def idea_majsztro_substitute_only_at_full_budget(root):
+    text = TG18074 + '\nATNEZO: MEHET agent-task-7f3a9c' + MJ
+    none = run(root, {'chat_id': GROUP, 'text': text})
+    budget(root, 99)
+    part = run(root, {'chat_id': GROUP, 'text': text})
+    budget(root, 100)
+    full = run(root, {'chat_id': GROUP, 'text': text})[0]
+    # the 5-hour window at 100 % before its reset counts too (CLAUDE.md MÁJSZTRÓ HELYETTES)
+    json.dump({'usage': {'rateLimits': [{'kind': 'five_hour', 'percentUsed': 100, 'resetsAt': '2099-01-01T00:00:00Z'},
+                                        {'kind': 'seven_day', 'percentUsed': 40}]}},
+              open(os.path.join(root, 'store', 'mod-state', 'majsztro.json'), 'w'))
+    five = run(root, {'chat_id': GROUP, 'text': text})[0]
+    return (none[0] == 2 and 'helyettes-klodel' in none[1] and part[0] == 2 and 'helyettes-klodel' in part[1]
+            and full == 0 and five == 0)
+
+
+@case
+def idea_majsztro_line_forms(root):
+    # The image-gate forms do not count for an idea, the line must start the row, the substitute needs a reason.
+    budget(root, 100)
+    base = TG18074 + '\nATNEZO: MEHET agent-task-7f3a9c\n'
+    bad = ['MAJSZTRO: nem-marketing ez csak egy ötlet', 'MAJSZTRO: kivetel-1881 12345', 'MAJSZTRO: helyettes-klodel',
+           'Megjegyzés: MAJSZTRO: helyettes-klodel Májsztró kerete elfogyott', 'MAJSZTRO: MEHET', 'MAJSZTRO: OK 12345']
+    ok = ['MAJSZTRÓ: helyettes-klodel Májsztró kerete elfogyott', 'majsztro: helyettes-klodel Májsztró kerete elfogyott']
+    return (all(run(root, {'chat_id': GROUP, 'text': base + b})[0] == 2 for b in bad)
+            and all(run(root, {'chat_id': GROUP, 'text': base + o})[0] == 0 for o in ok))
+
+
+def idea_majsztro_queue(root, row):
+    """idea_check in-process with the queue read stubbed: row is what GET /api/messages/<id> returns (or an exception)."""
+    mod = gate_module()
+    mod.ROOT = root
+    os.makedirs(os.path.join(root, 'store'), exist_ok=True)
+    open(os.path.join(root, 'store', '.dashboard-token'), 'w').write('synthetic')
+    seen = []
+
+    def fake(req, timeout=5):
+        seen.append(req.full_url)
+        if isinstance(row, Exception):
+            raise row
+        return FakeResponse(row)
+    mod.urllib.request.urlopen = fake
+    return mod.idea_check(TG18074 + '\nATNEZO: MEHET agent-task-7f3a9c\nMAJSZTRO: MEHET 39999'), seen
+
+
+@case
+def idea_majsztro_mehet_from_queue(root):
+    ok, seen = idea_majsztro_queue(root, {'from_agent': 'majsztro', 'content': 'Az 1. ötlet: MEHET.'})
+    other, _ = idea_majsztro_queue(root, {'from_agent': 'klodel', 'content': 'MEHET'})
+    fix, _ = idea_majsztro_queue(root, {'from_agent': 'majsztro', 'content': 'MEHET helyett JAVÍTANDÓ'})
+    down, _ = idea_majsztro_queue(root, OSError('queue down'))
+    return (ok is None and seen == ['http://localhost:3420/api/messages/39999'] and other and '18106' in other
+            and fix and down and 'nem olvasható' in down)
 
 
 def main():
