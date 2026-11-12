@@ -19,7 +19,7 @@ import {
 } from '../scheduled-tasks-io.js'
 import { validateScheduleUpdate, scheduleCreateRefusal, COMMAND_TASK_API_REFUSAL } from '../schedule-api-fields.js'
 import { runScheduledTaskNow } from '../schedule-runner.js'
-import { createOnceTask, readOnceAnchors, recordOnceAnchor, shouldAlertCap, type OnceRequestBody } from '../once-schedule.js'
+import { createOnceTask, readOnceAnchors, recordOnceAnchor, shouldAlertCap, isOnceTask, ONCE_EDIT_REFUSAL, type OnceRequestBody } from '../once-schedule.js'
 import { resolveDashboardOrigin } from '../agent-scaffold.js'
 import type { RouteContext } from './types.js'
 
@@ -166,11 +166,25 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     // the deps read below and the ledger append inside createOnceTask are one
     // uninterruptible stretch on the single-threaded dashboard.
     const now = Date.now()
+    // Viktor 38943 #5: a damaged ledger fails closed -- no once-task until a
+    // human has looked, and the main agent hears about it (once a day).
+    const ledger = readOnceAnchors()
+    if (ledger.malformed > 0) {
+      if (shouldAlertCap('ledger', 'agent-day', now)) {
+        try {
+          createSystemMessage(MAIN_AGENT_ID, `[ONCE-LEDGER] store/once-schedule-anchors.jsonl: ${ledger.malformed} sor nem értelmezhető. Egyszeri ébresztés addig nem kérhető; a fájlt ember nézze meg (append-only, a sérült sort ne töröld vakon).`)
+        } catch (err) {
+          logger.warn({ err }, 'once-schedule: ledger alert could not be queued')
+        }
+      }
+      json(res, { error: 'once-schedule ledger is damaged; the main agent has been told' }, 503)
+      return true
+    }
     const verdict = createOnceTask(data, {
       now,
       knownAgents: scheduleAgentIds(),
       getMessage: (id) => getAgentMessage(id),
-      anchors: readOnceAnchors(),
+      anchors: ledger.anchors,
       pendingOnceCount: (agent) => listScheduledTasks().filter(t => t.runAt != null && t.agent === agent).length,
       tz: effectiveCronTz().tz,
       dashboardOrigin: resolveDashboardOrigin(DASHBOARD_PUBLIC_URL, WEB_PORT, AGENT_API_ORIGIN),
@@ -265,6 +279,10 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     if (!resolved) { json(res, { error: 'Schedule not found' }, 404); return true }
     const { name, dir } = resolved
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
+    // ONCE (Viktor 38943 #2): a once-task carries a fixed prompt (the TEXT rule);
+    // an edit afterwards would put free text into it after all. It can be
+    // cancelled (DELETE) or switched off (toggle), never rewritten.
+    if (isOnceTask(readScheduledTask(name))) { json(res, { error: ONCE_EDIT_REFUSAL }, 409); return true }
 
     let body: Buffer
     try {

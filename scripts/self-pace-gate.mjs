@@ -271,13 +271,17 @@ export function wrappedPayloads(command) {
 
 // The Claude self-schedule store. Blocked for WRITE on any route (a Bash write,
 // or the native Write/Edit/NotebookEdit tool); a read/grep is legit diagnostics.
-const SCHEDULE_STORE_RX = /scheduled_tasks\.json/i
+// Viktor 38943 #5: the once-task anchor ledger is a store of the same kind --
+// rewriting it would reset "one message, one wake-up" and the daily caps.
+const SCHEDULE_STORE_RX = /scheduled_tasks\.json|once-schedule-anchors\.jsonl/i
 // Write-intent shell tokens (redirect / tee / in-place edit / dd / copy-move).
 const WRITE_INTENT_RX = /(>>?|\btee\b|\bsed\b[\s\S]*\s-i|\bdd\b|\bcp\b|\bmv\b)/i
 // Dashboard schedule API. A WRITE method (POST/PUT/PATCH/DELETE) creates/edits a
 // self-paced cron; a GET (list / pending / agents) is legit diagnostics -> allowed.
 const SCHEDULE_API_RX = /\/api\/schedules\b/i
-const HTTP_WRITE_RX = /(-X\s*(POST|PUT|PATCH|DELETE)|--request\s+(POST|PUT|PATCH|DELETE)|(^|\s)(--data\b|--data-\w+\b|-d\b))/i
+// Viktor 38943 #1: curl merges short flags (`-sXPUT`) and accepts a unique
+// long-option prefix (`--requ PUT`), so the method may hide in either form.
+const HTTP_WRITE_RX = /((^|\s)-[A-Za-z]*X\s*['"]?(POST|PUT|PATCH|DELETE)|--req[a-z]*(\s+|=)['"]?(POST|PUT|PATCH|DELETE)|(^|\s)(--data\b|--data-\w+\b|-d\b))/i
 
 // ONCE (card fd941954, Viktor 38878 #4): the ONE schedule write a sub-agent may
 // make -- a POST to exactly /api/schedules/once. It is not a self-pace door
@@ -291,17 +295,43 @@ const HTTP_WRITE_RX = /(-X\s*(POST|PUT|PATCH|DELETE)|--request\s+(POST|PUT|PATCH
 // nothing else. Allowed noise is exactly two things, removed before the test:
 // the token read `$(cat <path>/.dashboard-token)` and ONE trailing heredoc with
 // a QUOTED delimiter (its body is literal, never expanded) that names no API
-// path. What remains may not hold a separator (; & | newline), a backtick, any
-// `$` (substitution or variable), `..`, `%` (curl does not decode, but the
-// server or a proxy might), --path-as-is, a curl config file (-K/--config) or a
-// second transfer (--next/-:). Every -X/--request must say POST, and the
-// command must name /api/schedules exactly once, as /api/schedules/once with
-// nothing glued on (no query, suffix, glob or case variant).
+// path. What remains may not hold a separator (; & | newline), a backtick, a
+// backslash, any `$`, `..` or `%`.
+//
+// Then a POSITIVE list of curl arguments (Viktor 38943 #1: a denylist missed
+// `-sXPUT`, `--requ PUT`, `--conf`, `--nex`, `-o` and a foreign host, because
+// curl merges short flags and accepts unique long-option prefixes). Allowed,
+// and nothing else: short flags made only of s S f i; -H with a Content-Type,
+// `Authorization: Bearer <token>` or X-Agent-Id header; -X POST; --max-time N;
+// -d / --data / --data-raw / --data-binary with `@-` (the heredoc) or an inline
+// `{...}` JSON literal; and exactly ONE URL, http(s) on localhost or 127.0.0.1,
+// with the path exactly /api/schedules/once.
 const ONCE_TOKEN_SUBST_RX = /\$\(cat [^\s()$`;|&<>'"]+\/\.dashboard-token\)/g
 const ONCE_QUOTED_HEREDOC_RX = /<<-?[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'[ \t]*\n([\s\S]*?)\n\1[ \t]*\n?$/
-const ONCE_FORBIDDEN_RX = /[;&|`\n\r%$]|\.\.|--path-as-is|(^|\s)(-K|--config|--next|-:)(?=\s|=|$)/
-const SCHEDULE_URL_TOKEN_RX = /\/api\/schedules\b[^\s'"]*/gi
-const ONCE_METHOD_RX = /(?:-X|--request)(?:\s+|=)?\s*(['"]?)([^\s'"]*)\1/g
+const ONCE_FORBIDDEN_RX = /[;&|`\n\r%$\\]|\.\./
+const ONCE_URL_RX = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d{1,5})?\/api\/schedules\/once$/
+const ONCE_HEADER_RX = /^(?:Content-Type:\s*application\/json|Authorization:\s*Bearer TOKEN|X-Agent-Id:\s*[A-Za-z0-9_-]+)$/i
+const ONCE_DATA_FLAGS = new Set(['-d', '--data', '--data-raw', '--data-binary'])
+
+// Shell words of an already-screened command (no $, backslash or backtick left):
+// single and double quotes group, nothing else is special. null on an open quote.
+function onceShellWords(c) {
+  const words = []
+  let cur = ''
+  let has = false
+  let q = null
+  for (const ch of c) {
+    if (q) { if (ch === q) q = null; else cur += ch; continue }
+    if (ch === "'" || ch === '"') { q = ch; has = true; continue }
+    if (/\s/.test(ch)) { if (has) { words.push(cur); cur = ''; has = false } continue }
+    cur += ch
+    has = true
+  }
+  if (q) return null
+  if (has) words.push(cur)
+  return words
+}
+
 export function onceCommandAllowed(command) {
   let c = String(command ?? '')
   const h = c.match(ONCE_QUOTED_HEREDOC_RX)
@@ -309,13 +339,28 @@ export function onceCommandAllowed(command) {
     if (/\/api\//i.test(h[2])) return false
     c = c.slice(0, h.index)
   }
+  // A quoted heredoc opener whose body is not in this string (a recipe line).
+  c = c.replace(/<<-?[ \t]*'[A-Za-z_][A-Za-z0-9_]*'[ \t]*$/, '')
   c = c.replace(ONCE_TOKEN_SUBST_RX, 'TOKEN').trim()
-  if (!/^curl\s/.test(c)) return false
   if (ONCE_FORBIDDEN_RX.test(c)) return false
-  const urls = c.match(SCHEDULE_URL_TOKEN_RX) ?? []
-  if (urls.length !== 1 || urls[0] !== '/api/schedules/once') return false
-  for (const m of c.matchAll(ONCE_METHOD_RX)) if (m[2] !== 'POST') return false
-  return true
+  const w = onceShellWords(c)
+  if (!w || w[0] !== 'curl') return false
+  let urls = 0
+  for (let i = 1; i < w.length; i++) {
+    const a = w[i]
+    if (/^-[sSfi]+$/.test(a)) continue
+    if (a === '-H') { if (!ONCE_HEADER_RX.test(w[++i] ?? '')) return false; continue }
+    if (a === '-X') { if (w[++i] !== 'POST') return false; continue }
+    if (a === '--max-time') { if (!/^\d{1,3}$/.test(w[++i] ?? '')) return false; continue }
+    if (ONCE_DATA_FLAGS.has(a)) {
+      const v = w[++i] ?? ''
+      if (v !== '@-' && !/^\{[^@]*\}$/.test(v)) return false
+      continue
+    }
+    if (ONCE_URL_RX.test(a)) { urls++; continue }
+    return false
+  }
+  return urls === 1
 }
 
 // THE EGRESS ALLOWLIST IS A GATE ON THE SUB-AGENT ITSELF (EGRESSSELFEDIT824).
