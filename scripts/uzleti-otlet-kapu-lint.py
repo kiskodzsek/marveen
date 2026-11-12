@@ -70,6 +70,27 @@ def site_hibak(b):
     if hianyzik:
         hibak.append("ITTHON: site-próba eredménnyel hiányzik: " + ", ".join(hianyzik) + " (Klodel 39454)")
     return hibak
+# --zseni (Klodel 39499, Patrik TG 18069: "tényleg MINDEN embert érint és lehet róla viccesen is kommunikalni ... ezek
+# ... erőltetett dolgok"): MINDENKI mező = kit hagy ki. Csak a "senkit" kezdetű érték megy át, és abban sincs autó,
+# kutya, gyerek, szülő, sofőr, tulajdonos (szó elején: az "autós", "kutyás" is). VICCES mező = egy mondat idézőjelben.
+ZSENI_MOD = "--zseni" in sys.argv
+ZSENI_SZUKITO = ["autó", "kutya", "kutyá", "gyerek", "szülő", "szulo", "sofőr", "sofor", "tulajdonos"]
+def zseni_hibak(p):
+    hibak = []
+    mi = re.search(r"(?m)^\s*[-*]?\s*MINDENKI:(.*)$", p)
+    if not mi: hibak.append("MINDENKI hiányzik (TG 18069: kit hagy ki)")
+    else:
+        v = mi.group(1).strip().lower()
+        szuk = [k for k in ZSENI_SZUKITO if szokezdet(k, v)]
+        if not v.startswith("senkit"): hibak.append(f"MINDENKI: nem 'senkit' ({mi.group(1).strip()[:60]})")
+        elif szuk: hibak.append(f"MINDENKI: szűkítő szó ({szuk[0]})")
+    vi = re.search(r"(?m)^\s*[-*]?\s*VICCES:(.*)$", p)
+    if not vi: hibak.append("VICCES hiányzik (TG 18069: egy vicces mondat)")
+    else:
+        q = re.search(r"[„\"“]([^”\"“]{8,})[”\"“]", vi.group(1))
+        if not q: hibak.append("VICCES: nincs idézőjeles mondat")
+        elif len(re.findall(r"[.!?…]+(?=\s+\S)", q.group(1).strip())) > 0: hibak.append("VICCES: egy mondat legyen, nem több")
+    return hibak
 def itthon_blokk(p):
     sorok = p.splitlines()
     for i, s in enumerate(sorok):
@@ -141,6 +162,7 @@ def main(path):
             elif not (re.search(r"\d", vo.group(1)) or "NINCS ADAT" in vo.group(1).upper()):
                 hibak.append("VOLUMEN: se havi szám, se 'NINCS ADAT'")
         hibak += itthon_hibak(p, ITTHON_MOD)
+        if ZSENI_MOD: hibak += zseni_hibak(p)
         for k in ELUTASITOTT:
             if szokezdet(k, cim.lower()) or (k in ("halál","elhunyt","temet","gyász","hagyaték","végrendelet") and szokezdet(k, p.lower())): hibak.append(f"elutasított irány: {k}")
         if hibak:
