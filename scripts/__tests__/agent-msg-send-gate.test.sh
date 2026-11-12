@@ -272,6 +272,52 @@ text "Nem kell leállítani Radart, megy tovább."
 run klodel radar
 ok "stop: \"Nem kell leállítani\" in the text is not a stop: sent" "$(sent)" "rc=$RC posts=$POSTS"
 
+# --- Klodel 38950 (hibanapló 2026-11-12 08:24): SPEC LOCK, no code release on a locked card without SPEC-OK ---
+printf '{"d9bc643b": {"reason": "code only after Patrik spec OK", "keywords": ["saját rendszer"]}}' > "$SANDBOX/spec.json"
+SPEC="MARVEEN_MSG_GATE_SPEC_LOCK=$SANDBOX/spec.json"
+# negative: the 38939 release (shortened, wording kept)
+REL='Klodel -> Kernel (d9bc643b saját rendszer): Patrik TG 17858 szó szerint: „közben épüljön az új csapatunk”. Kész, ha: terv-muszaki-1111.md 6. pont 1. lépése fut a mi gépünkön: repó-váz, runner, claude-adapter. Gazda: te (mag).'
+text "$REL"
+GATE_ENV="$SPEC" run klodel kernel
+ok "spec lock: the 38939 release without SPEC-OK: refused" "$(refused)" "rc=$RC posts=$POSTS"
+ok "spec lock: the refusal names the card and the SPEC-OK line" "$(grep -q 'd9bc643b' "$SANDBOX/err" && grep -q 'SPEC-OK: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+ok "spec lock: the refusal never echoes the text" "$(grep -qF 'közben épüljön' "$SANDBOX/err" && echo 1 || echo 0)"
+text "$REL
+SPEC-OK: TG 17870"
+GATE_ENV="$SPEC" run klodel kernel
+ok "spec lock: with a SPEC-OK: TG line: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "$REL SPEC-OK: TG 17870 a végén, nem külön sorban"
+GATE_ENV="$SPEC" run klodel kernel
+ok "spec lock: SPEC-OK not on its own line: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Klodel -> Kernel (0742aba6): kész ág, push + PR-kérés hozzám, a kód mehet.'
+GATE_ENV="$SPEC" run klodel kernel
+ok "spec lock: a card that is not locked: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Klodel -> Kernel: VISSZAVONVA a 38939 (saját rendszer első szelet KÓDJA). Patrik TG 17862: „be kéne fejezni a specifikaciot”. Kód, repó-váz, próba most NINCS. Ha már elkezdted: állj meg, ne pusholj, írd meg, mi készült. A time-claim-gate PR (38942) és a SEO (38918) marad.'
+GATE_ENV="$SPEC" run klodel kernel
+ok "spec lock: the 38944 revocation (kód most nincs): sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'A saját rendszer első szelete indulhat, worktree-ben.'
+GATE_ENV="$SPEC" run klodel kernel
+ok "spec lock: the keyword without the card id: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'd9bc643b: nem kell PR, de indulhat a kód.'
+GATE_ENV="$SPEC" run klodel kernel
+ok "spec lock: a plain negation is not a revocation: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'VISSZAVONVA 38939: helyette indulj a d9bc643b kódjával.'
+GATE_ENV="$SPEC" run klodel kernel
+ok "spec lock: VISSZAVONVA without a no-code statement: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "$REL"
+GATE_ENV="$SPEC" run dave kernel
+ok "spec lock: only klodel's releases are gated (dave): sent" "$(sent)" "rc=$RC posts=$POSTS"
+GATE_ENV="MARVEEN_MSG_GATE_SPEC_LOCK=$SANDBOX/nonexistent.json" run klodel kernel
+ok "spec lock: no lock file means no lock: sent" "$(sent)" "rc=$RC posts=$POSTS"
+printf '{"d9bc643b": ' > "$SANDBOX/spec-bad.json"
+text "$REL"
+GATE_ENV="MARVEEN_MSG_GATE_SPEC_LOCK=$SANDBOX/spec-bad.json" run klodel kernel
+ok "spec lock: a malformed lock file: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+printf '{"d9bc643b": "code only after Patrik spec OK (TG 17604, 17862)"}' > "$SANDBOX/spec-str.json"
+text 'Klodel -> Kernel (d9bc643b): indulhat a repó-váz.'
+GATE_ENV="MARVEEN_MSG_GATE_SPEC_LOCK=$SANDBOX/spec-str.json" run klodel kernel
+ok "spec lock: the plain {id: reason} form locks the id: refused" "$(refused)" "rc=$RC posts=$POSTS"
+
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."
 run kernel klodel
