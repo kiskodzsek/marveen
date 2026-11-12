@@ -1800,7 +1800,7 @@ def no_idea_private_unchanged(root):
 
 # ELTUNT (Klodel 39281, Patrik TG 17953, 2026-11-12): a website before/after pair says what disappeared. The fixture is
 # the shape of the real 11-12 sheets (alk*-mobil-hero-par.jpg.ok). Synthetic ledger: inbound 17953, outbound 17946.
-def web_pair(root, eltunt=None, name='hero-par.png', konyv=None, ledger=True):
+def web_pair(root, eltunt=None, name='hero-par.png', konyv=None, ledger=True, a5='n/a weboldal-képernyőkép'):
     import sqlite3
     kapu = os.path.join(root, 'store', 'kep-kapu')
     os.makedirs(kapu, exist_ok=True)
@@ -1817,7 +1817,7 @@ def web_pair(root, eltunt=None, name='hero-par.png', konyv=None, ledger=True):
         con.commit()
         con.close()
     lines = [f'KONYV: {konyv or "a meglévő termékképek, a PR csak oldalszerkezetet módosít; weboldal előtte-utána pár"}',
-             'A5: n/a weboldal-képernyőkép', 'PAPIR: n/a weboldal-képernyőkép', 'SAJAT: ok saját oldalunk, dev szerver',
+             f'A5: {a5}', 'PAPIR: n/a weboldal-képernyőkép', 'SAJAT: ok saját oldalunk, dev szerver',
              'KERES: teszt kérés, egyezik', 'NAGYITVA: Read-del megnézve, nincs törés',
              'MAJSZTRO: nem-marketing weboldal-változás jóváhagyásra']
     if eltunt is not None:
@@ -1873,6 +1873,36 @@ def web_pair_kerte_without_ledger_blocked(root):
 def web_pair_detected_by_file_name(root):
     # KONYV/A5 say "weboldal" but not "előtte-utána"; the file name carries "-par"
     rc, _ = web_pair(root, konyv='n/a weboldal-képernyőkép', name='alk1-mobil-hero-par.jpg')
+    return rc == 2
+
+
+@case
+def elotte_utana_file_name_alone_is_a_pair(root):
+    # Viktor 39289 MEDIUM: 5 live elotte-*/utana-* sheets say "KONYV: nincs / A5: nincs-konyv", no "weboldal"
+    rc1, err = web_pair(root, konyv='nincs', a5='nincs-konyv', name='elotte-x-mobil.png')
+    rc2, _ = web_pair(root, konyv='nincs', a5='nincs-konyv', name='utana-80-koszonto-mobil-1.jpg')
+    rc3, _ = web_pair(root, 'nincs', konyv='nincs', a5='nincs-konyv', name='after-hero.png')
+    return rc1 == 2 and 'ELTUNT' in err and rc2 == 2 and rc3 == 0
+
+
+@case
+def par_file_word_without_weboldal_unchanged(root):
+    # "pár" is a common Hungarian word: a par/pair file word counts only with "weboldal" in KONYV/A5
+    rc, _ = web_pair(root, konyv='nincs', a5='nincs-konyv', name='jelenet-par.png')
+    return rc == 0
+
+
+@case
+def nincs_named_as_removed_blocked(root):
+    # Viktor 39289 INFO 3: "nincs PATRIK-KERTE TG <n>" names nothing that is gone
+    rc, err = web_pair(root, 'nincs PATRIK-KERTE TG 17953')
+    return rc == 2 and 'PATRIK-KERTE' in err
+
+
+@case
+def web_pair_text_pair_word(root):
+    # Viktor 39289 INFO 1: "pair" in KONYV/A5 counts like "pár"
+    rc, _ = web_pair(root, konyv='weboldal screenshot pair', name='hero.png')
     return rc == 2
 
 

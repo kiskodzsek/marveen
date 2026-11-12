@@ -73,7 +73,8 @@ Both files must exist, the TG id must be an inbound message in store/claudeclaw.
 sender column: it proves the message arrived, not who wrote it), and the comparison image must be newer than the checked
 file. "IZLES-REF: nincs" blocks (see izles_ref).
 Website before/after pair (Klodel 39281, Patrik TG 17953, 2026-11-12: the /marabello hero lost its 8 colour circles and
-went to Patrik as a "change"): KONYV/A5 "n/a weboldal" + előtte/utána/pár (or a par/pair word in the file name) needs
+went to Patrik as a "change"): an elotte/utana/before/after word in the file name, or KONYV/A5 "n/a weboldal" +
+előtte/utána/pár (or a par/pair word in the file name) needs
     ELTUNT: nincs | <what is gone> PATRIK-KERTE TG <inbound TG msg id>
 (see eltunt_check).
 Tests: product-image-gate_test.py next to this file.
@@ -594,11 +595,15 @@ def caption_body(text):
 # its 8 colour circles, and the pair went to Patrik as a "change" (TG 17946). A website pair now says what is gone:
 #     ELTUNT: nincs                                   (nothing visible on "before" is missing on "after")
 #     ELTUNT: <what is gone> PATRIK-KERTE TG <n>      (Patrik asked for the removal; n is an inbound TG message)
-# A website pair: KONYV or A5 names "weboldal" AND (KONYV/A5 say előtte / utána / pár / before / after, or the file
-# name has a par / pair / elotte / utana / before / after word). A missing line, a "nincs" with anything after it,
-# or a removal without PATRIK-KERTE TG <n> of an inbound message blocks.
-WEB_PAIR_TEXT_RX = re.compile(r'(?<![a-z0-9])(?:elotte|utana|par|before|after)(?![a-z0-9])')
-WEB_PAIR_FILE_RX = re.compile(r'(?<![a-z0-9])(?:par|pair|elotte|utana|before|after)(?![a-z0-9])')
+# A pair: the file name has an elotte / utana / before / after word (on its own, Viktor 39289 MEDIUM: 5 live
+# elotte-*/utana-* sheets say "KONYV: nincs", not "weboldal"), or KONYV/A5 name "weboldal" AND (KONYV/A5 say
+# előtte / utána / pár / pair / before / after, or the file name has a par / pair word; "pár" alone is too common a
+# Hungarian word to count without "weboldal"). A missing line, a "nincs" with anything after it, a removal without
+# PATRIK-KERTE TG <n> of an inbound message, or "nincs PATRIK-KERTE ..." blocks. The ledger has no sender column, so
+# any inbound id passes as PATRIK-KERTE: this catches the forgotten line, not a deliberate misuse.
+WEB_PAIR_TEXT_RX = re.compile(r'(?<![a-z0-9])(?:elotte|utana|par|pair|before|after)(?![a-z0-9])')
+PAIR_FILE_RX = re.compile(r'(?<![a-z0-9])(?:elotte|utana|before|after)(?![a-z0-9])')
+WEB_PAIR_FILE_RX = re.compile(r'(?<![a-z0-9])(?:par|pair)(?![a-z0-9])')
 ELTUNT_KERTE_RX = re.compile(r'^(?P<what>.*?\S)\s+patrik-kerte\s*:?\s*tg\s*(?P<tg>\d+)\s*\.?$', re.I)
 ELTUNT_FORM = ('Alak: "ELTUNT: nincs" (az előtte-képen látható elemek mind megvannak az utána-képen), vagy '
                '"ELTUNT: <mi tűnt el> PATRIK-KERTE TG <n>" (Patrik kérte az eltávolítást; n a bejövő TG-üzenete).')
@@ -609,10 +614,13 @@ def _fold(s):
 
 
 def is_web_pair(fp, d):
+    name = _fold(os.path.basename(fp))
+    if PAIR_FILE_RX.search(name):
+        return True
     head = _fold(' '.join(d.get(k) or '' for k in ('KONYV', 'A5')))
     if 'weboldal' not in head:
         return False
-    return bool(WEB_PAIR_TEXT_RX.search(head) or WEB_PAIR_FILE_RX.search(_fold(os.path.basename(fp))))
+    return bool(WEB_PAIR_TEXT_RX.search(head) or WEB_PAIR_FILE_RX.search(name))
 
 
 def eltunt_check(fp, d):
@@ -626,6 +634,8 @@ def eltunt_check(fp, d):
     if _fold(val).rstrip('.').strip() == 'nincs':
         return None
     m = ELTUNT_KERTE_RX.match(val)
+    if m and _fold(m.group('what')).strip(' .,:;-') == 'nincs':
+        m = None  # "nincs PATRIK-KERTE TG <n>" names nothing that is gone (Viktor 39289 INFO 3)
     if not m:
         return ('ELTUNT: ha valami eltűnt, csak Patrik kérésére mehet elé, PATRIK-KERTE TG <n> hivatkozással; a '
                 '"nincs" után nem állhat más. ' + ELTUNT_FORM)
