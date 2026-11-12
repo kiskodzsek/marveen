@@ -53,10 +53,11 @@ BOLTOK += ["meska"]  # kézműves piactér: 3 személyre szabott domborzati tér
 # Minden hiány-állításhoz kell keresőmotoros site-próba MIND a négy domainre, eredménnyel (a domain után, a következő
 # domainig; ha ott nincs, a sor maradékából: "(emag.hu, alza.hu): 0 találat"). Ha bármelyik site-próba találatot ad (szám > 0), a termék itthon kapható: a hiány-állítás bukik.
 SITE_DOMAINEK = ["emag.hu", "alza.hu", "notino.hu", "douglas.hu"]
+SITE_SOR = re.compile(r"(?i)(?<!\w)site(:|-szűrt|-próba| szűrt)")
 def site_hibak(b):
     talalt = {}
     for s in b.splitlines():
-        if not re.search(r"(?i)(?<!\w)site(:|-szűrt|-próba| szűrt)", s): continue
+        if not SITE_SOR.search(s): continue
         low = s.lower()
         for d in SITE_DOMAINEK:
             if d not in low: continue
@@ -115,6 +116,17 @@ def zseni_hibak(p):
         if not q: hibak.append("VICCES: nincs idézőjeles mondat")
         elif len(re.findall(r"[.!?…]+(?=\s+\S)", q.group(1).strip())) > 0: hibak.append("VICCES: egy mondat legyen, nem több")
     return hibak
+# Klodel 39550 (Radar 39544): (1) a site-próba sora hiány-bizonyíték, nem bolt-keresés: a benne lévő domainek (emag.hu,
+# alza.hu, ...) NEM számítanak mért boltnak (különben egy valódi bolt-keresés + a site-sor már "2 mért bolt").
+# (2) Az app-áruház azonosítós 404-e ("App Store HU: ... (id640360962) ... 404", "Google Play HU: id=com.x.y ... 404")
+# mért eredmény: az app itthon nem tölthető le. A 403/410/captcha/"nem mérhető" továbbra sem mért; a sor ilyenkor csak
+# az app-áruházat adja, más boltot nem.
+APP_ID = re.compile(r"(?i)(?<!\w)id\d{6,}(?!\w)|(?<!\w)id=[a-z]\w*(\.\w+)+")
+NEM_MERT_404_NELKUL = re.compile(r"(?i)nem mérhető|nem mért|(?<!\d)(403|410)(?!\d)|captcha")
+def app_404_mert(s):
+    low = s.lower()
+    return (re.search(r"(?<!\d)404(?!\d)", s) is not None and APP_ID.search(s) is not None
+            and any(a in low for a in APP_BOLT) and not NEM_MERT_404_NELKUL.search(s))
 def itthon_blokk(p):
     sorok = p.splitlines()
     for i, s in enumerate(sorok):
@@ -133,8 +145,10 @@ def itthon_hibak(p, kotelezo):
     mert = re.search(r"(?i)(?<!\w)mér(t|ve)(?!\w)", b) is not None
     boltok = set()
     for s in b.splitlines():
-        if NEM_MERT.search(s) or not EREDMENY.search(s): continue
-        for bo in BOLTOK:
+        if SITE_SOR.search(s) or not EREDMENY.search(s): continue
+        app404 = app_404_mert(s)
+        if NEM_MERT.search(s) and not app404: continue
+        for bo in (APP_BOLT if app404 else BOLTOK):
             if re.search(r"(?<!\w)" + re.escape(bo) + r"(?!\w)", s.lower()):
                 boltok.add({"mueller": "müller", "edigital": "extreme digital", "jofogas": "jófogás", "argep": "árgép", "arukereso": "árukereső"}.get(bo, bo))
     if "[search]" in b.lower() and not mert:

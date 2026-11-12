@@ -185,6 +185,36 @@ check("negative: a non-app idea measured only in app stores still needs the site
 check("negative: an app idea with one app store only still fails (two measured shops)",
       itthon_err(APP.replace("  - App Store HU, „sor hossz”: 0 találat.\n", "")), True)
 
+# Klodel 39550 (Radar 39544): (1) the site-probe line's domains are not measured shops; (2) an app store's 404 with the
+# app id counts as measured, a 403/410/captcha does not. budi-bizonyitott-1112-b.md is a verbatim copy (2026-11-12).
+SITE_ONLY = "\n  - site-szűrt keresés (emag.hu, alza.hu, notino.hu, douglas.hu): 0 találat."
+check("negative, Radar 39544: one real shop + the site line is not two measured shops",
+      itthon_err("- ITTHON: mért:\n  - dm: 0." + SITE_ONLY), True)
+check("one real shop + a second real shop + the site line passes",
+      itthon_err("- ITTHON: mért:\n  - dm: 0;\n  - Vatera: 0." + SITE_ONLY), False)
+A404 = "  - App Store HU: a Nextdoor (id640360962) magyar oldala HTTP 404, itthon nem tölthető le.\n"
+APP404 = APP.replace("  - App Store HU, „sor hossz”: 0 találat.\n", A404)
+check("app store 404 with the app id counts as measured", itthon_err(APP404), False)
+check("Google Play id= 404 counts as measured",
+      itthon_err(APP.replace("  - Google Play HU, „sorban állás”: 0 releváns;\n",
+                             "  - Google Play HU: id=com.nextdoor oldala 404.\n")), False)
+check("negative: app store 404 without an app id is not measured", itthon_err(APP404.replace(" (id640360962)", "")), True)
+for code in ("403", "410"):
+    check(f"negative: app store {code} with the app id is not measured", itthon_err(APP404.replace("404", code)), True)
+check("negative: app store 404 behind a captcha is not measured", itthon_err(APP404.replace("404", "404 (captcha)")), True)
+check("negative: an app-store 404 line lends nothing to a shop on the same line",
+      itthon_err("- ITTHON: mért:\n  - App Store HU (id640360962): 404; eMAG: 0." + SITE4), True)
+ITH = os.path.join(HERE, "fixtures", "idea-gate-itthon-1112", "budi-bizonyitott-1112-b.md")
+check("budi-bizonyitott-1112-b.md: ITTHON passes on the app stores",
+      any(re.search(r"(?<!-)ITTHON", l) for l in lint_lines(ITH, "--zseni", "--itthon")), False)
+with tempfile.TemporaryDirectory() as d:
+    mut = os.path.join(d, "b-no-appstore.md")
+    src = open(ITH, encoding="utf-8").read()
+    check("the fixture carries the App Store 404 line verbatim", A404 in src, True)
+    open(mut, "w", encoding="utf-8").write(src.replace(A404, ""))
+    check("negative: budi-b without the App Store 404 line fails ITTHON (site line does not count)",
+          any(re.search(r"(?<!-)ITTHON", l) for l in lint_lines(mut, "--zseni", "--itthon")), True)
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
     sys.exit(1)
