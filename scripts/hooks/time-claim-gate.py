@@ -14,6 +14,11 @@ SCOPE (everything else is allowed at once, exit 0, no output):
   - Bash, only when the command text contains "/api/kanban/" and "/comments" (a card comment). The command
     text is judged (inline heredoc / -d payload); a `--data-binary @file`, `--data @file` or `-d @file`
     payload is read too when it is a regular file of at most 64 KB.
+  - Bash that writes a shared/*.md through the shell (Radar 39251: `cat >> .../shared/hibanaplo.md <<'EOF'`
+    wrote a future time unseen): a `>` / `>>` / `>|` redirect or a `tee [-a]` whose target resolves to a
+    shared/*.md. The command text (the heredoc body) is judged; lines already in a target file pass, like
+    Write. A relative target is resolved against the payload cwd and against every `cd /absolute/dir` in
+    the command (the gate cannot know which cd ran last, so a match through any of them counts).
   <repo-root> is two levels above this file (scripts/hooks/ -> root), so it works in a worktree too.
 
 BLOCKS (exit 2, reason on stderr):
@@ -27,7 +32,11 @@ BLOCKS (exit 2, reason on stderr):
      A deadline-shaped time passes even on a marker line: followed by -ig / -ra / -re / óráig, or preceded
      by határidő / deadline / until / by ("mérve 19:40, kész 22:00-ig").
 Known gaps: a time written after midnight about the previous evening without a date on the line is read as
-future (the block text says to add the date); a shared/*.md written through Bash (cat > file) is not seen.
+future (the block text says to add the date); a shell write whose target is a variable ("> $F"), a relative
+path after a relative cd, or a file written by an interpreter (python3 open(..., 'a')) is not seen; only the
+cwd and the first 5 distinct cds are bases, and only the first 20 .md words (40 candidate paths) are looked at,
+so 20 other "> x.md" redirects before the real target hide it. Any ".md" word after a ">" counts as a target,
+so an echo of "a => <...>/shared/x.md" next to a future measured time is blocked too (Viktor 39257 INFO).
 Per line only the first 20 clock times are judged, the deadline word only within 40 characters before the time
 (bounded run time, Viktor 38419). This is a hygiene gate for a common mistake, not a security control.
 
@@ -74,6 +83,14 @@ MARKER_RX = re.compile(
 DEADLINE_AFTER_RX = re.compile(r'\s?-?\s?(?:ig|ra|re)(?!\w)|\s+óráig(?!\w)', re.I)
 DEADLINE_BEFORE_RX = re.compile(r'(?<!\w)(?:határidő|határidővel|deadline|until|by)[:\s]+$', re.I)
 DATA_FILE_RX = re.compile(r'(?<![\w-])(?:--data-binary|--data|-d)(?:\s+|=)?[\'"]?@([^\s\'";|&<>()]+)')
+# Shell writes (Radar 39251). ">>f", "> 'f'", ">| f"; "2>&1" has no path and does not match. tee takes every
+# non-option word up to the next shell operator.
+REDIRECT_RX = re.compile(r'>>?\|?[ \t]*[\'"]?([^\s\'";|&<>()]+)')
+TEE_RX = re.compile(r'(?<![\w./-])tee((?:[ \t]+[^\s;|&<>()]+)+)')
+CD_RX = re.compile(r'(?<![\w./-])cd[ \t]+[\'"]?(/[^\s\'";|&<>()]+)')
+MAX_SHELL_TARGETS = 20
+MAX_SHELL_BASES = 6
+MAX_SHELL_PATHS = 40
 
 
 def _now():
@@ -149,6 +166,31 @@ def _existing_lines(path):
         return frozenset()
 
 
+def _shell_shared_md_targets(cmd, cwd):
+    """Realpaths of the shared/*.md files a shell redirect or tee in `cmd` writes (at most MAX_SHELL_TARGETS)."""
+    words = [m.group(1) for m in REDIRECT_RX.finditer(cmd)]
+    for m in TEE_RX.finditer(cmd):
+        words += [w.strip('\'"') for w in m.group(1).split() if not w.startswith('-')]
+    # Bounded run time (Viktor 38419, 39257 LOW): unique bases, at most MAX_SHELL_BASES (the cwd and the first
+    # cds), at most MAX_SHELL_PATHS candidate paths in all, and a set for the seen realpaths. Without the caps
+    # 20 relative words x 2000 cds took 4 s.
+    bases = [b for b in [cwd] if isinstance(b, str) and os.path.isabs(b)] + CD_RX.findall(cmd)
+    bases = list(dict.fromkeys(bases))[:MAX_SHELL_BASES]
+    # Only .md words count toward the cap, so twenty "> /dev/null" before the real target do not hide it.
+    candidates = []
+    for w in [w for w in words if w.lower().endswith('.md')][:MAX_SHELL_TARGETS]:
+        w = os.path.expanduser(w)
+        candidates += [w] if os.path.isabs(w) else [os.path.join(b, w) for b in bases]
+    out, seen = [], set()
+    for path in candidates[:MAX_SHELL_PATHS]:
+        if _is_shared_md(path):
+            real = os.path.realpath(path)
+            if real not in seen:
+                seen.add(real)
+                out.append(real)
+    return out
+
+
 def judged_texts(tool_name, ti, cwd):
     """[(label, text, known_lines)] to judge for this call; [] when the call is out of scope."""
     if tool_name in ('Write', 'Edit', 'MultiEdit'):
@@ -167,8 +209,13 @@ def judged_texts(tool_name, ti, cwd):
         return out
     if tool_name == 'Bash':
         cmd = ti.get('command')
-        if not isinstance(cmd, str) or '/api/kanban/' not in cmd or '/comments' not in cmd:
+        if not isinstance(cmd, str):
             return []
+        if '/api/kanban/' not in cmd or '/comments' not in cmd:
+            targets = _shell_shared_md_targets(cmd, cwd)
+            if not targets:
+                return []
+            return [('command ', cmd, frozenset().union(*(_existing_lines(t) for t in targets)))]
         out = [('command ', cmd, frozenset())]
         for ref in DATA_FILE_RX.findall(cmd):
             path = os.path.expanduser(ref)

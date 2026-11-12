@@ -282,6 +282,72 @@ def bad_now_override_is_ignored_not_crashing(root):
     return code == 0 and err == ''
 
 
+# ---- shell writes to shared/*.md (Radar 39251) ----
+
+def _sh(root, cmd, cwd=None, now='18:14'):
+    return run(root['hook'], 'Bash', {'command': cmd}, now=now, cwd=cwd)[0]
+
+
+@case
+def block_shell_append_heredoc_absolute(root):
+    # Radar 39251 shape: cat >> <abs>/shared/hibanaplo.md <<'EOF', a future time on a `date` line.
+    path = os.path.join(root['dir'], 'shared', 'hibanaplo.md')
+    cmd = f"cat >> {path} <<'EOF'\n| {TODAY:%Y-%m-%d} 08:29 (date) | radar | hiba |\nEOF"
+    code, _, err = run(root['hook'], 'Bash', {'command': cmd}, now='08:28')
+    return code == 2 and '08:29' in err and 'command line 2' in err
+
+
+@case
+def block_shell_relative_target_cwd_and_cd(root):
+    body = " <<'EOF'\nmérve 23:59\nEOF"
+    return (_sh(root, 'cat >> shared/x/n.md' + body, cwd=root['dir']) == 2
+            and _sh(root, f'cd {root["dir"]} && cat >>shared/x/n.md' + body, cwd='/') == 2
+            and _sh(root, f"cd '{root['dir']}'; cat > 'shared/x/n.md'" + body, cwd='/') == 2)
+
+
+@case
+def block_shell_tee_and_placeholder(root):
+    path = os.path.join(root['dir'], 'shared', 'x', 'n.md')
+    return (_sh(root, f'printf "%s\\n" "lezárva 23:00" | tee -a {path} >/dev/null') == 2
+            and _sh(root, f'echo "kész 10:xx" | tee /dev/null {path}') == 2
+            and _sh(root, f'echo "kész 10:xx" >| {path}') == 2)
+
+
+@case
+def block_shell_target_after_many_other_redirects(root):
+    # The cap counts .md targets only: 30 "> /dev/null" before the real one do not push it out.
+    path = os.path.join(root['dir'], 'shared', 'x', 'n.md')
+    return _sh(root, 'echo a > /dev/null; ' * 30 + f"cat >> {path} <<'EOF'\nmérve 23:59\nEOF") == 2
+
+
+@case
+def bounded_time_with_many_cds(root):
+    # Viktor 39257 LOW: 20 relative .md words x 2000 distinct cds took 4 s; now the bases are capped.
+    import time
+    cds = ''.join(f'cd /shared/d{i}; ' for i in range(3000))
+    words = ' '.join(f'> shared/x/w{i}.md' for i in range(20))
+    t = time.time()
+    code = _sh(root, cds + f'echo "mérve 23:59" {words}', cwd='/')
+    fast = time.time() - t < 2.0
+    # The same cd repeated 3000 times is one base, so the real target stays in reach.
+    dup = _sh(root, f'cd {root["dir"]}; ' * 3000 + "cat >> shared/x/n.md <<'EOF'\nmérve 23:59\nEOF", cwd='/')
+    return code == 0 and fast and dup == 2
+
+
+@case
+def pass_shell_write_out_of_scope_or_clean(root):
+    shared_md = os.path.join(root['dir'], 'shared', 'x', 'n.md')
+    with open(shared_md, 'w', encoding='utf-8') as fh:
+        fh.write('régi sor, mérve 23:59\n')
+    return (_sh(root, f"cat >> {root['dir']}/notes.md <<'EOF'\nmérve 23:59\nEOF") == 0       # not under shared/
+            and _sh(root, f"cat >> {root['dir']}/shared/x/n.txt <<'EOF'\nmérve 23:59\nEOF") == 0  # not .md
+            and _sh(root, f"cat >> {shared_md} <<'EOF'\nmérve 18:10, kész 22:00-ig\nEOF") == 0  # past + deadline
+            and _sh(root, f"cat > {shared_md} <<'EOF'\nrégi sor, mérve 23:59\nEOF") == 0     # line already in file
+            and _sh(root, 'cat >> shared/x/n.md <<EOF\nmérve 23:59\nEOF', cwd='/') == 0       # relative, no base
+            and _sh(root, f'ls {shared_md} 2>&1 | grep mérve-23:59') == 0                     # a read, not a write
+            and _sh(root, 'F=shared/x/n.md; echo "mérve 23:59" >> "$F"', cwd=root['dir']) == 0)  # known gap
+
+
 @case
 def block_text_names_only_the_token(root):
     secretish = 'SZINTETIKUS-titok-szoveg-ne-jelenjen-meg'
