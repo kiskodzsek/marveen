@@ -90,6 +90,7 @@ import {
 } from './agent-process.js'
 import { isRestartInFlight } from './restart-lock.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
+import { ownerRecentlyActive } from './owner-activity.js'
 import { runCommandTask } from './command-task.js'
 import { scheduleTrustOf, isOwnerTrusted, alertScheduleTrust, ensureScheduleTrustBaseline, alertSafeId } from './schedule-trust.js'
 import { trackDetachedGroup } from './detached-groups.js'
@@ -1411,6 +1412,15 @@ async function attemptFireTask(
   // report false while the restart is only half done (see restart-lock.ts).
   // 'busy' is the honest answer: the normal retry path delivers once it is over.
   if (isRestartInFlight(agentName)) return 'busy'
+
+  // Owner-activity deferral (Klodel 39538, Patrik TG 18102): while a human wrote to the main agent in the last
+  // 15 minutes, a scheduled prompt is not typed into the main channels session -- it would push the answer back.
+  // 'busy' sends it through the normal retry path (skipIfBusy heartbeats drop the tick). A task with its own
+  // targetSession is not the channels pane and is not held. See owner-activity.ts.
+  if (isMainAgent && !task.targetSession && session === MAIN_CHANNELS_SESSION && ownerRecentlyActive(agentName, now)) {
+    logger.info({ task: task.name, agent: agentName, session }, 'Owner wrote to the main agent in the last 15 min -- deferring the scheduled prompt (owner-activity)')
+    return 'busy'
+  }
 
   if (!sessionExistsOnHost(host, session)) {
     // The main channels session is service-managed (systemd/launchd via
