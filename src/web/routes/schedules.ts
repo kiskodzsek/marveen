@@ -21,6 +21,9 @@ import { validateScheduleUpdate, scheduleCreateRefusal, COMMAND_TASK_API_REFUSAL
 import { runScheduledTaskNow } from '../schedule-runner.js'
 import { createOnceTask, readOnceAnchors, recordOnceAnchor, shouldAlertCap, isOnceTask, ONCE_EDIT_REFUSAL, type OnceRequestBody } from '../once-schedule.js'
 import { resolveDashboardOrigin } from '../agent-scaffold.js'
+import { scheduleTrustOf, scheduleTrustHash, scheduleTrustShortHash, approveScheduledTask, clearScheduleTrust, scheduleEditorHiddenFields } from '../schedule-trust.js'
+import { fleetOwnerSession } from './fleet.js'
+import { logConfigChange } from '../../db.js'
 import type { RouteContext } from './types.js'
 
 // The `agent` values the API accepts: exactly what GET /api/schedules/agents offers.
@@ -41,6 +44,39 @@ function resolveScheduleDir(rawName: string): { name: string; dir: string } | nu
   try {
     return { name, dir: safeJoin(SCHEDULED_TASKS_DIR, name) }
   } catch { return null }
+}
+
+// SCHEDTRUST1112 (card 6544de50, Viktor 38996 b): who wrote a schedule is decided
+// HERE, from the request's credential, never from its body. Only the OWNER'S
+// browser session (the mv_session cookie of the first dashboard user, read from
+// the cookie itself as for FLEETEXPORT1013) approves; the shared Bearer token,
+// device keys and X-Agent-Id (self-asserted) never do. Returns the session's
+// username for the audit, or null.
+function ownerWriter(ctx: RouteContext): string | null {
+  return fleetOwnerSession(ctx.req)
+}
+
+// After a create/edit: the owner's write approves the task as now stored. Any
+// other write drops an earlier approval when it changed a hashed field
+// (Viktor 38996 d) -- `beforeHash` is the stored definition's hash before the
+// write; a create passes null (always dropped: a stale row of a reused name
+// must not trust the new task). A token edit of enabled / schedule / skipIfBusy
+// keeps the approval: what runs and where did not change.
+// Viktor 39055 A: the owner's write approves only a task whose every set,
+// hashed field is one the editor shows (scheduleEditorHiddenFields empty). A
+// task with a command / preCheck / chat id / ... the editor does not show falls
+// under the token rule (row kept if the hash did not move, dropped if it did),
+// and is approved through the one-click approve, which lists those fields.
+// Returns whether the owner's write approved the task.
+function recordWriteTrust(name: string, owner: string | null, beforeHash: string | null): boolean {
+  const task = readScheduledTask(name)
+  if (owner && task) {
+    const hidden = scheduleEditorHiddenFields(task)
+    if (hidden.length === 0) { approveScheduledTask(task, `session:${owner}`); return true }
+    logger.info({ task: name, hidden }, 'schedule-trust: owner save not approving, the task sets fields the editor does not show')
+  }
+  if (beforeHash === null || !task || scheduleTrustHash(task) !== beforeHash) clearScheduleTrust(name)
+  return false
 }
 
 // HBSCHEDSZAM903: the hourly heartbeat digest's "enabled schedules" figure was
@@ -130,7 +166,10 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
   }
 
   if (path === '/api/schedules' && method === 'GET') {
-    json(res, listScheduledTasks())
+    // SCHEDTRUST1112: each task carries its trust verdict for the dashboard
+    // (approved / legacy = owner framing; agent / mismatch = agent framing).
+    // trustHash (16 hex) is what an approval must echo (Viktor 39032 #3).
+    json(res, listScheduledTasks().map(t => ({ ...t, trust: scheduleTrustOf(t), trustHash: scheduleTrustShortHash(t) })))
     return true
   }
 
@@ -217,6 +256,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     })
     if (!verdict.ok) { json(res, { error: verdict.error }, verdict.status); return true }
     const plan = verdict.plan
+    clearScheduleTrust(plan.name)
     logger.info(
       { name: plan.name, agent: plan.agent, runAt: new Date(plan.runAt).toISOString(), originMsgId: plan.originMsgId, claimedBy: ctx.auth?.agent },
       'One-shot task created',
@@ -268,7 +308,9 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       forceSend: data.forceSend === true,
       targetSession: data.targetSession || undefined,
     })
-    logger.info({ name, schedule: data.schedule }, 'Scheduled task created')
+    const owner = ownerWriter(ctx)
+    const approved = recordWriteTrust(name, owner, null)
+    logger.info({ name, schedule: data.schedule, approved, claimedBy: ctx.auth?.agent }, 'Scheduled task created')
     json(res, { ok: true, name })
     return true
   }
@@ -313,8 +355,12 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       json(res, { error: 'Invalid cron expression' }, 400)
       return true
     }
+    const stored = readScheduledTask(name)
+    const beforeHash = stored ? scheduleTrustHash(stored) : null
     writeScheduledTask(name, data)
-    logger.info({ name }, 'Scheduled task updated')
+    const owner = ownerWriter(ctx)
+    const approved = recordWriteTrust(name, owner, beforeHash)
+    logger.info({ name, approved, claimedBy: ctx.auth?.agent }, 'Scheduled task updated')
     json(res, { ok: true })
     return true
   }
@@ -325,6 +371,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     const { name, dir } = resolved
     if (!existsSync(dir)) { json(res, { error: 'Schedule not found' }, 404); return true }
     rmSync(dir, { recursive: true, force: true })
+    clearScheduleTrust(name)
     // #796: remember the removal so a shipped default is not re-seeded on the
     // next restart/update. Harmless for a user-authored task (the seeders only
     // ever revisit shipped names); a later re-create with this name clears it.
@@ -356,6 +403,53 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
     logger.info({ name, enabled: newEnabled }, 'Scheduled task toggled')
     json(res, { ok: true, enabled: newEnabled })
+    return true
+  }
+
+  // SCHEDTRUST1112: the owner approves a task AS STORED NOW (one click in the
+  // dashboard). Owner browser session only; every other caller gets 403, and
+  // every attempt is audited (config_change_log), as for FLEETEXPORT1013.
+  const scheduleApproveMatch = path.match(/^\/api\/schedules\/([^/]+)\/approve$/)
+  if (scheduleApproveMatch && method === 'POST') {
+    const resolved = resolveScheduleDir(scheduleApproveMatch[1])
+    if (!resolved) { json(res, { error: 'Schedule not found' }, 404); return true }
+    const { name } = resolved
+    const owner = ownerWriter(ctx)
+    if (!owner) {
+      const caller = ctx.auth?.kind === 'token' ? `token${ctx.auth.agent ? `:${ctx.auth.agent}` : ''}` : (ctx.auth?.kind ?? 'none')
+      logConfigChange('security.schedule_approve_denied', null, name, caller)
+      logger.warn({ name, caller }, 'schedule-trust: approve refused -- owner browser session required')
+      json(res, { error: 'Ütemezést jóváhagyni csak a bejelentkezett tulajdonos böngészője tud (a hozzáférési token nem elég).' }, 403)
+      return true
+    }
+    // Viktor 39032 #3 (TOCTOU): the approval is bound to the definition the
+    // owner SAW -- the body echoes the trustHash the list showed, and a task
+    // changed since then is refused (409), never approved in its new form.
+    // The echoed value is only COMPARED; nothing from the body is stored.
+    let seen: unknown
+    try {
+      const body = await readBody(req, { maxBytes: 1024 })
+      seen = (JSON.parse(body.toString() || '{}') as { hash?: unknown }).hash
+    } catch {
+      json(res, { error: 'Body must be a JSON object with the hash the dashboard showed' }, 400)
+      return true
+    }
+    if (typeof seen !== 'string' || !/^[0-9a-f]{16}$/.test(seen)) {
+      json(res, { error: 'hash is required (the trustHash of GET /api/schedules)' }, 400)
+      return true
+    }
+    const task = readScheduledTask(name)
+    if (!task) { json(res, { error: 'Schedule not found' }, 404); return true }
+    if (scheduleTrustShortHash(task) !== seen) {
+      logConfigChange('security.schedule_approve_stale', null, name, `session:${owner}`)
+      json(res, { error: 'A feladat megváltozott, mióta megnyitottad. Frissítsd az oldalt, és nézd meg újra.' }, 409)
+      return true
+    }
+    const before = scheduleTrustOf(task)
+    const hash = approveScheduledTask(task, `session:${owner}`)
+    logConfigChange('security.schedule_approve', `${name}:${before}`, `${name}:approved:${hash.slice(0, 16)}`, `session:${owner}`)
+    logger.info({ name, user: owner, hash: hash.slice(0, 16) }, 'schedule-trust: task approved by the owner')
+    json(res, { ok: true, trust: 'approved' })
     return true
   }
 

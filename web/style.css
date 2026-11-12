@@ -2806,6 +2806,11 @@ main.kanban-active { padding-left: 16px; padding-right: 16px; }
   background: rgba(200, 80, 120, 0.12);
   color: #c85078;
 }
+/* SCHEDTRUST1112: a task that runs agent-framed (not approved by the owner). */
+.badge-agent-authored {
+  background: color-mix(in srgb, var(--warning, #d4a52c) 14%, transparent);
+  color: var(--warning, #d4a52c);
+}
 
 .task-info {
   flex: 1;

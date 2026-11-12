@@ -6558,10 +6558,53 @@ function cronCadence(cron) {
 }
 const CADENCE_ICON = { 0: '⚡', 1: '☀️', 2: '📅', 3: '🗓️', 5: '•' }
 
+// SCHEDTRUST1112 (Viktor 39039): what the owner sees before approving a task.
+// Everything the trust hash covers that is set shows up -- not only the
+// description the row displays (that one is not hashed). A command or a
+// preCheck is called out: an approved task RUNS bash. A prompt longer than
+// SCHEDULE_APPROVE_MAX_PROMPT is not one-click approvable (a confirm box
+// cannot show it whole, and the tail is where an agent would hide the point):
+// blocked=true, and the caller opens the editor instead.
+const SCHEDULE_APPROVE_MAX_PROMPT = 500
+// Viktor 39055 LOW: a native confirm can hide text inside 500 characters too
+// (hundreds of newlines push it out of view; zero-width / bidi controls
+// reorder or hide it). More than SCHEDULE_APPROVE_MAX_LINES lines, or any
+// control / format character other than tab and newline, is blocked the same
+// way: the editor opens instead.
+const SCHEDULE_APPROVE_MAX_LINES = 20
+const SCHEDULE_APPROVE_HIDDEN_CHAR_RX = /[\p{Cc}\p{Cf}]/u
+function scheduleApprovalView(task) {
+  const prompt = String(task.prompt || '')
+  if (prompt.length > SCHEDULE_APPROVE_MAX_PROMPT) {
+    return { blocked: true, text: t('tasks.approve.too_long').replace('{n}', String(prompt.length)).replace('{max}', String(SCHEDULE_APPROVE_MAX_PROMPT)) }
+  }
+  const lineCount = prompt.split('\n').length
+  if (lineCount > SCHEDULE_APPROVE_MAX_LINES || SCHEDULE_APPROVE_HIDDEN_CHAR_RX.test(prompt.replace(/[\t\n]/g, ''))) {
+    return { blocked: true, text: t('tasks.approve.unreadable').replace('{lines}', String(lineCount)).replace('{max}', String(SCHEDULE_APPROVE_MAX_LINES)) }
+  }
+  const lines = [t('tasks.confirm.approve'), '']
+  if (task.command) lines.push('⚠ ' + t('tasks.approve.runs_bash') + ' command: ' + String(task.command))
+  if (task.preCheck) lines.push('⚠ ' + t('tasks.approve.runs_bash') + ' preCheck: ' + String(task.preCheck))
+  lines.push('agent: ' + String(task.agent || ''))
+  lines.push('schedule: ' + String(task.schedule || ''))
+  if (task.type && task.type !== 'task') lines.push('type: ' + String(task.type))
+  for (const k of ['targetSession', 'telegramChatId', 'channelProvider']) {
+    if (task[k]) lines.push(k + ': ' + String(task[k]))
+  }
+  for (const k of ['injectMetrics', 'sendDigestDirect', 'requiresDesktop']) {
+    if (task[k] === true) lines.push(k + ': true')
+  }
+  if (task.requires && Object.keys(task.requires).length) lines.push('requires: ' + JSON.stringify(task.requires))
+  lines.push('', prompt)
+  return { blocked: false, text: lines.join('\n') }
+}
+
 function makeScheduleRow(task) {
     const row = document.createElement('div')
     row.className = 'schedule-row'
     const agent = scheduleAgents.find(a => a.name === task.agent) || { name: task.agent || mainAgentId(), avatar: '/api/marveen/avatar', label: task.agent || mainAgentId() }
+    // SCHEDTRUST1112: agent / mismatch run agent-framed until the owner approves.
+    const needsApproval = task.trust === 'agent' || task.trust === 'mismatch'
 
     row.innerHTML = `
       <div class="schedule-agent-avatar">
@@ -6571,6 +6614,7 @@ function makeScheduleRow(task) {
         <div class="schedule-title">
           ${escapeHtml(task.description || task.name)}
           ${task.type === 'heartbeat' ? '<span class="badge badge-heartbeat">💓 heartbeat</span>' : ''}
+          ${needsApproval ? `<span class="badge badge-agent-authored" title="${escapeHtml(t('tasks.trust.hint'))}">${escapeHtml(t(task.trust === 'mismatch' ? 'tasks.trust.mismatch' : 'tasks.trust.agent'))}</span>` : ''}
           <span class="badge ${task.enabled ? 'badge-active' : 'badge-paused'}">${task.enabled ? t('tasks.status.active') : t('tasks.status.paused')}</span>
         </div>
         <div class="schedule-meta">
@@ -6580,6 +6624,9 @@ function makeScheduleRow(task) {
         </div>
       </div>
       <div class="schedule-actions">
+        ${needsApproval ? `<button class="btn-icon" data-action="approve" title="${escapeHtml(t('tasks.btn.approve'))}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        </button>` : ''}
         <button class="btn-icon" data-action="run" title="${t('tasks.btn.run_now')}">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
         </button>
@@ -6611,6 +6658,31 @@ function makeScheduleRow(task) {
         else showToast('Hiba: ' + (data.error || r.status))
         loadSchedules()
       } catch { showToast(t('tasks.toast.run_error')) }
+    })
+
+    const approveBtn = row.querySelector('[data-action="approve"]')
+    if (approveBtn) approveBtn.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      // Viktor 39032 #3 / 39039: an informed approval, bound to the definition
+      // shown here via trustHash (409 if it changed since). See scheduleApprovalView.
+      const view = scheduleApprovalView(task)
+      if (view.blocked) {
+        alert(view.text)
+        openEditSchedule(task)
+        return
+      }
+      if (!confirm(view.text)) return
+      try {
+        const r = await fetch(`/api/schedules/${encodeURIComponent(task.name)}/approve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hash: task.trustHash }),
+        })
+        const data = await r.json().catch(() => ({}))
+        if (r.ok) showToast(t('tasks.toast.approved'))
+        else showToast('Hiba: ' + (data.error || r.status))
+        loadSchedules()
+      } catch { showToast(t('common.error')) }
     })
 
     row.querySelector('[data-action="toggle"]').addEventListener('click', async (e) => {

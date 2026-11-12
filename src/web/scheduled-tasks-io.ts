@@ -244,11 +244,23 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
     requires: parseRequires(config.requires),
     injectMetrics: config.injectMetrics === true,
     sendDigestDirect: config.sendDigestDirect === true,
-    telegramChatId: typeof config.telegramChatId === 'string' && config.telegramChatId.trim() ? config.telegramChatId.trim() : undefined,
+    telegramChatId: parseTaskChatId(config.telegramChatId),
     channelProvider: parseChannelProvider(config.channelProvider),
     runAt: parsePositiveInt(config.runAt),
     originMsgId: parsePositiveInt(config.originMsgId),
   }
+}
+
+// SCHEDTRUST1112 (Viktor 39032 #1): the runner writes this value verbatim into
+// the delivery line right under the task preamble, so only an id shape gets
+// through: "none", a Telegram id (-100123...), a Slack / Discord id. Anything
+// else (spaces, newlines, free text) reads as unset -- the agent's own bound
+// channel -- exactly like an empty value.
+const TASK_CHAT_ID_RX = /^-?[A-Za-z0-9_]{1,64}$/
+export function parseTaskChatId(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const v = raw.trim()
+  return v && TASK_CHAT_ID_RX.test(v) ? v : undefined
 }
 
 // A positive safe integer, or undefined for anything else (string, NaN, 0, float).

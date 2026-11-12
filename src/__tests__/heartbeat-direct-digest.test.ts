@@ -129,15 +129,21 @@ describe('(A) which tasks the runner sends itself -- flag-less tasks are untouch
   it('the manual run-now takes the direct branch before any session dispatch', () => {
     const src = readFileSync(join(__dirname, '..', 'web', 'schedule-runner.ts'), 'utf-8')
     const fn = src.slice(src.indexOf('export async function runScheduledTaskNow('))
-    const direct = fn.indexOf('if (isDirectDigestTask(task)) {\n    const sent = await sendHeartbeatDigestDirect(')
+    // SCHEDTRUST1112: a trust check sits between the branch head and the send.
+    const head = fn.indexOf('if (isDirectDigestTask(task)) {')
+    const direct = fn.indexOf('const sent = await sendHeartbeatDigestDirect(', head)
     const dispatch = fn.indexOf('await attemptFireTask(task, agentName, now)')
-    expect(direct).toBeGreaterThan(0)
+    expect(head).toBeGreaterThan(0)
+    expect(direct).toBeGreaterThan(head)
     expect(dispatch).toBeGreaterThan(direct)
   })
 
   it('in the tick, the direct branch runs before the quota gate and the session dispatch', () => {
     const src = readFileSync(join(__dirname, '..', 'web', 'schedule-runner.ts'), 'utf-8')
-    const direct = src.indexOf('if (isDirectDigestTask(task)) {\n        await sendHeartbeatDigestDirect(')
+    // SCHEDTRUST1112: a trust check sits between the branch head and the send.
+    const head = src.indexOf('if (isDirectDigestTask(task)) {\n        // SCHEDTRUST1112')
+    const direct = src.indexOf('await sendHeartbeatDigestDirect(task.name, task.agent, directDigestDeps())', head)
+    expect(head).toBeGreaterThan(0)
     const quota = src.indexOf('const quota = decideQuotaAction({')
     const dispatch = src.indexOf('const result = await attemptFireTask(current, agentName, now, cronPc.prefix, lateCatchUpMs)')
     expect(direct).toBeGreaterThan(0)

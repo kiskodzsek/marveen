@@ -98,8 +98,9 @@ describe('wiring: attemptFireTask uses the snapshot/reference path above the thr
     expect(SRC).toMatch(/const \{ block: scheduledTaskBlock \} = buildScheduledTaskBlock\(task\.name, taskBody, host, now\)/)
   })
 
-  it('the fullPrompt still starts with SCHEDULED_TASK_PREAMBLE and the prefix, unchanged', () => {
-    expect(SRC).toMatch(/const fullPrompt =\s*\n\s*SCHEDULED_TASK_PREAMBLE \+ '\\n' \+\s*\n\s*prefix\.trimEnd\(\) \+ '\\n\\n' \+\s*\n\s*scheduledTaskBlock/)
+  it('the fullPrompt still starts with the scheduled-task preamble and the prefix, unchanged', () => {
+    // SCHEDTRUST1112: the preamble is the owner or the agent variant (schedule-trust.test.ts).
+    expect(SRC).toMatch(/const fullPrompt =\s*\n\s*preamble \+ '\\n' \+\s*\n\s*prefix\.trimEnd\(\) \+ '\\n\\n' \+\s*\n\s*scheduledTaskBlock/)
   })
 })
 

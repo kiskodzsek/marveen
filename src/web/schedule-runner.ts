@@ -50,6 +50,7 @@ import {
 import { toPendingRetryView, classifySendError, OWNER_ESCALATION_EXTRA_MS, type PendingRetryView } from '../pending-retries.js'
 import {
   SCHEDULED_TASK_PREAMBLE,
+  AGENT_SCHEDULED_TASK_PREAMBLE,
   wrapScheduledTask,
   wrapScheduledTaskByReference,
 } from '../prompt-safety.js'
@@ -90,6 +91,7 @@ import {
 import { isRestartInFlight } from './restart-lock.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { runCommandTask } from './command-task.js'
+import { scheduleTrustOf, isOwnerTrusted, alertScheduleTrust, ensureScheduleTrustBaseline, alertSafeId } from './schedule-trust.js'
 import { trackDetachedGroup } from './detached-groups.js'
 import { decideQuotaAction, type QuotaWorkClass } from '../quota-gate.js'
 import { readQuotaSnapshot } from '../quota-snapshot.js'
@@ -1170,6 +1172,15 @@ export function runPreCheckAsync(
   opts: { timeoutMs?: number; maxStdoutBytes?: number } = {},
 ): Promise<PreCheckResult> {
   if (!task.preCheck) return Promise.resolve({ skip: false })
+  // SCHEDTRUST1112: no bash for a task the owner has not approved as stored;
+  // its stdout would land in the task body. The LLM still runs (agent-framed).
+  // The API cannot set preCheck, so this is the file-edit case: alert too.
+  const trust = scheduleTrustOf(task)
+  if (!isOwnerTrusted(trust)) {
+    logger.warn({ task: task.name, trust }, 'schedule-trust: pre-check NOT run for an unapproved task')
+    alertScheduleTrust(task, trust, 'a pre-check nem futott')
+    return Promise.resolve({ skip: false })
+  }
   const scriptPath = resolvePreCheckPath(task.name, task.preCheck)
   if (!existsSync(scriptPath)) {
     logger.warn({ task: task.name, scriptPath }, 'pre-check script not found, running LLM anyway')
@@ -1575,7 +1586,8 @@ async function attemptFireTask(
           ambiguousTargetAlerted.add(task.name)
           createSystemMessage(
             MAIN_AGENT_ID,
-            `[FELHIVAS] A(z) "${task.name}" utemezett feladat (agent: ${agentName}) cimzettje bizonytalan -- ${bound.ambiguousCandidates} lehetseges kontakt van az agens allowFrom listajan, es a task-config.json-ban nincs telegramChatId megadva. A kezbesitesi utasitas kimaradt EBBOL A futasbol (nem tippeltunk). Toltsd ki a telegramChatId mezot (konkret chat_id, vagy "none" ha a taskot nem kell csatornara kuldeni) a ~/.claude/scheduled-tasks/${task.name}/task-config.json-ban.`,
+            // Viktor 39039 LOW: a from=system line carries no raw name from disk.
+            `[FELHIVAS] A(z) "${alertSafeId(task.name)}" utemezett feladat (agent: ${alertSafeId(agentName)}) cimzettje bizonytalan -- ${bound.ambiguousCandidates} lehetseges kontakt van az agens allowFrom listajan, es a task-config.json-ban nincs telegramChatId megadva. A kezbesitesi utasitas kimaradt EBBOL A futasbol (nem tippeltunk). Toltsd ki a telegramChatId mezot (konkret chat_id, vagy "none" ha a taskot nem kell csatornara kuldeni) a ~/.claude/scheduled-tasks/${alertSafeId(task.name)}/task-config.json-ban.`,
           )
         }
         prefix = `[Utemezett feladat: ${task.name}] `
@@ -1618,8 +1630,16 @@ async function attemptFireTask(
     // something the operator cannot fix from the SKILL.md.
     maybeSendSizeGuardNotice(task.name, task.prompt.length, now)
     const { block: scheduledTaskBlock } = buildScheduledTaskBlock(task.name, taskBody, host, now)
+    // SCHEDTRUST1112 (Viktor 38996): the owner framing only for a task the
+    // owner approved (or the install shipped) AS STORED NOW; anything else --
+    // token-created or -edited, changed on disk, a lookup error -- is framed
+    // as a coworker's request. scheduleTrustOf never throws, and there is no
+    // path back to the owner framing on failure.
+    const trust = scheduleTrustOf(task)
+    if (trust === 'mismatch') alertScheduleTrust(task, trust, 'tüzeléskor')
+    const preamble = isOwnerTrusted(trust) ? SCHEDULED_TASK_PREAMBLE : AGENT_SCHEDULED_TASK_PREAMBLE
     const fullPrompt =
-      SCHEDULED_TASK_PREAMBLE + '\n' +
+      preamble + '\n' +
       prefix.trimEnd() + '\n\n' +
       scheduledTaskBlock
     let typedAt = Date.now() // replaced by onEmitStart; see the note after the call
@@ -1960,6 +1980,12 @@ export async function runScheduledTaskNow(
   if (!task.enabled && !opts.allowDisabled) return { ok: false, error: 'Schedule is disabled' }
 
   if (isDirectDigestTask(task)) {
+    // SCHEDTRUST1112: the same gate as the cron loop's direct-digest branch.
+    const digestTrust = scheduleTrustOf(task)
+    if (!isOwnerTrusted(digestTrust)) {
+      alertScheduleTrust(task, digestTrust, 'a közvetlen összesítő nem ment ki')
+      return { ok: false, error: 'direct digest not sent: the task is not approved as stored' }
+    }
     const sent = await sendHeartbeatDigestDirect(task.name, task.agent, directDigestDeps())
     return sent ? { ok: true, result: `${task.agent}: sent-direct` } : { ok: false, error: 'direct digest could not be sent' }
   }
@@ -2424,6 +2450,12 @@ export function taskOccurrenceMs(task: Pick<ScheduledTask, 'schedule' | 'runAt'>
 }
 
 export function startScheduleRunner(): NodeJS.Timeout {
+  // SCHEDTRUST1112: the one-time legacy import (Klodel 39006). Before the first
+  // tick, so the tasks that exist when this ships keep today's framing; a no-op
+  // on every later start.
+  // The list is read inside the helper's try (Viktor 39032 #5): a read error
+  // does not stop the runner; every task then runs agent-framed.
+  ensureScheduleTrustBaseline(listScheduledTasks)
   // Close EVERY run that the previous process was still watching when it
   // stopped. taskInflightMap is in memory, so a restart loses every open entry
   // and nothing else can ever close those rows (SCHEDSORZAR923: an age window
@@ -2852,7 +2884,15 @@ export function startScheduleRunner(): NodeJS.Timeout {
       // alerts. Record the run time like a fired task so the catch-up window
       // does not double-run them on a dashboard restart.
       if (task.type === 'command') {
-        runCommandTask(task, now)
+        // SCHEDTRUST1112: a command task is raw bash in this process. The API
+        // can never create or edit one, so an unapproved one is a file edit:
+        // not run, alerted. The last-run stamp still moves (no catch-up storm).
+        const trust = scheduleTrustOf(task)
+        if (isOwnerTrusted(trust)) runCommandTask(task, now)
+        else {
+          logger.warn({ task: task.name, trust }, 'schedule-trust: command task NOT run (not approved as stored)')
+          alertScheduleTrust(task, trust, 'a command-feladat nem futott')
+        }
         scheduleLastRun.set(task.name, now)
         persistScheduleLastRun()
         continue
@@ -2863,6 +2903,17 @@ export function startScheduleRunner(): NodeJS.Timeout {
       // to go out exactly while the main agent is busy. A failure is recorded
       // as an 'error' run and reported by the gap guard.
       if (isDirectDigestTask(task)) {
+        // SCHEDTRUST1112 (Viktor 39032 #6): no LLM here, so no framing to
+        // switch -- an unapproved digest task is simply not sent, and alerted
+        // (the API sets neither injectMetrics nor sendDigestDirect: a file edit).
+        const digestTrust = scheduleTrustOf(task)
+        if (!isOwnerTrusted(digestTrust)) {
+          logger.warn({ task: task.name, trust: digestTrust }, 'schedule-trust: direct digest NOT sent (not approved as stored)')
+          alertScheduleTrust(task, digestTrust, 'a közvetlen összesítő nem ment ki')
+          scheduleLastRun.set(task.name, now)
+          persistScheduleLastRun()
+          continue
+        }
         await sendHeartbeatDigestDirect(task.name, task.agent, directDigestDeps())
         scheduleLastRun.set(task.name, now)
         persistScheduleLastRun()
