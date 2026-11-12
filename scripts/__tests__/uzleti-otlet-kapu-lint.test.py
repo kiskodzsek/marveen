@@ -156,6 +156,35 @@ for name in ("zseni-otlet-1112-r3-magnes.md", "zseni-otlet-1112-r3-radar.md", "z
     check(f"negative, TG 18089: {name} fails on BIZONYITEK in every idea",
           bool(lines) and all(l.startswith("NEM MEGY") and "BIZONYITEK" in l for l in lines), True)
 
+
+# Klodel 39514 (Mágnes 39510, Szigma 39512): in --zseni the 17 old fields are optional (as in --problema), an app idea's
+# ITTHON list accepts Google Play HU / App Store HU, and the 4-domain site probe is not required for it.
+# The three r2 files of 2026-11-12 (verbatim copies) are decided by MINDENKI/VICCES, not by the old fields or the site probe.
+def lint_lines(path, *modes):
+    out = subprocess.run([sys.executable, "-I", LINT, path, *modes], capture_output=True, text=True, timeout=20).stdout
+    return [l for l in out.splitlines() if l.startswith(("MEHET", "NEM MEGY"))]
+
+
+R2 = os.path.join(HERE, "fixtures", "idea-gate-zseni-r2")
+OLD17 = ("UJ hiányzik", "AI-SKALA", "NEM-SOFTWARE-KLON", "PENZ", "site-próba")
+# After #208 (Klodel 39531) every --zseni idea also needs a BIZONYITEK line, which the r2 files predate: Mágnes's three
+# ideas, MEHET before, now stop on BIZONYITEK alone (still no old-field or site-probe error).
+for name, want in [("zseni-otlet-1112-r2-magnes.md", ["BIZONYITEK", "BIZONYITEK", "BIZONYITEK"]),
+                   ("zseni-otlet-1112-r2-radar.md", ["MINDENKI"]),
+                   ("zseni-otlet-1112-r2-szigma.md", ["TERJESZTES", "MINDENKI"])]:
+    lines = lint_lines(os.path.join(R2, name), "--zseni")
+    check(f"r2 {name}: no old-field or site-probe error", any(o in l for l in lines for o in OLD17), False)
+    check(f"r2 {name}: verdicts", [("MEHET" if l.startswith("MEHET") else next((k for k in ("MINDENKI", "VICCES", "TERJESZTES", "BIZONYITEK")
+          if k in l), "OTHER")) for l in lines], want)
+APP = ("- MINDENKI: senkit\n- VICCES: „Ez egy vicces mondat lesz.”\n- TERJESZTES: megosztás, 320/hó (mért)\n"
+       "- Leírás: közösségi app\n- ITTHON: nincs ilyen app (mérve):\n  - Google Play HU, „sorban állás”: 0 releváns;\n"
+       "  - App Store HU, „sor hossz”: 0 találat.\n")
+check("app idea: Google Play HU + App Store HU is a measured list, no site probe needed", itthon_err(APP), False)
+check("negative: a non-app idea measured only in app stores still needs the site probe",
+      itthon_err(APP.replace("- Leírás: közösségi app\n", "- Leírás: kulacs\n").replace("nincs ilyen app", "nincs ilyen kulacs")), True)
+check("negative: an app idea with one app store only still fails (two measured shops)",
+      itthon_err(APP.replace("  - App Store HU, „sor hossz”: 0 találat.\n", "")), True)
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
     sys.exit(1)

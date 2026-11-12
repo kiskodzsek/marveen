@@ -41,7 +41,9 @@ def szokezdet(k, t):
 ITTHON_MOD = "--itthon" in sys.argv
 BOLTOK = ["emag", "alza", "decathlon", "pepita", "extreme digital", "edigital", "müller", "mueller", "dm", "rossmann",
     "szimpla", "vatera", "gymbeam", "kifli", "notino", "douglas", "jófogás", "jofogas", "árgép", "argep", "árukereső",
-    "arukereso", "olcsóbbat", "játéksziget", "jatekshop", "brendon", "mall", "hervis", "intersport", "libri"]
+    "arukereso", "olcsóbbat", "játéksziget", "jatekshop", "brendon", "mall", "hervis", "intersport", "libri",
+    "google play", "play áruház", "app store"]  # app-ötlet: a magyar app-áruházak keresése (Klodel 39514)
+APP_BOLT = {"google play", "play áruház", "app store"}
 HIANY = re.compile(r"(?i)(?<!\w)[ns]incs(en)?(?!\w)|nem találtam|nem találtunk|nem hozott találatot|nem árulja|nem árulj"
     r"|(?<![\w.,:])0(?![\w.,:])|egyik(ben)? sem|egyikben sincs")
 EREDMENY = re.compile(r"(?i)\d|nem hozott találatot|nem találtunk|nincs találat|„[^”]+”")
@@ -137,7 +139,11 @@ def itthon_hibak(p, kotelezo):
                 boltok.add({"mueller": "müller", "edigital": "extreme digital", "jofogas": "jófogás", "argep": "árgép", "arukereso": "árukereső"}.get(bo, bo))
     if "[search]" in b.lower() and not mert:
         return ["ITTHON: hiány-állítás csak [search] forrással (mért bolt-lista kell)"]
-    hibak = site_hibak(b)
+    # app-ötlet (a szakasz appról szól, és a mért boltok között app-áruház van): a 4 domaines site-próba nem kötelező
+    # (az "App Store" nevében lévő "App" nem számít: a bolt neve nélkül keressük)
+    p_bolt_nelkul = re.sub(r"(?i)app store|google play|play áruház", " ", p)
+    app = bool(boltok & APP_BOLT) and re.search(r"(?i)(?<!\w)(app|appok|alkalmazás|applikáció|pwa)(?!\w)", p_bolt_nelkul) is not None
+    hibak = [] if app else site_hibak(b)
     if not mert or len(boltok) < 2:
         hibak.insert(0, f"ITTHON: hiány-állítás mért bolt-lista nélkül (mért={'igen' if mert else 'nem'}, mért bolt {len(boltok)}, legalább 2 kell)")
     return hibak
@@ -151,14 +157,14 @@ def main(path):
         cim = p.splitlines()[0].strip()
         hibak = []
         for m in MEZOK:
-            if PROBLEMA_MOD: continue  # TG 4855: a régi mezők itt csak tájékoztatók, őszintén kitöltve
+            if PROBLEMA_MOD or ZSENI_MOD: continue  # TG 4855 / Klodel 39514: a régi mezők itt csak tájékoztatók
             mm = re.search(rf"(?m)^\s*[-*]?\s*{re.escape(m)}:\s*(\S+)", p)
             if not mm: hibak.append(f"{m} hiányzik")
             elif not mm.group(1).upper().startswith("IGEN"): hibak.append(f"{m}={mm.group(1)}")
         if "NINCS ADAT" in p.split("KIEMELKEDES:")[-1].splitlines()[0] if "KIEMELKEDES:" in p else False:
             hibak.append("KIEMELKEDES: NINCS ADAT")
         pz = re.search(r"(?m)^\s*[-*]?\s*PENZ:(.*)$", p)
-        if pz and not PROBLEMA_MOD and ("NINCS ADAT" in pz.group(1).upper() or not re.search(r"\d", pz.group(1))):
+        if pz and not (PROBLEMA_MOD or ZSENI_MOD) and ("NINCS ADAT" in pz.group(1).upper() or not re.search(r"\d", pz.group(1))):
             hibak.append("PENZ: mért bevétel szám nélkül")
         if PROBLEMA_MOD:
             for m in PROBLEMA_KOTELEZO:
