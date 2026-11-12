@@ -1,0 +1,4 @@
+# Known internal names that must never be visible to a customer (one per line, whole word, case-sensitive).
+# Patterns (snake_case, camelCase, SCREAMING_CASE, {{ }}, dotted keys, dev words) are caught without a list;
+# this file is for names that look like normal words: project/engine codes, internal product names.
+# Add a name after every one that ever shipped to production. Names only, no secrets, no customer data.

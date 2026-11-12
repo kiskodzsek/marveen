@@ -1,0 +1,170 @@
+{
+ "_comment": "Pages and pre-login entry steps only (read-only, nothing is submitted). Steps behind login or a submit need a flow script that imports Gate (see README.md). Extend with every page a release touches.",
+ "flows": [
+  {
+   "name": "page-home",
+   "steps": [
+    {
+     "goto": "/"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-termekek-es-arak",
+   "steps": [
+    {
+     "goto": "/termekek-es-arak"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-meseld-el",
+   "steps": [
+    {
+     "goto": "/meseld-el"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-elso-eved",
+   "steps": [
+    {
+     "goto": "/elso-eved"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-receptkonyv",
+   "steps": [
+    {
+     "goto": "/receptkonyv"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-koszonjuk",
+   "steps": [
+    {
+     "goto": "/koszonjuk"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-marabello",
+   "steps": [
+    {
+     "goto": "/marabello"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-karacsonyi-ajandek-szuloknek",
+   "steps": [
+    {
+     "goto": "/karacsonyi-ajandek-szuloknek"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-ajandek-parnak",
+   "steps": [
+    {
+     "goto": "/ajandek-parnak"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-szuletesnapi-ajandek",
+   "steps": [
+    {
+     "goto": "/szuletesnapi-ajandek"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-kosar",
+   "steps": [
+    {
+     "goto": "/kosar"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-kosar-penztar",
+   "steps": [
+    {
+     "goto": "/kosar/penztar"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-proba-meseld-el",
+   "steps": [
+    {
+     "goto": "/proba/meseld-el"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-proba-elso-eved",
+   "steps": [
+    {
+     "goto": "/proba/elso-eved"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  },
+  {
+   "name": "page-proba-receptkonyv",
+   "steps": [
+    {
+     "goto": "/proba/receptkonyv"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
+  }
+ ]
+}
