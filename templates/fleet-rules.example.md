@@ -15,6 +15,12 @@
 
   Placeholders: {{AGENT_ID}}, {{PROJECT_ROOT}}, {{DASHBOARD_ORIGIN}}.
 
+  Kept by hand: no script generates this file. When the root CLAUDE.md changes,
+  read what changed (diff store/fleet-rules.root-at-stamp.md CLAUDE.md), carry
+  every rule a sub-agent needs into store/fleet-rules.md, then stamp. Name only
+  scripts that exist in this comment: the stamp refuses a header naming a missing
+  one (exit 3), so the header cannot claim a generator again.
+
   Drift gate: the exclusion only applies while this comment carries the sha256 of
   the current root CLAUDE.md. After syncing the rules, stamp them:
     node scripts/fleet-rules-stamp.mjs          (writes synced-from-root-sha256=...)

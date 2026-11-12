@@ -21,12 +21,23 @@
 //
 // Stamping is a statement that the rules file has been reviewed against the
 // current root. It does not check that by itself.
-import { readFileSync, writeFileSync, renameSync, statSync, chmodSync } from 'node:fs'
+//
+// The rules file is maintained BY HAND (there is no generator): carry the new
+// root rules into store/fleet-rules.md, then stamp. The leading comment must say
+// so truthfully: until 2026-11-10 it claimed a scripts/fleet-rules-sync.mjs
+// generator that never existed (card 901b19b2). So every script path the leading
+// comment names (scripts/<name>) must exist in the install; if one does not, the
+// stamp is refused and --check exits 3, with the missing path named.
+//
+// Exit codes: 0 stamped / current; 1 stale (root changed or no stamp);
+// 2 cannot read a file; 3 the leading comment names a script that does not exist.
+import { readFileSync, writeFileSync, renameSync, statSync, chmodSync, existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const STAMP_RE = /synced-from-root-sha256=[0-9a-f]{64}/
+const SCRIPT_REF_RE = /\bscripts\/[A-Za-z0-9._-]+\.(?:mjs|cjs|js|ts|sh|py)\b/g
 const LEAD_RE = /^\s*<!--[\s\S]*?-->/
 
 function arg(name) {
@@ -46,8 +57,16 @@ try { rules = readFileSync(rulesPath, 'utf-8') } catch { console.error(`fleet-ru
 const sha = createHash('sha256').update(rootBytes).digest('hex')
 const lead = rules.match(LEAD_RE)
 const current = lead?.[0].match(STAMP_RE)?.[0].split('=')[1] ?? null
+const missingScripts = [...new Set(lead?.[0].match(SCRIPT_REF_RE) ?? [])].filter((p) => !existsSync(join(root, p)))
+function reportMissing() {
+  for (const p of missingScripts) {
+    console.log(`HEADER: the leading comment of ${rulesPath} names ${p}, which does not exist in ${root} -- the rules are kept by hand; fix the comment`)
+  }
+}
 
 if (process.argv.includes('--check')) {
+  reportMissing()
+  if (current === sha && missingScripts.length) process.exit(3)
   if (current === sha) {
     console.log(`OK: ${rulesPath} is stamped with the current root (${sha.slice(0, 12)})`)
     process.exit(0)
@@ -56,6 +75,12 @@ if (process.argv.includes('--check')) {
     ? `STALE: ${rulesPath} has no stamp -- the root CLAUDE.md stays loaded for opted-in agents`
     : `STALE: root CLAUDE.md changed since the stamp (${current.slice(0, 12)} -> ${sha.slice(0, 12)}); see: diff ${snapshotPath} ${rootPath}`)
   process.exit(1)
+}
+
+if (missingScripts.length) {
+  reportMissing()
+  console.error('fleet-rules-stamp: not stamped (a stamp says the file was reviewed, and its own header is wrong)')
+  process.exit(3)
 }
 
 const line = `synced-from-root-sha256=${sha}`
