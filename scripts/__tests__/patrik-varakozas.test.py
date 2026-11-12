@@ -166,6 +166,15 @@ def only_render_work_makes_a_free_machine_alert(_root):
          'Radar most kutat, a legjobb ötletekhez Dave képeket és videót készít.'),
         ('kérek új termékötleteket', 'Indul, utána jönnek a mintaképek.'),
         ('nézzetek piackutatást a karácsonyi ajándékokra', 'Radar viszi, utána a film.'),
+        # Klodel 39657, Patrik TG 5603 (verbatim, with Klodel's reply 5605): an inventory question is not render work.
+        ('milyen hirdetéshez való anyagaink állnak rendelkezésre?',
+         'Így értem: a Marabel-hirdetéshez kész, felhasználható képek, videók és szövegek termékenként, és melyik van '
+         'már elvetve. Nem csinálok most új anyagot. Mira összeszedi a mappákból, mérve, állapottal együtt '
+         '(jóváhagyott, elvetett, hiányzik). Kontaktlap-képpel hozom, az első termékcsoportot amint kész.'),
+        ('milyen képeink és videóink állnak rendelkezésre a receptkönyvhöz?', 'Mira összeszedi, amint kész, küldöm.'),
+        ('mi van meg a hirdetésekhez?', 'Összeszedem a képeket, amint kész, küldöm.'),
+        ('kérek leltárt a kész anyagokról', 'Indul, a videókat is hozom.'),
+        ('hány anyagunk van a karácsonyi kampányhoz?', 'Mira most nézi, a filmeket is.'),
     ]:
         assert not W.render_related({'text': text, 'promise': promise}), text
     for text, promise in [
@@ -181,6 +190,15 @@ def only_render_work_makes_a_free_machine_alert(_root):
         # A product-image or video idea request stays render work: the render word decides first.
         ('ötlet a karácsonyi videóhoz', 'Indul.'),
         ('csináljatok új termékképeket', 'Dave rendereli a képeket.'),
+        # The inventory guard is narrow: a status question about a film, or a render request naming material, stays.
+        ('hol tart a babás film?', 'Dave most rendereli.'),
+        ('mi van a papással?', 'A papás kisfilm most renderel a MacBookon.'),
+        ('készítsetek videó-anyagot a karácsonyra', 'Indul.'),
+        # A long render brief that mentions the material at hand somewhere inside stays render work (old-new run on the
+        # real ledger: eight such briefs would have been dropped without the length limit).
+        ('Készítsétek el az első Instagram-videót. Célhossz: 20-25 másodperc, magyar narráció, beégetett felirat. '
+         'Használjátok a rendelkezésre álló termékfotókat és a meglévő anyagokat, kész, publikálható fájlokat kérek, '
+         'nem storyboardot.', 'Indul, Dave most rendereli.'),
     ]:
         assert W.render_related({'text': text, 'promise': promise}), text
     # The day's baby-film requests in the fixture are render work.
