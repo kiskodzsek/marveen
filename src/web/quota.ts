@@ -191,8 +191,9 @@ export function readFableSnapshot(
  * idle agent's numbers age while the others burn the window. The rule, per
  * kind: drop a reading whose window has already reset, take the LATEST window
  * still open, and within it the HIGHEST percentage (the same rule as
- * scripts/usage-alert/usage_alert.py); between equal readings, the youngest
- * numbers (see fresher). A missing five_hour means "no window
+ * scripts/usage-alert/usage_alert.py), where a reading known to be older than
+ * maxAgeSec counts only when no younger one exists (see tooOld); between equal
+ * readings, the youngest numbers (see fresher). A missing five_hour means "no window
  * open" (it disappears at its reset and returns with the next API response).
  * Freshness travels with the data, and it is the age of the NUMBERS, not of
  * the file: alive_at ticks every minute on an idle agent while its readings
@@ -249,8 +250,12 @@ export function readModQuotaSnapshot(
       if (!Number.isFinite(resetsAt) || resetsAt <= nowSec) continue
       reporting.add(agent)
       const cur = best[r.kind]
-      if (!cur || resetsAt > cur.resetsAt || (resetsAt === cur.resetsAt && (r.percentUsed > cur.pct
-        || (r.percentUsed === cur.pct && fresher(dataSec, cur.dataSec))))) {
+      const old = tooOld(dataSec, nowSec, maxAgeSec)
+      const curOld = cur !== null && tooOld(cur.dataSec, nowSec, maxAgeSec)
+      if (!cur || resetsAt > cur.resetsAt || (resetsAt === cur.resetsAt && (
+        (!old && curOld)
+        || (old === curOld && (r.percentUsed > cur.pct
+          || (r.percentUsed === cur.pct && fresher(dataSec, cur.dataSec))))))) {
         best[r.kind] = { pct: r.percentUsed, resetsAt, agent, dataSec }
       }
     }
@@ -284,6 +289,21 @@ export function readModQuotaSnapshot(
  */
 function fresher(a: number | null, b: number | null): boolean {
   return a !== null && (b === null || a > b)
+}
+
+/**
+ * A reading KNOWN to be older than maxAgeSec (the snapshot's own 'ok' bar).
+ * Inside one window such a reading counts only while every other reading is
+ * old too: the percentage can fall inside a window (the seat was reset, or the
+ * fleet moved to another login), and "highest wins" then let an idle agent's
+ * 82% from 2026-11-11 11:50 beat three fresh 1% readings of the same window
+ * and turned the fleet stale for a day (Kernel 38779, card 0742aba6). An
+ * unknown age is NOT old here: right after a restart there is no completed
+ * turn yet, but the numbers may be the newest there are, so a higher reading
+ * of unknown age still beats a younger lower one, as before (see the tests).
+ */
+function tooOld(dataSec: number | null, nowSec: number, maxAgeSec: number): boolean {
+  return dataSec !== null && nowSec - dataSec > maxAgeSec
 }
 
 /**

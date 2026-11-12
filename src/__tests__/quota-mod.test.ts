@@ -151,6 +151,48 @@ describe('readModQuotaSnapshot', () => {
     expect(q.status).toBe('stale')
   })
 
+  it('inside one window a reading older than maxAgeSec loses to a younger lower one (card 0742aba6)', () => {
+    // 2026-11-11: magnes idle since 11:50 at 82%, three agents fresh at 1% of the same window
+    // after the fall -> the fleet showed a day-old 82% and read stale
+    source('magnes', [week(82)], { turnAgoSec: 43548 })
+    source('kernel', [week(1)], { turnAgoSec: 120 })
+    source('viktor', [week(1)], { turnAgoSec: 60 })
+    const q = readModQuotaSnapshot(dir, NOW, 21600)
+    expect(q.sevenDay).toMatchObject({ usedPercentage: 1, sourceAgent: 'viktor' })
+    expect(q).toMatchObject({ ageSec: 60, status: 'ok' })
+    expect(q.reportingAgents).toEqual(['kernel', 'magnes', 'viktor'])
+  })
+
+  it('an old reading still counts when nothing younger reads that window', () => {
+    source('magnes', [week(82)], { turnAgoSec: 43548 })
+    source('kernel', [five(3)], { turnAgoSec: 120 })
+    const q = readModQuotaSnapshot(dir, NOW, 21600)
+    expect(q.sevenDay).toMatchObject({ usedPercentage: 82, sourceAgent: 'magnes' })
+    expect(q.status).toBe('stale')
+    // all old: the highest of them, as before
+    source('kernel', [week(40)], { turnAgoSec: 30000 })
+    expect(readModQuotaSnapshot(dir, NOW, 21600).sevenDay?.usedPercentage).toBe(82)
+  })
+
+  it('the old reading loses whatever order the files come in, and a later window still wins first', () => {
+    source('a-fresh', [week(5)], { turnAgoSec: 60 })
+    source('z-old', [week(70)], { turnAgoSec: 21601 })
+    expect(readModQuotaSnapshot(dir, NOW, 21600).sevenDay?.sourceAgent).toBe('a-fresh')
+    // exactly at the bar is not old yet: highest wins
+    source('z-old', [week(70)], { turnAgoSec: 21600 })
+    expect(readModQuotaSnapshot(dir, NOW, 21600).sevenDay?.sourceAgent).toBe('z-old')
+    // a later window beats an earlier one regardless of age
+    source('z-old', [week(70, NOW + 6 * 86400)], { turnAgoSec: 30000 })
+    expect(readModQuotaSnapshot(dir, NOW, 21600).sevenDay).toMatchObject({ usedPercentage: 70, sourceAgent: 'z-old' })
+  })
+
+  it('an unknown age is not "old": a restarted agent\'s higher reading still beats a younger lower one', () => {
+    source('a-restarted', [week(63)], { turnAgoSec: null })
+    source('z-old', [week(90)], { turnAgoSec: 30000 })
+    source('z-known', [week(62)], { turnAgoSec: 600 })
+    expect(readModQuotaSnapshot(dir, NOW, 21600).sevenDay).toMatchObject({ usedPercentage: 63, sourceAgent: 'a-restarted' })
+  })
+
   it('no state files at all -> missing / no-file; files without readings -> no-rate-limits', () => {
     expect(readModQuotaSnapshot(join(dir, 'nope'), NOW)).toMatchObject({ status: 'missing', reason: 'no-file' })
     expect(readModQuotaSnapshot(dir, NOW)).toMatchObject({ status: 'missing', reason: 'no-file' })
