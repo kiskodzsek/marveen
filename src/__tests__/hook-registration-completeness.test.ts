@@ -102,6 +102,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of balazs-task-reply-gate.py (run: python3 -I scripts/hooks/balazs-task-reply-gate_test.py); not itself a hook (#185)',
   'time-claim-gate_test.py':
     'the unit test of time-claim-gate.py (run: python3 -I scripts/hooks/time-claim-gate_test.py); not itself a hook (Klodel 38401)',
+  'pr-kerdes-gate_test.py':
+    'the unit test of pr-kerdes-gate.py and scripts/pr-kerdes.py (run: python3 -I scripts/hooks/pr-kerdes-gate_test.py); not itself a hook',
   'render_claim_lib.py':
     'shared library imported by render-claim-reply-gate.py (the store/video-export-status.json reader); not itself a hook',
   'mio-orszem-precheck.sh':
@@ -170,6 +172,8 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'PreToolUse gate on the telegram reply/edit_message tool that guards replies to Patrik\'s own chats: a state claim or number needs a source (Klodel 35761, Patrik TG 4477; chats as mea-culpa-reply-gate.py). Its docstring wires it in .claude/settings.json; until fix/ci-red-main-1111 it ran only from the prod checkout\'s uncommitted settings',
   'mute-video-reply-gate.py':
     'PreToolUse gate on the main agent\'s telegram reply: no .mp4/.mov without an audio track reaches Patrik (TG 4483, Klodel 35741). Docstring: "Wiring: .claude/settings.json PreToolUse"; until fix/ci-red-main-1111 it ran only from the prod checkout\'s uncommitted settings. Seeding it fleet-wide is a separate decision',
+  'pr-kerdes-gate.py':
+    'PreToolUse gate on the main agent\'s telegram reply/edit_message: a "PR #<n> mehet?" ask to Patrik only with a store/pr-kerdes/<n>.ok sheet (the PR\'s full file list, a picture or reason per file) in THIS checkout\'s store (hibanapló 2026-11-11, Klodel 37320). Asking Patrik to ship a PR is the main agent\'s role; seeding it fleet-wide is a separate decision',
   'product-image-gate.py':
     'TERMEKKEP-KAPU (Patrik TG 1690/1694): an image/video to the owner on Telegram only with a store/kep-kapu/<file>.ok attestation in THIS checkout\'s store. Until fix/ci-red-main-1111 it ran only from the prod checkout\'s uncommitted settings. Seeding it fleet-wide is a separate decision',
   'react-emoji-gate.py':
