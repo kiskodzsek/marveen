@@ -143,5 +143,8 @@ jobs:
       # TIMECLAIM1111 (Klodel 38401): no placeholder (19:3x) or future "measured" time in
       # shared/*.md or a kanban comment. Hermetic: a copy of the hook in a temp root.
       - run: python3 -I scripts/hooks/time-claim-gate_test.py
+      # LINKKAPU1112 (Patrik TG 17974, TG 18022 "a linket kértem"): a reply to a chat whose latest inbound
+      # message asks for a link carries a URL or a "LINK-NINCS: <why>" line. Pure check(), no ledger, no network.
+      - run: python3 -I scripts/hooks/link-request-reply-gate_test.py
       - run: python3 -I scripts/__tests__/seo-copy-gate.test.py
       - run: python3 -I scripts/__tests__/mcp-pin-run.test.py
