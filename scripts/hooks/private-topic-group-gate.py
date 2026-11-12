@@ -20,7 +20,8 @@ Which chats are gated: every chat except the owner's private one (MARVEEN_OWNER_
 store/projektek.json elo_uzenet.privat): the group, and any other chat the bot writes to (Viktor 29635 INFO-3).
 When the private chat is unknown, every chat is gated (fail-closed). Any error while matching blocks too
 (Viktor 29635: an OverflowError from re.compile used to exit 1, which Claude Code does not treat as a block).
-No chat id is written in this file: the ids are personal data.
+No chat id is written in this file: the ids are personal data. One exception: Balázs's Telegram sender id
+(BALAZS_USER_ID, the own-words exemption, Klodel 39569), the same constant product-image-gate.py already carries.
 Tests: private-topic-group-gate_test.py next to this file.
 """
 import json
@@ -80,7 +81,7 @@ def patterns(temak, projektek):
     return out
 
 
-def gated(chat, projektek):
+def owner_private(projektek):
     elo = projektek.get('elo_uzenet') if isinstance(projektek, dict) else None
     elo = elo if isinstance(elo, dict) else {}
     # The live store keeps each chat as {"chat_id": ..., "message_id": ...} (the status card's message); a plain id
@@ -88,8 +89,51 @@ def gated(chat, projektek):
     priv = elo.get('privat')
     if isinstance(priv, dict):
         priv = priv.get('chat_id')
-    private = (os.environ.get('MARVEEN_OWNER_PRIVATE_CHAT') or str(priv if priv is not None else '')).strip()
+    return (os.environ.get('MARVEEN_OWNER_PRIVATE_CHAT') or str(priv if priv is not None else '')).strip()
+
+
+def gated(chat, projektek):
+    private = owner_private(projektek)
     return not private or chat != private
+
+
+# Klodel 39569 (Patrik TG 18102 "nagyon lassú vagy"; Balázs group TG 5511 "Kulfoldon nezz inkabb korbe mi a trend"):
+# the "trend" keyword of a private project blocked the answer to Balázs's own group request. A hit is let through
+# when the same pattern matches the LATEST group message of Balázs or of Patrik in that chat: they raised the word
+# themselves. Who wrote it comes from what only the Telegram plugin writes: <state>/inbound-senders.jsonl (chat_id,
+# message_id, user_id) and the text from <state>/inbound-evidence.jsonl (the same records as the Creatorz gate).
+# Patrik's user id is his private chat id (a Telegram private chat id is the user id). No record = no exemption.
+BALAZS_USER_ID = '8366648365'
+
+
+def _jsonl_rows(name):
+    base = os.path.join(os.environ.get('TELEGRAM_STATE_DIR') or os.path.join(ROOT, '.claude', 'channels', 'telegram'), name)
+    for path in (base + '.1', base):
+        try:
+            with open(path, encoding='utf-8') as f:
+                for ln in f:
+                    try:
+                        row = json.loads(ln)
+                    except Exception:
+                        continue
+                    if isinstance(row, dict):
+                        yield row
+        except OSError:
+            continue
+
+
+def own_words(chat, projektek):
+    """Texts of the latest message in <chat> from Balázs and from Patrik (each), as recorded by the plugin."""
+    people = {BALAZS_USER_ID, owner_private(projektek)} - {''}
+    latest = {}
+    for r in _jsonl_rows('inbound-senders.jsonl'):
+        uid, mid = str(r.get('user_id')), str(r.get('message_id'))
+        if str(r.get('chat_id')) == chat and uid in people and mid.isdigit():
+            if int(mid) > latest.get(uid, -1):
+                latest[uid] = int(mid)
+    want = {str(m) for m in latest.values()}
+    return [str(r.get('text') or '') for r in _jsonl_rows('inbound-evidence.jsonl')
+            if str(r.get('chat_id')) == chat and str(r.get('message_id')) in want]
 
 
 def main():
@@ -104,9 +148,14 @@ def main():
         return 0
     files = ti.get('files')
     text = str(ti.get('text') or '') + ' ' + ' '.join(map(str, files if isinstance(files, list) else []))
+    chat = str(ti.get('chat_id') or '').strip()
     try:
         plain = norm(text)
-        hits = [label for label, rx in patterns(load('privat-temak.json'), projektek) if rx.search(text) or rx.search(plain)]
+        pats = patterns(load('privat-temak.json'), projektek)
+        hits = [(label, rx) for label, rx in pats if rx.search(text) or rx.search(plain)]
+        if hits:
+            theirs = own_words(chat, projektek)
+            hits = [label for label, rx in hits if not any(rx.search(w) or rx.search(norm(w)) for w in theirs)]
     except Exception as e:  # fail-closed: no error may switch the gate off (Viktor 29635)
         hits = [f'a kapu hibára futott ({e.__class__.__name__}), ezért blokkol']
     if hits:

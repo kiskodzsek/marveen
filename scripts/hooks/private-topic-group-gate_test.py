@@ -240,6 +240,82 @@ def settings_wire_gate_on_reply_and_edit_message(root):
     return all(wired(t) for t in ('mcp__plugin_telegram_telegram__reply', 'mcp__plugin_telegram_telegram__edit_message'))
 
 
+# Klodel 39569 (Patrik TG 18102; Balázs group TG 5511 "Kulfoldon nezz inkabb korbe mi a trend"): a private keyword
+# passes when Balázs's or Patrik's LATEST group message in that chat carries it. Synthetic plugin records.
+BALAZS = '8366648365'
+TREND = {'elo_uzenet': {'csoport': GROUP, 'privat': PRIV},
+         'projektek': [{'id': 'trend-oldal-1111', 'chat': 'privat', 'kulcsszavak': ['trend']},
+                       {'id': 'hirdetes-x', 'chat': 'privat', 'kulcsszavak': ['hirdetéskép']}]}
+ANSWER = 'Körbenéztem külföldön: a mostani trend a rövid, vicces app-videó. Részletek lent.'
+
+
+def inbound(root, rows):
+    """rows: (chat, message_id, user_id, text); writes the plugin's sender and evidence logs."""
+    d = os.path.join(root, '.claude', 'channels', 'telegram')
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, 'inbound-senders.jsonl'), 'w', encoding='utf-8') as f:
+        for c, m, u, _t in rows:
+            f.write(json.dumps({'chat_id': c, 'message_id': m, 'user_id': u, 'at': 1}) + '\n')
+    with open(os.path.join(d, 'inbound-evidence.jsonl'), 'w', encoding='utf-8') as f:
+        for c, m, _u, t in rows:
+            f.write(json.dumps({'chat_id': c, 'message_id': m, 'text': t, 'at': 1}, ensure_ascii=False) + '\n')
+
+
+@case
+def tg5511_balazs_own_word_allowed(root):
+    setup(root, projektek=TREND)
+    before = run(root, {'chat_id': GROUP, 'text': ANSWER})[0]
+    inbound(root, [(GROUP, '5511', BALAZS, 'Kulfoldon nezz inkabb korbe mi a trend')])
+    return before == 2 and run(root, {'chat_id': GROUP, 'text': ANSWER})[0] == 0
+
+
+@case
+def patrik_own_word_allowed(root):
+    setup(root, projektek=TREND)
+    inbound(root, [(GROUP, '700', PRIV, 'Mi a trend most?')])
+    return run(root, {'chat_id': GROUP, 'text': ANSWER})[0] == 0
+
+
+@case
+def own_word_exempts_only_that_word(root):
+    # Balázs said "trend"; the other private keyword in the same answer still blocks.
+    setup(root, projektek=TREND)
+    inbound(root, [(GROUP, '5511', BALAZS, 'mi a trend')])
+    rc, err = run(root, {'chat_id': GROUP, 'text': ANSWER + ' Kész a hirdetéskép is.'})
+    return rc == 2 and 'hirdetes-x' in err and 'trend-oldal' not in err
+
+
+@case
+def own_word_not_from_them_still_blocked(root):
+    # Someone else said it, an older message of Balázs said it, it was said in another chat, or only the evidence
+    # exists without the sender record: still blocked.
+    setup(root, projektek=TREND)
+    res = []
+    for rows in ([(GROUP, '5511', '1112223334', 'mi a trend')],
+                 [(GROUP, '5510', BALAZS, 'mi a trend'), (GROUP, '5511', BALAZS, 'köszi')],
+                 [('-1000000000099', '5511', BALAZS, 'mi a trend')]):
+        inbound(root, rows)
+        res.append(run(root, {'chat_id': GROUP, 'text': ANSWER})[0])
+    inbound(root, [])
+    d = os.path.join(root, '.claude', 'channels', 'telegram')
+    with open(os.path.join(d, 'inbound-evidence.jsonl'), 'w', encoding='utf-8') as f:
+        f.write(json.dumps({'chat_id': GROUP, 'message_id': '5511', 'text': 'mi a trend', 'at': 1}) + '\n')
+    res.append(run(root, {'chat_id': GROUP, 'text': ANSWER})[0])
+    return res == [2, 2, 2, 2]
+
+
+@case
+def own_word_corrupt_logs_still_block(root):
+    setup(root, projektek=TREND)
+    d = os.path.join(root, '.claude', 'channels', 'telegram')
+    os.makedirs(d, exist_ok=True)
+    for name in ('inbound-senders.jsonl', 'inbound-evidence.jsonl'):
+        with open(os.path.join(d, name), 'w', encoding='utf-8') as f:
+            f.write('[1]\n"x"\n{bad\n')
+    rc, err = run(root, {'chat_id': GROUP, 'text': ANSWER})
+    return rc == 2 and 'trend-oldal-1111' in err
+
+
 def main():
     bad = 0
     for fn in CASES:
