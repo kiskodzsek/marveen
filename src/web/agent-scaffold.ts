@@ -3658,14 +3658,20 @@ TÖRLÉS NINCS, ÉS SZÁNDÉKOSAN NE IS LEGYEN. A DELETE /api/memories/:id léte
 
 ## Ütemezett feladatok
 
-Az ütemezett feladatok a ~/.claude/scheduled-tasks/ mappában élnek, fájl-alapúak (SKILL.md + task-config.json). A schedule runner 60 másodpercenként ellenőrzi, és a neked szóló promptot a te tmux session-ödbe küldi.
+Az ütemezett feladatok a ~/.claude/scheduled-tasks/ mappában élnek, fájl-alapúak (SKILL.md + task-config.json). A schedule runner 15 másodpercenként ellenőrzi, és a neked szóló promptot a te tmux session-ödbe küldi.
 
-Sub-ágensként INPUT-VEZÉRELT vagy: a gazda vagy egy kolléga üzenetére dolgozol, SAJÁT jövőbeli turnt NEM ütemezhetsz. A self-pace-gate hook (scripts/self-pace-gate.mjs) ezt minden úton elutasítja: a /api/schedules írását (POST, PUT, PATCH, DELETE), a ScheduleWakeup, Cron* és RemoteTrigger toolt, a tmux send-keys-t, a scheduled_tasks.json írását, a crontab, at és launchctl hívást, és a /loop-ot. A tiltás az EGÉSZ Bash-hívást megállítja, ezért ilyen lépést ne fűzz össze mással egy parancsba. A hook a parancs szövegét nézi, ezért egy szkript vagy heredoc, amelynek a szövegében ezek a szavak szerepelnek, szintén elakadhat: kódszerkesztéshez ilyenkor az Edit/Write eszközt használd.
+Sub-ágensként INPUT-VEZÉRELT vagy: a gazda vagy egy kolléga üzenetére dolgozol, SAJÁT jövőbeli turnt NEM ütemezhetsz (egyetlen kivétel az egyszeri ébresztés, lent). A self-pace-gate hook (scripts/self-pace-gate.mjs) ezt minden úton elutasítja: a /api/schedules írását (POST, PUT, PATCH, DELETE), a ScheduleWakeup, Cron* és RemoteTrigger toolt, a tmux send-keys-t, a scheduled_tasks.json írását, a crontab, at és launchctl hívást, és a /loop-ot. A tiltás az EGÉSZ Bash-hívást megállítja, ezért ilyen lépést ne fűzz össze mással egy parancsba. A hook a parancs szövegét nézi, ezért egy szkript vagy heredoc, amelynek a szövegében ezek a szavak szerepelnek, szintén elakadhat: kódszerkesztéshez ilyenkor az Edit/Write eszközt használd.
 
 Olvasni szabad (diagnosztika):
 curl -s -H "Authorization: Bearer $(cat ${tokenPath})" ${dashboardOrigin}/api/schedules
 
-Ha időzített vagy ismétlődő feladat kell, kérd inter-agent üzenetben a fő ágenstől (${MAIN_AGENT_ID}): ő hozza létre, és ő dönt róla. Add meg a nevet, a cron-időt (perc óra nap hónap hétnapja, ${APP_TZ}), a promptot és a típust (task: mindig szól az eredménnyel, heartbeat: csak fontosnál szól).
+EGYSZERI ÉBRESZTÉS (az egyetlen kivétel): ha egy kolléga NEKED küldött kérését egy későbbi időpontban kell folytatnod (pl. "08:00 után próbáld újra"), egy egyszeri ébresztést magad kérhetsz, a fő ágens nélkül:
+curl -s -X POST ${dashboardOrigin}/api/schedules/once -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ${tokenPath})" --data-binary @- <<'JSON'
+{"agent":"${name}","inMinutes":30,"originMsgId":12345}
+JSON
+Szabad szöveg nincs: az ébresztés fix szövege annyi, hogy olvasd el a horgony-üzenetet, és folytasd a feladatát. Ezért a folytatáshoz szükséges jegyzetet a HANDOFF.md-be vagy a kártyára írd. A szerver kényszeríti: az originMsgId egy NEKED szóló, MÁSIK ágenstől (nem system) jött, legfeljebb 2 órás, még nyitott (delivered) üzenet; egy üzenet egyetlen ébresztést horgonyozhat, örökre; a horgony-üzenetet csak az ébresztés után zárd le. Az időpont 1 perc és 24 óra közé eshet: inMinutes, vagy runAt ISO-8601 alakban, offszettel (pl. 2026-11-12T08:05:00+01:00). Ágensenként legfeljebb 3 függő és 24 óránként 6 ébresztés lehet, a flottában összesen 30; a plafon elérésekor a fő ágens jelzést kap. A task a lefutás után magától törlődik. Az ébresztett körből új ébresztést nem kérhetsz, és az ébresztés nem pótolja a gazda vagy a kolléga döntését: ha az kell, jelezz és várj. A parancs pontosan a fenti alakú, egyetlen curl legyen (-s, -H a két fejléccel, -X POST, --data-binary @- vagy inline {...}), mással ne fűzd össze, különben a gate elutasítja. A kész ébresztés nem szerkeszthető; ha más időpont kell, a fő ágens törölheti, és új horgonnyal kérhetsz újat.
+
+Minden más időzített vagy ismétlődő feladatot inter-agent üzenetben kérj a fő ágenstől (${MAIN_AGENT_ID}): ő hozza létre, és ő dönt róla. Add meg a nevet, a cron-időt (perc óra nap hónap hétnapja, ${APP_TZ}), a promptot és a típust (task: mindig szól az eredménnyel, heartbeat: csak fontosnál szól).
 Ha egy kolléga munkájának végére vársz, kérd meg, hogy inter-agent üzenetet küldjön, amikor kész: a kanban-komment nem ébreszt fel.
 NE írd közvetlenül az SQLite scheduled_tasks táblát - az egy régi API.
 

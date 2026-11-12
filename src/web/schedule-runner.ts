@@ -63,6 +63,7 @@ import {
   SCHEDULED_TASK_INLINE_MAX_CHARS,
   SCHEDULED_TASK_BODY_WARN_CHARS,
   MAX_SCHEDULED_TASK_PROMPT_LEN,
+  removeScheduledTaskDir,
   type ScheduledTask,
 } from './scheduled-tasks-io.js'
 import { listAgentNames, readFileOr, readAgentRemoteHost, agentDir } from './agent-config.js'
@@ -1690,6 +1691,15 @@ async function attemptFireTask(
       firedRunId = appendTaskRun(task.name, agentName, 'fired')
     }
     logger.info({ task: task.name, agent: agentName, session }, 'Scheduled task fired')
+    // ONCE (card fd941954): a one-shot task is gone after its delivery. Here,
+    // not at the call sites, so the cron path, the busy/starting retry path
+    // and run-now all remove it, and only after a real send: a 'busy' or
+    // 'starting' result returns before this line and the retry row keeps the
+    // task alive until it is delivered.
+    if (task.runAt != null) {
+      removeScheduledTaskDir(task.name)
+      logger.info({ task: task.name, agent: agentName, originMsgId: task.originMsgId }, 'One-shot task delivered and removed')
+    }
 
     // Register the injection in the post-fire timeout watchdog. The watchdog
     // polls the target pane on each tick and alerts if the session stays busy
@@ -2400,6 +2410,19 @@ function sendTaskTimeoutAlert(entry: TaskInflightEntry, elapsedMs: number): void
 // SQLite SELECT so the load is negligible.
 export const SCHEDULE_TICK_MS = 15_000
 
+/**
+ * The occurrence of `task` the tick at `now` should consider, or null.
+ * ONCE (card fd941954): a one-shot task (runAt set) never consults its cron.
+ * Its single occurrence is due from runAt onward with NO lower bound -- a
+ * once-task whose instant fell before this scan window (the dashboard was down,
+ * the window moved on) is still judged, by decideCatchUp, as catch-up or
+ * stale, never silently skipped.
+ */
+export function taskOccurrenceMs(task: Pick<ScheduledTask, 'schedule' | 'runAt'>, fromMs: number, now: number): number | null {
+  if (task.runAt != null) return task.runAt <= now ? task.runAt : null
+  return cronPrevOccurrence(task.schedule, fromMs, now)
+}
+
 export function startScheduleRunner(): NodeJS.Timeout {
   // Close EVERY run that the previous process was still watching when it
   // stopped. taskInflightMap is in memory, so a restart loses every open entry
@@ -2780,14 +2803,22 @@ export function startScheduleRunner(): NodeJS.Timeout {
 
     for (const task of tasks) {
       if (!task.enabled) continue
-      const occurrenceMs = cronPrevOccurrence(task.schedule, fromMs, now)
+      const occurrenceMs = taskOccurrenceMs(task, fromMs, now)
       if (occurrenceMs == null) continue
 
       // Prevent double-firing across a restart: skip if the task already ran at
       // or after the start of this scan window (its occurrence is already
       // recorded, so re-scanning the catch-up window must not fire it again).
+      // A one-shot task's single occurrence may predate the window (it waited
+      // in the retry queue, or the window moved past it), so its guard is the
+      // occurrence itself.
       const lastRun = scheduleLastRun.get(task.name) || 0
-      if (lastRun >= fromMs) continue
+      if (lastRun >= (task.runAt != null ? occurrenceMs : fromMs)) continue
+      // ONCE: while its delivery waits in the retry queue (busy, starting), the
+      // retry loop above owns it. Judging it here again would report it as a
+      // catch-up on every tick and, past catchUpMaxAge, delete it as stale
+      // under a live retry row -- a busy afternoon would lose the wake-up.
+      if (task.runAt != null && pendingKeys.has(`${task.name}@${task.agent || MAIN_AGENT_ID}`)) continue
 
       // How late is this occurrence, and is it still worth running? An
       // occurrence the owning tick never scanned (process down, dropped tick)
@@ -2808,6 +2839,9 @@ export function startScheduleRunner(): NodeJS.Timeout {
           ? [MAIN_AGENT_ID, ...listAgentNames().filter(a => isAgentRunning(a))]
           : [task.agent || MAIN_AGENT_ID]
         for (const agentName of missedTargets) appendTaskRun(task.name, agentName, 'missed')
+        // ONCE: a stale one-shot has no later occurrence, so it would sit in
+        // the task list forever. The 'missed' run above is its record.
+        if (task.runAt != null) removeScheduledTaskDir(task.name)
         continue
       }
       const lateCatchUpMs = decision === 'catch-up' ? ageMs : undefined
@@ -2858,6 +2892,10 @@ export function startScheduleRunner(): NodeJS.Timeout {
         scheduleLastRun.set(task.name, now)
         persistScheduleLastRun()
         for (const agentName of targetAgents) appendTaskRun(task.name, agentName, 'skipped')
+        // ONCE: lastRun now covers its only occurrence; left in place it
+        // would never fire and never leave the list. The API only creates
+        // type 'task' once-tasks (not quota-gated); this is the hand-edit case.
+        if (task.runAt != null) removeScheduledTaskDir(task.name)
         continue
       }
 

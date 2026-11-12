@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { MAIN_AGENT_ID } from '../config.js'
@@ -165,6 +165,17 @@ export interface ScheduledTask {
   // historical name); without one, the agent's binding for THIS provider is
   // resolved. An unknown value is ignored, as if unset.
   channelProvider?: ChannelProviderType
+  // ONCE (card fd941954): a one-shot task. When set (epoch ms), the runner
+  // ignores `schedule` for due-ness and fires the task once at this instant,
+  // then removes the task directory (also when the occurrence goes stale).
+  // `schedule` still holds a valid cron of the same minute, so a code path
+  // that does not know runAt shows a sane time and can at worst fire it once
+  // a year -- never every day.
+  runAt?: number
+  // ONCE: the inter-agent message id that asked for this wake-up (the anchor).
+  // One message anchors at most one once-task, ever (once-schedule.ts), so a
+  // turn started by a once-task cannot schedule the next one for itself.
+  originMsgId?: number
 }
 
 const CHANNEL_PROVIDER_VALUES: readonly ChannelProviderType[] = ['telegram', 'slack', 'discord', 'googlechat', 'teams']
@@ -206,7 +217,7 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
   const skillContent = hasSkill ? readFileOr(skillPath, '') : ''
   const { name, description, body } = parseSkillMdFrontmatter(skillContent)
 
-  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; requiresDesktop?: boolean; forceSend?: boolean; targetSession?: string; description?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: unknown; stuckAfterMinutes?: unknown; requires?: { mcp_servers?: unknown }; injectMetrics?: unknown; sendDigestDirect?: unknown; telegramChatId?: string; channelProvider?: unknown } = {}
+  let config: { schedule?: string; agent?: string; enabled?: boolean; createdAt?: number; type?: string; skipIfBusy?: boolean; requiresDesktop?: boolean; forceSend?: boolean; targetSession?: string; description?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: unknown; stuckAfterMinutes?: unknown; requires?: { mcp_servers?: unknown }; injectMetrics?: unknown; sendDigestDirect?: unknown; telegramChatId?: string; channelProvider?: unknown; runAt?: unknown; originMsgId?: unknown } = {}
   try {
     config = JSON.parse(readFileOr(configPath, '{}'))
   } catch { /* use defaults */ }
@@ -235,7 +246,20 @@ export function readScheduledTask(taskName: string): ScheduledTask | null {
     sendDigestDirect: config.sendDigestDirect === true,
     telegramChatId: typeof config.telegramChatId === 'string' && config.telegramChatId.trim() ? config.telegramChatId.trim() : undefined,
     channelProvider: parseChannelProvider(config.channelProvider),
+    runAt: parsePositiveInt(config.runAt),
+    originMsgId: parsePositiveInt(config.originMsgId),
   }
+}
+
+// A positive safe integer, or undefined for anything else (string, NaN, 0, float).
+export function parsePositiveInt(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : undefined
+}
+
+// ONCE: remove a one-shot task after it fired or went stale. No tombstone: a
+// once-task is never a shipped default, and a tombstone would block nothing.
+export function removeScheduledTaskDir(taskName: string): void {
+  rmSync(join(SCHEDULED_TASKS_DIR, taskName), { recursive: true, force: true })
 }
 
 // Only a finite number is a policy; anything else (string, null, NaN) is
@@ -275,7 +299,7 @@ export function listScheduledTasks(): ScheduledTask[] {
 
 export function writeScheduledTask(
   taskName: string,
-  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: number; stuckAfterMinutes?: number; injectMetrics?: boolean; sendDigestDirect?: boolean; telegramChatId?: string; channelProvider?: ChannelProviderType | null },
+  data: { description?: string; prompt?: string; schedule?: string; agent?: string; enabled?: boolean; type?: string; skipIfBusy?: boolean; forceSend?: boolean; targetSession?: string; command?: string; timeoutMs?: number; failThreshold?: number; preCheck?: string; catchUpMaxAgeMinutes?: number; stuckAfterMinutes?: number; injectMetrics?: boolean; sendDigestDirect?: boolean; telegramChatId?: string; channelProvider?: ChannelProviderType | null; runAt?: number; originMsgId?: number },
 ): void {
   const dir = join(SCHEDULED_TASKS_DIR, taskName)
   mkdirSync(dir, { recursive: true })
@@ -321,6 +345,8 @@ export function writeScheduledTask(
     const cp = parseChannelProvider(data.channelProvider)
     if (cp) config.channelProvider = cp
   }
+  if (data.runAt !== undefined) config.runAt = data.runAt
+  if (data.originMsgId !== undefined) config.originMsgId = data.originMsgId
   if (data.description !== undefined) config.description = data.description
   if (!config.createdAt) config.createdAt = Math.floor(Date.now() / 1000)
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
