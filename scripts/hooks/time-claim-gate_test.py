@@ -53,6 +53,76 @@ def write(root, text, name='x/report.md', **kw):
     return run(root['hook'], 'Write', {'file_path': os.path.join(root['dir'], 'shared', name), 'content': text}, **kw)
 
 
+
+# ---- inter-agent message, memory, daily log (Dave 39699): placeholder rule only ----
+
+MSG = "bash /Users/klodel/marveen/scripts/agent-msg.sh dave klodel - <<'TXT'\n"
+API = 'curl -s -X POST http://localhost:3420/api/'
+
+
+@case
+def block_agent_msg_heredoc_placeholder(root):
+    # Dave 39698, the case that went out: a placeholder measured time in a message to Klodel.
+    code, out, err = run(root['hook'], 'Bash', {'command': MSG + 'Kész, mérve 16:3x date.\nTXT'})
+    return code == 2 and '16:3x' in err and out == ''
+
+
+@case
+def block_wrapper_msg_and_close_placeholder(root):
+    h = root['hook']
+    return (run(h, 'Bash', {'command': "bash tools/kernel-msg.sh klodel - <<'TXT'\nlefutott 10:xx-kor\nTXT"})[0] == 2
+            and run(h, 'Bash', {'command': 'bash tools/msg-close.sh "kész 09:4X" 123'})[0] == 2)
+
+
+@case
+def block_api_messages_memories_daily_log(root):
+    h = root['hook']
+    return all(run(h, 'Bash', {'command': API + ep + " --data-binary @- <<'JSON'\n{\"content\":\"mérve 11:2x\"}\nJSON"})[0] == 2
+               for ep in ('messages', 'messages/77', 'memories', 'daily-log'))
+
+
+@case
+def block_message_body_from_data_file_and_stdin_file(root):
+    body = os.path.join(root['dir'], 'body.txt')
+    with open(body, 'w', encoding='utf-8') as fh:
+        fh.write('Pulzus: élesben, mérve 14:5x.\n')
+    h = root['hook']
+    return (run(h, 'Bash', {'command': API + 'messages --data-binary @' + body})[0] == 2
+            and run(h, 'Bash', {'command': 'bash scripts/agent-msg.sh pulzus klodel - < ' + body})[0] == 2
+            and run(h, 'Bash', {'command': 'bash scripts/agent-msg.sh pulzus klodel - <body.txt',
+                                'description': 'x'}, cwd=root['dir'])[0] == 2)  # relative: resolved against cwd
+
+
+@case
+def allow_message_future_time_rule_two_is_off(root):
+    # 346 "future" hits in a week of real messages were plans, deadlines and reset times: allowed in a message.
+    h = root['hook']
+    return all(run(h, 'Bash', {'command': MSG + t + '\nTXT'}, now='18:14')[0] == 0 for t in (
+        'Mért: a keret 100 %, nullázás 23:36.',
+        'mérve 18:10; deploy csak éjjel, 23:00 után',
+        'Kész, ha 19:30, mért forgalom mellett.'))
+
+
+@case
+def allow_message_reads_and_clean_sends(root):
+    h = root['hook']
+    return (run(h, 'Bash', {'command': 'curl -s -H "Authorization: Bearer x" http://localhost:3420/api/messages?agent=kernel'})[0] == 0
+            and run(h, 'Bash', {'command': MSG + 'Kész, mérve 18:12 (date).\nTXT'}, now='18:14')[0] == 0
+            and run(h, 'Bash', {'command': 'python3 x.py 2>&1 | bash scripts/agent-msg.sh a b -'})[0] == 0)
+
+
+@case
+def card_comment_keeps_the_future_rule(root):
+    # The message scope is narrower; a card comment is judged by both rules as before.
+    return run(root['hook'], 'Bash', {'command': KANBAN + " -d @- <<'J'\nmérve 18:30\nJ"}, now='18:14')[0] == 2
+
+
+@case
+def unrelated_msg_words_are_out_of_scope(root):
+    h = root['hook']
+    return (run(h, 'Bash', {'command': 'echo "sms.sh 10:xx"; cat agent-msg-notes.txt'})[0] == 0
+            and run(h, 'Bash', {'command': 'grep 10:xx /tmp/api-messages.log'})[0] == 0)
+
 # ---- BLOCK ----
 
 @case
