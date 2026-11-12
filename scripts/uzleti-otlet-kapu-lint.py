@@ -75,6 +75,27 @@ def site_hibak(b):
 # kutya, gyerek, szülő, sofőr, tulajdonos (szó elején: az "autós", "kutyás" is). VICCES mező = egy mondat idézőjelben.
 ZSENI_MOD = "--zseni" in sys.argv
 ZSENI_SZUKITO = ["autó", "kutya", "kutyá", "gyerek", "szülő", "szulo", "sofőr", "sofor", "tulajdonos"]
+# BIZONYITEK (Klodel 39531, Patrik TG 18089 "ennyire buta ostoba ötleteket nem láttam még soha"): a vak átnéző MEHET-je
+# a "Mit álmodtál?"-ra sem volt elég. --zseni-ben ötletenként kötelező egy BIZONYITEK sor: egy külföldön már működő app
+# vagy oldal neve + mért szám (letöltés / felhasználó / értékelés) + http(s) forrás + dátum (ÉÉÉÉ-HH-NN). "[search]",
+# "tipp" és "NINCS ADAT" a sorban bukik: ami nem mért, az nem bizonyíték.
+BIZ_DATUM = re.compile(r"(?<!\d)20\d\d[-.](0[1-9]|1[0-2])[-.](0[1-9]|[12]\d|3[01])(?!\d)")
+BIZ_URL = re.compile(r"https?://[^\s)\]>,;]+")
+BIZ_MERO = re.compile(r"(?i)letölt|felhasznál|értékel|download|install|user|rating|review|csillag|MAU|DAU|előfizető|subscriber")
+def bizonyitek_hibak(p):
+    b = re.search(r"(?m)^\s*[-*]?\s*BIZONYITEK:(.*)$", p)
+    if not b: return ["BIZONYITEK hiányzik (Klodel 39531, TG 18089: külföldön működő app/oldal + mért szám + forrás + dátum)"]
+    v = b.group(1)
+    if re.search(r"(?i)\[search\]|(?<!\w)tipp|nincs adat", v): return ["BIZONYITEK: [search] / tipp / NINCS ADAT nem bizonyíték"]
+    hibak = []
+    if not BIZ_URL.search(v): hibak.append("BIZONYITEK: nincs http(s) forrás")
+    if not BIZ_DATUM.search(v): hibak.append("BIZONYITEK: nincs dátum (ÉÉÉÉ-HH-NN)")
+    marad = BIZ_DATUM.sub(" ", BIZ_URL.sub(" ", v))
+    if not (re.search(r"\d", marad) and BIZ_MERO.search(marad)):
+        hibak.append("BIZONYITEK: nincs mért szám (letöltés/felhasználó/értékelés)")
+    if len(re.findall(r"[^\W\d_]{3,}", BIZ_MERO.sub(" ", marad))) < 1:
+        hibak.append("BIZONYITEK: nincs megnevezett app/oldal")
+    return hibak
 def zseni_hibak(p):
     hibak = []
     mi = re.search(r"(?m)^\s*[-*]?\s*MINDENKI:(.*)$", p)
@@ -162,7 +183,7 @@ def main(path):
             elif not (re.search(r"\d", vo.group(1)) or "NINCS ADAT" in vo.group(1).upper()):
                 hibak.append("VOLUMEN: se havi szám, se 'NINCS ADAT'")
         hibak += itthon_hibak(p, ITTHON_MOD)
-        if ZSENI_MOD: hibak += zseni_hibak(p)
+        if ZSENI_MOD: hibak += zseni_hibak(p) + bizonyitek_hibak(p)
         for k in ELUTASITOTT:
             if szokezdet(k, cim.lower()) or (k in ("halál","elhunyt","temet","gyász","hagyaték","végrendelet") and szokezdet(k, p.lower())): hibak.append(f"elutasított irány: {k}")
         if hibak:

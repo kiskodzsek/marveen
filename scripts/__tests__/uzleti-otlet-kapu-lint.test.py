@@ -124,6 +124,38 @@ check("'senkit' + one quoted sentence passes", zseni_err("- MINDENKI: senkit, mi
 check("'automata' is not 'autó'", zseni_err("- MINDENKI: senkit, a csomagautomata mindenkié\n" + JO_VICCES), "")
 check("without --zseni the fields are not required", zseni_err("- VOLUMEN: 10", mode="--x"), "")
 
+
+# Klodel 39531 (Patrik TG 18089): in --zseni every idea needs a BIZONYITEK line: a foreign app/site already working, a
+# measured number (downloads/users/ratings), an http(s) source and a date; "[search]", "tipp", "NINCS ADAT" fail.
+def biz_err(body):
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
+        f.write(f"## 1. Ötlet\n{body}\n")
+        path = f.name
+    try:
+        out = subprocess.run([sys.executable, "-I", LINT, path, "--zseni"], capture_output=True, text=True, timeout=20).stdout
+    finally:
+        os.unlink(path)
+    return "BIZONYITEK" in out
+
+
+BIZ_OK = "- BIZONYITEK: Wanna (US) 1,2 millió letöltés a Google Playen, https://play.google.com/store/apps/details?id=x, 2026-11-12"
+check("BIZONYITEK: name + measured downloads + source + date passes", biz_err(BIZ_OK), False)
+check("negative: no BIZONYITEK line fails", biz_err("- MINDENKI: senkit"), True)
+check("negative: [search] fails", biz_err(BIZ_OK + " [search]"), True)
+check("negative: tipp fails", biz_err(BIZ_OK.replace("1,2 millió", "tipp: sok")), True)
+check("negative: NINCS ADAT fails", biz_err("- BIZONYITEK: Wanna, letöltés NINCS ADAT, https://x.com, 2026-11-12"), True)
+check("negative: no http(s) source fails", biz_err(BIZ_OK.replace("https://play.google.com/store/apps/details?id=x", "Google Play")), True)
+check("negative: no date fails", biz_err(BIZ_OK.replace(", 2026-11-12", "")), True)
+check("negative: a number only in the URL and the date is not a measured number",
+      biz_err("- BIZONYITEK: Wanna letöltés, https://example.com/app/123, 2026-11-12"), True)
+R3 = os.path.join(HERE, "fixtures", "idea-gate-zseni-r3")
+for name in ("zseni-otlet-1112-r3-magnes.md", "zseni-otlet-1112-r3-radar.md", "zseni-otlet-1112-r3-szigma.md"):
+    out = subprocess.run([sys.executable, "-I", LINT, os.path.join(R3, name), "--zseni"], capture_output=True, text=True,
+                         timeout=20).stdout
+    lines = [l for l in out.splitlines() if l.startswith(("MEHET", "NEM MEGY"))]
+    check(f"negative, TG 18089: {name} fails on BIZONYITEK in every idea",
+          bool(lines) and all(l.startswith("NEM MEGY") and "BIZONYITEK" in l for l in lines), True)
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
     sys.exit(1)
