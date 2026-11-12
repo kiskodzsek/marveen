@@ -1154,6 +1154,112 @@ def creatorz_check(chat, text, reply_to):
             'akkor mehet, ha a válasz (reply_to) Balázs saját üzenetére megy, amelyben ő maga írta a szót.')
 
 
+
+# Klodel 39617 (Balázs group TG 5579 "ha 4. visszakérdezés után találsz ilyen cégeket holott megkérdeztem mi a magyar
+# piac"; second case today after Patrik TG 18042 "Mindegyik van itthon is"): TG 5550 said "Radar a mért magyar boltokban
+# személyre szabott domborzati térképet nem talált" without Meska and Pepita, and Meska sells three (Szigma 39612). The
+# lint measured the research file, not the Telegram reply. A reply that claims something is missing at home now needs
+# "ITTHON-MERT: <file>": the file passes the shared lint's ITTHON rule (--itthon; Radar's itthon_check.py rules live
+# there since #203/#204) AND every ITTHON block names Meska, Pepita and eMAG, each with a measured result or
+# "NINCS ADAT <reason>" (the site-probe line does not count as a shop). Patterns measured on Klodel's 2577 sent texts
+# of 7 days: 34 hits, all "not available here" claims (data-gap sentences such as "magyar mérés nincs" do not hit).
+ITTHON_VERB = r'(talál|kaph|árul|forgalmaz|létezik|érhető el|csinál|kínál|gyárt)'
+ITTHON_CLAIM = [
+    re.compile(r'(?i)\bitthon(\s+(még|viszont|pedig|is|sem|már))?\s+(nincs|sincs|hiányzik)\b'),
+    re.compile(r'(?i)\bitthon\s+nem\s*[:.,;)]'),
+    re.compile(r'(?i)\bitthon\b(\s+[\wáéíóöőúüű-]+){0,4}?\s+(nem|sem)\s+' + ITTHON_VERB),
+    re.compile(r'(?i)\bitthon\s+senki\s+(sem|nem)\b'),
+    re.compile(r'(?i)\bitthon\s+egyik\w*(\s+[\w-]+){0,2}\s+sem\b'),
+    re.compile(r'(?i)\b(magyar|hazai)\s+(bolt|webshop|piac|platform|szolgáltat|stúdió|ügynökség|alapítású|megfelel|'
+               r'változat|versenytárs|cég|app|termék)\w*[^.\n]{0,60}?(nem talál|nincs|sincs|nem kaph|nem árul)'),
+    re.compile(r'(?i)nincs\s+(magyar|hazai)\s+(megfelel|változat|bolt|versenytárs|kínál|termék|app|platform)'),
+]
+ITTHON_MERT_RE = re.compile(r'(?mi)^\s*ITTHON-M[EÉ]RT:[ \t]*(\S+)')
+ITTHON_SHOPS = {'meska': r'meska', 'pepita': r'pepita', 'emag': r'e-?mag'}
+ITTHON_RESULT = re.compile(r'(?i)\d|nincs találat|nem hozott találatot|nem talált')
+ITTHON_NOT_MEASURED = re.compile(r'(?i)nem mérhető|nem mért|(?<!\d)(403|404|410)(?!\d)|captcha')
+ITTHON_NO_DATA = re.compile(r'(?i)NINCS ADAT\W+\w[^\n]{9,}')
+ITTHON_SITE = re.compile(r'(?i)(?<!\w)site(:|-szűrt|-próba| szűrt)')
+
+
+def itthon_blocks(t):
+    out, lines = [], t.splitlines()
+    for i, ln in enumerate(lines):
+        if re.match(r'^\s*[-*]?\s*ITTHON:', ln):
+            blk = [ln]
+            for k in lines[i + 1:]:
+                if k.startswith('  ') and k.strip():
+                    blk.append(k)
+                else:
+                    break
+            out.append(blk)
+    return out
+
+
+def itthon_shop_gaps(blk):
+    """The shops of ITTHON_SHOPS that this ITTHON block does not answer (measured result or NINCS ADAT + reason)."""
+    gaps = []
+    for name, rx in ITTHON_SHOPS.items():
+        ok = False
+        for ln in blk:
+            # On a site-probe line the domains (emag.hu, ...) are absence evidence, not a shop search (Klodel 39550):
+            # they are cut out, the line's own shop name ("eMAG: NINCS ADAT ..., a site-próba pótolja") still counts.
+            if ITTHON_SITE.search(ln):
+                ln = re.sub(r'(?i)(?<![\w.])[\w-]+\.hu(?!\w)', ' ', ln)
+            if not re.search(r'(?i)(?<!\w)' + rx + r'(?!\w)', ln):
+                continue
+            if ITTHON_NO_DATA.search(ln) or (ITTHON_RESULT.search(ln) and not ITTHON_NOT_MEASURED.search(ln)):
+                ok = True
+                break
+        if not ok:
+            gaps.append(name)
+    return gaps
+
+
+def itthon_mert_check(text):
+    """None if the text claims no absence at home, or carries a valid ITTHON-MERT line; else the reason to block."""
+    t = unicodedata.normalize('NFC', text)
+    if not any(rx.search(t) for rx in ITTHON_CLAIM):
+        return None
+    need = ('ITTHON-KAPU (Klodel 39617, Balázs TG 5579 "megkérdeztem mi a magyar piac"): itthoni hiányt csak mérve '
+            'állíts. Írd a szövegbe: "ITTHON-MERT: <kutatási fájl>"; a fájl ITTHON mezője menjen át a közös linten '
+            '(scripts/uzleti-otlet-kapu-lint.py --itthon), és minden ITTHON-blokkban legyen Meska, Pepita és eMAG '
+            'mért eredménnyel, vagy "NINCS ADAT <indok>". Ha nem mérted, ne állítsd.')
+    m = ITTHON_MERT_RE.search(t)
+    if not m:
+        return need
+    tok = m.group(1)
+    path = os.path.realpath(tok if os.path.isabs(tok) else os.path.join(ROOT, tok))
+    if not path.startswith(os.path.realpath(ROOT) + os.sep):
+        return need + f' (a fájl a projekten kívül van: {tok})'
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            body = f.read(2_000_000)
+    except OSError as e:
+        return need + f' (a fájl nem olvasható: {tok}, {e.__class__.__name__})'
+    blocks = itthon_blocks(body)
+    if not blocks:
+        return need + f' (a fájlban nincs ITTHON mező: {tok})'
+    gaps = sorted({g for b in blocks for g in itthon_shop_gaps(b)})
+    if gaps:
+        return need + f' (hiányzó bolt az ITTHON-blokkban: {", ".join(gaps)})'
+    # The shared lint decides the ITTHON rule (measured, two shops, site probe). It runs as its own process with -I, so
+    # nothing it does at import reaches this hook; anything but a clean verdict blocks (fail closed).
+    try:
+        import subprocess
+        p = subprocess.run([sys.executable, '-I', IDEA_LINT, path, '--itthon'], capture_output=True, text=True,
+                           timeout=20, cwd=os.path.dirname(path))
+        verdicts = [ln for ln in p.stdout.splitlines() if ln.startswith(('MEHET', 'NEM MEGY'))]
+    except Exception as e:
+        return need + f' (a lint nem futott: {e.__class__.__name__})'
+    if not verdicts:
+        return need + f' (a lint nem adott ítéletet a fájlra; "## 1." szakaszok kellenek: {tok})'
+    # "NEM MEGY  1. <title>: <err>; <err>" -- a title may hold a colon, so the ITTHON error is searched, not split out
+    bad = [m.group(0).strip() for ln in verdicts for m in re.finditer(r'(?<![\w-])ITTHON(?: hiányzik|:)[^;]*', ln)]
+    if bad:
+        return need + f' (lint: {bad[0][:160]})'
+    return None
+
 def main():
     if sys.argv[1:2] == ['--ocr']:
         return warm_ocr(sys.argv[2:])
@@ -1189,6 +1295,10 @@ def main():
         cz = creatorz_check(chat, str(ti.get('text') or ''), ti.get('reply_to'))
         if cz:
             sys.stderr.write(cz + '\n')
+            return 2
+        im = itthon_mert_check(str(ti.get('text') or ''))
+        if im:
+            sys.stderr.write(im + '\n')
             return 2
     files = ti.get('files') or []
     errs = [e for e in (check(f) for f in files if f.lower().endswith(MEDIA)) if e]

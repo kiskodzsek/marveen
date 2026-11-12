@@ -46,6 +46,7 @@ HIANY = re.compile(r"(?i)(?<!\w)[ns]incs(en)?(?!\w)|nem találtam|nem találtunk
     r"|(?<![\w.,:])0(?![\w.,:])|egyik(ben)? sem|egyikben sincs")
 EREDMENY = re.compile(r"(?i)\d|nem hozott találatot|nem találtunk|nincs találat|„[^”]+”")
 NEM_MERT = re.compile(r"(?i)nem mérhető|nem mért|(?<!\d)(403|404|410)(?!\d)|captcha")
+BOLTOK += ["meska"]  # kézműves piactér: 3 személyre szabott domborzati térkép volt rajta (Klodel 39617, Szigma 39612)
 # Site-próba (Klodel 39454, Radar 39474): a 403/410-es bolt (eMAG) nem mérhető, mégis árulta a Rhode-ot és a Loop-ot.
 # Minden hiány-állításhoz kell keresőmotoros site-próba MIND a négy domainre, eredménnyel (a domain után, a következő
 # domainig; ha ott nincs, a sor maradékából: "(emag.hu, alza.hu): 0 találat"). Ha bármelyik site-próba találatot ad (szám > 0), a termék itthon kapható: a hiány-állítás bukik.

@@ -2063,6 +2063,101 @@ def idea_majsztro_mehet_from_queue(root):
             and fix and down and 'nem olvasható' in down)
 
 
+# Klodel 39617 (Balázs TG 5579 "megkérdeztem mi a magyar piac"): an "itthon nincs" claim in a reply needs
+# "ITTHON-MERT: <file>"; TG 5550 is the literal text that went out without Meska and Pepita (ledger, read-only).
+TG5550 = ('A „1000 helyről venni” kint igaz, itthon nem: Radar a mért magyar boltokban személyre szabott domborzati '
+          'térképet nem talált. Amit kint árulnak, ott a vevő maga jelöli be a helyeket, vagy kész mintát választ.\n\n'
+          'Három dolog, amit szerintem csak mi tudunk beletenni (ez javaslat, még nem mért):\n'
+          '1. A vevő semmit nem jelöl kézzel. Feltölti a telefonja fotóit vagy a Google helyelőzményeit, és mi '
+          'kirajzoljuk belőle az összes utat, évszámmal és útvonallal.\n'
+          '2. Minden helyhez tartozik egy kis felirat vagy QR-kód, ami az ottani fotókhoz és történethez visz. Ettől lesz '
+          'az övé, és nem egy térkép a sok közül.\n'
+          '3. Előnézet a saját falán: lefotózza a szobát, és megmutatjuk benne a kész darabot, a színeket a lakáshoz '
+          'igazítva.\nAz 1. pont személyes helyadat, ezért Lexnek és Viktornak előbb meg kell néznie.\n\n'
+          'Radar most azt méri, mit árulnak kint utazós falitérképből (kaparós, tűzős, világítós), mennyiért, és mi '
+          'hiányzik mindegyikből. A különlegességet ezzel ellenőrizzük, nem fejből.\n\n'
+          'ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (Meséld el!, Első éved, Receptkönyv, Köszönjük, '
+          'Marabello, Chats)\nFORRÁS: shared/k-f/ai-tervezes-termek-1112.md (Radar, ma) ')
+TG5550_BODY = TG5550.split('\n\nÖTLET-KAPU')[0]  # without the idea line, so only this gate speaks in a subprocess run
+ITTHON_OK = ('## 1. Személyre szabott domborzati térkép\n'
+             '- ITTHON: nincs magyar bolt, ami árulja (mérve, saját GET):\n'
+             '  - Meska: 0 találat („domborzati térkép”)\n'
+             '  - Pepita: 0 találat\n'
+             '  - eMAG: NINCS ADAT, 410 botvédelem, a site-próba pótolja\n'
+             '  - site-szűrt keresés: emag.hu 0; alza.hu 0; notino.hu „nincs találat”; douglas.hu 0.\n')
+
+
+def itthon_file(root, body, name='itthon.md'):
+    d = os.path.join(root, 'shared', 'k-f')
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, name), 'w', encoding='utf-8') as f:
+        f.write(body)
+    return f'shared/k-f/{name}'
+
+
+@case
+def itthon_tg5550_blocked(root):
+    # In-process: the literal TG 5550 is an absence claim without ITTHON-MERT (independent of the idea gates).
+    mod = gate_module()
+    mod.ROOT = root
+    why = mod.itthon_mert_check(TG5550)
+    rc, err = run(root, {'chat_id': GROUP, 'text': TG5550_BODY})
+    return bool(why) and '5579' in why and rc == 2 and 'ITTHON-KAPU' in err and 'Meska' in err
+
+
+@case
+def itthon_measured_file_allowed(root):
+    rel = itthon_file(root, ITTHON_OK)
+    rc, err = run(root, {'chat_id': GROUP, 'text': TG5550_BODY + '\nITTHON-MERT: ' + rel})
+    return rc == 0 and not err.strip()
+
+
+@case
+def itthon_file_must_name_meska_pepita_emag(root):
+    res = []
+    for body in (ITTHON_OK.replace('  - Meska: 0 találat („domborzati térkép”)\n', ''),            # no Meska
+                 ITTHON_OK.replace('  - Pepita: 0 találat\n', ''),                                  # no Pepita
+                 ITTHON_OK.replace('  - eMAG: NINCS ADAT, 410 botvédelem, a site-próba pótolja\n', ''),  # eMAG only in site line
+                 ITTHON_OK.replace('Meska: 0 találat („domborzati térkép”)', 'Meska: 410'),          # not measured
+                 ITTHON_OK.replace('NINCS ADAT, 410 botvédelem, a site-próba pótolja', 'NINCS ADAT')):  # no reason
+        rel = itthon_file(root, body)
+        res.append(run(root, {'chat_id': GROUP, 'text': TG5550_BODY + '\nITTHON-MERT: ' + rel}))
+    names = ['meska', 'pepita', 'emag', 'meska', 'emag']
+    return all(rc == 2 and n in err for (rc, err), n in zip(res, names))
+
+
+@case
+def itthon_file_must_pass_the_lint(root):
+    # No "mért" word, and only one shop with a result (eMAG is NINCS ADAT): the shared lint's ITTHON rule fails it.
+    bad = ITTHON_OK.replace('(mérve, saját GET)', '(saját GET)')
+    rc, err = run(root, {'chat_id': GROUP, 'text': TG5550_BODY + '\nITTHON-MERT: ' + itthon_file(root, bad)})
+    nosec = ITTHON_OK.replace('## 1. ', '# ')  # no "## N." section: the lint gives no verdict
+    rc2, err2 = run(root, {'chat_id': GROUP, 'text': TG5550_BODY + '\nITTHON-MERT: ' + itthon_file(root, nosec, 'b.md')})
+    return rc == 2 and 'lint:' in err and rc2 == 2 and 'ítéletet' in err2
+
+
+@case
+def itthon_mert_line_forms(root):
+    rel = itthon_file(root, ITTHON_OK)
+    texts = [TG5550_BODY + '\nITTHON-MERT: shared/k-f/nincs-ilyen.md', TG5550_BODY + '\nITTHON-MERT: /etc/hosts',
+             TG5550_BODY + '\nForrás, ITTHON-MERT: ' + rel, TG5550_BODY + '\nITTHON-MERT:',
+             TG5550_BODY + '\nITTHON-MERT: ' + itthon_file(root, '## 1. X\n- Leírás: nincs ITTHON mező\n', 'c.md')]
+    return all(run(root, {'chat_id': GROUP, 'text': t})[0] == 2 for t in texts)
+
+
+@case
+def itthon_claims_from_the_ledger_detected(root):
+    # Real sentences (Klodel's sent texts, 2026-11-12) are claims; data-gap sentences are not.
+    mod = gate_module()
+    mod.ROOT = root
+    claims = ['Itthon egyiknek sem találtunk megfelelőjét az app-boltokban.', 'Magyar boltban nem találtunk ilyet.',
+              'Kint 41 ezer felhasználó, itthon nincs ilyen app.', 'Itthon senki nem csinálja.',
+              'Itthon személyre szabott változatot nem találtunk.', 'Nincs magyar megfelelője.']
+    plain = ['Magyar bevételi adat (RPM) nincs.', 'A magyar mérés pedig nincs meg.', 'Itthon is kapható a Meskán.',
+             'Hogy itthon kellene-e, azt nem tudjuk.', 'Kész a riport.']
+    return (all(mod.itthon_mert_check(t) for t in claims) and not any(mod.itthon_mert_check(t) for t in plain))
+
+
 def main():
     bad = 0
     for fn in CASES:
