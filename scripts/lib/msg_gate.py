@@ -43,10 +43,24 @@ Two rules:
    verb right after "ne"/"nem" is not a trigger either. Zero-width characters are ignored.
    Known limit: the gate sees agent-msg.sh only; a raw POST /api/messages is not gated.
 
+4. SPEC LOCK (Klodel 38950, hibanapló 2026-11-12 08:24): Klodel released the code of our own system
+   (card d9bc643b) with agent-msg before Patrik approved the specification; Patrik TG 17862: "be kéne
+   fejezni a specifikaciot mert én még nem akarom hfejlesszetek hülyeségeket". store/spec-zar.json
+   lists locked cards: {"<card id>": "<reason>"} or {"<card id>": {"reason": "...", "keywords": [...]}}.
+   A text from SPEC_FROM (default "klodel") that names a locked card id or one of its keywords AND a
+   code-release word (kód, repó-váz, implement, worktree, PR, push, első szelet) is refused unless it
+   carries a line
+       SPEC-OK: TG <number>
+   A revocation passes: a text that starts with VISSZAVONVA <msg_id> and says the code is not on now
+   ("kód ... nincs", "ne pusholj"). Only the revocation form is exempt, a plain negation is not, so
+   "nem kell PR, de indulhat a kód" stays refused. A missing lock file means no lock; an unreadable or
+   malformed one is a gate failure (exit 4), never a silent "nothing locked".
+
 Env (the suite uses them): MARVEEN_MSG_GATE_SECRET_SRC, MARVEEN_MSG_GATE_STRICT (comma list),
 MARVEEN_MSG_GATE_MAX_CHARS, MARVEEN_MSG_GATE_OWN_DOMAINS (comma list), MARVEEN_MSG_GATE_STOP_FROM
-(comma list).
+(comma list), MARVEEN_MSG_GATE_SPEC_LOCK (path), MARVEEN_MSG_GATE_SPEC_FROM (comma list).
 """
+import json
 import os
 import re
 import sys
@@ -195,6 +209,62 @@ def stop_reason(text):
             'ne csináld; a "ne állítsd le" nem az). Ha nem állította le, ne állítsd le.')
 
 
+# Rule 4. Matched against fold(text), like rule 3.
+DEFAULT_SPEC_LOCK = os.path.join(HERE, '..', '..', 'store', 'spec-zar.json')
+CODE_WORD = re.compile(_B + r'(?:kod|repo[\s-]*vaz|implement|worktree|pr(?![a-z])|push|elso\s+szelet)')
+SPEC_OK_LINE = re.compile(r'^[ \t]*spec-ok:[ \t]*tg[ \t]*\d+[ \t]*$', re.M)
+# "Kód, repó-váz, próba most NINCS", "ne pusholj": a code word with "nincs" after it in the same clause, or "ne"
+# right before it.
+NO_CODE = re.compile(r'(?:' + _B + r'(?:kod|repo[\s-]*vaz|implement|worktree|push|elso\s+szelet)[^.!?\n]{0,40}?'
+                     r'(?<![a-z0-9])nincs(?![a-z0-9])|' + _B + r'ne\s+(?:pushol|kodol|implemental))')
+
+# The revocation opens the text, after an optional "Klodel -> Kernel:" header (38944 starts that way).
+REVOKE_SPEC = re.compile(r'^\s*(?:[a-z]+\s*->\s*[a-z]+(?:\s*\([^)\n]*\))?\s*:\s*)?visszavonva[\s:]+(?:a\s+)?\d{4,}')
+
+
+def load_spec_locks(path):
+    """{card id: [folded keywords]}. Missing file: no lock. Unreadable or malformed: the gate fails (exit 4)."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        die('spec lock file unreadable or not JSON: %s' % path)
+    if not isinstance(raw, dict):
+        die('spec lock file is not an object: %s' % path)
+    locks = {}
+    for card, v in raw.items():
+        if not isinstance(card, str) or not re.fullmatch(r'[0-9a-f]{8}', card.lower()):
+            die('spec lock: a key is not an 8-hex card id')
+        kws = v.get('keywords', []) if isinstance(v, dict) else []
+        if not (isinstance(v, str) or isinstance(v, dict)) or not isinstance(kws, list) \
+                or not all(isinstance(k, str) and k.strip() for k in kws):
+            die('spec lock: card %s has a malformed value' % card)
+        locks[card.lower()] = [fold(k).strip() for k in kws]
+    return locks
+
+
+def spec_lock_reason(text, locks):
+    """None if no locked card is released for code, else the refusal reason (names the card only)."""
+    folded = fold(text)
+    hit = None
+    for card, kws in locks.items():
+        if re.search(r'(?<![0-9a-f])' + card + r'(?![0-9a-f])', folded) or any(
+                re.search(_B + r'\s+'.join(map(re.escape, k.split())) + r'(?![a-z0-9])', folded) for k in kws):
+            hit = card
+            break
+    if hit is None or not CODE_WORD.search(folded):
+        return None
+    if SPEC_OK_LINE.search(folded):
+        return None
+    if REVOKE_SPEC.match(folded) and NO_CODE.search(folded):
+        return None
+    return ('kód-kiadás zárolt kártyára (%s, store/spec-zar.json) Patrik spec-OK-ja nélkül. Amíg Patrik a '
+            'specifikációt jóvá nem hagyja, kód, repó-váz, worktree, PR, push nem indul. Ha jóváhagyta, tegyél bele '
+            'egy sort: SPEC-OK: TG <szám>.' % hit)
+
+
 def csv_env(name, default):
     return [x.strip().lower() for x in os.environ.get(name, default).split(',') if x.strip()]
 
@@ -247,6 +317,11 @@ def main(argv):
 
     if frm.lower() in csv_env('MARVEEN_MSG_GATE_STOP_FROM', 'klodel'):
         r = stop_reason(text)
+        if r:
+            reasons.append(r)
+
+    if frm.lower() in csv_env('MARVEEN_MSG_GATE_SPEC_FROM', 'klodel'):
+        r = spec_lock_reason(text, load_spec_locks(os.environ.get('MARVEEN_MSG_GATE_SPEC_LOCK', DEFAULT_SPEC_LOCK)))
         if r:
             reasons.append(r)
 
