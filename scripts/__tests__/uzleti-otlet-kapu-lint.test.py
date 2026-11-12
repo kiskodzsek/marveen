@@ -61,7 +61,8 @@ def itthon_err(body, mode="--itthon"):
     return re.search(r"(?<!-)ITTHON", out) is not None  # not the KERESLET-ITTHON field of --problema
 
 
-MERT2 = "- ITTHON: mért (saját GET):\n  - dm: „nem hozott találatot”;\n  - Vatera: 0;\n  - Nem mérhető: eMAG (410)."
+SITE4 = "\n  - site-szűrt keresés: emag.hu 0; alza.hu 0; notino.hu „nincs találat”; douglas.hu 0."
+MERT2 = "- ITTHON: mért (saját GET):\n  - dm: „nem hozott találatot”;\n  - Vatera: 0;\n  - Nem mérhető: eMAG (410)." + SITE4
 check("negative, TG 18042: 'nincs magyar bolt [search]' fails", itthon_err("- ITTHON: nincs magyar bolt, ami árulja [search]."), True)
 check("negative: 'nem találtam [search]' fails", itthon_err("- ITTHON: magyar webshopot nem találtam [search]."), True)
 check("negative: 'egyikben sincs [search]' fails", itthon_err("- ITTHON: egyikben sincs ilyen termék [search]."), True)
@@ -76,6 +77,21 @@ check("measured list with two shops passes", itthon_err(MERT2), False)
 check("'mérve' counts as measured", itthon_err(MERT2.replace("mért (saját GET)", "mérve (saját GET)")), False)
 check("a field that claims no absence passes", itthon_err("- ITTHON: kapható: Decathlon 92 termék [search]."), False)
 check("without --itthon a missing field is not required", itthon_err("- VOLUMEN: 10", mode="--x"), False)
+
+# Klodel 39454 / Radar 39474: the eMAG (410) sold Rhode and Loop; a site-filtered search on all four domains is required.
+MERT2_NOSITE = MERT2.replace(SITE4, "")
+check("negative, 39454: measured shops but no site probe fails", itthon_err(MERT2_NOSITE), True)
+check("negative: a site probe missing douglas.hu fails",
+      itthon_err(MERT2.replace("; douglas.hu 0.", ".")), True)
+check("negative, Rhode/Loop: a site probe WITH hits fails (the product is sold here)",
+      itthon_err(MERT2.replace("emag.hu 0", "emag.hu 3 találat")), True)
+check("negative: a domain named without a result fails",
+      itthon_err(MERT2.replace("alza.hu 0", "alza.hu megnézve")), True)
+check("all four site probes at 0 with two measured shops passes", itthon_err(MERT2), False)
+check("Radar's form: one result after a domain list passes",
+      itthon_err(MERT2.replace(SITE4, "\n  - site-szűrt keresés (emag.hu, alza.hu, notino.hu, douglas.hu): 0 találat.")), False)
+check("negative: in a domain list the hit of the next domain is not borrowed",
+      itthon_err(MERT2.replace(SITE4, "\n  - site: emag.hu, alza.hu 0, notino.hu 0, douglas.hu 2 találat.")), True)
 
 if FAILS:
     print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
