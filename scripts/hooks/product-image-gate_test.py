@@ -1512,7 +1512,7 @@ def izles_not_asked_on_non_marketing(root):
 
 
 PRIV_OK ='PRIVÁT-OK: Patrik privátban kérdezte, privát ügy\n'
-IDEA_LINE = 'ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel összevetve)\n'
+IDEA_LINE = 'ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel összevetve)\nATNEZO: MEHET a1b2c3d4e5\n'
 
 
 @case
@@ -1572,7 +1572,7 @@ def idea_irany_word_start_only(root):
 def idea_group_gated(root):
     # Patrik csoport TG 4978: the group is gated too, and "irány" triggers like "ötlet".
     rc, _ = run(root, {'chat_id': GROUP, 'text': 'Négy új irány: évkönyv.'})
-    rc2, _ = run(root, {'chat_id': GROUP, 'text': 'Új irány.\nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve: 6 termék'})
+    rc2, _ = run(root, {'chat_id': GROUP, 'text': 'Új irány.\nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve: 6 termék\nATNEZO: MEHET a1b2c3d4e5'})
     rc3, _ = run(root, {'chat_id': GROUP, 'text': 'Radar dolgozik.'})
     rc4, _ = run(root, {'chat_id': GROUP, 'text': '📊 ÉLŐ ÁLLAPOT · frissítve 10:31\nÚj üzletág: új irány'})
     return rc == 2 and rc2 == 0 and rc3 == 0 and rc4 == 0
@@ -1708,7 +1708,7 @@ def idea_refused_direction_inside_marker_line_blocked(root):
     # A negation in the marker line is the declaration the gate asks for (TG 17460: "nem AI-tanácsadás"): it passes.
     # In the body a negation gets no pass.
     neg_line, _ = run(root, {'chat_id': GROUP, 'text': 'ÖTLET-KAPU: nem Marabel/könyv, nem AI-tanácsadás, nem telefonos '
-                                                       'asszisztens, termékpaletta ellenőrizve\nÚj ötlet: kalkulátor.'})
+                                                       'asszisztens, termékpaletta ellenőrizve\nATNEZO: MEHET a1b2c3d4e5\nÚj ötlet: kalkulátor.'})
     neg_body, _ = run(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: nem recepciós, hanem kalkulátor.'})
     return all(r == 2 for r in hits) and ok == 0 and neg_line == 0 and neg_body == 2
 
@@ -1919,6 +1919,62 @@ def book_image_needs_no_eltunt(root):
     rc, _ = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
     return rc == 0
 
+# Klodel 39520 (Patrik TG 18075 "ez hülyeség"): an ÖTLET-KAPU text needs the blind reviewer's ATNEZO line.
+TG18074 = ('Megvan az első. Szigma és Mágnes egymástól függetlenül ugyanoda jutott:\n\n'
+           'Sorbanállás-mérő. A postán, orvosnál, kormányablakban vagy a bolti pénztárnál két gomb van: „itt vagyok, '
+           'sorban állok” és „sorra kerültem”. Az app ebből kiszámolja, hol mennyit kell várni napszak szerint, a '
+           'várakozásért pedig jelvény jár (pl. „Türelem Nagymestere”).\n'
+           '• Mindenkit érint: sorban állni mindenki szokott, 16 évestől 70 évesig, városban és falun is. Csak az marad '
+           'ki, akinek nincs okostelefonja, ahogy a Budicheckből is.\n'
+           '• Vicces mondat (Mágnesé): „Mindig a másik sor halad gyorsabban. Most végre számokkal.” Szigmáé: „47 perc a '
+           'postán, előttem 6 ember és 1 ablak: ez már nem sor, hanem életforma.”\n'
+           '• Itthon: a Google Térkép becsül forgalmasságot, a Kormányablak-app pedig várakozási időt. A Telex szerint az '
+           'utóbbi hónapokig hibásan mutatta. Olyat, ahol az emberek maguk jelzik a sort, viccesen, jelvényekkel, nem '
+           'találtunk.\n'
+           '• Gyenge pont: indulásnál üres, amíg kevesen jelzik a sort. A pénz még csak tipp: a hivatalok és a boltok '
+           'fizethetnek a valós várakozási adatokért.\n\n'
+           'Radar ötletei még jönnek, és a független átnéző 15:00-ra rangsorol.\n\n'
+           'ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (Meséld el!, Első éved, Receptkönyv, Köszönjük, '
+           'Marabello, Chats)\n'
+           'PRIVÁT-OK: Patrik privát kérése (TG 18069), új üzletág')
+
+
+@case
+def idea_tg18074_without_reviewer_blocked(root):
+    # The exact text of TG 18074: a valid ÖTLET-KAPU line, no ATNEZO line -> blocked, and the message says why.
+    rc, err = run(root, {'chat_id': PRIV, 'text': TG18074})
+    rc2, _ = run(root, {'chat_id': GROUP, 'text': TG18074})
+    return rc == 2 and rc2 == 2 and 'ATNEZO: MEHET' in err and '18075' in err
+
+
+@case
+def idea_tg18074_with_reviewer_id_allowed(root):
+    return run(root, {'chat_id': PRIV, 'text': TG18074 + '\nATNEZO: MEHET agent-task-7f3a9c'})[0] == 0
+
+
+@case
+def idea_reviewer_file_must_say_mehet(root):
+    os.makedirs(os.path.join(root, 'shared', 'k-f'), exist_ok=True)
+    with open(os.path.join(root, 'shared', 'k-f', 'atnezo-ok.md'), 'w', encoding='utf-8') as f:
+        f.write('Vak átnéző ítélete: MEHET (1. ötlet)\n')
+    with open(os.path.join(root, 'shared', 'k-f', 'atnezo-javitando.md'), 'w', encoding='utf-8') as f:
+        f.write('Vak átnéző ítélete: JAVÍTANDÓ, nem megy\n')
+    ok = run(root, {'chat_id': GROUP, 'text': TG18074 + '\nATNEZO: MEHET shared/k-f/atnezo-ok.md'})[0]
+    bad = run(root, {'chat_id': GROUP, 'text': TG18074 + '\nATNEZO: MEHET shared/k-f/atnezo-javitando.md'})[0]
+    missing = run(root, {'chat_id': GROUP, 'text': TG18074 + '\nATNEZO: MEHET shared/k-f/nincs-ilyen.md'})[0]
+    outside = run(root, {'chat_id': GROUP, 'text': TG18074 + '\nATNEZO: MEHET /etc/hosts'})[0]
+    return ok == 0 and bad == 2 and missing == 2 and outside == 2
+
+
+@case
+def idea_reviewer_line_forms(root):
+    texts_bad = [TG18074 + '\nATNEZO: MEHET', TG18074 + '\nATNEZO: MEHET abc', TG18074 + '\nATNEZO: JAVÍTANDÓ x1y2z3w4',
+                 TG18074 + '\nATNEZO: nincs-otlet ok', TG18074 + '\nMegjegyzés: ATNEZO: MEHET a1b2c3d4e5']
+    texts_ok = ['Állapot: Radar ötletei még jönnek.\n' + IDEA_LINE.split('\n')[0] + '\nATNEZO: nincs-otlet csak állapot, új ötlet nincs benne',
+                TG18074 + '\nATNÉZŐ: MEHET a1b2c3d4e5']
+    return (all(run(root, {'chat_id': GROUP, 'text': t})[0] == 2 for t in texts_bad)
+            and all(run(root, {'chat_id': GROUP, 'text': t})[0] == 0 for t in texts_ok))
+
 
 def main():
     bad = 0
@@ -1933,3 +1989,4 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+

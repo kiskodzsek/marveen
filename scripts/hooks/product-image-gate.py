@@ -1007,6 +1007,43 @@ def refused_in_text(t):
     return [k for k in banned if k not in IDEA_TEXT_SKIP and word_start(k, body)]
 
 
+# Klodel 39520 (hibanapló 2026-11-12 14:28, Patrik TG 18075 "ez hülyeség"): the queue-meter idea went to Patrik (TG
+# 18074) with a valid ÖTLET-KAPU line but without the independent blind reviewer Klodel had promised. A text with an
+# ÖTLET-KAPU line now also needs "ATNEZO: MEHET <agent-task id or file>" (the reviewer's verdict), or, when the text
+# carries no new idea (status only), "ATNEZO: nincs-otlet <reason>". A file reference must exist (relative to the
+# project dir or absolute, inside the project dir) and contain the word MEHET; an id is at least 6 characters of [A-Za-z0-9_-].
+ATNEZO_RE = re.compile(r'(?mi)^\s*ATN[EÉ]Z[OŐ]:\s*(MEHET|nincs-[oö]tlet)\b[ \t]*(.*)$')
+ATNEZO_ID = re.compile(r'[A-Za-z0-9_-]{6,}')
+
+
+def atnezo_check(t):
+    """None if the ÖTLET-KAPU text has a valid ATNEZO line, else the reason to block."""
+    need = ('ÖTLET-KAPU (Klodel 39520, Patrik TG 18075): ötletet csak a független vak átnéző MEHET-je után küldj. Írd a '
+            'szövegbe: "ATNEZO: MEHET <agent-task azonosító vagy az ítélet fájlja>"; ha nincs benne új ötlet, csak '
+            'állapot: "ATNEZO: nincs-otlet <ok>".')
+    for m in ATNEZO_RE.finditer(t):
+        kind, ref = m.group(1).lower(), m.group(2).strip()
+        if kind.startswith('nincs'):
+            if len(ref) >= 10:
+                return None
+            continue
+        tok = ref.split()[0] if ref else ''
+        if '/' in tok:
+            path = os.path.realpath(tok if os.path.isabs(tok) else os.path.join(ROOT, tok))
+            try:
+                if not path.startswith(os.path.realpath(ROOT) + os.sep):
+                    raise OSError('outside the project dir')
+                with open(path, encoding='utf-8', errors='replace') as f:
+                    if re.search(r'(?<!\w)MEHET(?!\w)', f.read(1_000_000)):
+                        return None
+            except OSError:
+                pass
+            return need + f' (a fájl nem olvasható vagy nincs benne MEHET: {tok})'
+        if ATNEZO_ID.fullmatch(tok):
+            return None
+    return need
+
+
 def idea_check(text):
     """Klodel 33881: a private-chat text that mentions an idea ("ötlet") passes only with an "ÖTLET-KAPU:" line that
     contains both "nem Marabel/könyv" and "termékpaletta ellenőrizve". Klodel 38049: and it names no direction Patrik
@@ -1025,7 +1062,7 @@ def idea_check(text):
     for ln in t.splitlines():
         s = ln.strip()
         if s.upper().startswith(IDEA_MARK) and all(n in s.lower() for n in IDEA_NEEDS):
-            return None
+            return atnezo_check(t)
     return ('ÖTLET-KAPU: új irány ne legyen Marabel/könyv-variáció, AI-tanácsadás, saját rendszer eladása; vesd össze '
             'a 6 termékkel (memória new-direction-start-from-market). Ha megvan, írd a szövegbe: "ÖTLET-KAPU: nem '
             'Marabel/könyv, termékpaletta ellenőrizve <mivel vetetted össze>".')
