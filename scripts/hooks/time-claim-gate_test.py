@@ -321,6 +321,20 @@ def block_shell_target_after_many_other_redirects(root):
 
 
 @case
+def bounded_time_with_many_cds(root):
+    # Viktor 39257 LOW: 20 relative .md words x 2000 distinct cds took 4 s; now the bases are capped.
+    import time
+    cds = ''.join(f'cd /shared/d{i}; ' for i in range(3000))
+    words = ' '.join(f'> shared/x/w{i}.md' for i in range(20))
+    t = time.time()
+    code = _sh(root, cds + f'echo "mérve 23:59" {words}', cwd='/')
+    fast = time.time() - t < 2.0
+    # The same cd repeated 3000 times is one base, so the real target stays in reach.
+    dup = _sh(root, f'cd {root["dir"]}; ' * 3000 + "cat >> shared/x/n.md <<'EOF'\nmérve 23:59\nEOF", cwd='/')
+    return code == 0 and fast and dup == 2
+
+
+@case
 def pass_shell_write_out_of_scope_or_clean(root):
     shared_md = os.path.join(root['dir'], 'shared', 'x', 'n.md')
     with open(shared_md, 'w', encoding='utf-8') as fh:
