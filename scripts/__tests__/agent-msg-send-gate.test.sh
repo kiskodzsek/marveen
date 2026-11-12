@@ -225,6 +225,25 @@ ok "stop: accent-free quote \"ezt allitsuk le\": sent" "$(sent)" "rc=$RC posts=$
 text "targytalan, allj le"
 run klodel radar
 ok "stop: an accent-free trigger is caught too: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# Klodel 39243: Patrik TG 4943 "nem azt mondtam zárd le" denies a stop; quoted in a brief it is not a stop order
+text 'Brief (ea036ae1). Kérés szó szerint, Patrik TG 4943: "nem azt mondtam zárd le, csak nem látom hogy lehetne őket jól csinálni"'
+run klodel radar
+ok "stop: TG 4943 \"nem azt mondtam zárd le\" quoted in a brief: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Patrik: nem azt kértem, hogy zárd le, hanem hogy nézd meg.'
+run klodel radar
+ok "stop: \"nem azt kértem, hogy zárd le\": sent" "$(sent)" "rc=$RC posts=$POSTS"
+# negative: the denial is narrow; a stop after it in the same sentence still counts
+text 'Nem azt mondtam, hogy folytasd, hanem zárd le.'
+run klodel radar
+ok "stop: \"nem azt mondtam, hogy folytasd, hanem zárd le\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Nem azt mondtam zárd le. Állj le a K+F-szállal.'
+run klodel radar
+ok "stop: a denied stop next to a real \"állj le\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+# negative: the denial does not unlock a stop either
+text 'Állj le.
+LEÁLLÍTÁS-OK: TG 4943 "nem azt mondtam zárd le"'
+run klodel radar
+ok "stop: LEÁLLÍTÁS-OK quoting \"nem azt mondtam zárd le\" does not unlock: refused" "$(refused)" "rc=$RC posts=$POSTS"
 text "VISSZAVONVA a 37874 leállítás: Patrik TG 5297 'ne allitsd le'. A 37872 MEGY tovább."
 run klodel radar
 ok "stop: Klodel's revocation of a stop (37875 shape): sent" "$(sent)" "rc=$RC posts=$POSTS"
