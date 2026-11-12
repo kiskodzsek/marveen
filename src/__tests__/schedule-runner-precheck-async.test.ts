@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -13,6 +13,16 @@ import {
   type PreCheckResult,
 } from '../web/schedule-runner.js'
 import type { ScheduledTask } from '../web/scheduled-tasks-io.js'
+
+// SCHEDTRUST1112: this file is about the pre-check / command mechanics, so its
+// fixture tasks count as owner-approved; the trust gate itself (untrusted ->
+// no bash, agent framing) is covered in schedule-trust.test.ts.
+vi.mock('../web/schedule-trust.js', () => ({
+  scheduleTrustOf: () => 'approved',
+  isOwnerTrusted: () => true,
+  alertScheduleTrust: () => {},
+  ensureScheduleTrustBaseline: () => null,
+}))
 
 // df2e0d97 2a: the pending-retry loop re-ran a task's preCheck on every 15 s
 // tick through spawnSync, holding the dashboard's event loop for the whole

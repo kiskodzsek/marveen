@@ -31,6 +31,15 @@ const mockListScheduledTasks = vi.fn(() => [] as ScheduledTask[])
 let duringPreCheck: () => void = () => {}
 let preCheckRuns = 0
 
+// SCHEDTRUST1112: this file is about the pre-check / command mechanics, so its
+// fixture tasks count as owner-approved; the trust gate itself (untrusted ->
+// no bash, agent framing) is covered in schedule-trust.test.ts.
+vi.mock('../web/schedule-trust.js', () => ({
+  scheduleTrustOf: () => 'approved',
+  isOwnerTrusted: () => true,
+  alertScheduleTrust: () => {},
+  ensureScheduleTrustBaseline: () => null,
+}))
 vi.mock('node:child_process', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:child_process')>()
   return {

@@ -6562,6 +6562,8 @@ function makeScheduleRow(task) {
     const row = document.createElement('div')
     row.className = 'schedule-row'
     const agent = scheduleAgents.find(a => a.name === task.agent) || { name: task.agent || mainAgentId(), avatar: '/api/marveen/avatar', label: task.agent || mainAgentId() }
+    // SCHEDTRUST1112: agent / mismatch run agent-framed until the owner approves.
+    const needsApproval = task.trust === 'agent' || task.trust === 'mismatch'
 
     row.innerHTML = `
       <div class="schedule-agent-avatar">
@@ -6571,6 +6573,7 @@ function makeScheduleRow(task) {
         <div class="schedule-title">
           ${escapeHtml(task.description || task.name)}
           ${task.type === 'heartbeat' ? '<span class="badge badge-heartbeat">💓 heartbeat</span>' : ''}
+          ${needsApproval ? `<span class="badge badge-agent-authored" title="${escapeHtml(t('tasks.trust.hint'))}">${escapeHtml(t(task.trust === 'mismatch' ? 'tasks.trust.mismatch' : 'tasks.trust.agent'))}</span>` : ''}
           <span class="badge ${task.enabled ? 'badge-active' : 'badge-paused'}">${task.enabled ? t('tasks.status.active') : t('tasks.status.paused')}</span>
         </div>
         <div class="schedule-meta">
@@ -6580,6 +6583,9 @@ function makeScheduleRow(task) {
         </div>
       </div>
       <div class="schedule-actions">
+        ${needsApproval ? `<button class="btn-icon" data-action="approve" title="${escapeHtml(t('tasks.btn.approve'))}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        </button>` : ''}
         <button class="btn-icon" data-action="run" title="${t('tasks.btn.run_now')}">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
         </button>
@@ -6611,6 +6617,19 @@ function makeScheduleRow(task) {
         else showToast('Hiba: ' + (data.error || r.status))
         loadSchedules()
       } catch { showToast(t('tasks.toast.run_error')) }
+    })
+
+    const approveBtn = row.querySelector('[data-action="approve"]')
+    if (approveBtn) approveBtn.addEventListener('click', async (e) => {
+      e.stopPropagation()
+      if (!confirm(t('tasks.confirm.approve'))) return
+      try {
+        const r = await fetch(`/api/schedules/${encodeURIComponent(task.name)}/approve`, { method: 'POST' })
+        const data = await r.json().catch(() => ({}))
+        if (r.ok) showToast(t('tasks.toast.approved'))
+        else showToast('Hiba: ' + (data.error || r.status))
+        loadSchedules()
+      } catch { showToast(t('common.error')) }
     })
 
     row.querySelector('[data-action="toggle"]').addEventListener('click', async (e) => {

@@ -20,6 +20,7 @@ import { readClaudePlansState } from './claude-plans-state.js'
 import {
   SCHEDULED_TASKS_DIR, readScheduledTask, readRemovedDefaultTasks, writeScheduledTask,
 } from './scheduled-tasks-io.js'
+import { approveScheduledTask } from './schedule-trust.js'
 
 export const ROTATION_HEARTBEAT_TASK = 'claude-plan-rotate-check'
 export const ROTATION_HEARTBEAT_SCHEDULE = '*/10 * * * *'
@@ -109,6 +110,12 @@ export function ensureRotationHeartbeatTask(opts: { respectRemoval?: boolean } =
     // already on the way, same trade-off as the other frequent heartbeats.
     skipIfBusy: true,
   })
+  // SCHEDTRUST1112: written by the install's own code, so approved as written.
+  // A failed approval leaves it agent-framed (fail-closed), never unwritten.
+  try {
+    const created = readScheduledTask(ROTATION_HEARTBEAT_TASK)
+    if (created) approveScheduledTask(created, 'code:rotation-heartbeat')
+  } catch { /* stays agent-framed until the owner approves it */ }
   return 'created'
 }
 

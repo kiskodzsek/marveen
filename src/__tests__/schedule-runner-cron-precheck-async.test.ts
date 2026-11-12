@@ -22,6 +22,15 @@ const mockAppendTaskRun = vi.fn()
 const mockSendPrompt = vi.fn((..._a: unknown[]) => 'sent')
 const mockListScheduledTasks = vi.fn(() => [] as ScheduledTask[])
 
+// SCHEDTRUST1112: this file is about the pre-check / command mechanics, so its
+// fixture tasks count as owner-approved; the trust gate itself (untrusted ->
+// no bash, agent framing) is covered in schedule-trust.test.ts.
+vi.mock('../web/schedule-trust.js', () => ({
+  scheduleTrustOf: () => 'approved',
+  isOwnerTrusted: () => true,
+  alertScheduleTrust: () => {},
+  ensureScheduleTrustBaseline: () => null,
+}))
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }))

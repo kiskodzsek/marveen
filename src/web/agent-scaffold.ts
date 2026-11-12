@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync, rmSync, watchFile, unwatchFile, realpathSync } from 'node:fs'
-import { readRemovedDefaultTasks } from './scheduled-tasks-io.js'
+import { readRemovedDefaultTasks, readScheduledTask } from './scheduled-tasks-io.js'
+import { approveScheduledTask } from './schedule-trust.js'
 import { join } from 'node:path'
 import { domainToASCII } from 'node:url'
 import { homedir } from 'node:os'
@@ -2332,6 +2333,15 @@ export function ensureDefaultScheduledTasks(): void {
           copyFileSync(srcFile, destFile)
         }
       }
+    }
+    // SCHEDTRUST1112: a shipped default is the install's own code, so it runs
+    // with the owner framing -- approved as seeded, right here. A later edit
+    // of it outside the owner's dashboard session ends that.
+    try {
+      const seeded = readScheduledTask(taskName)
+      if (seeded) approveScheduledTask(seeded, 'seed')
+    } catch (err) {
+      logger.warn({ err, task: taskName }, 'schedule-trust: seeded task could not be approved; it runs agent-framed')
     }
   }
 }

@@ -1039,6 +1039,31 @@ export function initDatabase(dbPathOverride?: string): void {
   // the later, bigger threshold.
   try { db.exec('ALTER TABLE pending_task_retries ADD COLUMN owner_alert_sent_at INTEGER') } catch { /* already exists */ }
 
+  // SCHEDTRUST1112 (card 6544de50, Viktor 38996): which scheduled tasks run with
+  // the OWNER framing. A row = the owner approved (or the install shipped) the
+  // task at `hash` (src/web/schedule-trust.ts); no row = agent-authored. Kept
+  // out of the task dir on purpose: a prompt-injected agent that rewrites a
+  // SKILL.md does not touch this table, so the fire-time hash catches it. The
+  // baseline row marks the one-time "legacy" import of the tasks that existed
+  // when this shipped; it never runs again, so deleting trust rows only ever
+  // makes tasks LESS trusted.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schedule_trust (
+      task_name TEXT PRIMARY KEY,
+      status TEXT NOT NULL CHECK (status IN ('approved', 'legacy')),
+      hash TEXT NOT NULL,
+      set_by TEXT NOT NULL,
+      set_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schedule_trust_baseline (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      at INTEGER NOT NULL,
+      task_count INTEGER NOT NULL
+    )
+  `)
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS background_tasks (
       id TEXT PRIMARY KEY,
@@ -4429,6 +4454,55 @@ export function listPendingTaskRetries(): PendingTaskRetryRow[] {
   return db
     .prepare('SELECT * FROM pending_task_retries ORDER BY first_attempt ASC')
     .all() as PendingTaskRetryRow[]
+}
+
+// ── Scheduled-task trust (SCHEDTRUST1112) ──────────────────────────────────
+// The rules (what the hash covers, who may approve) live in
+// src/web/schedule-trust.ts; these are the plain reads and writes.
+
+export interface ScheduleTrustRow {
+  task_name: string
+  status: string
+  hash: string
+  set_by: string
+  set_at: number
+}
+
+export function getScheduleTrust(taskName: string): ScheduleTrustRow | undefined {
+  return db.prepare('SELECT task_name, status, hash, set_by, set_at FROM schedule_trust WHERE task_name = ?')
+    .get(taskName) as ScheduleTrustRow | undefined
+}
+
+export function setScheduleTrust(taskName: string, status: 'approved' | 'legacy', hash: string, setBy: string, now: number): void {
+  db.prepare(`
+    INSERT INTO schedule_trust (task_name, status, hash, set_by, set_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(task_name) DO UPDATE SET status = excluded.status, hash = excluded.hash, set_by = excluded.set_by, set_at = excluded.set_at
+  `).run(taskName, status, hash, setBy, now)
+}
+
+export function deleteScheduleTrust(taskName: string): boolean {
+  return db.prepare('DELETE FROM schedule_trust WHERE task_name = ?').run(taskName).changes > 0
+}
+
+export function scheduleTrustBaselineDone(): boolean {
+  return db.prepare('SELECT 1 FROM schedule_trust_baseline WHERE id = 1').get() !== undefined
+}
+
+/**
+ * One-time legacy import: every listed task gets a 'legacy' row at its current
+ * hash, then the baseline row is written, in ONE transaction. Returns the
+ * number of rows written, or null when the baseline was already done (then
+ * nothing is written: a later run must never re-trust a changed task).
+ */
+export function baselineScheduleTrust(entries: Array<{ name: string; hash: string }>, now: number): number | null {
+  return db.transaction((): number | null => {
+    if (db.prepare('SELECT 1 FROM schedule_trust_baseline WHERE id = 1').get() !== undefined) return null
+    const ins = db.prepare(`INSERT OR IGNORE INTO schedule_trust (task_name, status, hash, set_by, set_at) VALUES (?, 'legacy', ?, 'baseline', ?)`)
+    let n = 0
+    for (const e of entries) n += ins.run(e.name, e.hash, now).changes
+    db.prepare('INSERT INTO schedule_trust_baseline (id, at, task_count) VALUES (1, ?, ?)').run(now, n)
+    return n
+  })()
 }
 
 export function getPendingTaskRetry(taskName: string, agentName: string): PendingTaskRetryRow | undefined {
