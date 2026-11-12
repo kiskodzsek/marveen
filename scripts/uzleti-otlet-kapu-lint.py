@@ -17,7 +17,8 @@ ELUTASITOTT = ["ágenscsapat", "ügynökség", "tanácsadás", "képzés", "kurz
     "titkár",  # Klodel 38081: az AI-titkárság a recepciós irány másik neve (TG 17453/17460)
     "repülőjárat-kártérítés", "járat-kártérítés", "lejárat-őr", "robotpilóta", "bébiszitter", "előfizetés-őr",
     "számlaőr", "kalkulátor-portál", "trend-oldal", "fordítás", "szalon",  # Patrik 11-11 TG 17467/17473/17479/17480 (Klodel 38081)
-    "társasjáték", "kártyajáték"]  # Patrik TG 17490 "utalom a tarsasjatekokat nem érdekel" (Klodel 38096)
+    "társasjáték", "kártyajáték",
+    "egyedi dal", "ai dal", "dalrendelés", "dal rendelés", "dal ajándék"]  # Patrik TG 18004 (11-12): "ez egy undorito termék átverése az embereknek.."  # Patrik TG 17490 "utalom a tarsasjatekokat nem érdekel" (Klodel 38096)
 # --problema mód (Patrik TG 4847: "valos nagy kozonseget erinto problema"): a magyar-specifikus
 # probléma nem lehet külföldön bevált/virális, ezért ezek nem kötelezők; helyettük PROBLEMA kell számmal.
 PROBLEMA_OPCIONALIS = ["BEVALT", "VIRALIS", "KULFOLD", "PENZ"]
@@ -32,6 +33,46 @@ PROBLEMA_MOD = "--problema" in sys.argv
 # Ára: az összetett szó belseje nem illeszkedik ("ablaktakarítás"), ezért ott a tiltott irányt külön szóként kell felvenni.
 def szokezdet(k, t):
     return re.search(r"(?<!\w)" + re.escape(k), t) is not None
+# ITTHON (Klodel 39442, Patrik TG 18042 "Mindegyik van itthon is abbol amiket adtal"; Radar 39450 itthon_check.py):
+# "kapható külföldön, itthon hiányzik" jelöltnél a hiány-állítás ("nincs", "nem találtam", "0", "nem árulja") CSAK mért
+# bolt-listával megy át: a "mért"/"mérve" szó a mezőben ÉS legalább 2 magyar bolt, mindegyik mellett eredmény ugyanabban
+# a sorban. A 403/404/410/captcha/"nem mérhető" bolt nem számít mértnek; [search] forrású hiány-állítás bukik.
+# --itthon: az ITTHON mező kötelező. Mód nélkül is ellenőrizzük, ha a mező ott van (kapcsoló-felejtés nem kerülő út).
+ITTHON_MOD = "--itthon" in sys.argv
+BOLTOK = ["emag", "alza", "decathlon", "pepita", "extreme digital", "edigital", "müller", "mueller", "dm", "rossmann",
+    "szimpla", "vatera", "gymbeam", "kifli", "notino", "douglas", "jófogás", "jofogas", "árgép", "argep", "árukereső",
+    "arukereso", "olcsóbbat", "játéksziget", "jatekshop", "brendon", "mall", "hervis", "intersport", "libri"]
+HIANY = re.compile(r"(?i)(?<!\w)[ns]incs(en)?(?!\w)|nem találtam|nem találtunk|nem hozott találatot|nem árulja|nem árulj"
+    r"|(?<![\w.,:])0(?![\w.,:])|egyik(ben)? sem|egyikben sincs")
+EREDMENY = re.compile(r"(?i)\d|nem hozott találatot|nem találtunk|nincs találat|„[^”]+”")
+NEM_MERT = re.compile(r"(?i)nem mérhető|nem mért|(?<!\d)(403|404|410)(?!\d)|captcha")
+def itthon_blokk(p):
+    sorok = p.splitlines()
+    for i, s in enumerate(sorok):
+        if re.match(r"^\s*[-*]?\s*ITTHON:", s):
+            blokk = [s]
+            for k in sorok[i + 1:]:
+                if k.startswith("  ") and k.strip(): blokk.append(k)
+                else: break
+            return "\n".join(blokk)
+    return None
+def itthon_hibak(p, kotelezo):
+    b = itthon_blokk(p)
+    if b is None:
+        return ["ITTHON hiányzik (Klodel 39442: itthoni hiány mérve)"] if kotelezo else []
+    if not HIANY.search(b): return []
+    mert = re.search(r"(?i)(?<!\w)mér(t|ve)(?!\w)", b) is not None
+    boltok = set()
+    for s in b.splitlines():
+        if NEM_MERT.search(s) or not EREDMENY.search(s): continue
+        for bo in BOLTOK:
+            if re.search(r"(?<!\w)" + re.escape(bo) + r"(?!\w)", s.lower()):
+                boltok.add({"mueller": "müller", "edigital": "extreme digital", "jofogas": "jófogás", "argep": "árgép", "arukereso": "árukereső"}.get(bo, bo))
+    if "[search]" in b.lower() and not mert:
+        return ["ITTHON: hiány-állítás csak [search] forrással (mért bolt-lista kell)"]
+    if not mert or len(boltok) < 2:
+        return [f"ITTHON: hiány-állítás mért bolt-lista nélkül (mért={'igen' if mert else 'nem'}, mért bolt {len(boltok)}, legalább 2 kell)"]
+    return []
 def main(path):
     t = open(path, encoding="utf-8").read()
     parts = re.split(r"(?m)^## (?=\d+\.)", t)[1:]
@@ -74,6 +115,7 @@ def main(path):
             if not vo: hibak.append("VOLUMEN hiányzik (keresés-alapú jelölt, TG 5094)")
             elif not (re.search(r"\d", vo.group(1)) or "NINCS ADAT" in vo.group(1).upper()):
                 hibak.append("VOLUMEN: se havi szám, se 'NINCS ADAT'")
+        hibak += itthon_hibak(p, ITTHON_MOD)
         for k in ELUTASITOTT:
             if szokezdet(k, cim.lower()) or (k in ("halál","elhunyt","temet","gyász","hagyaték","végrendelet") and szokezdet(k, p.lower())): hibak.append(f"elutasított irány: {k}")
         if hibak:
