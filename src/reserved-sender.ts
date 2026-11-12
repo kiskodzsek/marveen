@@ -46,7 +46,7 @@ const CONFUSABLES: Record<string, string> = {
 /** The comparison key of a sender id: NFKC (folds fullwidth forms), the
  *  look-alike letters above mapped to Latin, then the same character filter
  *  the router applies to agent ids, lowercased. */
-function senderKey(raw: string): string {
+export function senderKey(raw: string): string {
   const folded = [...String(raw ?? '').normalize('NFKC')]
     .map(ch => CONFUSABLES[ch] ?? ch)
     .join('')

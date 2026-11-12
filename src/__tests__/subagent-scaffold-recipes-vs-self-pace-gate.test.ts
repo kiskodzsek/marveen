@@ -73,6 +73,9 @@ describe('sub-agent CLAUDE.md recipes vs the sub-agent self-pace gate (card aedf
   it('the schedules section names the gate and the way a sub-agent gets a timed task', () => {
     expect(scheduleSection).toContain('self-pace-gate')
     expect(scheduleSection).toContain('${MAIN_AGENT_ID}')
-    expect(scheduleSection).not.toMatch(/-X\s*POST[^\n]*\/api\/schedules/)
+    // ONCE (card fd941954): the one-shot wake-up is the single POST a sub-agent
+    // is handed; any other schedule-create recipe stays out of the section.
+    expect(scheduleSection).not.toMatch(/-X\s*POST[^\n]*\/api\/schedules(?!\/once\b)/)
+    expect(scheduleSection).toMatch(/-X\s*POST[^\n]*\/api\/schedules\/once\b/)
   })
 })

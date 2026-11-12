@@ -279,6 +279,45 @@ const WRITE_INTENT_RX = /(>>?|\btee\b|\bsed\b[\s\S]*\s-i|\bdd\b|\bcp\b|\bmv\b)/i
 const SCHEDULE_API_RX = /\/api\/schedules\b/i
 const HTTP_WRITE_RX = /(-X\s*(POST|PUT|PATCH|DELETE)|--request\s+(POST|PUT|PATCH|DELETE)|(^|\s)(--data\b|--data-\w+\b|-d\b))/i
 
+// ONCE (card fd941954, Viktor 38878 #4): the ONE schedule write a sub-agent may
+// make -- a POST to exactly /api/schedules/once. It is not a self-pace door
+// because the dashboard ties every once-task to a fresh inter-agent message
+// from ANOTHER agent, one message one wake-up, with daily ceilings, and the
+// task carries no text of its own (src/web/once-schedule.ts). That server check
+// is the real gate; this is depth.
+//
+// The exception is decided on the WHOLE raw command, never per segment, and
+// only at the top level (not inside sh -c / eval): ONE curl invocation and
+// nothing else. Allowed noise is exactly two things, removed before the test:
+// the token read `$(cat <path>/.dashboard-token)` and ONE trailing heredoc with
+// a QUOTED delimiter (its body is literal, never expanded) that names no API
+// path. What remains may not hold a separator (; & | newline), a backtick, any
+// `$` (substitution or variable), `..`, `%` (curl does not decode, but the
+// server or a proxy might), --path-as-is, a curl config file (-K/--config) or a
+// second transfer (--next/-:). Every -X/--request must say POST, and the
+// command must name /api/schedules exactly once, as /api/schedules/once with
+// nothing glued on (no query, suffix, glob or case variant).
+const ONCE_TOKEN_SUBST_RX = /\$\(cat [^\s()$`;|&<>'"]+\/\.dashboard-token\)/g
+const ONCE_QUOTED_HEREDOC_RX = /<<-?[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'[ \t]*\n([\s\S]*?)\n\1[ \t]*\n?$/
+const ONCE_FORBIDDEN_RX = /[;&|`\n\r%$]|\.\.|--path-as-is|(^|\s)(-K|--config|--next|-:)(?=\s|=|$)/
+const SCHEDULE_URL_TOKEN_RX = /\/api\/schedules\b[^\s'"]*/gi
+const ONCE_METHOD_RX = /(?:-X|--request)(?:\s+|=)?\s*(['"]?)([^\s'"]*)\1/g
+export function onceCommandAllowed(command) {
+  let c = String(command ?? '')
+  const h = c.match(ONCE_QUOTED_HEREDOC_RX)
+  if (h) {
+    if (/\/api\//i.test(h[2])) return false
+    c = c.slice(0, h.index)
+  }
+  c = c.replace(ONCE_TOKEN_SUBST_RX, 'TOKEN').trim()
+  if (!/^curl\s/.test(c)) return false
+  if (ONCE_FORBIDDEN_RX.test(c)) return false
+  const urls = c.match(SCHEDULE_URL_TOKEN_RX) ?? []
+  if (urls.length !== 1 || urls[0] !== '/api/schedules/once') return false
+  for (const m of c.matchAll(ONCE_METHOD_RX)) if (m[2] !== 'POST') return false
+  return true
+}
+
 // THE EGRESS ALLOWLIST IS A GATE ON THE SUB-AGENT ITSELF (EGRESSSELFEDIT824).
 // store/egress-allowlist.json decides which hosts egress-gate.mjs lets through, and it
 // was a plain writable file in the sub-agent's own tree: on 2026-08-24 a nested
@@ -898,6 +937,8 @@ export function gateDecision(toolName, toolInput, opts = {}) {
     // Per-segment so an unrelated token elsewhere in a compound command cannot
     // turn a legit read (store inspection, schedule-API GET) into a false deny.
     const naiveSegs = splitSegments(safeCommand)
+    // ONCE: decided once, on the whole RAW command, top level only (see onceCommandAllowed).
+    const onceOk = (opts.depth ?? 0) === 0 && onceCommandAllowed(toolInput?.command)
     for (const seg of naiveSegs) {
       // Match the self-pace bash patterns against the shell-normalised segment so a
       // `\/loop` / `$IFS/loop` evasion (which bash resolves to `/loop` at exec) is
@@ -912,7 +953,7 @@ export function gateDecision(toolName, toolInput, opts = {}) {
       // self-schedule store: block WRITE only (a read/grep is legit diagnostics)
       if (SCHEDULE_STORE_RX.test(seg) && WRITE_INTENT_RX.test(seg)) return { deny: true }
       // dashboard schedule API: block WRITE methods only (GET list/pending is legit)
-      if (SCHEDULE_API_RX.test(seg) && HTTP_WRITE_RX.test(seg)) return { deny: true }
+      if (SCHEDULE_API_RX.test(seg) && HTTP_WRITE_RX.test(seg) && !onceOk) return { deny: true }
       // the egress allowlist: a plain read only (EGRESSSELFEDIT824)
       if (!allowlistBashSegmentAllowed(seg)) return { deny: true, reason: 'egress-allowlist' }
     }
@@ -988,7 +1029,8 @@ export const QUARANTINE_GATE_MSG =
 const GATE_MSG =
   'Self-pace TILTOTT (governance hard-gate). Sub-agentkent NEM utemezhetsz sajat ' +
   'jovobeli turn-t: se ScheduleWakeup/Cron*/RemoteTrigger, se tmux send-keys, se ' +
-  'scheduled_tasks.json iras, se /api/schedules POST, se /loop self-pace. Input-vezerelt ' +
+  'scheduled_tasks.json iras, se /api/schedules POST, se /loop self-pace. Egyetlen kivetel: ' +
+  'POST /api/schedules/once egy masik agenstol kapott, friss uzenet (originMsgId) folytatasara. Input-vezerelt ' +
   'vagy: csak az operator (channel) vagy egy peer (inter-agent) uzenete inditson. Ha varakozol, ' +
   'maradj idle a prompt-on -- a beerkezo uzenet majd ujrainditja a turn-t. SOHA ne valaszolj ' +
   'magadnak es SOHA ne dontsd el az operator helyett egy hozza intezett kerdest.'

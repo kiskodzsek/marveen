@@ -1,14 +1,14 @@
 import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  listPendingTaskRetries, deletePendingTaskRetryById, listTaskRunHistory,
+  listPendingTaskRetries, deletePendingTaskRetryById, listTaskRunHistory, getAgentMessage, createSystemMessage,
 } from '../../db.js'
-import { MAIN_AGENT_ID, currentBotName } from '../../config.js'
+import { MAIN_AGENT_ID, currentBotName, PROJECT_ROOT, WEB_PORT, DASHBOARD_PUBLIC_URL, AGENT_API_ORIGIN } from '../../config.js'
 import { runAgent } from '../../agent.js'
 import { logger } from '../../logger.js'
 import { toPendingRetryView } from '../../pending-retries.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
-import { isValidCronShape } from '../cron.js'
+import { isValidCronShape, effectiveCronTz } from '../cron.js'
 import { readBody, json, RequestBodyTooLargeError } from '../http-helpers.js'
 import { sanitizeScheduleName, safeJoin } from '../sanitize.js'
 import { listAgentNames } from '../agent-config.js'
@@ -19,6 +19,8 @@ import {
 } from '../scheduled-tasks-io.js'
 import { validateScheduleUpdate, scheduleCreateRefusal, COMMAND_TASK_API_REFUSAL } from '../schedule-api-fields.js'
 import { runScheduledTaskNow } from '../schedule-runner.js'
+import { createOnceTask, readOnceAnchors, recordOnceAnchor, shouldAlertCap, type OnceRequestBody } from '../once-schedule.js'
+import { resolveDashboardOrigin } from '../agent-scaffold.js'
 import type { RouteContext } from './types.js'
 
 // The `agent` values the API accepts: exactly what GET /api/schedules/agents offers.
@@ -134,6 +136,78 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
 
   if (path === '/api/schedules/summary' && method === 'GET') {
     json(res, summarizeScheduledTasks(listScheduledTasks()))
+    return true
+  }
+
+  // ONCE (card fd941954): the ONE schedule write a sub-agent may make (the
+  // self-pace gate lets exactly this path through). All rules are in
+  // once-schedule.ts; this handler only does the I/O around them.
+  if (path === '/api/schedules/once' && method === 'POST') {
+    let body: Buffer
+    try {
+      body = await readBody(req, { maxBytes: 16 * 1024 })
+    } catch (err) {
+      if (err instanceof RequestBodyTooLargeError) {
+        json(res, { error: `Request body too large (max ${err.limit} bytes)` }, 413)
+        return true
+      }
+      throw err
+    }
+    let data: OnceRequestBody
+    try {
+      const parsed: unknown = JSON.parse(body.toString())
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
+      data = parsed as OnceRequestBody
+    } catch {
+      json(res, { error: 'Body must be a JSON object' }, 400)
+      return true
+    }
+    // ATOMIC (Viktor 38878 #5): from here to the response there is no await, so
+    // the deps read below and the ledger append inside createOnceTask are one
+    // uninterruptible stretch on the single-threaded dashboard.
+    const now = Date.now()
+    const verdict = createOnceTask(data, {
+      now,
+      knownAgents: scheduleAgentIds(),
+      getMessage: (id) => getAgentMessage(id),
+      anchors: readOnceAnchors(),
+      pendingOnceCount: (agent) => listScheduledTasks().filter(t => t.runAt != null && t.agent === agent).length,
+      tz: effectiveCronTz().tz,
+      dashboardOrigin: resolveDashboardOrigin(DASHBOARD_PUBLIC_URL, WEB_PORT, AGENT_API_ORIGIN),
+      tokenPath: join(PROJECT_ROOT, 'store', '.dashboard-token'),
+    }, {
+      taskExists: (name) => existsSync(join(SCHEDULED_TASKS_DIR, name)),
+      recordAnchor: (rec) => recordOnceAnchor(rec),
+      writeTask: (plan) => writeScheduledTask(plan.name, {
+        description: plan.description,
+        prompt: plan.prompt,
+        schedule: plan.schedule,
+        agent: plan.agent,
+        enabled: true,
+        type: 'task',
+        // A self-reminder: the result goes nowhere by itself (the woken turn
+        // reports on its own channel, as for its anchor message).
+        telegramChatId: 'none',
+        runAt: plan.runAt,
+        originMsgId: plan.originMsgId,
+      }),
+      // CAPS (Viktor 38878 #1): a cap hit is a loop suspicion, not just a 429.
+      alertCap: (agent, cap, error) => {
+        if (!shouldAlertCap(agent, cap, now)) return
+        try {
+          createSystemMessage(MAIN_AGENT_ID, `[ONCE-PLAFON] ${agent}: egyszeri ébresztés elutasítva (${cap}). ${error}. Hurok-gyanú: nézd meg, mi kéri ilyen sűrűn (store/once-schedule-anchors.jsonl).`)
+        } catch (err) {
+          logger.warn({ err, agent, cap }, 'once-schedule: cap alert could not be queued')
+        }
+      },
+    })
+    if (!verdict.ok) { json(res, { error: verdict.error }, verdict.status); return true }
+    const plan = verdict.plan
+    logger.info(
+      { name: plan.name, agent: plan.agent, runAt: new Date(plan.runAt).toISOString(), originMsgId: plan.originMsgId, claimedBy: ctx.auth?.agent },
+      'One-shot task created',
+    )
+    json(res, { ok: true, name: plan.name, runAt: new Date(plan.runAt).toISOString(), schedule: plan.schedule })
     return true
   }
 
