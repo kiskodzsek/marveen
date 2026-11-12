@@ -55,6 +55,21 @@ check('PR go-ask without PATRIK-KERTE blocked', run('PR #183 mehet élesbe?')[0]
 check('PR go-ask with PATRIK-KERTE allowed', run('PR #183 mehet?\nPATRIK-KÉRTE: TG 17000')[0] == 0)
 check('PR mentioned without a go-ask allowed', run('A PR #183 mergelve.')[0] == 0)
 
+# 5. Klodel 39569 (Patrik TG 18102): an addressed RESULT with a numbered list is not a task; a task verb still is.
+CAPAS = ('Balázs, a cápás keresés eredménye (Szigma): három szellemi termék jött fel, de egyik sem erős.\n'
+         '1. Scholly: ösztöndíj-kereső app (Shark Tank US, 40 000 USD; 2023-ban felvásárolták).\n'
+         '2. Talentcube: videós állásjelentkezés (Die Höhle der Löwen, 400 000 EUR). Céges termék, ez a leggyengébb.\n'
+         '3. Finanzguru: szerződés- és költségkövető (DHDL, 1 M EUR).\n'
+         'Itthon egyiknek sem találtunk megfelelőjét az app-boltokban.')
+check('result list addressed to Balázs allowed (the cápás text)', run(CAPAS)[0] == 0)
+check('English -ned words in a result are not a task', run('Balázs, eredmény:\n1. Scholly: signed, learned, designed.')[0] == 0)
+task_texts = [CAPAS + '\nNézd meg, melyik tetszik.', 'Balázs:\n1. jelentkezz be\n2. kattints a Mentésre',
+              'Balázs, a lista:\n1. Scholly\n2. Talentcube\nMegnéznéd, melyik jó?', 'Balázs:\n1. töltsd fel a videót',
+              'Balázs, a lista:\n1. Scholly\nLégyszi küldd tovább.']
+res = [run(t) for t in task_texts]
+check('negative: a numbered list WITH a task verb still blocks', all(rc == 2 and 'BALAZS-KAPU' in err for rc, err in res))
+check('a task verb without a list adds no block (no wider gate)', run('Balázs, nem neked kell átvenned, mi intézzük.')[0] == 0)
+
 # 4. malformed payload: nothing to read, allowed
 check('malformed payload allowed (exit 0, not a crash)', run('', raw='not json')[0] == 0
       and run('', raw='[1]')[0] == 0 and run('', raw='{"tool_input": "text"}')[0] == 0)
