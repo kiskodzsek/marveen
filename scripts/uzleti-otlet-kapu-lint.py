@@ -46,6 +46,30 @@ HIANY = re.compile(r"(?i)(?<!\w)[ns]incs(en)?(?!\w)|nem találtam|nem találtunk
     r"|(?<![\w.,:])0(?![\w.,:])|egyik(ben)? sem|egyikben sincs")
 EREDMENY = re.compile(r"(?i)\d|nem hozott találatot|nem találtunk|nincs találat|„[^”]+”")
 NEM_MERT = re.compile(r"(?i)nem mérhető|nem mért|(?<!\d)(403|404|410)(?!\d)|captcha")
+# Site-próba (Klodel 39454, Radar 39474): a 403/410-es bolt (eMAG) nem mérhető, mégis árulta a Rhode-ot és a Loop-ot.
+# Minden hiány-állításhoz kell keresőmotoros site-próba MIND a négy domainre, eredménnyel (a domain után, a következő
+# domainig; ha ott nincs, a sor maradékából: "(emag.hu, alza.hu): 0 találat"). Ha bármelyik site-próba találatot ad (szám > 0), a termék itthon kapható: a hiány-állítás bukik.
+SITE_DOMAINEK = ["emag.hu", "alza.hu", "notino.hu", "douglas.hu"]
+def site_hibak(b):
+    talalt = {}
+    for s in b.splitlines():
+        if not re.search(r"(?i)(?<!\w)site(:|-szűrt|-próba| szűrt)", s): continue
+        low = s.lower()
+        for d in SITE_DOMAINEK:
+            if d not in low: continue
+            utana = low.split(d, 1)[1]
+            kov = [utana.find(x) for x in SITE_DOMAINEK if x != d and x in utana]
+            sajat = utana[:min(kov)] if kov else utana
+            # a list ("emag.hu, alza.hu): 0") shares the result after it; a domain with its own text keeps its own
+            for resz in [sajat] + ([utana] if kov and re.fullmatch(r"[\s,/()]*", sajat) else []):
+                m = re.search(r"(?<![\w.])(\d+)(?!\w|[.,]\d)", resz)
+                if m: talalt[d] = int(m.group(1)); break
+                if re.search(r"(?i)nincs találat|nem hozott találatot|nem talált", resz): talalt[d] = 0; break
+    hibak = [f"ITTHON: site-próba talált ({d}: {n}), itthon kapható (Klodel 39454)" for d, n in talalt.items() if n > 0]
+    hianyzik = [d for d in SITE_DOMAINEK if d not in talalt]
+    if hianyzik:
+        hibak.append("ITTHON: site-próba eredménnyel hiányzik: " + ", ".join(hianyzik) + " (Klodel 39454)")
+    return hibak
 def itthon_blokk(p):
     sorok = p.splitlines()
     for i, s in enumerate(sorok):
@@ -70,9 +94,10 @@ def itthon_hibak(p, kotelezo):
                 boltok.add({"mueller": "müller", "edigital": "extreme digital", "jofogas": "jófogás", "argep": "árgép", "arukereso": "árukereső"}.get(bo, bo))
     if "[search]" in b.lower() and not mert:
         return ["ITTHON: hiány-állítás csak [search] forrással (mért bolt-lista kell)"]
+    hibak = site_hibak(b)
     if not mert or len(boltok) < 2:
-        return [f"ITTHON: hiány-állítás mért bolt-lista nélkül (mért={'igen' if mert else 'nem'}, mért bolt {len(boltok)}, legalább 2 kell)"]
-    return []
+        hibak.insert(0, f"ITTHON: hiány-állítás mért bolt-lista nélkül (mért={'igen' if mert else 'nem'}, mért bolt {len(boltok)}, legalább 2 kell)")
+    return hibak
 def main(path):
     t = open(path, encoding="utf-8").read()
     parts = re.split(r"(?m)^## (?=\d+\.)", t)[1:]
