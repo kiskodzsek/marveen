@@ -176,6 +176,36 @@ def block_one_minute_ahead(root):
 
 
 @case
+def block_bare_date_marker_kanban(root):
+    # 2026-11-12 (Kernel 39004): "Kernel 08:48 date:" and "Kernel, 08:48 (date)" passed, the bare word was no marker
+    def kanban(text):
+        cmd = KANBAN + " --data-binary @- <<'JSON'\n{\"author\":\"kernel\",\"content\":\"" + text + "\"}\nJSON"
+        return run(root['hook'], 'Bash', {'command': cmd}, now='08:47')[0]
+    return kanban('Kernel 08:48 date: lap kész') == 2 and kanban('Kernel, 08:48 (date)') == 2
+
+
+@case
+def block_time_followed_by_colon(root):
+    # 2026-11-12 (Kernel 39004): "mérve 08:48: lap kész" passed, the trailing colon hid the time
+    return write(root, 'mérve 08:48: lap kész', now='08:47')[0] == 2
+
+
+@case
+def block_future_time_with_seconds(root):
+    # HH:MM:SS was skipped as a whole; it is judged by its HH:MM now
+    return write(root, 'mérve 08:48:10', now='08:47')[0] == 2 and write(root, 'mérve 08:47:59', now='08:47')[0] == 0
+
+
+@case
+def pass_date_word_without_measurement(root):
+    # "date" inside a word, a JS call or a dotted / dashed name is no marker; a deadline next to date passes;
+    # the current minute with the bare marker passes
+    return all(write(root, t, now='08:47')[0] == 0 for t in (
+        'update 22:00', 'new Date(2026) 22:00', 'date.now 22:00', 'date-fns 22:00',
+        'date szerint kész 22:00-ig', 'Kernel 08:47 (date)', 'Kernel 08:47:54 date:'))
+
+
+@case
 def pass_not_clock_times(root):
     return all(write(root, t)[0] == 0 for t in ('cron 0 9 * * *', 'arány 3:2', 'hex 0x1f', 'mérve 2026-11-11T23:30:00'))
 

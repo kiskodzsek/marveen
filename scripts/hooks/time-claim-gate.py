@@ -18,9 +18,10 @@ SCOPE (everything else is allowed at once, exit 0, no output):
 
 BLOCKS (exit 2, reason on stderr):
   1. A placeholder clock time anywhere in the judged lines: HH:Mx or HH:xx (x or X), e.g. 19:3x, 10:xx.
-  2. A FUTURE MEASURED time: HH:MM later than the current minute, on a line that names a measurement
-     (mérve, mérés..., mért, `date`, date szerint, measured, lefutott, futott, elküldve, küldve, lezárva,
-     rögzítve; case-insensitive, accented forms only: unaccented "mert" is the Hungarian "because")
+  2. A FUTURE MEASURED time: HH:MM (or HH:MM:SS, judged by its HH:MM) later than the current minute, on a
+     line that names a measurement
+     (mérve, mérés..., mért, `date`, a bare date / (date), date szerint, measured, lefutott, futott, elküldve,
+     küldve, lezárva, rögzítve; case-insensitive, accented forms only: unaccented "mert" is the Hungarian "because")
      and that does not name another date (YYYY-MM-DD or MM-DD other than today). A future time with no
      marker on its line (a deadline: "21:00-ig kész") passes: that is the main false-positive guard.
      A deadline-shaped time passes even on a marker line: followed by -ig / -ra / -re / óráig, or preceded
@@ -57,13 +58,18 @@ MAX_DATA_FILE = 64 * 1024
 DEADLINE_WINDOW = 40
 MAX_TIMES_PER_LINE = 20
 
-TIME_RX = re.compile(r'(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])')
+# Seconds are optional and judged by their HH:MM ("mérve 08:48:10"); a trailing colon that is not followed by a
+# digit ends the time ("08:48: kész", Kernel 39004), so neither form slips past the gate any more.
+TIME_RX = re.compile(r'(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?(?!\d)(?!:\d)')
 PLACEHOLDER_RX = re.compile(r'(?<![\d:])(?:[01]?\d|2[0-3]):(?:[0-5][xX]|[xX]{2})(?!\w)')
 # Not preceded or followed by ':' so the range "10:05-11:30" is not read as the date 05-11.
 DATE_RX = re.compile(r'(?<![\d:])(?:(\d{4})-)?(\d{2})-(\d{2})(?![\d:])')
 MARKER_RX = re.compile(
     r'(?<!\w)(?:mérve|mérés\w*|mért|measured|lefutott|futott|elküldve|küldve|lezárva|rögzítve|date\s+szerint)(?!\w)'
-    r'|`date\b', re.I)
+    r'|`date\b'
+    # A bare "date" / "(date)" names the `date` command too ("Kernel 08:48 date:", Kernel 39004). Not inside a
+    # word, a JS call or a dotted / dashed name: "update", "Date(", "date.now", "date-fns" are not markers.
+    r'|(?<![\w.$/-])date(?![\w(.-])', re.I)
 # A deadline, not a measurement: "22:00-ig", "22:00-ra", "22:00 óráig"; "határidő 22:00", "by 22:00".
 DEADLINE_AFTER_RX = re.compile(r'\s?-?\s?(?:ig|ra|re)(?!\w)|\s+óráig(?!\w)', re.I)
 DEADLINE_BEFORE_RX = re.compile(r'(?<!\w)(?:határidő|határidővel|deadline|until|by)[:\s]+$', re.I)
