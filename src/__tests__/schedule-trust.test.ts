@@ -246,6 +246,106 @@ describe('edits end the approval (Viktor 38996 d)', () => {
   })
 })
 
+// Viktor 39055 A: the dashboard editor shows prompt / agent / type / targetSession
+// only, so an owner save must not approve a command, a preCheck, a chat id, ...
+// it never showed. Such a task follows the token rule and is approved via the
+// one-click approve, which lists every one of those fields.
+function setConfig(name: string, extra: Record<string, unknown>): void {
+  const cfgPath = join(io.SCHEDULED_TASKS_DIR, name, 'task-config.json')
+  writeFileSync(cfgPath, JSON.stringify({ ...JSON.parse(readFileSync(cfgPath, 'utf8')), ...extra }))
+}
+
+describe('an owner editor save approves only what the editor shows (Viktor 39055 A)', () => {
+  it('scheduleEditorHiddenFields: shown and timing fields are not hidden; set flags, ids, scripts and later fields are', () => {
+    const base = { name: 'n', description: 'd', prompt: 'p', schedule: '0 9 * * *', agent: 'a', enabled: true, createdAt: 1,
+      type: 'heartbeat' as const, skipIfBusy: true, forceSend: true, targetSession: 'agent-x', requiresDesktop: false,
+      injectMetrics: false, sendDigestDirect: false }
+    expect(trust.scheduleEditorHiddenFields(base)).toEqual([])
+    expect(trust.scheduleEditorHiddenFields({ ...base, preCheck: 'check.sh' })).toEqual(['preCheck'])
+    expect(trust.scheduleEditorHiddenFields({ ...base, type: 'command', command: 'ls' })).toEqual(['command', 'type'])
+    expect(trust.scheduleEditorHiddenFields({ ...base, telegramChatId: '-1001', injectMetrics: true, requires: { mcp_servers: ['x'] } }))
+      .toEqual(['injectMetrics', 'requires', 'telegramChatId'])
+    // A field added later is hidden until the editor shows it (no drift).
+    expect(trust.scheduleEditorHiddenFields({ ...base, someFutureField: 'x' } as never)).toEqual(['someFutureField'])
+  })
+
+  it('the shown list and the unhashed list do not overlap, and cover every field the editor reads', () => {
+    for (const k of trust.SCHEDULE_EDITOR_SHOWN_FIELDS) expect(trust.SCHEDULE_TRUST_UNHASHED_FIELDS.has(k), k).toBe(false)
+    const app = readFileSync(new URL('../../web/app.js', import.meta.url), 'utf-8')
+    const start = app.indexOf('function openEditSchedule(task)')
+    expect(start).toBeGreaterThan(0)
+    const editor = app.slice(start, app.indexOf('\n}\n', start))
+    const read = new Set([...editor.matchAll(/\btask\.(\w+)/g)].map(m => m[1]))
+    expect(read.size).toBeGreaterThan(5)
+    for (const k of read) {
+      expect(trust.SCHEDULE_EDITOR_SHOWN_FIELDS.has(k) || trust.SCHEDULE_TRUST_UNHASHED_FIELDS.has(k), `editor reads ${k}`).toBe(true)
+    }
+  })
+
+  it('an owner PUT of the prompt does not approve a task with a preCheck: agent, row dropped', async () => {
+    await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+    setConfig('napi-riport', { preCheck: 'check.sh' })
+    expect(await trustOf('napi-riport')).toBe('mismatch')
+    expect((await call('PUT', '/api/schedules/napi-riport', { prompt: 'Új szöveg.' }, { owner: true })).status).toBe(200)
+    expect(await trustOf('napi-riport')).toBe('agent')
+    expect(db.getScheduleTrust('napi-riport')).toBeUndefined()
+  })
+
+  it('an owner PUT of the schedule alone does not approve a file-edited preCheck task either', async () => {
+    await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+    setConfig('napi-riport', { preCheck: 'check.sh' })
+    await call('PUT', '/api/schedules/napi-riport', { schedule: '0 10 * * *' }, { owner: true })
+    expect(await trustOf('napi-riport')).toBe('mismatch')
+  })
+
+  it('a preCheck task approved in one click stays approved after an owner schedule edit, and falls on a prompt edit', async () => {
+    await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+    setConfig('napi-riport', { preCheck: 'check.sh' })
+    expect((await approve('napi-riport', { owner: true })).status).toBe(200)
+    expect(await trustOf('napi-riport')).toBe('approved')
+    await call('PUT', '/api/schedules/napi-riport', { schedule: '0 10 * * *' }, { owner: true })
+    expect(await trustOf('napi-riport')).toBe('approved')
+    await call('PUT', '/api/schedules/napi-riport', { prompt: 'Új szöveg.' }, { owner: true })
+    expect(await trustOf('napi-riport')).toBe('agent')
+  })
+
+  it('a telegramChatId or a command type is not approved by an owner save', async () => {
+    await call('POST', '/api/schedules', NEW_TASK)
+    setConfig('napi-riport', { telegramChatId: '-1001234567' })
+    await call('PUT', '/api/schedules/napi-riport', { prompt: 'Új szöveg.' }, { owner: true })
+    expect(await trustOf('napi-riport')).toBe('agent')
+
+    await call('DELETE', '/api/schedules/napi-riport', undefined)
+    await call('POST', '/api/schedules', NEW_TASK)
+    setConfig('napi-riport', { type: 'command', command: 'echo hi' })
+    expect((await call('PUT', '/api/schedules/napi-riport', { enabled: false }, { owner: true })).status).toBe(200)
+    expect(await trustOf('napi-riport')).not.toMatch(/approved|legacy/)
+  })
+
+  it('for a task with a hidden field, owner and token PUT give the same verdict', async () => {
+    const edits: Array<Record<string, unknown>> = [{ schedule: '0 10 * * *' }, { enabled: false }, { prompt: 'Új szöveg.' }, { targetSession: 'agent-other' }]
+    for (const edit of edits) {
+      const verdicts: string[] = []
+      for (const owner of [true, false]) {
+        await call('DELETE', '/api/schedules/napi-riport', undefined)
+        await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+        setConfig('napi-riport', { preCheck: 'check.sh' })
+        await approve('napi-riport', { owner: true })
+        await call('PUT', '/api/schedules/napi-riport', edit, { owner })
+        verdicts.push(await trustOf('napi-riport'))
+      }
+      expect(verdicts[0], JSON.stringify(edit)).toBe(verdicts[1])
+    }
+  })
+
+  it('a plain task (no hidden field) is still approved by an owner save', async () => {
+    await call('POST', '/api/schedules', NEW_TASK)
+    setConfig('napi-riport', { requiresDesktop: false, injectMetrics: false })
+    await call('PUT', '/api/schedules/napi-riport', { prompt: 'Új szöveg.' }, { owner: true })
+    expect(await trustOf('napi-riport')).toBe('approved')
+  })
+})
+
 describe('POST /api/schedules/:name/approve', () => {
   it('the shared token gets 403 and an audit row; the trust does not change', async () => {
     await call('POST', '/api/schedules', NEW_TASK)

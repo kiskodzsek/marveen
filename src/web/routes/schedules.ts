@@ -21,7 +21,7 @@ import { validateScheduleUpdate, scheduleCreateRefusal, COMMAND_TASK_API_REFUSAL
 import { runScheduledTaskNow } from '../schedule-runner.js'
 import { createOnceTask, readOnceAnchors, recordOnceAnchor, shouldAlertCap, isOnceTask, ONCE_EDIT_REFUSAL, type OnceRequestBody } from '../once-schedule.js'
 import { resolveDashboardOrigin } from '../agent-scaffold.js'
-import { scheduleTrustOf, scheduleTrustHash, scheduleTrustShortHash, approveScheduledTask, clearScheduleTrust } from '../schedule-trust.js'
+import { scheduleTrustOf, scheduleTrustHash, scheduleTrustShortHash, approveScheduledTask, clearScheduleTrust, scheduleEditorHiddenFields } from '../schedule-trust.js'
 import { fleetOwnerSession } from './fleet.js'
 import { logConfigChange } from '../../db.js'
 import type { RouteContext } from './types.js'
@@ -62,10 +62,21 @@ function ownerWriter(ctx: RouteContext): string | null {
 // write; a create passes null (always dropped: a stale row of a reused name
 // must not trust the new task). A token edit of enabled / schedule / skipIfBusy
 // keeps the approval: what runs and where did not change.
-function recordWriteTrust(name: string, owner: string | null, beforeHash: string | null): void {
+// Viktor 39055 A: the owner's write approves only a task whose every set,
+// hashed field is one the editor shows (scheduleEditorHiddenFields empty). A
+// task with a command / preCheck / chat id / ... the editor does not show falls
+// under the token rule (row kept if the hash did not move, dropped if it did),
+// and is approved through the one-click approve, which lists those fields.
+// Returns whether the owner's write approved the task.
+function recordWriteTrust(name: string, owner: string | null, beforeHash: string | null): boolean {
   const task = readScheduledTask(name)
-  if (owner) { if (task) approveScheduledTask(task, `session:${owner}`); return }
+  if (owner && task) {
+    const hidden = scheduleEditorHiddenFields(task)
+    if (hidden.length === 0) { approveScheduledTask(task, `session:${owner}`); return true }
+    logger.info({ task: name, hidden }, 'schedule-trust: owner save not approving, the task sets fields the editor does not show')
+  }
   if (beforeHash === null || !task || scheduleTrustHash(task) !== beforeHash) clearScheduleTrust(name)
+  return false
 }
 
 // HBSCHEDSZAM903: the hourly heartbeat digest's "enabled schedules" figure was
@@ -298,8 +309,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       targetSession: data.targetSession || undefined,
     })
     const owner = ownerWriter(ctx)
-    recordWriteTrust(name, owner, null)
-    logger.info({ name, schedule: data.schedule, approved: owner !== null, claimedBy: ctx.auth?.agent }, 'Scheduled task created')
+    const approved = recordWriteTrust(name, owner, null)
+    logger.info({ name, schedule: data.schedule, approved, claimedBy: ctx.auth?.agent }, 'Scheduled task created')
     json(res, { ok: true, name })
     return true
   }
@@ -348,8 +359,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     const beforeHash = stored ? scheduleTrustHash(stored) : null
     writeScheduledTask(name, data)
     const owner = ownerWriter(ctx)
-    recordWriteTrust(name, owner, beforeHash)
-    logger.info({ name, approved: owner !== null, claimedBy: ctx.auth?.agent }, 'Scheduled task updated')
+    const approved = recordWriteTrust(name, owner, beforeHash)
+    logger.info({ name, approved, claimedBy: ctx.auth?.agent }, 'Scheduled task updated')
     json(res, { ok: true })
     return true
   }

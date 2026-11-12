@@ -63,6 +63,36 @@ export const SCHEDULE_TRUST_UNHASHED_FIELDS: ReadonlySet<string> = new Set([
   'catchUpMaxAgeMinutes', 'stuckAfterMinutes', 'runAt',
 ])
 
+/**
+ * The hashed fields the dashboard EDITOR shows and lets the owner set
+ * (openEditSchedule in web/app.js: prompt, agent, type task/heartbeat,
+ * targetSession). An owner save from the editor approves the task as stored
+ * ONLY when no other hashed field is set (Viktor 39055 A): the editor does not
+ * show a command, a preCheck, a telegramChatId, ..., so saving must not approve
+ * one the owner never saw. Kept next to SCHEDULE_TRUST_UNHASHED_FIELDS so the
+ * two lists cannot drift: "hidden" is everything hashed that is not listed
+ * here, so a field added later is hidden until the editor shows it.
+ */
+export const SCHEDULE_EDITOR_SHOWN_FIELDS: ReadonlySet<string> = new Set(['prompt', 'agent', 'type', 'targetSession'])
+const SCHEDULE_EDITOR_TYPES: ReadonlySet<string> = new Set(['task', 'heartbeat'])
+
+/**
+ * The hashed fields of a stored task the editor does not show, that are set
+ * (anything but undefined / null / false -- readScheduledTask turns an absent
+ * flag into false), plus "type" when it is not one the editor offers. Empty =
+ * an owner editor save may approve the task. Sorted, for the log line.
+ */
+export function scheduleEditorHiddenFields(task: ScheduleTrustFields): string[] {
+  const hidden: string[] = []
+  for (const [k, v] of Object.entries(task)) {
+    if (SCHEDULE_TRUST_UNHASHED_FIELDS.has(k) || SCHEDULE_EDITOR_SHOWN_FIELDS.has(k)) continue
+    if (v === undefined || v === null || v === false) continue
+    hidden.push(k)
+  }
+  if (!SCHEDULE_EDITOR_TYPES.has(String(task.type ?? 'task'))) hidden.push('type')
+  return hidden.sort()
+}
+
 export type ScheduleTrustFields = Pick<ScheduledTask, 'prompt' | 'agent'> & Partial<Omit<ScheduledTask, 'prompt' | 'agent'>>
 
 const HASH_RX = /^[0-9a-f]{64}$/

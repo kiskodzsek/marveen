@@ -6566,10 +6566,21 @@ const CADENCE_ICON = { 0: '⚡', 1: '☀️', 2: '📅', 3: '🗓️', 5: '•' 
 // cannot show it whole, and the tail is where an agent would hide the point):
 // blocked=true, and the caller opens the editor instead.
 const SCHEDULE_APPROVE_MAX_PROMPT = 500
+// Viktor 39055 LOW: a native confirm can hide text inside 500 characters too
+// (hundreds of newlines push it out of view; zero-width / bidi controls
+// reorder or hide it). More than SCHEDULE_APPROVE_MAX_LINES lines, or any
+// control / format character other than tab and newline, is blocked the same
+// way: the editor opens instead.
+const SCHEDULE_APPROVE_MAX_LINES = 20
+const SCHEDULE_APPROVE_HIDDEN_CHAR_RX = /[\p{Cc}\p{Cf}]/u
 function scheduleApprovalView(task) {
   const prompt = String(task.prompt || '')
   if (prompt.length > SCHEDULE_APPROVE_MAX_PROMPT) {
     return { blocked: true, text: t('tasks.approve.too_long').replace('{n}', String(prompt.length)).replace('{max}', String(SCHEDULE_APPROVE_MAX_PROMPT)) }
+  }
+  const lineCount = prompt.split('\n').length
+  if (lineCount > SCHEDULE_APPROVE_MAX_LINES || SCHEDULE_APPROVE_HIDDEN_CHAR_RX.test(prompt.replace(/[\t\n]/g, ''))) {
+    return { blocked: true, text: t('tasks.approve.unreadable').replace('{lines}', String(lineCount)).replace('{max}', String(SCHEDULE_APPROVE_MAX_LINES)) }
   }
   const lines = [t('tasks.confirm.approve'), '']
   if (task.command) lines.push('⚠ ' + t('tasks.approve.runs_bash') + ' command: ' + String(task.command))

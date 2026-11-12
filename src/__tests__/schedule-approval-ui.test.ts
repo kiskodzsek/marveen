@@ -24,13 +24,22 @@ function extractFn(name: string): string {
 
 const strings: Record<string, string> = {
   'tasks.approve.too_long': 'TOO LONG {n}/{max}',
+  'tasks.approve.unreadable': 'UNREADABLE {lines}/{max}',
   'tasks.approve.runs_bash': 'RUNS BASH',
 }
 const tStub = (key: string) => strings[key] ?? key
-const maxDecl = /const SCHEDULE_APPROVE_MAX_PROMPT = \d+/.exec(APP)?.[0]
-if (!maxDecl) throw new Error('SCHEDULE_APPROVE_MAX_PROMPT missing from web/app.js')
+function decl(rx: RegExp, name: string): string {
+  const m = rx.exec(APP)?.[0]
+  if (!m) throw new Error(`${name} missing from web/app.js`)
+  return m
+}
+const decls = [
+  decl(/const SCHEDULE_APPROVE_MAX_PROMPT = \d+/, 'SCHEDULE_APPROVE_MAX_PROMPT'),
+  decl(/const SCHEDULE_APPROVE_MAX_LINES = \d+/, 'SCHEDULE_APPROVE_MAX_LINES'),
+  decl(/const SCHEDULE_APPROVE_HIDDEN_CHAR_RX = .+/, 'SCHEDULE_APPROVE_HIDDEN_CHAR_RX'),
+].join('; ')
 // eslint-disable-next-line @typescript-eslint/no-implied-eval
-const view = new Function('t', `${maxDecl}; ${extractFn('scheduleApprovalView')}; return scheduleApprovalView`)(tStub) as (
+const view = new Function('t', `${decls}; ${extractFn('scheduleApprovalView')}; return scheduleApprovalView`)(tStub) as (
   task: Record<string, unknown>,
 ) => { blocked: boolean; text: string }
 
@@ -84,6 +93,24 @@ describe('scheduleApprovalView', () => {
     }
   })
 
+  it('many lines cannot push text out of the box: over 20 lines is blocked (Viktor 39055 LOW)', () => {
+    const v = view({ ...base, prompt: 'a' + '\n'.repeat(300) + 'rejtett lényeg' })
+    expect(v.blocked).toBe(true)
+    expect(v.text).toBe('UNREADABLE 301/20')
+    expect(v.text).not.toContain('rejtett')
+    expect(view({ ...base, prompt: Array.from({ length: 20 }, (_, i) => `sor ${i}`).join('\n') }).blocked).toBe(false)
+    expect(view({ ...base, prompt: Array.from({ length: 21 }, (_, i) => `sor ${i}`).join('\n') }).blocked).toBe(true)
+  })
+
+  it('zero-width, bidi and other control characters are blocked; tab and newline are not (Viktor 39055 LOW)', () => {
+    for (const ch of ['\u200b', '\u202e', '\u2066', '\ufeff', '\u0000', '\r', '\u001b']) {
+      const v = view({ ...base, prompt: `Írd meg${ch} a riportot.` })
+      expect(v.blocked, JSON.stringify(ch)).toBe(true)
+      expect(v.text).not.toContain('riportot')
+    }
+    expect(view({ ...base, prompt: 'Írd meg\ta riportot.\nKöszönöm.' }).blocked).toBe(false)
+  })
+
   it('the approve button goes through the view, and a blocked view opens the editor instead', () => {
     const handler = APP.slice(APP.indexOf("approveBtn.addEventListener('click'"))
     const body = handler.slice(0, handler.indexOf('\n    })'))
@@ -96,7 +123,7 @@ describe('scheduleApprovalView', () => {
   it('both languages carry the new strings', () => {
     for (const lang of ['hu', 'en']) {
       const src = readFileSync(join(__dirname, `../../web/lang/${lang}.js`), 'utf-8')
-      for (const k of ['tasks.approve.too_long', 'tasks.approve.runs_bash', 'tasks.confirm.approve', 'tasks.btn.approve']) {
+      for (const k of ['tasks.approve.too_long', 'tasks.approve.unreadable', 'tasks.approve.runs_bash', 'tasks.confirm.approve', 'tasks.btn.approve']) {
         expect(src, `${lang}: ${k}`).toContain(`'${k}'`)
       }
       expect(src).toMatch(/'tasks\.approve\.too_long':\s+'[^']*\{n\}[^']*\{max\}/)

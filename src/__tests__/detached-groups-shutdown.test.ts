@@ -22,6 +22,14 @@ vi.mock('../config.js', async () => {
 vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }))
+// SCHEDTRUST1112: the runner runs a preCheck only for a task approved as
+// stored; this file tests the process-group mechanics, so the trust is fixed.
+vi.mock('../web/schedule-trust.js', () => ({
+  scheduleTrustOf: () => 'approved',
+  isOwnerTrusted: () => true,
+  alertScheduleTrust: () => {},
+  ensureScheduleTrustBaseline: () => null,
+}))
 
 const cmd = await import('../web/command-task.js')
 const sr = await import('../web/schedule-runner.js')
