@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""time-claim-gate.py -- PreToolUse gate: no guessed "measured at" clock time in shared reports and card comments.
+"""time-claim-gate.py -- PreToolUse gate: no guessed "measured at" clock time in shared reports and card comments,
+and no placeholder clock time in an inter-agent message, a memory or the daily log.
 
 WHY (Klodel 38401, 2026-11-11): an agent three times wrote a GUESSED measurement time into a report or a
 kanban comment: a placeholder ("19:3x", "10:xx") or a time later than the wall clock ("mérve 18:15-18:30"
@@ -19,6 +20,13 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     shared/*.md. The command text (the heredoc body) is judged; lines already in a target file pass, like
     Write. A relative target is resolved against the payload cwd and against every `cd /absolute/dir` in
     the command (the gate cannot know which cd ran last, so a match through any of them counts).
+  - Bash that sends an inter-agent message or writes a memory or the daily log (Dave 39699, 2026-11-12: his
+    39698 went to Klodel with a placeholder measured time while the same text on the card was stopped): the
+    command text names agent-msg.sh, a <name>-msg.sh / msg-close.sh wrapper, /api/messages, /api/memories
+    or /api/daily-log. Judged like a card comment (command text + @file payload, and a `< file` stdin
+    redirect), but ONLY rule 1 (placeholder). Rule 2 is off here: measured on the 7 days of agent_messages
+    before 2026-11-12, the 346 "future" hits were mostly plans, deadlines and quota reset times
+    ("nullázás 12:05", "23:00 után"), while the 323 placeholders were the real error.
   <repo-root> is two levels above this file (scripts/hooks/ -> root), so it works in a worktree too.
 
 BLOCKS (exit 2, reason on stderr):
@@ -82,6 +90,9 @@ MARKER_RX = re.compile(
 # A deadline, not a measurement: "22:00-ig", "22:00-ra", "22:00 óráig"; "határidő 22:00", "by 22:00".
 DEADLINE_AFTER_RX = re.compile(r'\s?-?\s?(?:ig|ra|re)(?!\w)|\s+óráig(?!\w)', re.I)
 DEADLINE_BEFORE_RX = re.compile(r'(?<!\w)(?:határidő|határidővel|deadline|until|by)[:\s]+$', re.I)
+# Inter-agent message, memory and daily-log writes (placeholder rule only, see SCOPE).
+API_WRITE_RX = re.compile(r'(?<![\w-])(?:[a-z]+-msg|msg-close)\.sh(?![\w-])|/api/(?:messages|memories|daily-log)')
+STDIN_FILE_RX = re.compile(r'(?<![<\d])<[ \t]*[\'"]?([^\s\'";|&<>()]+)')
 DATA_FILE_RX = re.compile(r'(?<![\w-])(?:--data-binary|--data|-d)(?:\s+|=)?[\'"]?@([^\s\'";|&<>()]+)')
 # Shell writes (Radar 39251). ">>f", "> 'f'", ">| f"; "2>&1" has no path and does not match. tee takes every
 # non-option word up to the next shell operator.
@@ -112,7 +123,7 @@ def _other_day(line, now):
     return False
 
 
-def findings(text, now, known_lines=frozenset()):
+def findings(text, now, known_lines=frozenset(), placeholder_only=False):
     """[(line_no, token, kind)] for the lines of `text` that are not in known_lines."""
     out = []
     limit = now.hour * 60 + now.minute + SLACK_MIN
@@ -121,7 +132,7 @@ def findings(text, now, known_lines=frozenset()):
             continue
         for m in PLACEHOLDER_RX.finditer(line):
             out.append((n, m.group(0), 'placeholder'))
-        if not MARKER_RX.search(line) or _other_day(line, now):
+        if placeholder_only or not MARKER_RX.search(line) or _other_day(line, now):
             continue
         # Bounded work per line (Viktor 38419 LOW): at most MAX_TIMES_PER_LINE times, and the deadline word
         # is looked for only in the DEADLINE_WINDOW characters right before the time.
@@ -199,25 +210,32 @@ def judged_texts(tool_name, ti, cwd):
             return []
         if tool_name == 'Write':
             content = ti.get('content')
-            return [('', content, _existing_lines(path))] if isinstance(content, str) else []
+            return [('', content, _existing_lines(path), False)] if isinstance(content, str) else []
         edits = [ti] if tool_name == 'Edit' else ti.get('edits')
         out = []
         for e in edits if isinstance(edits, list) else []:
             if isinstance(e, dict) and isinstance(e.get('new_string'), str):
                 old = e.get('old_string')
-                out.append(('', e['new_string'], frozenset(old.splitlines()) if isinstance(old, str) else frozenset()))
+                out.append(('', e['new_string'], frozenset(old.splitlines()) if isinstance(old, str) else frozenset(),
+                            False))
         return out
     if tool_name == 'Bash':
         cmd = ti.get('command')
         if not isinstance(cmd, str):
             return []
-        if '/api/kanban/' not in cmd or '/comments' not in cmd:
+        card = '/api/kanban/' in cmd and '/comments' in cmd
+        if not card and not API_WRITE_RX.search(cmd):
             targets = _shell_shared_md_targets(cmd, cwd)
             if not targets:
                 return []
-            return [('command ', cmd, frozenset().union(*(_existing_lines(t) for t in targets)))]
-        out = [('command ', cmd, frozenset())]
-        for ref in DATA_FILE_RX.findall(cmd):
+            return [('command ', cmd, frozenset().union(*(_existing_lines(t) for t in targets)), False)]
+        refs = DATA_FILE_RX.findall(cmd)
+        if not card:
+            # A message body can come from a file on stdin: agent-msg.sh kernel klodel - < body.txt
+            refs += STDIN_FILE_RX.findall(cmd)[:MAX_SHELL_TARGETS]
+        po = not card  # message / memory / daily log: placeholder rule only
+        out = [('command ', cmd, frozenset(), po)]
+        for ref in refs:
             path = os.path.expanduser(ref)
             if not os.path.isabs(path):
                 if not (isinstance(cwd, str) and os.path.isabs(cwd)):
@@ -225,7 +243,7 @@ def judged_texts(tool_name, ti, cwd):
                 path = os.path.join(cwd, path)
             body = _read_small(path)
             if body is not None:
-                out.append(('@file ', body, frozenset()))
+                out.append(('@file ', body, frozenset(), po))
         return out
     return []
 
@@ -236,8 +254,8 @@ def verdict(payload):
         return None
     now = _now()
     hits = []
-    for label, text, known in judged_texts(payload.get('tool_name'), ti, payload.get('cwd')):
-        hits += [(label, n, tok, kind) for n, tok, kind in findings(text, now, known)]
+    for label, text, known, po in judged_texts(payload.get('tool_name'), ti, payload.get('cwd')):
+        hits += [(label, n, tok, kind) for n, tok, kind in findings(text, now, known, po)]
     if not hits:
         return None
     parts = []
