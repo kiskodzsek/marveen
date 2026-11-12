@@ -37,6 +37,8 @@ const red = await run('trial-form-internal-names.html');
 expect('old bug: internal names on the trial form', red.length > 0, true);
 const rules = new Set(red.map((f) => f.rule));
 for (const r of ['template', 'snake_case', 'SCREAMING_CASE', 'camelCase', 'i18n_key', 'dev_word']) expect(`rule ${r} fires`, rules.has(r), true);
+expect('name hidden in a closed <details>', red.some((f) => f.token === 'faq_trial_note'), true);
+expect('name in a <select> option', red.some((f) => f.where === 'attr:option' && f.token === 'GIFT_BOOK_V2'), true);
 expect('both views are checked', new Set(red.map((f) => f.view)).size === 2, true);
 expect('clean Hungarian page (host, brand, price, "Test")', (await run('trial-form-clean.html')).length > 0, false);
 expect('404 text with HTTP 200', (await run('page-404.html')).some((f) => f.rule === 'error_marker'), true);

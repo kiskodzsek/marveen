@@ -57,6 +57,9 @@ export class Gate {
   async checkpoint(page, label, { status = 200 } = {}) {
     this.n += 1;
     const idx = String(this.n).padStart(2, '0');
+    // A customer opens the FAQ: closed <details> hide their text from innerText, so open them first
+    // (Dave's belso-nev-audit.mjs does the same). The page state is only toggled in the browser, nothing is sent.
+    await page.evaluate(() => document.querySelectorAll('details').forEach((d) => { d.open = true; }));
     // Only what a customer can see: innerText skips display:none and <script>/<style>.
     const text = await page.evaluate(() => document.body ? document.body.innerText : '');
     const attrs = await page.evaluate(() => {
@@ -66,6 +69,8 @@ export class Gate {
         if (st.display === 'none' || st.visibility === 'hidden') continue;
         for (const a of ['placeholder', 'aria-label', 'alt', 'title']) { const v = el.getAttribute(a); if (v) out.push({ attr: a, value: v }); }
       }
+      // <option> labels sit in a closed select and are not in innerText (a dropdown shows enum names this way)
+      for (const o of document.querySelectorAll('select option')) { const v = (o.textContent || '').trim(); if (v) out.push({ attr: 'option', value: v }); }
       return out;
     });
     const findings = this.evaluate(label, { text, attrs, status });
