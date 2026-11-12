@@ -4089,6 +4089,16 @@ export function openInboundQuestionMessageId(agentId: string): string | null {
   return row.message_id == null ? '' : String(row.message_id)
 }
 
+/** Unix seconds of the agent's latest inbound channel message (conversation_log, direction 'in'), or null.
+ *  Used by the schedule runner to keep scheduled prompts out of the main channels session while a human is
+ *  talking to it (owner-activity.ts, Klodel 39538). */
+export function lastInboundAt(agentId: string): number | null {
+  const row = db.prepare(
+    `SELECT MAX(created_at) AS last FROM conversation_log WHERE agent_id = ? AND direction = 'in'`,
+  ).get(agentId) as { last: number | null } | undefined
+  return row && row.last != null ? Number(row.last) : null
+}
+
 export function hasOpenInboundQuestion(agentId: string): boolean {
   const row = db.prepare(
     `SELECT id, created_at FROM conversation_log
