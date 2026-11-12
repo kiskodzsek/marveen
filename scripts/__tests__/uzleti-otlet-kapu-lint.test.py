@@ -93,6 +93,37 @@ check("Radar's form: one result after a domain list passes",
 check("negative: in a domain list the hit of the next domain is not borrowed",
       itthon_err(MERT2.replace(SITE4, "\n  - site: emag.hu, alza.hu 0, notino.hu 0, douglas.hu 2 találat.")), True)
 
+
+def zseni_err(body, mode="--zseni"):
+    """The lint's MINDENKI/VICCES errors for one section (Klodel 39499, Patrik TG 18069), or "" if none."""
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
+        f.write(f"## 1. Ötlet\n{body}\n")
+        path = f.name
+    try:
+        out = subprocess.run([sys.executable, "-I", LINT, path, "--problema", mode], capture_output=True, text=True, timeout=20).stdout
+    finally:
+        os.unlink(path)
+    return "; ".join(x for x in out.split("; ") if x.startswith(("MINDENKI", "VICCES")) or "MINDENKI" in x or "VICCES" in x)
+
+
+JO_VICCES = '- VICCES: „Végre egy térkép, ami nem azt mondja, hogy forduljon vissza.”'
+# the two forced ideas of 2026-11-12 (Szigma A: free-parking map; Magnes A / biznisz-modell 1: dog places)
+check("negative, TG 18069: the parking map leaves out who has no car",
+      bool(zseni_err("- MINDENKI: akinek nincs autója\n" + JO_VICCES)), True)
+check("negative, TG 18069: the dog-place idea leaves out who has no dog",
+      bool(zseni_err("- MINDENKI: aki nem kutyás\n" + JO_VICCES)), True)
+check("negative: 'senkit' with a narrowing word still fails ('senkit, csak autósoknak')",
+      bool(zseni_err("- MINDENKI: senkit, de főleg autósoknak szól\n" + JO_VICCES)), True)
+check("negative: 'senkit' naming parents fails", bool(zseni_err("- MINDENKI: senkit (szülőknek)\n" + JO_VICCES)), True)
+check("negative: no MINDENKI field fails", bool(zseni_err(JO_VICCES)), True)
+check("negative: no VICCES field fails", bool(zseni_err("- MINDENKI: senkit")), True)
+check("negative: VICCES without quotes fails", bool(zseni_err("- MINDENKI: senkit\n- VICCES: majd kitaláljuk")), True)
+check("negative: VICCES with two sentences fails",
+      bool(zseni_err("- MINDENKI: senkit\n- VICCES: „Ez vicces. Ez is az.”")), True)
+check("'senkit' + one quoted sentence passes", zseni_err("- MINDENKI: senkit, mindenki sorban áll valahol\n" + JO_VICCES), "")
+check("'automata' is not 'autó'", zseni_err("- MINDENKI: senkit, a csomagautomata mindenkié\n" + JO_VICCES), "")
+check("without --zseni the fields are not required", zseni_err("- VOLUMEN: 10", mode="--x"), "")
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
     sys.exit(1)
