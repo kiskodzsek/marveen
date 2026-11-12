@@ -18,7 +18,7 @@ SCOPE (everything else is allowed at once, exit 0, no output):
 
 BLOCKS (exit 2, reason on stderr):
   1. A placeholder clock time anywhere in the judged lines: HH:Mx or HH:xx (x or X), e.g. 19:3x, 10:xx.
-  2. A FUTURE MEASURED time: HH:MM later than now + 2 minutes, on a line that names a measurement
+  2. A FUTURE MEASURED time: HH:MM later than the current minute, on a line that names a measurement
      (mérve, mérés..., mért, `date`, date szerint, measured, lefutott, futott, elküldve, küldve, lezárva,
      rögzítve; case-insensitive, accented forms only: unaccented "mert" is the Hungarian "because")
      and that does not name another date (YYYY-MM-DD or MM-DD other than today). A future time with no
@@ -50,7 +50,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 SHARED_DIR = os.path.join(os.path.realpath(os.path.join(HERE, '..', '..')), 'shared')
-SLACK_MIN = 2
+# 0: a minute after the current one is already a guess. With 2, Kernel's "08:20 date" written at 08:19:49
+# (2026-11-12, hibanapló) passed; the clock is this machine's, so there is no skew to absorb (Klodel 38942).
+SLACK_MIN = 0
 MAX_DATA_FILE = 64 * 1024
 DEADLINE_WINDOW = 40
 MAX_TIMES_PER_LINE = 20

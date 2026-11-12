@@ -165,8 +165,14 @@ def long_line_is_bounded(root):
 
 
 @case
-def pass_past_and_slack(root):
-    return write(root, 'mérve 18:08-18:14')[0] == 0 and write(root, 'mérve 18:16')[0] == 0
+def pass_past_and_current_minute(root):
+    return write(root, 'mérve 18:08-18:14')[0] == 0 and write(root, 'mérve 18:14')[0] == 0
+
+
+@case
+def block_one_minute_ahead(root):
+    # 2026-11-12: "08:20 date" written at 08:19:49 passed the old 2-minute slack (Klodel 38942)
+    return write(root, 'mérve 18:15')[0] == 2 and write(root, 'mérve 18:16')[0] == 2
 
 
 @case
