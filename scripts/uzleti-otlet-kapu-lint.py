@@ -41,7 +41,9 @@ def szokezdet(k, t):
 ITTHON_MOD = "--itthon" in sys.argv
 BOLTOK = ["emag", "alza", "decathlon", "pepita", "extreme digital", "edigital", "müller", "mueller", "dm", "rossmann",
     "szimpla", "vatera", "gymbeam", "kifli", "notino", "douglas", "jófogás", "jofogas", "árgép", "argep", "árukereső",
-    "arukereso", "olcsóbbat", "játéksziget", "jatekshop", "brendon", "mall", "hervis", "intersport", "libri"]
+    "arukereso", "olcsóbbat", "játéksziget", "jatekshop", "brendon", "mall", "hervis", "intersport", "libri",
+    "google play", "play áruház", "app store"]  # app-ötlet: a magyar app-áruházak keresése (Klodel 39514)
+APP_BOLT = {"google play", "play áruház", "app store"}
 HIANY = re.compile(r"(?i)(?<!\w)[ns]incs(en)?(?!\w)|nem találtam|nem találtunk|nem hozott találatot|nem árulja|nem árulj"
     r"|(?<![\w.,:])0(?![\w.,:])|egyik(ben)? sem|egyikben sincs")
 EREDMENY = re.compile(r"(?i)\d|nem hozott találatot|nem találtunk|nincs találat|„[^”]+”")
@@ -51,10 +53,11 @@ BOLTOK += ["meska"]  # kézműves piactér: 3 személyre szabott domborzati tér
 # Minden hiány-állításhoz kell keresőmotoros site-próba MIND a négy domainre, eredménnyel (a domain után, a következő
 # domainig; ha ott nincs, a sor maradékából: "(emag.hu, alza.hu): 0 találat"). Ha bármelyik site-próba találatot ad (szám > 0), a termék itthon kapható: a hiány-állítás bukik.
 SITE_DOMAINEK = ["emag.hu", "alza.hu", "notino.hu", "douglas.hu"]
+SITE_SOR = re.compile(r"(?i)(?<!\w)site(:|-szűrt|-próba| szűrt)")
 def site_hibak(b):
     talalt = {}
     for s in b.splitlines():
-        if not re.search(r"(?i)(?<!\w)site(:|-szűrt|-próba| szűrt)", s): continue
+        if not SITE_SOR.search(s): continue
         low = s.lower()
         for d in SITE_DOMAINEK:
             if d not in low: continue
@@ -113,6 +116,17 @@ def zseni_hibak(p):
         if not q: hibak.append("VICCES: nincs idézőjeles mondat")
         elif len(re.findall(r"[.!?…]+(?=\s+\S)", q.group(1).strip())) > 0: hibak.append("VICCES: egy mondat legyen, nem több")
     return hibak
+# Klodel 39550 (Radar 39544): (1) a site-próba sora hiány-bizonyíték, nem bolt-keresés: a benne lévő domainek (emag.hu,
+# alza.hu, ...) NEM számítanak mért boltnak (különben egy valódi bolt-keresés + a site-sor már "2 mért bolt").
+# (2) Az app-áruház azonosítós 404-e ("App Store HU: ... (id640360962) ... 404", "Google Play HU: id=com.x.y ... 404")
+# mért eredmény: az app itthon nem tölthető le. A 403/410/captcha/"nem mérhető" továbbra sem mért; a sor ilyenkor csak
+# az app-áruházat adja, más boltot nem.
+APP_ID = re.compile(r"(?i)(?<!\w)id\d{6,}(?!\w)|(?<!\w)id=[a-z]\w*(\.\w+)+")
+NEM_MERT_404_NELKUL = re.compile(r"(?i)nem mérhető|nem mért|(?<!\d)(403|410)(?!\d)|captcha")
+def app_404_mert(s):
+    low = s.lower()
+    return (re.search(r"(?<!\d)404(?!\d)", s) is not None and APP_ID.search(s) is not None
+            and any(a in low for a in APP_BOLT) and not NEM_MERT_404_NELKUL.search(s))
 def itthon_blokk(p):
     sorok = p.splitlines()
     for i, s in enumerate(sorok):
@@ -131,13 +145,19 @@ def itthon_hibak(p, kotelezo):
     mert = re.search(r"(?i)(?<!\w)mér(t|ve)(?!\w)", b) is not None
     boltok = set()
     for s in b.splitlines():
-        if NEM_MERT.search(s) or not EREDMENY.search(s): continue
-        for bo in BOLTOK:
+        if SITE_SOR.search(s) or not EREDMENY.search(s): continue
+        app404 = app_404_mert(s)
+        if NEM_MERT.search(s) and not app404: continue
+        for bo in (APP_BOLT if app404 else BOLTOK):
             if re.search(r"(?<!\w)" + re.escape(bo) + r"(?!\w)", s.lower()):
                 boltok.add({"mueller": "müller", "edigital": "extreme digital", "jofogas": "jófogás", "argep": "árgép", "arukereso": "árukereső"}.get(bo, bo))
     if "[search]" in b.lower() and not mert:
         return ["ITTHON: hiány-állítás csak [search] forrással (mért bolt-lista kell)"]
-    hibak = site_hibak(b)
+    # app-ötlet (a szakasz appról szól, és a mért boltok között app-áruház van): a 4 domaines site-próba nem kötelező
+    # (az "App Store" nevében lévő "App" nem számít: a bolt neve nélkül keressük)
+    p_bolt_nelkul = re.sub(r"(?i)app store|google play|play áruház", " ", p)
+    app = bool(boltok & APP_BOLT) and re.search(r"(?i)(?<!\w)(app|appok|alkalmazás|applikáció|pwa)(?!\w)", p_bolt_nelkul) is not None
+    hibak = [] if app else site_hibak(b)
     if not mert or len(boltok) < 2:
         hibak.insert(0, f"ITTHON: hiány-állítás mért bolt-lista nélkül (mért={'igen' if mert else 'nem'}, mért bolt {len(boltok)}, legalább 2 kell)")
     return hibak
@@ -151,14 +171,14 @@ def main(path):
         cim = p.splitlines()[0].strip()
         hibak = []
         for m in MEZOK:
-            if PROBLEMA_MOD: continue  # TG 4855: a régi mezők itt csak tájékoztatók, őszintén kitöltve
+            if PROBLEMA_MOD or ZSENI_MOD: continue  # TG 4855 / Klodel 39514: a régi mezők itt csak tájékoztatók
             mm = re.search(rf"(?m)^\s*[-*]?\s*{re.escape(m)}:\s*(\S+)", p)
             if not mm: hibak.append(f"{m} hiányzik")
             elif not mm.group(1).upper().startswith("IGEN"): hibak.append(f"{m}={mm.group(1)}")
         if "NINCS ADAT" in p.split("KIEMELKEDES:")[-1].splitlines()[0] if "KIEMELKEDES:" in p else False:
             hibak.append("KIEMELKEDES: NINCS ADAT")
         pz = re.search(r"(?m)^\s*[-*]?\s*PENZ:(.*)$", p)
-        if pz and not PROBLEMA_MOD and ("NINCS ADAT" in pz.group(1).upper() or not re.search(r"\d", pz.group(1))):
+        if pz and not (PROBLEMA_MOD or ZSENI_MOD) and ("NINCS ADAT" in pz.group(1).upper() or not re.search(r"\d", pz.group(1))):
             hibak.append("PENZ: mért bevétel szám nélkül")
         if PROBLEMA_MOD:
             for m in PROBLEMA_KOTELEZO:
