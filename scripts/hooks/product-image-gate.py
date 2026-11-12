@@ -72,6 +72,10 @@ marketing image and video (not "MAJSZTRO: nem-marketing") carries
 Both files must exist, the TG id must be an inbound message in store/claudeclaw.db conversation_log (the ledger has no
 sender column: it proves the message arrived, not who wrote it), and the comparison image must be newer than the checked
 file. "IZLES-REF: nincs" blocks (see izles_ref).
+Website before/after pair (Klodel 39281, Patrik TG 17953, 2026-11-12: the /marabello hero lost its 8 colour circles and
+went to Patrik as a "change"): KONYV/A5 "n/a weboldal" + előtte/utána/pár (or a par/pair word in the file name) needs
+    ELTUNT: nincs | <what is gone> PATRIK-KERTE TG <inbound TG msg id>
+(see eltunt_check).
 Tests: product-image-gate_test.py next to this file.
 Exit 0 = allow, exit 2 = block (stderr to the model).
 """
@@ -586,6 +590,53 @@ def caption_body(text):
     return body
 
 
+# Klodel 39281 (hibanapló 2026-11-12 11:43, Patrik TG 17953): in a website before/after pair the /marabello hero lost
+# its 8 colour circles, and the pair went to Patrik as a "change" (TG 17946). A website pair now says what is gone:
+#     ELTUNT: nincs                                   (nothing visible on "before" is missing on "after")
+#     ELTUNT: <what is gone> PATRIK-KERTE TG <n>      (Patrik asked for the removal; n is an inbound TG message)
+# A website pair: KONYV or A5 names "weboldal" AND (KONYV/A5 say előtte / utána / pár / before / after, or the file
+# name has a par / pair / elotte / utana / before / after word). A missing line, a "nincs" with anything after it,
+# or a removal without PATRIK-KERTE TG <n> of an inbound message blocks.
+WEB_PAIR_TEXT_RX = re.compile(r'(?<![a-z0-9])(?:elotte|utana|par|before|after)(?![a-z0-9])')
+WEB_PAIR_FILE_RX = re.compile(r'(?<![a-z0-9])(?:par|pair|elotte|utana|before|after)(?![a-z0-9])')
+ELTUNT_KERTE_RX = re.compile(r'^(?P<what>.*?\S)\s+patrik-kerte\s*:?\s*tg\s*(?P<tg>\d+)\s*\.?$', re.I)
+ELTUNT_FORM = ('Alak: "ELTUNT: nincs" (az előtte-képen látható elemek mind megvannak az utána-képen), vagy '
+               '"ELTUNT: <mi tűnt el> PATRIK-KERTE TG <n>" (Patrik kérte az eltávolítást; n a bejövő TG-üzenete).')
+
+
+def _fold(s):
+    return ''.join(c for c in unicodedata.normalize('NFKD', s or '') if not unicodedata.combining(c)).lower()
+
+
+def is_web_pair(fp, d):
+    head = _fold(' '.join(d.get(k) or '' for k in ('KONYV', 'A5')))
+    if 'weboldal' not in head:
+        return False
+    return bool(WEB_PAIR_TEXT_RX.search(head) or WEB_PAIR_FILE_RX.search(_fold(os.path.basename(fp))))
+
+
+def eltunt_check(fp, d):
+    """None, or the block reason for a website before/after pair without a valid ELTUNT line (Klodel 39281)."""
+    if not is_web_pair(fp, d):
+        return None
+    val = (d.get('ELTUNT') or d.get('ELTŰNT') or '').strip()
+    if not val:
+        return ('weboldal előtte/utána pár, de nincs ELTUNT sor: nézd meg, mi tűnt el az előtte-képhez képest '
+                '(Patrik TG 17953: a /marabello hero 8 színköre eltűnt, és "változásként" ment elé). ' + ELTUNT_FORM)
+    if _fold(val).rstrip('.').strip() == 'nincs':
+        return None
+    m = ELTUNT_KERTE_RX.match(val)
+    if not m:
+        return ('ELTUNT: ha valami eltűnt, csak Patrik kérésére mehet elé, PATRIK-KERTE TG <n> hivatkozással; a '
+                '"nincs" után nem állhat más. ' + ELTUNT_FORM)
+    try:
+        if not tg_inbound_exists(m.group('tg')):
+            return f'ELTUNT: a TG {m.group("tg")} üzenet nincs a bejövő naplóban (store/claudeclaw.db conversation_log).'
+    except Exception as e:
+        return f'ELTUNT: a TG-napló nem olvasható ({e.__class__.__name__}).'
+    return None
+
+
 def check(fp):
     base = os.path.basename(fp)
     ok = os.path.join(KAPU, base + '.ok')
@@ -604,6 +655,9 @@ def check(fp):
     miss = [k for k in REQ if not d.get(k)]
     if miss:
         return f'{base}: hiányzó mezők: {", ".join(miss)}.'
+    el = eltunt_check(fp, d)
+    if el:
+        return f'{base}: {el}'
     msg = message_and_real(d)
     if msg:
         return f'{base}: {msg}'

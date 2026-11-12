@@ -1798,6 +1798,98 @@ def no_idea_private_unchanged(root):
     return rc == 0
 
 
+# ELTUNT (Klodel 39281, Patrik TG 17953, 2026-11-12): a website before/after pair says what disappeared. The fixture is
+# the shape of the real 11-12 sheets (alk*-mobil-hero-par.jpg.ok). Synthetic ledger: inbound 17953, outbound 17946.
+def web_pair(root, eltunt=None, name='hero-par.png', konyv=None, ledger=True):
+    import sqlite3
+    kapu = os.path.join(root, 'store', 'kep-kapu')
+    os.makedirs(kapu, exist_ok=True)
+    img = os.path.join(root, name)
+    open(img, 'wb').write(b'\x89PNG')
+    if ledger and not os.path.exists(os.path.join(root, 'store', 'claudeclaw.db')):
+        con = sqlite3.connect(os.path.join(root, 'store', 'claudeclaw.db'))
+        con.execute('CREATE TABLE conversation_log (id INTEGER PRIMARY KEY, agent_id TEXT, chat_id TEXT, direction TEXT, '
+                    'message_id TEXT, text TEXT, ts TEXT, created_at INTEGER, source TEXT)')
+        con.execute("INSERT INTO conversation_log (agent_id, chat_id, direction, message_id, created_at, source) "
+                    "VALUES ('klodel', ?, 'in', '17953', 1, 'plugin:telegram:telegram')", (GROUP,))
+        con.execute("INSERT INTO conversation_log (agent_id, chat_id, direction, message_id, created_at, source) "
+                    "VALUES ('klodel', ?, 'out', '17946', 1, 'plugin:telegram:telegram')", (GROUP,))
+        con.commit()
+        con.close()
+    lines = [f'KONYV: {konyv or "a meglévő termékképek, a PR csak oldalszerkezetet módosít; weboldal előtte-utána pár"}',
+             'A5: n/a weboldal-képernyőkép', 'PAPIR: n/a weboldal-képernyőkép', 'SAJAT: ok saját oldalunk, dev szerver',
+             'KERES: teszt kérés, egyezik', 'NAGYITVA: Read-del megnézve, nincs törés',
+             'MAJSZTRO: nem-marketing weboldal-változás jóváhagyásra']
+    if eltunt is not None:
+        lines.append(f'ELTUNT: {eltunt}')
+    open(os.path.join(kapu, name + '.ok'), 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+    return run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+
+
+@case
+def web_pair_without_eltunt_blocked(root):
+    rc, err = web_pair(root)
+    return rc == 2 and 'ELTUNT' in err and '17953' in err
+
+
+@case
+def web_pair_eltunt_nincs_allowed(root):
+    return web_pair(root, 'nincs')[0] == 0 and web_pair(root, 'Nincs.')[0] == 0
+
+
+@case
+def web_pair_nincs_with_text_blocked(root):
+    # the 11-12 case written as a "nincs" with an excuse after it is not "nothing is gone"
+    rc, err = web_pair(root, 'nincs, csak a 8 színkör ment ki a heróból')
+    return rc == 2 and 'PATRIK-KERTE' in err
+
+
+@case
+def web_pair_removal_without_kerte_blocked(root):
+    rc, err = web_pair(root, 'a hero 8 színköre')
+    return rc == 2 and 'PATRIK-KERTE' in err
+
+
+@case
+def web_pair_removal_with_kerte_allowed(root):
+    return web_pair(root, 'a hero 8 színköre PATRIK-KERTE TG 17953')[0] == 0
+
+
+@case
+def web_pair_kerte_outbound_or_unknown_tg_blocked(root):
+    # 17946 is our own outbound message (the "change" sent to Patrik), 99999 does not exist
+    rc1, err1 = web_pair(root, 'a hero 8 színköre PATRIK-KERTE TG 17946')
+    rc2, _ = web_pair(root, 'a hero 8 színköre PATRIK-KERTE TG 99999', name='masik-par.png')
+    return rc1 == 2 and '17946' in err1 and rc2 == 2
+
+
+@case
+def web_pair_kerte_without_ledger_blocked(root):
+    rc, err = web_pair(root, 'a hero 8 színköre PATRIK-KERTE TG 17953', ledger=False)
+    return rc == 2 and 'ELTUNT' in err
+
+
+@case
+def web_pair_detected_by_file_name(root):
+    # KONYV/A5 say "weboldal" but not "előtte-utána"; the file name carries "-par"
+    rc, _ = web_pair(root, konyv='n/a weboldal-képernyőkép', name='alk1-mobil-hero-par.jpg')
+    return rc == 2
+
+
+@case
+def web_single_screenshot_unchanged(root):
+    # a single website screenshot (no pair word in KONYV/A5 or the name) needs no ELTUNT line; "parnak" is not "par"
+    rc, _ = web_pair(root, konyv='n/a weboldal-képernyőkép', name='ajandek-parnak-mobil.png')
+    return rc == 0
+
+
+@case
+def book_image_needs_no_eltunt(root):
+    img = book_fixture(root, 'van fotós borító')
+    rc, _ = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 0
+
+
 def main():
     bad = 0
     for fn in CASES:
