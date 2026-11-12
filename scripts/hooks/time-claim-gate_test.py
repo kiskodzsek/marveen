@@ -117,6 +117,51 @@ def card_comment_keeps_the_future_rule(root):
     return run(root['hook'], 'Bash', {'command': KANBAN + " -d @- <<'J'\nmérve 18:30\nJ"}, now='18:14')[0] == 2
 
 
+# ---- daily-log heading (Dave 39739): rule 3 ----
+
+LOG = API + "daily-log -H 'Content-Type: application/json' --data-binary @- <<'JSON'\n"
+YESTERDAY = TODAY - datetime.timedelta(days=1)
+
+
+@case
+def block_daily_log_future_heading(root):
+    # Dave 1375, the case that went in: "## 16:58" written at 16:48.
+    h = root['hook']
+    code, out, err = run(h, 'Bash', {'command': LOG + '{"agent_id":"dave","content":"## 16:58 -- PR #1293\\nkész"}\nJSON'},
+                         now='16:48')
+    body = os.path.join(root['dir'], 'log.json')
+    with open(body, 'w', encoding='utf-8') as fh:
+        fh.write('{"agent_id": "radar", "content": "# 9:05 -- kör"}')
+    return (code == 2 and '16:58' in err and 'heading' in err and out == ''
+            and run(h, 'Bash', {'command': API + 'daily-log --data-binary @' + body}, now='08:59')[0] == 2
+            and run(h, 'Bash', {'command': LOG + '{"content": "###16:49"}\nJSON'}, now='16:48')[0] == 2)
+
+
+@case
+def allow_daily_log_heading_now_past_other_day_or_body_deadline(root):
+    h = root['hook']
+    return all(run(h, 'Bash', {'command': LOG + c + '\nJSON'}, now='16:48')[0] == 0 for c in (
+        '{"content":"## 16:48 -- kész"}',
+        '{"content":"## 16:40 -- PR kész\\nPulzus 23:00-ig élesíti"}',
+        '{"content":"## 23:40 (' + f'{YESTERDAY:%m-%d}' + ') -- éjjeli kör"}',
+        '{"content":"Napi összegzés\\n## 23:59 terv"}'))
+
+
+@case
+def heading_rule_is_daily_log_only(root):
+    # A message or memory that starts with a heading, or a message that names the endpoint and quotes a heading,
+    # is not a log write (Dave 39739: his own local rule stopped his proposal message this way).
+    h = root['hook']
+    return (run(h, 'Bash', {'command': API + "messages --data-binary @- <<'JSON'\n{\"content\":\"## 23:59 terv\"}\nJSON"},
+                now='19:25')[0] == 0
+            and run(h, 'Bash', {'command': API + "memories --data-binary @- <<'JSON'\n{\"content\":\"## 23:59\"}\nJSON"},
+                    now='19:25')[0] == 0
+            and run(h, 'Bash', {'command': MSG + 'javaslat: a /api/daily-log fejléce (## 23:59) jövőbeli\nTXT'},
+                    now='19:25')[0] == 0
+            and run(h, 'Bash', {'command': KANBAN + " -d @- <<'J'\n{\"content\":\"## 23:59 terv\"}\nJ"},
+                    now='19:25')[0] == 0)
+
+
 @case
 def unrelated_msg_words_are_out_of_scope(root):
     h = root['hook']
