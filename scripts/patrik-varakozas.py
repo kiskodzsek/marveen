@@ -20,7 +20,8 @@ never Patrik) when a request has waited too long, and Klodel + Dave when a rende
    panes that are busy). At most one such message every WAIT_S; a request is named at most MAX_ALERTS times, and one
    older than MAX_AGE_S is no longer chased.
 2. Free-machine guard. While a RENDER work request is open (render_related: the request or the promise names a film,
-   video, image, render or one of the films' products), a render machine that has not rendered for IDLE_S (5 min) ->
+   video, image, render or one of the films' products; an inventory question, a purchase, a decision or an idea
+   request is not), a render machine that has not rendered for IDLE_S (5 min) ->
    one alert to Klodel and Dave ("üres gép: <gép>, sorban: <ami vár>"), again every WAIT_S. The mini renders when a
    render.mjs export/frames, Blender or ffmpeg runs here; the MacBook when our ssh to its render gate (render-mac
    render|export) runs here (measured on this side: the gate itself has no status in the installed version).
@@ -122,11 +123,22 @@ RENDER_WORK = re.compile(
 NON_RENDER = re.compile(
     r'(szerez|megve(sz|tt|nn)|\bvesz(ek|ed|unk|ik|em)?\b|\bveg(yem|yuk|yel|yek|ye|yetek)\b|vasarl|\bfizet|elofizet'
     r'|szamla|csomag|\bdont(es|s|sd|sek|sunk|ottam)?\b|valassz|valasszak|melyiket'
-    r'|otlet|\btermek(ek|et|eket|eink|unk|ot)?\b|kutat)')
+    r'|otlet|\btermek(ek|et|eket|eink|unk|ot)?\b|kutat|\bmi(nk|nek)? van meg\b)')
+# An inventory question ("what do we have?") is not render work, whatever it names: it needs a list and an answer, no
+# machine time (Klodel 39657, Dave 39655, Patrik TG 5603, 2026-11-12: «milyen hirdetéshez való anyagaink állnak
+# rendelkezésre?» was answered "... képek, videók ... amint kész", and [SZABAD GÉP] went out, 39653/39654). Checked
+# before the render words, so «milyen képeink állnak rendelkezésre?» is an inventory question too. Kept narrow: a status
+# question ("hol tart a babás?") is not caught here, the render word still decides it. Only a short request: measured on
+# the 14 days of the ledger before 2026-11-12, eight long render briefs (a campaign video, the character engine) carry
+# "rendelkezésre" or "mi ... anyag" somewhere inside and would have been dropped.
+INVENTORY = re.compile(r'rendelkezesre|leltar|\b(milyen|melyik|mely|hany|mi)\b.{0,80}\banyag')
+INVENTORY_MAX = 200  # characters, folded
 
 
 def render_related(q):
     text = ' '.join(fold(q.get('text') or '').split())
+    if len(text) <= INVENTORY_MAX and INVENTORY.search(text):
+        return False
     if RENDER_WORK.search(text):
         return True
     if NON_RENDER.search(text):
