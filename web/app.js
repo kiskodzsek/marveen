@@ -6622,9 +6622,26 @@ function makeScheduleRow(task) {
     const approveBtn = row.querySelector('[data-action="approve"]')
     if (approveBtn) approveBtn.addEventListener('click', async (e) => {
       e.stopPropagation()
-      if (!confirm(t('tasks.confirm.approve'))) return
+      // Viktor 39032 #3: an informed approval -- what runs, where, as whom (the
+      // row shows only the description, which is not part of the hash), bound
+      // to the definition shown here via trustHash (409 if it changed since).
+      const promptHead = String(task.prompt || '').slice(0, 500)
+      const details = [
+        t('tasks.confirm.approve'),
+        '',
+        'agent: ' + (task.agent || ''),
+        'schedule: ' + (task.schedule || ''),
+        'targetSession: ' + (task.targetSession || '-'),
+        '',
+        promptHead + (String(task.prompt || '').length > 500 ? ' …' : ''),
+      ].join('\n')
+      if (!confirm(details)) return
       try {
-        const r = await fetch(`/api/schedules/${encodeURIComponent(task.name)}/approve`, { method: 'POST' })
+        const r = await fetch(`/api/schedules/${encodeURIComponent(task.name)}/approve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hash: task.trustHash }),
+        })
         const data = await r.json().catch(() => ({}))
         if (r.ok) showToast(t('tasks.toast.approved'))
         else showToast('Hiba: ' + (data.error || r.status))

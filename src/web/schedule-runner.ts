@@ -1979,6 +1979,12 @@ export async function runScheduledTaskNow(
   if (!task.enabled && !opts.allowDisabled) return { ok: false, error: 'Schedule is disabled' }
 
   if (isDirectDigestTask(task)) {
+    // SCHEDTRUST1112: the same gate as the cron loop's direct-digest branch.
+    const digestTrust = scheduleTrustOf(task)
+    if (!isOwnerTrusted(digestTrust)) {
+      alertScheduleTrust(task, digestTrust, 'a közvetlen összesítő nem ment ki')
+      return { ok: false, error: 'direct digest not sent: the task is not approved as stored' }
+    }
     const sent = await sendHeartbeatDigestDirect(task.name, task.agent, directDigestDeps())
     return sent ? { ok: true, result: `${task.agent}: sent-direct` } : { ok: false, error: 'direct digest could not be sent' }
   }
@@ -2446,7 +2452,9 @@ export function startScheduleRunner(): NodeJS.Timeout {
   // SCHEDTRUST1112: the one-time legacy import (Klodel 39006). Before the first
   // tick, so the tasks that exist when this ships keep today's framing; a no-op
   // on every later start.
-  ensureScheduleTrustBaseline(listScheduledTasks())
+  // The list is read inside the helper's try (Viktor 39032 #5): a read error
+  // does not stop the runner; every task then runs agent-framed.
+  ensureScheduleTrustBaseline(listScheduledTasks)
   // Close EVERY run that the previous process was still watching when it
   // stopped. taskInflightMap is in memory, so a restart loses every open entry
   // and nothing else can ever close those rows (SCHEDSORZAR923: an age window
@@ -2894,6 +2902,17 @@ export function startScheduleRunner(): NodeJS.Timeout {
       // to go out exactly while the main agent is busy. A failure is recorded
       // as an 'error' run and reported by the gap guard.
       if (isDirectDigestTask(task)) {
+        // SCHEDTRUST1112 (Viktor 39032 #6): no LLM here, so no framing to
+        // switch -- an unapproved digest task is simply not sent, and alerted
+        // (the API sets neither injectMetrics nor sendDigestDirect: a file edit).
+        const digestTrust = scheduleTrustOf(task)
+        if (!isOwnerTrusted(digestTrust)) {
+          logger.warn({ task: task.name, trust: digestTrust }, 'schedule-trust: direct digest NOT sent (not approved as stored)')
+          alertScheduleTrust(task, digestTrust, 'a közvetlen összesítő nem ment ki')
+          scheduleLastRun.set(task.name, now)
+          persistScheduleLastRun()
+          continue
+        }
         await sendHeartbeatDigestDirect(task.name, task.agent, directDigestDeps())
         scheduleLastRun.set(task.name, now)
         persistScheduleLastRun()

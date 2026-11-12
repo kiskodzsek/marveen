@@ -594,7 +594,7 @@ window._i18n.hu = {
   'tasks.trust.mismatch':        'jóváhagyás után módosult',
   'tasks.trust.hint':            'Ügynöki keretezéssel fut: kérésként kezeli, kifelé menő lépés előtt rákérdez. Jóváhagyással gazda-utasításként fut.',
   'tasks.btn.approve':           'Jóváhagyás (gazda-utasításként fusson)',
-  'tasks.confirm.approve':       'Jóváhagyod ezt a feladatot a mostani szövegével? Utána gazda-utasításként fut.',
+  'tasks.confirm.approve':       'Jóváhagyod ezt a feladatot ezzel a szöveggel? Utána gazda-utasításként fut.',
   'tasks.toast.approved':        'Feladat jóváhagyva',
   'tasks.retries.title':         'Függőben lévő ütemezett feladatok ({n})',
   'tasks.retries.hint':          'Busy cél-session, a rendszer tovább próbálkozik. Nyilvánvaló hibánál visszavonhatod.',

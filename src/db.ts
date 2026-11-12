@@ -1046,7 +1046,8 @@ export function initDatabase(dbPathOverride?: string): void {
   // SKILL.md does not touch this table, so the fire-time hash catches it. The
   // baseline row marks the one-time "legacy" import of the tasks that existed
   // when this shipped; it never runs again, so deleting trust rows only ever
-  // makes tasks LESS trusted.
+  // makes tasks LESS trusted. (Deleting the baseline row itself re-baselines on
+  // the next start: same user, same capability as writing this table.)
   db.exec(`
     CREATE TABLE IF NOT EXISTS schedule_trust (
       task_name TEXT PRIMARY KEY,

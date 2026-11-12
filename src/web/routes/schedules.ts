@@ -21,7 +21,7 @@ import { validateScheduleUpdate, scheduleCreateRefusal, COMMAND_TASK_API_REFUSAL
 import { runScheduledTaskNow } from '../schedule-runner.js'
 import { createOnceTask, readOnceAnchors, recordOnceAnchor, shouldAlertCap, isOnceTask, ONCE_EDIT_REFUSAL, type OnceRequestBody } from '../once-schedule.js'
 import { resolveDashboardOrigin } from '../agent-scaffold.js'
-import { scheduleTrustOf, scheduleTrustHash, approveScheduledTask, clearScheduleTrust } from '../schedule-trust.js'
+import { scheduleTrustOf, scheduleTrustHash, scheduleTrustShortHash, approveScheduledTask, clearScheduleTrust } from '../schedule-trust.js'
 import { fleetOwnerSession } from './fleet.js'
 import { logConfigChange } from '../../db.js'
 import type { RouteContext } from './types.js'
@@ -157,7 +157,8 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
   if (path === '/api/schedules' && method === 'GET') {
     // SCHEDTRUST1112: each task carries its trust verdict for the dashboard
     // (approved / legacy = owner framing; agent / mismatch = agent framing).
-    json(res, listScheduledTasks().map(t => ({ ...t, trust: scheduleTrustOf(t) })))
+    // trustHash (16 hex) is what an approval must echo (Viktor 39032 #3).
+    json(res, listScheduledTasks().map(t => ({ ...t, trust: scheduleTrustOf(t), trustHash: scheduleTrustShortHash(t) })))
     return true
   }
 
@@ -410,8 +411,29 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       json(res, { error: 'Ütemezést jóváhagyni csak a bejelentkezett tulajdonos böngészője tud (a hozzáférési token nem elég).' }, 403)
       return true
     }
+    // Viktor 39032 #3 (TOCTOU): the approval is bound to the definition the
+    // owner SAW -- the body echoes the trustHash the list showed, and a task
+    // changed since then is refused (409), never approved in its new form.
+    // The echoed value is only COMPARED; nothing from the body is stored.
+    let seen: unknown
+    try {
+      const body = await readBody(req, { maxBytes: 1024 })
+      seen = (JSON.parse(body.toString() || '{}') as { hash?: unknown }).hash
+    } catch {
+      json(res, { error: 'Body must be a JSON object with the hash the dashboard showed' }, 400)
+      return true
+    }
+    if (typeof seen !== 'string' || !/^[0-9a-f]{16}$/.test(seen)) {
+      json(res, { error: 'hash is required (the trustHash of GET /api/schedules)' }, 400)
+      return true
+    }
     const task = readScheduledTask(name)
     if (!task) { json(res, { error: 'Schedule not found' }, 404); return true }
+    if (scheduleTrustShortHash(task) !== seen) {
+      logConfigChange('security.schedule_approve_stale', null, name, `session:${owner}`)
+      json(res, { error: 'A feladat megváltozott, mióta megnyitottad. Frissítsd az oldalt, és nézd meg újra.' }, 409)
+      return true
+    }
     const before = scheduleTrustOf(task)
     const hash = approveScheduledTask(task, `session:${owner}`)
     logConfigChange('security.schedule_approve', `${name}:${before}`, `${name}:approved:${hash.slice(0, 16)}`, `session:${owner}`)

@@ -23,6 +23,11 @@
 //   - The runner executes no bash for an untrusted task: a command task is not
 //     run, a preCheck is not run (its stdout would land in the task body).
 //
+// The legacy baseline runs once (db.ts schedule_trust_baseline). Deleting a
+// trust ROW only lowers trust; deleting the BASELINE row and restarting would
+// re-baseline every task at its current hash -- the same capability as writing
+// the table directly, i.e. the residual below, not a new door (Viktor 39032 #5).
+//
 // Residual, stated (Klodel 39006: "ismert maradék kockázat, zárja: bubek 2e"):
 // an agent runs under the same Unix user as the dashboard, so it can rewrite a
 // task AND its trust row together (the hash is not a secret; an HMAC key would
@@ -44,26 +49,55 @@ import type { ScheduledTask } from './scheduled-tasks-io.js'
 /** approved/legacy run with the owner framing; agent/mismatch do not. */
 export type ScheduleTrustStatus = 'approved' | 'legacy' | 'agent' | 'mismatch'
 
-/** The fields that decide WHAT runs and WHERE. targetSession is in on purpose:
- *  it can steer an approved task into another agent's session (PUT-writable). */
-export type ScheduleTrustFields = Pick<ScheduledTask, 'prompt' | 'agent'> &
-  Partial<Pick<ScheduledTask, 'type' | 'command' | 'preCheck' | 'targetSession'>>
+/**
+ * The hash is DENY-LIST based (Viktor 39032 #1): EVERY field of the stored
+ * definition counts -- prompt (the SKILL.md body), type, command, preCheck,
+ * agent, targetSession, telegramChatId, channelProvider, injectMetrics,
+ * sendDigestDirect, requires, ... and any field added later -- EXCEPT the ones
+ * below, which only say WHEN or WHETHER a task runs, or how it is labelled.
+ * They are exactly what a token PUT may change while keeping the approval
+ * (schedule-api-fields.ts), plus the store's own bookkeeping.
+ */
+export const SCHEDULE_TRUST_UNHASHED_FIELDS: ReadonlySet<string> = new Set([
+  'name', 'description', 'schedule', 'enabled', 'createdAt', 'skipIfBusy', 'forceSend',
+  'catchUpMaxAgeMinutes', 'stuckAfterMinutes', 'runAt',
+])
+
+export type ScheduleTrustFields = Pick<ScheduledTask, 'prompt' | 'agent'> & Partial<Omit<ScheduledTask, 'prompt' | 'agent'>>
 
 const HASH_RX = /^[0-9a-f]{64}$/
 
+// Key-sorted, undefined-free JSON, so the hash does not depend on the order
+// the fields were written in, nor on an absent-vs-undefined difference.
+function canonical(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonical)
+  if (v && typeof v === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+      const x = (v as Record<string, unknown>)[k]
+      if (x !== undefined) out[k] = canonical(x)
+    }
+    return out
+  }
+  return v
+}
+
 export function scheduleTrustHash(task: ScheduleTrustFields): string {
-  // An array, not an object: the order is fixed, and a missing field is null
-  // (not dropped), so moving text from one field to another changes the hash.
-  const canon = JSON.stringify([
-    'v1',
-    String(task.prompt ?? ''),
-    String(task.type ?? 'task'),
-    task.command ?? null,
-    task.preCheck ?? null,
-    String(task.agent ?? ''),
-    task.targetSession ?? null,
-  ])
-  return createHash('sha256').update(canon, 'utf8').digest('hex')
+  const kept: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(task)) {
+    if (!SCHEDULE_TRUST_UNHASHED_FIELDS.has(k)) kept[k] = v
+  }
+  // The defaults readScheduledTask applies, so a task built in code and the
+  // same task read back from disk hash alike.
+  kept.prompt = String(task.prompt ?? '')
+  kept.agent = String(task.agent ?? '')
+  kept.type = task.type ?? 'task'
+  return createHash('sha256').update(JSON.stringify(['v2', canonical(kept)]), 'utf8').digest('hex')
+}
+
+/** The first 16 hex of the hash: what the dashboard shows and the approve call echoes. */
+export function scheduleTrustShortHash(task: ScheduleTrustFields): string {
+  return scheduleTrustHash(task).slice(0, 16)
 }
 
 /** Pure verdict for one task against its stored row. */
@@ -111,10 +145,18 @@ export function clearScheduleTrust(taskName: string): void {
  * shipped (Klodel 39006: they keep today's framing). Does nothing once the
  * baseline row exists. Returns the number of rows written, or null.
  */
-export function ensureScheduleTrustBaseline(tasks: ScheduledTask[], now = Date.now()): number | null {
+export function ensureScheduleTrustBaseline(listTasks: () => ScheduledTask[], now = Date.now()): number | null {
   try {
-    const n = baselineScheduleTrust(tasks.map(t => ({ name: t.name, hash: scheduleTrustHash(t) })), Math.floor(now / 1000))
-    if (n !== null) logger.warn({ tasks: n }, 'schedule-trust: legacy baseline written (one-time)')
+    const entries = listTasks().map(t => ({ name: t.name, agent: t.agent, hash: scheduleTrustHash(t) }))
+    const n = baselineScheduleTrust(entries, Math.floor(now / 1000))
+    // Viktor 39032 #7: the baselined set, once, so a later review can compare
+    // what was trusted unreviewed. Names and agents are filtered like the alert.
+    if (n !== null) {
+      logger.warn({
+        tasks: n,
+        baseline: entries.map(e => ({ name: alertSafeId(e.name), agent: alertSafeId(e.agent), hash: e.hash.slice(0, 16) })),
+      }, 'schedule-trust: legacy baseline written (one-time)')
+    }
     return n
   } catch (err) {
     logger.error({ err }, 'schedule-trust: legacy baseline failed; every task runs agent-framed until it is approved')
@@ -126,24 +168,35 @@ export function ensureScheduleTrustBaseline(tasks: ScheduledTask[], now = Date.n
 // task firing every 10 minutes does not repeat it; a further edit alerts again.
 const mismatchAlerted = new Map<string, string>()
 
+// Viktor 39032 #2: the alert goes out as a from=system message to the main
+// agent, so nothing read from the task files may reach it raw -- the directory
+// name and the agent field are free text on disk (newlines, a fake directive,
+// kilobytes). Only an id-shaped value is shown; the rest is a fixed template.
+const ALERT_ID_RX = /^[A-Za-z0-9._-]{1,64}$/
+export function alertSafeId(v: unknown): string {
+  return typeof v === 'string' && ALERT_ID_RX.test(v) ? v : '(érvénytelen név)'
+}
+
 export function alertScheduleTrust(task: ScheduledTask, status: ScheduleTrustStatus, where: string): void {
   if (isOwnerTrusted(status)) return
   const hash = scheduleTrustHash(task)
   if (mismatchAlerted.get(task.name) === hash) return
   mismatchAlerted.set(task.name, hash)
-  logger.warn({ task: task.name, agent: task.agent, status, where }, 'schedule-trust: task is not approved as stored')
+  const name = alertSafeId(task.name)
+  const agent = alertSafeId(task.agent)
+  logger.warn({ task: name, agent, status, where }, 'schedule-trust: task is not approved as stored')
   const what = status === 'mismatch'
     ? 'tárolt definíciója eltér a jóváhagyottól (prompt / type / command / preCheck / agent / targetSession): valaki az API-n kívül, a fájlban írta át'
     : 'nincs jóváhagyva, mégis olyat kér, amit az API nem tud beállítani (command / preCheck): fájlból került a tárba'
   try {
     createSystemMessage(
       MAIN_AGENT_ID,
-      `[UTEMEZES-BIZALOM] A(z) "${task.name}" ütemezett feladat (agent: ${task.agent}) ${what}. ` +
+      `[UTEMEZES-BIZALOM] A(z) "${name}" ütemezett feladat (agent: ${agent}) ${what}. ` +
       `Ügynöki keretezéssel fut, bash (command, preCheck) nélkül (${where}). ` +
-      `Nézd meg a ~/.claude/scheduled-tasks/${task.name}/ tartalmát; ha rendben van, a tulajdonos a dashboardon jóváhagyhatja. Ha nem a tulajdonos írta, szólj Viktornak.`,
+      `Nézd meg a ~/.claude/scheduled-tasks/${name}/ tartalmát; ha rendben van, a tulajdonos a dashboardon jóváhagyhatja. Ha nem a tulajdonos írta, szólj Viktornak.`,
     )
   } catch (err) {
-    logger.warn({ err, task: task.name }, 'schedule-trust: alert could not be queued')
+    logger.warn({ err, task: name }, 'schedule-trust: alert could not be queued')
   }
 }
 

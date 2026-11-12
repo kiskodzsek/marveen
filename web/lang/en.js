@@ -400,7 +400,7 @@ window._i18n.en = {
   'tasks.trust.mismatch':        'changed after approval',
   'tasks.trust.hint':            'Runs agent-framed: treated as a request, outward steps wait for you. Approve it to run as an owner instruction.',
   'tasks.btn.approve':           'Approve (run as an owner instruction)',
-  'tasks.confirm.approve':       'Approve this task with its current text? It then runs as an owner instruction.',
+  'tasks.confirm.approve':       'Approve this task with the text below? It then runs as an owner instruction.',
   'tasks.toast.approved':        'Task approved',
   'tasks.btn.toggle_pause':      'Pause',
   'tasks.btn.toggle_resume':     'Resume',

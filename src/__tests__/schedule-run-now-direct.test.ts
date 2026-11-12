@@ -20,6 +20,14 @@ const h = vi.hoisted(() => ({
   insertRetry: vi.fn(),
 }))
 
+// SCHEDTRUST1112: this file tests the direct-digest mechanics, so its task
+// counts as owner-approved; the gate itself is in schedule-trust.test.ts.
+vi.mock('../web/schedule-trust.js', () => ({
+  scheduleTrustOf: () => 'approved',
+  isOwnerTrusted: () => true,
+  alertScheduleTrust: () => {},
+  ensureScheduleTrustBaseline: () => null,
+}))
 vi.mock('../web/scheduled-tasks-io.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../web/scheduled-tasks-io.js')>()),
   listScheduledTasks: () => h.tasks,
