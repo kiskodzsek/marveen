@@ -190,7 +190,8 @@ export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // plist that scripts/install-mem-relief.sh writes for this install (#104, 319c5425). RunAtLoad
   // + every 60 s; it stops the Colima VM and next dev servers on a critical host. Bootstrap and
   // bootout only, nothing kickstarts it. Viktor 25470/25476: the scripts it runs are pinned at
-  // bootstrap against the 3efd5548 blobs (agents/kernel/out/mem-relief-pins-3efd5548.txt).
+  // bootstrap: scripts/launchd-pins/com.marveen.mem-relief.sha256 (`shasum -a 256 -c` from the repo
+  // root), kept in step by src/__tests__/launchd-script-pins.test.ts (LAUNCHDPIN1111).
   'com.marveen.mem-relief': new Set(['50d2f3a54bce7dc12bc0243030fd07d7337957b5ba8503fc3b017aef454e9572']),
   // Card 7b30ebe5 (Klodel 27133/27138, 2026-11-05: the accounting folder was found cloud-only while
   // the owner waited at the bank): the plist that scripts/install-konyveles-hydrate.sh writes for
