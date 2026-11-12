@@ -596,6 +596,8 @@ window._i18n.hu = {
   'tasks.btn.approve':           'Jóváhagyás (gazda-utasításként fusson)',
   'tasks.confirm.approve':       'Jóváhagyod ezt a feladatot ezzel a szöveggel? Utána gazda-utasításként fut.',
   'tasks.toast.approved':        'Feladat jóváhagyva',
+  'tasks.approve.too_long':      'A feladat szövege {n} karakter, ez több, mint amennyi itt megjeleníthető ({max}). Egy kattintással nem hagyható jóvá: megnyitom a szerkesztőt, ott nézd át a teljes szöveget, és mentéssel hagyd jóvá.',
+  'tasks.approve.runs_bash':     'FUTTAT bash-t:',
   'tasks.retries.title':         'Függőben lévő ütemezett feladatok ({n})',
   'tasks.retries.hint':          'Busy cél-session, a rendszer tovább próbálkozik. Nyilvánvaló hibánál visszavonhatod.',
   'tasks.retries.meta':          '{age} vár ({n} próbálkozás)',

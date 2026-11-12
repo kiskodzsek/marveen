@@ -6558,6 +6558,36 @@ function cronCadence(cron) {
 }
 const CADENCE_ICON = { 0: '⚡', 1: '☀️', 2: '📅', 3: '🗓️', 5: '•' }
 
+// SCHEDTRUST1112 (Viktor 39039): what the owner sees before approving a task.
+// Everything the trust hash covers that is set shows up -- not only the
+// description the row displays (that one is not hashed). A command or a
+// preCheck is called out: an approved task RUNS bash. A prompt longer than
+// SCHEDULE_APPROVE_MAX_PROMPT is not one-click approvable (a confirm box
+// cannot show it whole, and the tail is where an agent would hide the point):
+// blocked=true, and the caller opens the editor instead.
+const SCHEDULE_APPROVE_MAX_PROMPT = 500
+function scheduleApprovalView(task) {
+  const prompt = String(task.prompt || '')
+  if (prompt.length > SCHEDULE_APPROVE_MAX_PROMPT) {
+    return { blocked: true, text: t('tasks.approve.too_long').replace('{n}', String(prompt.length)).replace('{max}', String(SCHEDULE_APPROVE_MAX_PROMPT)) }
+  }
+  const lines = [t('tasks.confirm.approve'), '']
+  if (task.command) lines.push('⚠ ' + t('tasks.approve.runs_bash') + ' command: ' + String(task.command))
+  if (task.preCheck) lines.push('⚠ ' + t('tasks.approve.runs_bash') + ' preCheck: ' + String(task.preCheck))
+  lines.push('agent: ' + String(task.agent || ''))
+  lines.push('schedule: ' + String(task.schedule || ''))
+  if (task.type && task.type !== 'task') lines.push('type: ' + String(task.type))
+  for (const k of ['targetSession', 'telegramChatId', 'channelProvider']) {
+    if (task[k]) lines.push(k + ': ' + String(task[k]))
+  }
+  for (const k of ['injectMetrics', 'sendDigestDirect', 'requiresDesktop']) {
+    if (task[k] === true) lines.push(k + ': true')
+  }
+  if (task.requires && Object.keys(task.requires).length) lines.push('requires: ' + JSON.stringify(task.requires))
+  lines.push('', prompt)
+  return { blocked: false, text: lines.join('\n') }
+}
+
 function makeScheduleRow(task) {
     const row = document.createElement('div')
     row.className = 'schedule-row'
@@ -6622,20 +6652,15 @@ function makeScheduleRow(task) {
     const approveBtn = row.querySelector('[data-action="approve"]')
     if (approveBtn) approveBtn.addEventListener('click', async (e) => {
       e.stopPropagation()
-      // Viktor 39032 #3: an informed approval -- what runs, where, as whom (the
-      // row shows only the description, which is not part of the hash), bound
-      // to the definition shown here via trustHash (409 if it changed since).
-      const promptHead = String(task.prompt || '').slice(0, 500)
-      const details = [
-        t('tasks.confirm.approve'),
-        '',
-        'agent: ' + (task.agent || ''),
-        'schedule: ' + (task.schedule || ''),
-        'targetSession: ' + (task.targetSession || '-'),
-        '',
-        promptHead + (String(task.prompt || '').length > 500 ? ' …' : ''),
-      ].join('\n')
-      if (!confirm(details)) return
+      // Viktor 39032 #3 / 39039: an informed approval, bound to the definition
+      // shown here via trustHash (409 if it changed since). See scheduleApprovalView.
+      const view = scheduleApprovalView(task)
+      if (view.blocked) {
+        alert(view.text)
+        openEditSchedule(task)
+        return
+      }
+      if (!confirm(view.text)) return
       try {
         const r = await fetch(`/api/schedules/${encodeURIComponent(task.name)}/approve`, {
           method: 'POST',

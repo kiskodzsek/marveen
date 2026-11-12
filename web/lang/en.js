@@ -402,6 +402,8 @@ window._i18n.en = {
   'tasks.btn.approve':           'Approve (run as an owner instruction)',
   'tasks.confirm.approve':       'Approve this task with the text below? It then runs as an owner instruction.',
   'tasks.toast.approved':        'Task approved',
+  'tasks.approve.too_long':      'This task text is {n} characters, more than can be shown here ({max}). It cannot be approved in one click: the editor opens, read the full text there and save to approve.',
+  'tasks.approve.runs_bash':     'RUNS bash:',
   'tasks.btn.toggle_pause':      'Pause',
   'tasks.btn.toggle_resume':     'Resume',
   'tasks.btn.history':           'Run history',

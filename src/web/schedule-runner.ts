@@ -91,7 +91,7 @@ import {
 import { isRestartInFlight } from './restart-lock.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { runCommandTask } from './command-task.js'
-import { scheduleTrustOf, isOwnerTrusted, alertScheduleTrust, ensureScheduleTrustBaseline } from './schedule-trust.js'
+import { scheduleTrustOf, isOwnerTrusted, alertScheduleTrust, ensureScheduleTrustBaseline, alertSafeId } from './schedule-trust.js'
 import { trackDetachedGroup } from './detached-groups.js'
 import { decideQuotaAction, type QuotaWorkClass } from '../quota-gate.js'
 import { readQuotaSnapshot } from '../quota-snapshot.js'
@@ -1586,7 +1586,8 @@ async function attemptFireTask(
           ambiguousTargetAlerted.add(task.name)
           createSystemMessage(
             MAIN_AGENT_ID,
-            `[FELHIVAS] A(z) "${task.name}" utemezett feladat (agent: ${agentName}) cimzettje bizonytalan -- ${bound.ambiguousCandidates} lehetseges kontakt van az agens allowFrom listajan, es a task-config.json-ban nincs telegramChatId megadva. A kezbesitesi utasitas kimaradt EBBOL A futasbol (nem tippeltunk). Toltsd ki a telegramChatId mezot (konkret chat_id, vagy "none" ha a taskot nem kell csatornara kuldeni) a ~/.claude/scheduled-tasks/${task.name}/task-config.json-ban.`,
+            // Viktor 39039 LOW: a from=system line carries no raw name from disk.
+            `[FELHIVAS] A(z) "${alertSafeId(task.name)}" utemezett feladat (agent: ${alertSafeId(agentName)}) cimzettje bizonytalan -- ${bound.ambiguousCandidates} lehetseges kontakt van az agens allowFrom listajan, es a task-config.json-ban nincs telegramChatId megadva. A kezbesitesi utasitas kimaradt EBBOL A futasbol (nem tippeltunk). Toltsd ki a telegramChatId mezot (konkret chat_id, vagy "none" ha a taskot nem kell csatornara kuldeni) a ~/.claude/scheduled-tasks/${alertSafeId(task.name)}/task-config.json-ban.`,
           )
         }
         prefix = `[Utemezett feladat: ${task.name}] `
