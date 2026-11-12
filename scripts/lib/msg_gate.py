@@ -157,7 +157,11 @@ STOP_WORD = re.compile(_B + r'(?:zard\s+le|nem\s+kell|allitsd\s+le|allitsuk\s+le
 SELF_NEGATED = re.compile(r'(?:ne\s+csinald|nem\s+kell)$')
 # "ne állítsd le", "nem kell leállítani". Viktor 37910 L5: only a short window before the verb is searched
 # (NEG_WINDOW), so a text of many negated verbs stays linear; a longer gap reads as no negation (the safe side).
-NEGATION = re.compile(_B + r'(?:ne|nem(?:\s+kell)?)\s+$')
+# Klodel 39243: "nem azt mondtam zárd le" (Patrik TG 4943) denies a stop, it does not give one; the denied
+# saying ("nem azt mondtam/írtam/kértem", optional ", hogy") right before the verb is a negation too. Kept
+# narrow on purpose: "nem azt mondtam, hogy folytasd, hanem zárd le" is still a stop (the window ends at
+# "hanem").
+NEGATION = re.compile(_B + r'(?:ne|nem(?:\s+kell)?|nem\s+azt\s+(?:mondtam|irtam|kertem),?(?:\s+hogy)?)\s+$')
 NEG_WINDOW = 24
 # "nem kell leállítani", "ne hagyjuk abba": a quote that says NOT to stop is never a stop, whatever else it holds.
 NEG_STOP = re.compile(_B + r'(?:nem\s+kell\s+(?:leallit|lezar|abbahagy|befejez)|ne\s+(?:hagyjuk|hagyd)\s+abba)')
