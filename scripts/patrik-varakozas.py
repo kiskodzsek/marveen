@@ -116,9 +116,13 @@ RENDER_WORK = re.compile(
 # A purchase, a payment or a decision is not render work, even when the promising reply talks about the images or the
 # film it will lead to (Dave 38764, 2026-11-11: «ultrat be kell szerezni holnap» was answered with "indul az első
 # AI-influenszer ... a képeket ...", and the free-machine alert went out twice). Then only the request's own words count.
+# An idea, product or research request is not render work either (Klodel 39419, Patrik TG 18037, 2026-11-12: «akkor adj
+# jobb ötleteket vagy termékeket ...» was research for Radar, yet [SZABAD GÉP] went out, 39417). "termek" is a whole word,
+# so a product-image request ("termékképeket") is not caught here.
 NON_RENDER = re.compile(
     r'(szerez|megve(sz|tt|nn)|\bvesz(ek|ed|unk|ik|em)?\b|\bveg(yem|yuk|yel|yek|ye|yetek)\b|vasarl|\bfizet|elofizet'
-    r'|szamla|csomag|\bdont(es|s|sd|sek|sunk|ottam)?\b|valassz|valasszak|melyiket)')
+    r'|szamla|csomag|\bdont(es|s|sd|sek|sunk|ottam)?\b|valassz|valasszak|melyiket'
+    r'|otlet|\btermek(ek|et|eket|eink|unk|ot)?\b|kutat)')
 
 
 def render_related(q):
