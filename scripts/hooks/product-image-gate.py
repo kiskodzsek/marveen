@@ -1357,24 +1357,41 @@ def itthon_mert_check(text):
 # owner's PRIVATE chat never carries a shell command for him to run: no sudo, no command chain, no checksum line, no
 # shell path, no pipe into a shell. A step that needs root goes a root-free way, or it is dropped (Klodel 40845).
 COMMAND_PATTERNS = (
-    (re.compile(r'\bsudo\b'), 'sudo'),
+    (re.compile(r'(?i)\bsudo\b'), 'sudo'),
     (re.compile(r'&&|\|\|'), '&& / ||'),
     (re.compile(r'\bshasum\b|\bsha256sum\b'), 'shasum'),
     (re.compile(r'/bin/(?:ba|z|da|k)?sh\b|/usr/bin/env\s'), '/bin/bash'),
     (re.compile(r'\|\s*(?:sudo\s+)?(?:ba|z)?sh\b'), '| bash'),
-    (re.compile(r'\b(?:launchctl|chmod|chown|defaults\s+write|xattr|spctl|csrutil)\b'), 'rendszerparancs'),
-    (re.compile(r'\bcurl\s+-|\bwget\s'), 'curl/wget'),
-    (re.compile(r'(?m)^[ \t]*[$%][ \t]+\S'), 'parancssor-prompt'),
-    # Lower case only: a sentence starting "Node 22 kell" is not a command line.
-    (re.compile(r'(?m)^[ \t]*(?:cd|export|npm|npx|node|python3?|brew|git|bash|zsh|sh|install)[ \t]+[-./~$\w]'), 'parancssor'),
+    (re.compile(r'\b(?:launchctl|chmod|chown|defaults\s+write|xattr|spctl|csrutil|osascript)\b'), 'rendszerparancs'),
+    (re.compile(r'\b(?:curl|wget)\s+(?:-|https?://)'), 'curl/wget'),
+    (re.compile(r'(?m)^[$%][ \t]+\S'), 'parancssor-prompt'),
 )
+# A line (or an inline `code` span) that starts with a lower-case command and an argument. A line with Hungarian
+# accented letters is a sentence, not a command ("git push megtörtént", Viktor 40870).
+COMMAND_LINE = re.compile(
+    r'^(?:cd|export|npm|npx|node|python3?|pip3?|brew|git|bash|zsh|sh|install|rm|mv|cp|tar|ssh|scp|kill|killall|'
+    r'open|ln|mkdir)[ \t]+[-./~$\w]')
+HU_ACCENT = re.compile('[áéíóöőúüűÁÉÍÓÖŐÚÜŰ]')
+LIST_MARK = re.compile(r'^(?:[-*\u2022>]|\d{1,3}[.)])[ \t]+')
+INVISIBLE = re.compile('[\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]')
 
 
 def command_check(text):
-    """A shell command in a text to the owner's private chat: the first match as a short name, else None."""
-    for rx, name in COMMAND_PATTERNS:
-        if rx.search(text):
-            return name
+    """A shell command in a text to the owner's private chat: the first match as a short name, else None.
+    Normalised first (NFKC, invisible characters out), so "su<zero-width>do" and full-width letters do not pass.
+    Each line and each inline `code` span is checked, with a list mark ("1.", "-", "*") taken off the front."""
+    t = INVISIBLE.sub('', unicodedata.normalize('NFKC', text))
+    pieces = []
+    for line in t.splitlines():
+        pieces.append(line.strip())
+        pieces.extend(x.strip() for x in re.findall(r'`([^`\n]+)`', line))
+    pieces = [LIST_MARK.sub('', p) for p in pieces]
+    for p in pieces:
+        for rx, name in COMMAND_PATTERNS:
+            if rx.search(p):
+                return name
+        if not HU_ACCENT.search(p) and COMMAND_LINE.match(p.strip('`').strip()):
+            return 'parancssor'
     return None
 
 
