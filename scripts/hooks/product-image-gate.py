@@ -348,7 +348,9 @@ def izles_ref(fp, val):
 
 BRAND = 'marabel.hu'
 OCR_SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib', 'video_text_ocr.swift')
-OCR_BUDGET_S = 40  # inside the hook; the fast Vision level reads ~0.1 s per frame, plus a one-off swiftc build (~2 s)
+# Inside the hook. Two fast Vision reads per frame, ~0.07 s together (measured 2026-11-13 on a 30 s reel), plus a
+# one-off swiftc build (~2 s).
+OCR_BUDGET_S = 40
 VIDEO = ('.mp4', '.mov', '.webm')
 
 
