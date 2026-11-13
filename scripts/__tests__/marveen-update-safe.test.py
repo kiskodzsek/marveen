@@ -9,6 +9,7 @@ Run: python3 -I scripts/__tests__/marveen-update-safe.test.py
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -232,6 +233,51 @@ def grown_stash_list_is_a_failure(r):
     write(leave, 'git stash push -q -m stranded\ngit pull -q --ff-only origin main\n')
     rc, out = run(r, '--apply', cmd=f'bash {leave}')
     return rc == 1 and 'stash list grew' in out
+
+
+@case
+def classification_does_not_hash_local_only_files(r):
+    # Pulzus 39788: the first live run spent about 40 s hashing 2 384 local-only files one git call each.
+    push_upstream(r, {'hooks/gate.py': 'G\n'})
+    write(os.path.join(r['prod'], 'hooks', 'gate.py'), 'G\n')
+    for i in range(200):
+        write(os.path.join(r['prod'], 'bak', f'f{i}.txt'), f'{i}\n')
+    g(r['prod'], 'fetch', '-q', 'origin', 'main')
+    calls, real = [], mus.git
+    mus.git = lambda root, *a, **k: (calls.append(a), real(root, *a, **k))[1]
+    real_hash = mus.hash_files
+    hashed = []
+    mus.hash_files = lambda root, paths: (hashed.extend(paths), real_hash(root, paths))[1]
+    try:
+        actions, stops, _ = mus.plan(r['prod'], 'origin/main')
+    finally:
+        mus.git, mus.hash_files = real, real_hash
+    return (not stops and len(calls) < 10 and hashed == ['hooks/gate.py']
+            and sum(1 for a in actions if a[0] == 'KEEP') == 200 and ('PARK', 'hooks/gate.py') in [a[:2] for a in actions])
+
+
+@case
+def stop_signal_during_update_waits_and_finishes(r):
+    # Pulzus 39788: a SIGTERM mid-run left update.sh orphaned and skipped the settings merge and the verification.
+    push_upstream(r, {'hooks/gate.py': 'G\n'})
+    write(os.path.join(r['prod'], 'hooks', 'gate.py'), 'G\n')
+    write(os.path.join(r['prod'], '.claude', 'settings.json'), json.dumps(local_settings()) + '\n')
+    slow = os.path.join(r['tmp'], 'slow-update.sh')
+    write(slow, 'sleep 2\n' + FAKE_UPDATE.split('\n', 1)[1])
+    p = subprocess.Popen([sys.executable, '-I', SCRIPT, '--root', r['prod'], '--update-cmd', f'bash {slow}', '--apply'],
+                         env=ENV, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    out = []
+    for line in p.stdout:
+        out.append(line)
+        if line.startswith('UPDATE'):
+            p.send_signal(signal.SIGTERM)
+            break
+    out += p.stdout.readlines()
+    rc = p.wait(timeout=60)
+    text = ''.join(out)
+    s = json.loads(read(os.path.join(r['prod'], '.claude', 'settings.json')))
+    return (rc == 128 + signal.SIGTERM and 'nem szakítható' in text and 'OK       hooks/gate.py' in text
+            and head(r) == g(r['dev'], 'rev-parse', 'HEAD')[1].strip() and s.get('effortLevel') == 'high')
 
 
 @case

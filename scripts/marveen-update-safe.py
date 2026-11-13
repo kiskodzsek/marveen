@@ -33,7 +33,16 @@ the fetched upstream (<remote>/<branch>):
 --apply writes a backup under <root>/store/update-safe/<YYYYmmdd-HHMMSS>/ (files + settings + manifest.json), runs
 `AUTO_STASH=1 <update-cmd>`, then verifies. If update.sh fails with HEAD unchanged, the parked / reset files and
 the local settings are put back. A grown `git stash list` (an auto-stash pop that failed) is reported as a failure.
-Exit: 0 = OK (check: would proceed), 1 = STOP or a failed verification, 2 = usage.
+Exit: 0 = OK (check: would proceed), 1 = STOP or a failed verification, 2 = usage, 128+N = stopped by signal N.
+
+Stopping it (Pulzus 39788, first live run 2026-11-13: a SIGTERM mid-run killed the wrapper, update.sh ran on
+orphaned with the restart, and the settings merge and the verification never ran). The CHECK and the
+classification write nothing and stop at once. From the first file move on, SIGTERM / SIGINT / SIGHUP are
+deferred: before update.sh starts, everything is put back and it exits 128+N; while update.sh runs (in its own
+session, so a terminal Ctrl-C does not cut it in half), it prints that update.sh cannot be interrupted, waits for
+it, finishes the settings merge and the verification, then exits 128+N.
+The classification hashes only what it compares: a file that exists only locally is never hashed (the first live
+run spent about 40 s hashing 2 384 such files).
 Tests: python3 -I scripts/__tests__/marveen-update-safe.test.py
 """
 import argparse
@@ -41,6 +50,7 @@ import datetime
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 
@@ -54,17 +64,37 @@ def git(root, *args, text=True):
     return p.returncode, (p.stdout.strip() if text else p.stdout)
 
 
-def blob(root, ref, path):
-    rc, out = git(root, 'rev-parse', '-q', '--verify', f'{ref}:{path}')
-    return out if rc == 0 and out else None
-
-
 def file_blob(root, path):
     full = os.path.join(root, path)
     if not os.path.isfile(full) or os.path.islink(full):
         return None
     rc, out = git(root, 'hash-object', '--', path)
     return out if rc == 0 else None
+
+
+def tree(root, ref):
+    """{path: blob sha} for every file in ref (one git call)."""
+    rc, out = git(root, 'ls-tree', '-r', '-z', '--full-tree', ref, text=False)
+    if rc != 0:
+        return None
+    out_map = {}
+    for rec in out.decode('utf-8', 'surrogateescape').split('\0'):
+        meta, _, path = rec.partition('\t')
+        parts = meta.split()
+        if len(parts) == 3 and parts[1] == 'blob':
+            out_map[path] = parts[2]
+    return out_map
+
+
+def hash_files(root, paths):
+    """{path: blob sha} for the regular files among paths (one git call)."""
+    files = [p for p in paths if os.path.isfile(os.path.join(root, p)) and not os.path.islink(os.path.join(root, p))]
+    if not files:
+        return {}
+    p = subprocess.run(['git', '-C', root, 'hash-object', '--stdin-paths'], input='\n'.join(files) + '\n',
+                       capture_output=True, text=True)
+    shas = p.stdout.split()
+    return dict(zip(files, shas)) if p.returncode == 0 and len(shas) == len(files) else {}
 
 
 def show(root, ref, path):
@@ -172,12 +202,18 @@ def plan(root, up):
     items = changes(root)
     if items is None:
         return [], ['git status failed (not a git checkout?)'], notes
-    seen = set()
+    head_tree, up_tree = tree(root, 'HEAD'), tree(root, up)
+    if head_tree is None or up_tree is None:
+        return [], ['git ls-tree failed for HEAD or upstream'], notes
+    todo, seen = [], set()
     for xy, path in items:
-        if path in seen or os.path.basename(path) in SKIP:
-            continue
-        seen.add(path)
-        head, upb, wt = blob(root, 'HEAD', path), blob(root, up, path), file_blob(root, path)
+        if path not in seen and os.path.basename(path) not in SKIP:
+            seen.add(path)
+            todo.append((xy, path))
+    # Hash only what is compared: a file in neither HEAD nor upstream is local only (KEEP) without hashing.
+    wts = hash_files(root, [p for _, p in todo if p in head_tree or p in up_tree])
+    for xy, path in todo:
+        head, upb, wt = head_tree.get(path), up_tree.get(path), wts.get(path)
         incoming = head != upb
         if path == SETTINGS:
             if wt == head:
@@ -276,7 +312,48 @@ def _write_json(full, value):
     os.replace(tmp, full)
 
 
+class _Signals:
+    """Defers SIGTERM / SIGINT / SIGHUP while the tree is being changed (see "Stopping it")."""
+
+    NAMES = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+    def __init__(self):
+        self.got, self.updating, self.old = None, False, {}
+
+    def __enter__(self):
+        for s in self.NAMES:
+            self.old[s] = signal.signal(s, self._handle)
+        return self
+
+    def __exit__(self, *exc):
+        for s, h in self.old.items():
+            signal.signal(s, h)
+
+    def _handle(self, signum, frame):
+        first = self.got is None
+        self.got = self.got or signum
+        if first:
+            what = ('update.sh fut, nem szakítható: megvárom, befejezem az ellenőrzést és a settings-visszafésülést, '
+                    'utána leállok' if self.updating else 'leállás: a félretett fájlok és a settings visszakerülnek')
+            print(f'SIGNAL   {signal.Signals(signum).name}: {what}', flush=True)
+
+
 def apply(root, up, actions, update_cmd):
+    with _Signals() as sig:
+        rc = _apply(root, up, actions, update_cmd, sig)
+    return rc
+
+
+def _put_back_all(root, backup, actions, settings_local):
+    for kind, path, info in actions:
+        if kind in ('PARK', 'RESET') and os.path.isfile(os.path.join(backup, 'files', path)):
+            _put_back(root, backup, path)
+    if settings_local is not None:
+        with open(os.path.join(root, SETTINGS), 'wb') as fh:
+            fh.write(settings_local)
+
+
+def _apply(root, up, actions, update_cmd, sig):
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     backup = os.path.join(root, 'store', 'update-safe', stamp)
     os.makedirs(backup)
@@ -300,22 +377,24 @@ def apply(root, up, actions, update_cmd):
             git(root, 'checkout', 'HEAD', '--', path)
     with open(os.path.join(backup, 'manifest.json'), 'w', encoding='utf-8') as fh:
         json.dump({'old_head': old_head, 'upstream': up, 'actions': actions, 'update_cmd': update_cmd}, fh, indent=2)
-    print(f'BACKUP   {backup}')
+    print(f'BACKUP   {backup}', flush=True)
+    if sig.got:
+        _put_back_all(root, backup, actions, settings_local)
+        print('STOPPED  before update.sh: local files and settings put back (backup kept)', flush=True)
+        return 128 + sig.got
     stashes = _stash_count(root)
     env = dict(os.environ, AUTO_STASH='1')
-    rc = subprocess.run(update_cmd, cwd=root, env=env).returncode
+    sig.updating = True
+    child = subprocess.Popen(update_cmd, cwd=root, env=env, start_new_session=True)
+    print(f'UPDATE   {" ".join(update_cmd)} (pid {child.pid}); a stop signal waits for it', flush=True)
+    rc = child.wait()
     _, new_head = git(root, 'rev-parse', 'HEAD')
     failed = []
     if rc != 0 and new_head == old_head:
         # Nothing was pulled: put the local state back as it was.
-        for kind, path, info in actions:
-            if kind in ('PARK', 'RESET') and os.path.isfile(os.path.join(backup, 'files', path)):
-                _put_back(root, backup, path)
-        if settings_local is not None:
-            with open(os.path.join(root, SETTINGS), 'wb') as fh:
-                fh.write(settings_local)
+        _put_back_all(root, backup, actions, settings_local)
         print(f'FAIL     update exited {rc}, HEAD unchanged: local files and settings put back (backup kept)')
-        return 1
+        return 128 + sig.got if sig.got else 1
     if rc != 0:
         failed.append(f'update exited {rc} after moving HEAD {old_head[:8]} -> {new_head[:8]}')
     for kind, path, info in actions:
@@ -349,6 +428,9 @@ def apply(root, up, actions, update_cmd):
     for f in failed:
         print(f'FAIL     {f}')
     print('DONE' if not failed else 'DONE WITH FAILURES')
+    if sig.got:
+        print(f'STOPPED  on {signal.Signals(sig.got).name}, after update.sh and the verification', flush=True)
+        return 128 + sig.got
     return 1 if failed else 0
 
 
