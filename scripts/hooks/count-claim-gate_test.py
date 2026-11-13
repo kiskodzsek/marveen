@@ -89,7 +89,75 @@ def only_opted_in_agents_and_only_sends(root):
             and run(root, MSG + '29 új blokk\nMSG', agent='klodel')[0] == 0
             and run(root, 'echo "29 új blokk, msg 39836"')[0] == 0
             and run(root, 'git commit -m "29 new blocks (39861)"')[0] == 0
-            and run(root, "curl -s -X POST http://localhost:3420/api/daily-log -d '{\"content\":\"29 blokk\"}'")[0] == 0)
+            and run(root, 'curl -s -H "Authorization: Bearer x" "http://localhost:3420/api/daily-log?agent=kernel"')[0] == 0
+            # a read of the log with an id in the same command is not a write (mutation M19)
+            and run(root, 'curl -s "http://localhost:3420/api/daily-log?agent=kernel" | grep -c 41038')[0] == 0)
+
+
+@case
+def daily_log_write_is_judged(root):
+    # Retro R1 (card 028205dd): the daily log is a report too; a write to it is judged, a read is not.
+    log = "curl -s -X POST http://localhost:3420/api/daily-log -d '{\"content\":\"%s\"}'"
+    return (run(root, log % '29 blokk')[0] == 2
+            and run(root, log % '29 blokk\\nMÉRVE: `sqlite3 x.db count(*)`')[0] == 0
+            and run(root, "curl -s -X POST http://localhost:3420/api/daily-log --data-binary @- <<'J'\n"
+                          '{"content":"## {{NOW}} -- 29 blokk"}\nJ')[0] == 2)
+
+
+@case
+def zero_claim_needs_a_counting_measurement(root):
+    # Kernel's retro input (b), hibanapló 2026-11-13 18:04: "0 maradék" went to Viktor under a MÉRVE line whose
+    # `ls -d x-* | wc -l` had stopped on a zsh glob with no match; 48 folders were left.
+    blocked = [
+        '0 db t1-* maradék\nMÉRVE: `ls -d $T/t1-* | wc -l`',          # the incident: ls with a glob
+        'nincs maradék\nMÉRVE: /tmp/x megnézve',                       # a source, but nothing counted
+        'Egy mappa sem maradt.\nMÉRVE: agents/kernel/tools/README.md:5',
+        '0 találat\nMÉRVE: `ls /tmp/a?`',
+        '0 db\nMÉRVE: `cd /x && ls -d t1-* | wc -l`',                  # ls after &&
+        '0 db\nMÉRVE: `echo $(ls x-* | wc -l)`',                       # ls in $(...)
+        # Viktor 41387 INFO 1: the forms the first prefix list missed
+        '0 db\nMÉRVE: `for d in a b; do ls $d/x-* | wc -l; done`',
+        '0 db\nMÉRVE: `if true; then ls x-* | wc -l; fi`',
+        '0 db\nMÉRVE: `time ls x-* | wc -l`',
+        '0 db\nMÉRVE: `sudo ls x-* | wc -l`',
+        '0 db\nMÉRVE: `command ls x-* | wc -l`',
+        '0 db\nMÉRVE: `/bin/ls x-* | wc -l`',
+        '0 db\nMÉRVE: `\\ls x-* | wc -l`',
+        '0 db\nMÉRVE: `{ ls x-*; } | wc -l`',
+        '0 db\nMÉRVE: `! ls x-* | wc -l`',
+        "0 db\nMÉRVE: `bash -c 'ls x-* | wc -l'`",
+    ]
+    passed = [
+        '0 db t1-* maradék\nMÉRVE: `find /tmp -maxdepth 1 -name \'t1-*\' | wc -l`',
+        'nincs maradék\nMÉRVE: `sqlite3 x.db "select count(*) from t"`',
+        '0 találat\nMÉRVE: `grep -c foo /tmp/x.log`',
+        '10 db kész\nMÉRVE: /tmp/x.log',                               # not a zero: the old rule only
+        "0 db\nMÉRVE: `find /x -name 'ls*' | wc -l`",                # ls inside a find pattern (Viktor 41354)
+        '0 db\nMÉRVE: `find /x -type d | wc -l` (nem ls, mert [zsh])',  # the word ls in prose
+        'kész, 0 hiba nélkül? nem: a teszt zöld\nMÉRVE: `npm test` kimenete',  # "0 hiba" is not a zero-count noun
+    ]
+    return (all(run(root, MSG + t + '\nMSG')[0] == 2 for t in blocked)
+            and all(run(root, MSG + t + '\nMSG')[0] == 0 for t in passed))
+
+
+@case
+def ls_glob_regex_stays_linear(root):
+    # Viktor 41387 LOW (CWE-1333): "ls" + 27 blanks + "x" with no glob took 11 s in the old regex (10 s hook timeout).
+    import importlib.util
+    import time
+    spec = importlib.util.spec_from_file_location('ccg', os.path.join(HERE, HOOK))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # 26 blanks first: the old regex needs about 3 s there (measured), so it fails fast instead of hanging on the
+    # long lines below.
+    t0 = time.time()
+    if mod.LS_GLOB_RX.search('`find /x | wc -l` ; ls' + ' ' * 26 + 'x') or time.time() - t0 > 1.0:
+        return False
+    t0 = time.time()
+    for line in ('ls' + ' \t' * 20000 + 'x', 'ls' + ' a' * 20000 + ' b'):
+        if mod.LS_GLOB_RX.search(line):
+            return False
+    return time.time() - t0 < 1.0 and mod.LS_GLOB_RX.search('ls' + ' ' * 40 + 'x-*') is not None
 
 
 @case

@@ -26,6 +26,7 @@ import { buildFreshnessInfo, type MessageFreshness } from '../agent-message-wrap
 import { parseQualifiedId, formatQualifiedId, isQualifiedId } from '../federation/address.js'
 import { getFederationConfig } from '../federation/config.js'
 import { isReservedSender, isPlainSenderId } from '../../reserved-sender.js'
+import { fillNowToken } from '../now-token.js'
 import type { RouteContext } from './types.js'
 
 // Should closing a message produce a reverse "[Eredmény]" notification to its sender?
@@ -383,7 +384,8 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     // (measured 0,0,0,0,0,+1h,+3h on 2026-09-08) and the digest is the surface
     // the whole fleet reads time from. Same code-side-enforcement pattern as
     // normalizeKanbanRefs below.
-    const normalizedContent = normalizeKanbanRefs(stampHeartbeatHeader(content.trim()), getKanbanSeqByIdPrefix)
+    // Retro R1 (card 028205dd): {{NOW}} is the server's clock at the insert, never an agent-typed time.
+    const normalizedContent = normalizeKanbanRefs(stampHeartbeatHeader(fillNowToken(content.trim())), getKanbanSeqByIdPrefix)
     // Card 06f062e4: optional attributability tag, self-declared like `from`
     // itself -- capped short so it stays a label, not a second content field.
     const trimmedOriginNote = origin_note?.trim().slice(0, 120) || null
@@ -577,8 +579,10 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
     }
 
     let ok = false
-    if (newStatus === 'done') ok = markMessageDone(id, result)
-    else if (newStatus === 'failed') ok = markMessageFailed(id, result)
+    // Retro R1 (card 028205dd): a close result's {{NOW}} is the server's clock at the close.
+    const filledResult = fillNowToken(result)
+    if (newStatus === 'done') ok = markMessageDone(id, filledResult ?? undefined)
+    else if (newStatus === 'failed') ok = markMessageFailed(id, filledResult ?? undefined)
 
     if (ok) {
       const done = getAgentMessage(id)
@@ -597,7 +601,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       if (done && notify === true && !isReservedSender(done.to_agent)
         && shouldNotifyDelegator(done.from_agent, done.to_agent, done.content)) {
         // A vagas NE legyen nema, ES legyen KOVETHETO: lasd resultSummary().
-        const summary = resultSummary(id, result)
+        const summary = resultSummary(id, filledResult)
         createAgentMessage(
           done.to_agent,
           done.from_agent,

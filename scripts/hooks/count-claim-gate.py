@@ -14,7 +14,8 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     joins by adding its id here, in its own PR.
   - Only a command that sends an inter-agent message or closes one with a result (agent-msg.sh, a
     <name>-msg.sh / msg-close.sh wrapper, a POST to /api/messages, or a /api/messages/<id> call whose judged text
-    carries a "result" key) or posts a card comment (/api/kanban/.../comments).
+    carries a "result" key), posts a card comment (/api/kanban/.../comments) or writes the daily log (a write to
+    /api/daily-log; retro R1, card 028205dd: the log is a report too).
     READ-ONLY (Klodel 39980, measured 2026-11-13: three blocks of Kernel's own calls in one morning): a GET of
     /api/messages/<id> or /api/messages?..., and a status-only PUT /api/messages/<id> ({"status":"done"}) carry no
     claim to anyone; the id in their URL or in the script that loops over them is an address, not a claim.
@@ -33,6 +34,9 @@ BLOCKS (exit 2, reason on stderr) when the judged text has a CLAIM and no EVIDEN
            "card" followed by an 8-character hex id.
   EVIDENCE - a line starting with "MÉRVE:" (or "MERVE:", any case, after optional "- ", "* ", "> ") whose text names
            a source: a path (a '/'), a backticked command, or a file:line ("x.py:42").
+  ZERO   - a zero count ("0 db", "0 maradék", "nincs maradék", "egy mappa sem maradt") needs more: a MÉRVE line
+           that names a counting command (find, wc, grep -c, count() and no `ls` with a glob (retro R1, Kernel's
+           input b: zsh stops `ls x-* | wc -l` on a glob with no match and wc prints 0).
 A time ("08:51"), a year, a short number ("3 pont"), a version or a hex SHA alone is not a claim here (the time
 has its own gate, time-claim-gate.py).
 
@@ -61,6 +65,25 @@ MSG_OTHER_RX = re.compile(r'/api/messages(?:\?|/+(?![\d{$<]))')
 WRITE_RX = re.compile(r'(?:-X|--request)[ \t]*[\'"]?(?:POST|PUT|PATCH)\b|(?<![\w-])(?:-d|--data[\w-]*|--json)(?![\w-])'
                       r'|<<|(?<![<\d&])<(?![<(&])|method=[\'"]?(?:POST|PUT|PATCH)|\bdata=')
 CARD_RX = re.compile(r'/api/kanban/[^\s/\'"]+/comments')
+# Retro R1 (card 028205dd): the daily log is a report too; a GET of it is a read.
+DAILY_LOG_RX = re.compile(r'/api/daily-log(?![\w/-])')
+# Retro R1, Kernel's input (b): a ZERO count ("0 db", "nincs maradék") is the claim a broken measurement makes
+# most easily -- in zsh a glob with no match stops the whole `ls x-* | wc -l` and wc prints 0 (hibanapló
+# 2026-11-13 18:04: "0 maradék" sent, 48 folders were left). Such a claim needs a MÉRVE line that counts:
+# find, wc, grep -c or an SQL count(, and no ls with a glob in it.
+ZERO_RX = re.compile(
+    r'(?<![\w.,:/#-])0[ \t]+(?:db|darab|maradék\w*|maradvány\w*|találat\w*|mappá?\w*|fájl\w*|sor(?:t|a)?)(?!\w)'
+    r'|(?<!\w)nincs(?:[ \t]+több)?[ \t]+(?:maradék|maradvány|találat)\w*'
+    r'|(?<!\w)egy(?:[ \t]+\w+)?[ \t]+sem[ \t]+maradt(?!\w)', re.I)
+COUNTING_RX = re.compile(r'(?<![\w-])(?:find|wc|grep[ \t]+-[a-zA-Z]*c)(?![\w-])|count\(', re.I)
+# ls as a COMMAND (at the start, after a backtick, $(, |, ;, &, (, {, !, a quote, or the words do / then / else /
+# time / sudo / command; also /bin/ls and \ls) with a glob in its own arguments; "ls*" inside a find pattern or the
+# word ls in prose is not one (Viktor 41354 INFO 3, 41387 INFO 1). Every argument token is non-empty, so a run of
+# blanks splits one way only: the regex stays linear (Viktor 41387 LOW, CWE-1333: the empty-token form backtracked
+# exponentially, 27 blanks took 11 s, past the 10 s hook timeout).
+LS_GLOB_RX = re.compile(
+    r'(?:^|[`|;&({!\'"]|\$\(|(?<![\w-])(?:do|then|else|time|sudo|command)(?=[ \t]))'
+    r'[ \t]*(?:\\|/(?:[\w.-]+/)*)?ls(?:[ \t]+[^|;&`)\s]+)*[ \t]+[^|;&`)\s]*[*?\[]')
 NOUNS = (r'db|darab|komment\w*|blokk\w*|sor(?:a|t|ok\w*|ból|ban|ra)?|üzenet\w*|kártyá?\w*|fájl\w*|eset\w*|'
          r'találat\w*|hibá?\w*|oldal\w*|PR\w*|commit\w*|teszt\w*|mutáns\w*|ügynök\w*')
 COUNT_RX = re.compile(r'(?<![\w.:/#-])\d+(?:[.,]\d+)?(?:[ \t]+[\w-]+){0,2}?[ \t-]+(?:' + NOUNS + r')(?![\w])', re.I)
@@ -93,11 +116,31 @@ def has_evidence(text):
     return any(SOURCE_RX.search(m.group(1)) for m in EVIDENCE_RX.finditer(_norm(text)))
 
 
+def zero_claims(text):
+    return [m.group(0) for m in ZERO_RX.finditer(_norm(text))][:3]
+
+
+def has_counting_evidence(text):
+    """A MÉRVE line that names a counting command (find, wc, grep -c, count() and no ls glob."""
+    for m in EVIDENCE_RX.finditer(_norm(text)):
+        line = m.group(1)
+        if COUNTING_RX.search(line) and not LS_GLOB_RX.search(line):
+            return True
+    return False
+
+
 def check_text(text):
     """None when the text passes, else the reason."""
     found = claims(text)
     if not found or has_evidence(text):
-        return None
+        zero = zero_claims(text)
+        if not zero or has_counting_evidence(text):
+            return None
+        return ('SZAM-KAPU / COUNT-CLAIM-GATE (retró R1): nulla darabot állítasz ('
+                + ', '.join(f'"{c}"' for c in zero) + '), de nincs olyan "MÉRVE:" sor, amely számláló parancsot nevez '
+                'meg (find, wc, grep -c, count(), glob nélkül. zsh-ban a nem illeszkedő glob ("ls x-* | wc -l") az egész '
+                'parancsot leállítja, és a wc 0-t ír. Mérd így: "MÉRVE: `find <mappa> -maxdepth 1 -name \'<minta>\' | '
+                'wc -l`". / A zero count needs a MÉRVE line with a counting command and no ls glob.')
     return ('SZAM-KAPU / COUNT-CLAIM-GATE (Klodel 39869): darabszám vagy azonosító áll a szövegben ('
             + ', '.join(f'"{c}"' for c in found[:4]) + '), de nincs "MÉRVE: <parancs vagy fájl:sor>" sor. '
             'Mérd meg, és írd be a forrást egy külön sorba (pl. "MÉRVE: `sqlite3 ... count(*)`" vagy '
@@ -137,7 +180,7 @@ def verdict(payload):
     if not isinstance(cmd, str):
         return None
     send = bool(SEND_RX.search(cmd) or CARD_RX.search(cmd)
-                or (MSG_OTHER_RX.search(cmd) and WRITE_RX.search(cmd)))
+                or ((MSG_OTHER_RX.search(cmd) or DAILY_LOG_RX.search(cmd)) and WRITE_RX.search(cmd)))
     item = not send and bool(MSG_ITEM_RX.search(cmd))
     if not send and not item:
         return None

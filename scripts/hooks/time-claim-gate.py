@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""time-claim-gate.py -- PreToolUse gate: no guessed "measured at" clock time in shared reports and card comments,
-no placeholder clock time in an inter-agent message, a memory or the daily log, and no future daily-log heading.
+"""time-claim-gate.py -- PreToolUse gate: no guessed "measured at" clock time in shared reports, card comments,
+inter-agent messages, close results and the daily log, no placeholder clock time in a memory either, and a daily-log
+heading time only through the {{NOW}} token.
 
 WHY (Klodel 38401, 2026-11-11): an agent three times wrote a GUESSED measurement time into a report or a
 kanban comment: a placeholder ("19:3x", "10:xx") or a time later than the wall clock ("mérve 18:15-18:30"
@@ -45,6 +46,24 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     written at 03:12), none a plan or a deadline.
     Passes: a date other than today right before the time; a time followed by a suffix ("23:50-es", "08:00-kor"),
     a deadline (-ig, -ra, -re, óráig) or a plan word (után, előtt, terv...): "Indulás 08:00 után", "## 23:59 terv".
+  - Rule 5, the send path (retro 2026-11-13 R1, card 028205dd): an inter-agent message (agent-msg.sh, a wrapper,
+    /api/messages), a close result (msg-close.sh, PUT /api/messages/<id>) or a daily-log entry, NOT a memory. Rule 2
+    there, narrowed to the near future: a measured time 1-15 minutes (SEND_WINDOW_MIN) after the current minute,
+    unless it is a deadline (rule 2), carries a suffix or plan word ("15:40-kor", "után"), an estimate before it
+    ("~", "kb.", "nem"), a UTC stamp after it ("16:13:16Z"), or its line is about a plan (nullázás, reset, ütemez...,
+    holnap, tervez..., kivetít..., várható, becsl..., tipp). Measured read-only on store/claudeclaw.db, the 7 days
+    before 2026-11-13 19:50, each row judged at its own created_at / completed_at: 9700 messages, 5918 results,
+    326 daily-log entries -> 73, 14 and 18 hits; by hand about 87 are stamps typed ahead of the clock ("merve 15:37
+    date" stored at 15:35, "a kártyán rögzítve (12:35)" closed at 12:22, "## 21:25" written at 21:17), about 6 are
+    unclear (a slot label "10:00 próba-tölcsér" at 09:55). With no upper bound the same rule gave 106 message hits,
+    the 33 extra all plans ("ma 15:00", the night batch); every typed-ahead stamp was at most 8 minutes ahead.
+    The fix the block text gives: write {{NOW}}, which the dashboard fills in with its own minute at the write
+    (src/web/now-token.ts), or run `date`.
+  - Rule 6, the daily log only (retro R1): the heading time at the start of the "content" value ("## HH:MM") must
+    be the {{NOW}} token, not a typed time of today (past or future); a heading that names another day passes.
+  - Bash payloads are judged as the reader sees them: a literal backslash-n or backslash-t is a line break or a
+    tab, and a backslash-u escape (four hex digits) its character: json.dumps writes the e-acute of "mérve" as such
+    an escape, and a literal backslash-n right before "lefutott" hid the marker behind the letter n.
   <repo-root> is two levels above this file (scripts/hooks/ -> root), so it works in a worktree too.
 
 BLOCKS (exit 2, reason on stderr):
@@ -67,6 +86,8 @@ BLOCKS (exit 2, reason on stderr):
      by határidő / deadline / until / by ("mérve 19:40, kész 22:00-ig").
   3. A daily-log heading time later than the current minute (SCOPE, rule 3).
   4. A card comment's opening time later than the current minute (SCOPE, rule 4).
+  5. A measured time 1-15 minutes ahead on the send path (SCOPE, rule 5).
+  6. A typed daily-log heading time of today instead of {{NOW}} (SCOPE, rule 6).
 Known gaps: a time written after midnight about the previous evening without a date on the line is read as
 future (the block text says to add the date); a shell write whose target is a variable ("> $F"), a relative
 path after a relative cd, or a file written by an interpreter (python3 open(..., 'a')) is not seen; only the
@@ -131,6 +152,18 @@ COMMENT_HEAD_RX = re.compile(
     r'([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?!:\d)')
 # Right after the time: a suffix ("23:50-es", "08:00-kor") or a plan word; the time is not the comment's stamp.
 COMMENT_HEAD_NOT_STAMP_RX = re.compile(r'-[^\W\d_]|[ \t]+(?:után|előtt|terv\w*)(?!\w)', re.I)
+# Rule 5, the send path (retro R1, card 028205dd): an inter-agent message, a close result or a daily-log entry.
+# Not a memory: a memory is not a report to anyone, and its times are mostly plans.
+SEND_PATH_RX = re.compile(r'(?<![\w-])(?:[a-z]+-msg|msg-close)\.sh(?![\w-])|/api/(?:messages|daily-log)')
+# A guessed measured time runs a few minutes ahead; a time further ahead is a plan (measured, see SCOPE rule 5).
+SEND_WINDOW_MIN = 15
+# A line that is about a plan or an estimate, not a measurement.
+SEND_PLAN_LINE_RX = re.compile(
+    r'(?<!\w)(?:nullázás\w*|reset\w*|ütemez\w*|holnap\w*|tervez\w*|kivetít\w*|várható\w*|becsl\w*|tipp\w*)(?!\w)', re.I)
+# Right before the time: an estimate ("~16:50", "kb. 16:50") or a correction ("nem 14:00").
+SEND_ESTIMATE_BEFORE_RX = re.compile(r'(?:~|(?<!\w)kb\.?[ \t]*|(?<!\w)körülbelül[ \t]+|(?<!\w)nem[ \t]+)$', re.I)
+# Right after the time: a UTC stamp ("16:13:16Z"), not the install's clock.
+UTC_AFTER_RX = re.compile(r'(?::[0-5]\d)?Z(?!\w)')
 STDIN_FILE_RX = re.compile(r'(?<![<\d])<[ \t]*[\'"]?([^\s\'";|&<>()]+)')
 DATA_FILE_RX = re.compile(r'(?<![\w-])(?:--data-binary|--data|-d)(?:\s+|=)?[\'"]?@([^\s\'";|&<>()]+)')
 # Shell writes (Radar 39251). ">>f", "> 'f'", ">| f"; "2>&1" has no path and does not match. tee takes every
@@ -223,6 +256,44 @@ def heading_findings(text, now):
     return out
 
 
+def send_findings(text, now):
+    """[(line_no, token, 'send')] for a measured time 1-SEND_WINDOW_MIN minutes after the current minute on the send
+    path (rule 5): rule 2's marker line and exceptions, plus a plan line, a suffix, an estimate and a UTC stamp."""
+    out = []
+    lines = text.splitlines()
+    cur = now.hour * 60 + now.minute
+    for n, tok, kind in findings(text, now):
+        if kind != 'future' or len(out) >= MAX_TIMES_PER_LINE:
+            continue
+        line = lines[n - 1]
+        if SEND_PLAN_LINE_RX.search(line):
+            continue
+        for i, m in enumerate(TIME_RX.finditer(line)):
+            if i >= MAX_TIMES_PER_LINE:
+                break
+            if m.group(0) != tok:
+                continue
+            if (COMMENT_HEAD_NOT_STAMP_RX.match(line, m.end()) or UTC_AFTER_RX.match(line, m.end())
+                    or SEND_ESTIMATE_BEFORE_RX.search(line[max(0, m.start() - DEADLINE_WINDOW):m.start()])):
+                continue
+            if 0 < int(m.group(1)) * 60 + int(m.group(2)) - cur <= SEND_WINDOW_MIN:
+                out.append((n, tok, 'send'))
+                break
+    return out
+
+
+def typed_heading_findings(text, now):
+    """[(line_no, token, 'heading-typed')] for a daily-log heading with a typed time of today (rule 6): the heading
+    time is "{{NOW}}", which the dashboard fills in at the write. A heading that names another day passes."""
+    out = []
+    for m in HEADING_RX.finditer(text):
+        if len(out) >= MAX_TIMES_PER_LINE:
+            break
+        if _other_day(m.group(3), now):
+            continue
+        out.append((text.count('\n', 0, m.start()) + 1, f'{m.group(1)}:{m.group(2)}', 'heading-typed'))
+    return out
+
 def _is_shared_md(path):
     if not isinstance(path, str) or not path:
         return False
@@ -295,22 +366,32 @@ def comment_head_findings(text, now):
     return out
 
 
+JSON_U_RX = re.compile(r'\\u([0-9a-fA-F]{4})')
+
+
+def _json_text(text):
+    """A JSON payload as the reader will see it (retro R1): a literal \\n or \\t is a line break or a tab, and a
+    \\uXXXX escape is its character -- json.dumps writes "M\\u00e9rve", and "x\\nlefutott" hid the marker behind the
+    letter n. A \\" stays as it is: the heading and comment-stamp patterns read the JSON string's end from it."""
+    return JSON_U_RX.sub(lambda m: chr(int(m.group(1), 16)), text.replace('\\n', '\n').replace('\\t', '\t'))
+
+
 def judged_texts(tool_name, ti, cwd):
-    """[(label, text, known_lines, placeholder_only, daily_log, card)] to judge; [] when the call is out of scope."""
+    """[(label, text, known_lines, placeholder_only, daily_log, card, send)] to judge; [] when out of scope."""
     if tool_name in ('Write', 'Edit', 'MultiEdit'):
         path = ti.get('file_path')
         if not _is_shared_md(path):
             return []
         if tool_name == 'Write':
             content = ti.get('content')
-            return [('', content, _existing_lines(path), False, False, False)] if isinstance(content, str) else []
+            return [('', content, _existing_lines(path), False, False, False, False)] if isinstance(content, str) else []
         edits = [ti] if tool_name == 'Edit' else ti.get('edits')
         out = []
         for e in edits if isinstance(edits, list) else []:
             if isinstance(e, dict) and isinstance(e.get('new_string'), str):
                 old = e.get('old_string')
                 out.append(('', e['new_string'], frozenset(old.splitlines()) if isinstance(old, str) else frozenset(),
-                            False, False, False))
+                            False, False, False, False))
         return out
     if tool_name == 'Bash':
         cmd = ti.get('command')
@@ -321,14 +402,15 @@ def judged_texts(tool_name, ti, cwd):
             targets = _shell_shared_md_targets(cmd, cwd)
             if not targets:
                 return []
-            return [('command ', cmd, frozenset().union(*(_existing_lines(t) for t in targets)), False, False, False)]
+            return [('command ', cmd, frozenset().union(*(_existing_lines(t) for t in targets)), False, False, False, False)]
         refs = DATA_FILE_RX.findall(cmd)
         if not card:
             # A message body can come from a file on stdin: agent-msg.sh kernel klodel - < body.txt
             refs += STDIN_FILE_RX.findall(cmd)[:MAX_SHELL_TARGETS]
         po = not card  # message / memory / daily log: placeholder rule only
-        hd = not card and DAILY_LOG in cmd  # rule 3: the daily-log heading
-        out = [('command ', cmd, frozenset(), po, hd, card)]
+        hd = not card and DAILY_LOG in cmd  # rules 3 and 6: the daily-log heading
+        sp = not card and bool(SEND_PATH_RX.search(cmd))  # rule 5: message, close result, daily log
+        out = [('command ', _json_text(cmd), frozenset(), po, hd, card, sp)]
         for ref in refs:
             path = os.path.expanduser(ref)
             if not os.path.isabs(path):
@@ -337,7 +419,7 @@ def judged_texts(tool_name, ti, cwd):
                 path = os.path.join(cwd, path)
             body = _read_small(path)
             if body is not None:
-                out.append(('@file ', body, frozenset(), po, hd, card))
+                out.append(('@file ', _json_text(body), frozenset(), po, hd, card, sp))
         return out
     return []
 
@@ -348,11 +430,16 @@ def verdict(payload):
         return None
     now = _now()
     hits = []
-    for label, text, known, po, hd, card in judged_texts(payload.get('tool_name'), ti, payload.get('cwd')):
+    for label, text, known, po, hd, card, sp in judged_texts(payload.get('tool_name'), ti, payload.get('cwd')):
         found = findings(text, now, known, po)
         hits += [(label, n, tok, kind) for n, tok, kind in found]
+        if sp:
+            hits += [(label, n, tok, kind) for n, tok, kind in send_findings(text, now)]
         if hd:
-            hits += [(label, n, tok, kind) for n, tok, kind in heading_findings(text, now)]
+            future_heads = heading_findings(text, now)
+            hits += [(label, n, tok, kind) for n, tok, kind in future_heads]
+            seen = {(n, tok) for n, tok, _ in future_heads}
+            hits += [(label, n, tok, kind) for n, tok, kind in typed_heading_findings(text, now) if (n, tok) not in seen]
         if card:
             seen = {(n, tok) for n, tok, _ in found}
             hits += [(label, n, tok, kind) for n, tok, kind in comment_head_findings(text, now) if (n, tok) not in seen]
@@ -363,11 +450,15 @@ def verdict(payload):
         what = ('helykitöltő idő / placeholder time' if kind == 'placeholder'
                 else f'jövőbeli naplófejléc / future daily-log heading (now {now:%H:%M})' if kind == 'heading'
                 else f'jövőbeli komment-időbélyeg / future comment stamp (now {now:%H:%M})' if kind == 'card-head'
+                else 'kézzel írt naplófejléc-idő / typed daily-log heading time' if kind == 'heading-typed'
                 else f'jövőbeli mért idő / future measured time (now {now:%H:%M})')
         parts.append(f'{label}line {n}: "{tok}" = {what}')
     return ('IDO-KAPU / TIME-CLAIM-GATE: ' + '; '.join(parts) + '. '
             'Futtasd a `date`-et, és a MÉRT időt írd be (nem becsültet, nem 19:3x-et). '
-            'Run `date` and write the measured time. Ha az idő másik napé, a sorba írd a dátumot (MM-DD). '
+            'Run `date` and write the measured time. Üzenetben, lezárás-resultban és napi naplóban írd: {{NOW}} '
+            '(a dashboard a beírás percére cseréli; a naplófejléc: "## {{NOW}} -- Téma"). '
+            'In a message, a close result or the daily log write {{NOW}}: the dashboard fills in the minute of the write. '
+            'Ha az idő másik napé, a sorba írd a dátumot (MM-DD). '
             'If the time belongs to another day, put its date (MM-DD) on the line.')
 
 
