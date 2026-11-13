@@ -363,7 +363,7 @@ def head_branch_1_42_still_blocked(root):
 
 
 # UZENET + VALODI (Patrik TG 14836, shared/hibanaplo.md 2026-11-06 13:37, card ca0737c2).
-SAV_9X16_OK = 'SAV: 9x16 felso 269 also 672 430-1240'  # inside the Reel band AND the feed's 4:5 crop (420-1248)
+SAV_9X16_OK = 'SAV: 9x16 felso 269 also 672 430-1240'  # inside the Reel band (269-1248)
 MARKETING = 'MEHET 1'  # the MAJSZTRO API check comes after UZENET/VALODI; here it fails (no token): rc 2, MAJSZTRO
 UZENET_OK = 'nagyszülőnek ajándékot kereső felnőtt gyerek | karácsony előtt, amíg még elkészül'
 
@@ -1003,19 +1003,20 @@ def sav_9x16_inside_passes(root):
 
 
 @case
-def sav_9x16_feed_crop_top_blocked(root):
-    # Dave 36310 / Klodel 36308: the Reel C v10 closing logo at y 290 is inside the Reel band (269-1248) but under the
-    # FB feed's 4:5 centre crop top band (crop 285-1635, free 420-1500). The negative test of the miss.
+def sav_9x16_reel_band_only_the_old_feed_crop_case_passes(root):
+    # Patrik TG 5732 (Klodel 40094): "egyedül arra kell figyelni h reels és hogy ha kimaszkolnak vmit akkor ne takarjon
+    # ki". The Reel C v10 logo at y 290 is inside the Reel band (269-1248): it passes now, no 4:5 feed-crop check.
     r = sav_check(root, 1080, 1920, '9x16 felso 269 also 672 290-1231')
-    return '4:5 középső vágata' in r and '420-1248' in r
+    return 'SAV' not in r and '4:5 középső vágata' not in r and 'ARC-ITELET' in r
 
 
 @case
-def sav_9x16_feed_crop_edges(root):
-    # 420 is the first free row of the feed crop, 1248 the last of the Reel band: the common part passes, one row out fails.
-    ok_ = sav_check(root, 1080, 1920, '9x16 felso 269 also 672 420-1248')
-    out = sav_check(root, 1080, 1920, '9x16 felso 269 also 672 419-1248')
-    return 'SAV' not in ok_ and 'ARC-ITELET' in ok_ and '4:5 középső vágata' in out
+def NEG_sav_9x16_reel_band_edges_still_block(root):
+    # The Reel band itself still holds: 269-1248 passes, one row out at either end blocks.
+    ok_ = sav_check(root, 1080, 1920, '9x16 felso 269 also 672 269-1248')
+    top = sav_check(root, 1080, 1920, '9x16 felso 269 also 672 268-1248')
+    bot = sav_check(root, 1080, 1920, '9x16 felso 269 also 672 269-1249')
+    return ('SAV' not in ok_ and 'belelóg a levágott sávba' in top and 'belelóg a levágott sávba' in bot)
 
 
 @case

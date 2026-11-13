@@ -61,9 +61,10 @@ Reel/Story UI cover the top and the bottom of the frame while scrolling, so ever
 <y1>-<y2> is the vertical extent of the bounding box of every important element (headline, product, steps, logo,
 price/CTA). The gate measures the file itself (sips / ffprobe), so the format must fit the real aspect, the bands must
 equal 10 % / 10 % (4:5, 1:1, landscape) or 14 % top / 35 % bottom (9:16) of the real height (+-2 px), and the box
-must stay out of them. A 9:16 frame runs in the Facebook feed as a 4:5 centre crop too (Dave 36310, Klodel 36308: the
-Reel C v10 closing logo at y 290 passed the Reel band and was caught by hand), so on 9:16 the box must also stay out
-of that crop's 10 % / 10 % bands: on 1080x1920 the Reel band is 269-1248, the feed crop's 420-1500, together 420-1248.
+must stay out of them. On 9:16 only the Reel band counts (1080x1920: 269-1248): Patrik csoport TG 5732 (2026-11-13,
+Klodel 40094), word for word: "egyedül arra kell figyelni h reels és hogy ha kimaszkolnak vmit akkor ne takarjon ki".
+The earlier extra check against the FB feed's 4:5 centre crop (Dave 36310, Klodel 36308, free part 420-1500) is
+removed: it blocked every Reel frame of the 11-13 v8 set while Patrik waited.
 1:1 and landscape (any width > height) carry 10 % / 10 % too (Klodel 31805); only an upright
 format other than 4:5 and 9:16 is blocked.
 Taste reference (Patrik TG 4793, 2026-11-10: "Ezek ocsmany anyagotk", the third taste rejection; Klodel 36836): every
@@ -500,8 +501,6 @@ def message_and_real(d):
 SAFE_BANDS = {'4x5': (0.10, 0.10), '9x16': (0.14, 0.35), '1x1': (0.10, 0.10), 'fekvo': (0.10, 0.10)}
 SAFE_ASPECT = {'4x5': 5 / 4, '9x16': 16 / 9, '1x1': 1.0}  # height / width
 SAFE_ASPECT_TOL = 0.02
-# A 9:16 Reel in the Facebook feed: a 4:5 centre crop, its own 10 % / 10 % covered (Dave 36310).
-FEED_CROP_9X16 = (5 / 4, 0.10, 0.10)  # crop height / width, top, bottom share of the crop
 SAFE_PX_TOL = 2
 LAYOUT_REASON_MIN = 15  # ELRENDEZES: kulon-elem <reason> (Klodel 32029)
 SUB_REASON_MIN = 10  # SZERZO: helyettes-klodel <reason> (Klodel 33823)
@@ -610,16 +609,7 @@ def safe_band(fp, value):
         return (f'SAV: a fontos elem ({y1}-{y2}) belelóg a levágott sávba: a szabad rész {want_top}-{h - want_bot} px. '
                 'Görgetésnél a hírfolyam és a Reel-felület ezt eltakarja (Patrik TG 15669). Told beljebb, és nézd meg '
                 'a levágott változatot Read-del.')
-    if fmt == '9x16':
-        crop_h = w * FEED_CROP_9X16[0]
-        off = (h - crop_h) / 2
-        feed_top = round(off + crop_h * FEED_CROP_9X16[1])
-        feed_bot = round(off + crop_h * (1 - FEED_CROP_9X16[2]))
-        if y1 < feed_top or y2 > feed_bot:
-            lo, hi = max(want_top, feed_top), min(h - want_bot, feed_bot)
-            return (f'SAV: a fontos elem ({y1}-{y2}) a 9:16 Reel-sávon belül van, de az FB-hírfolyam 4:5 középső vágata '
-                    f'({round(off)}-{round(off + crop_h)} px, felül-alul 10 % takarva) szabad része {feed_top}-{feed_bot} '
-                    f'px; a kettő közös része {lo}-{hi} px (Dave 36310). Told beljebb, és nézd meg a 4:5 vágatot is Read-del.')
+    # Patrik TG 5732 (Klodel 40094): on 9:16 the Reel band above is the only rule; no 4:5 feed-crop check.
     return None
 
 
