@@ -52,28 +52,10 @@ BOLTOK += ["meska"]  # kézműves piactér: 3 személyre szabott domborzati tér
 # Site-próba (Klodel 39454, Radar 39474): a 403/410-es bolt (eMAG) nem mérhető, mégis árulta a Rhode-ot és a Loop-ot.
 # Minden hiány-állításhoz kell keresőmotoros site-próba MIND a négy domainre, eredménnyel (a domain után, a következő
 # domainig; ha ott nincs, a sor maradékából: "(emag.hu, alza.hu): 0 találat"). Ha bármelyik site-próba találatot ad (szám > 0), a termék itthon kapható: a hiány-állítás bukik.
-SITE_DOMAINEK = ["emag.hu", "alza.hu", "notino.hu", "douglas.hu"]
-SITE_SOR = re.compile(r"(?i)(?<!\w)site(:|-szűrt|-próba| szűrt)")
-def site_hibak(b):
-    talalt = {}
-    for s in b.splitlines():
-        if not SITE_SOR.search(s): continue
-        low = s.lower()
-        for d in SITE_DOMAINEK:
-            if d not in low: continue
-            utana = low.split(d, 1)[1]
-            kov = [utana.find(x) for x in SITE_DOMAINEK if x != d and x in utana]
-            sajat = utana[:min(kov)] if kov else utana
-            # a list ("emag.hu, alza.hu): 0") shares the result after it; a domain with its own text keeps its own
-            for resz in [sajat] + ([utana] if kov and re.fullmatch(r"[\s,/()]*", sajat) else []):
-                m = re.search(r"(?<![\w.])(\d+)(?!\w|[.,]\d)", resz)
-                if m: talalt[d] = int(m.group(1)); break
-                if re.search(r"(?i)nincs találat|nem hozott találatot|nem talált", resz): talalt[d] = 0; break
-    hibak = [f"ITTHON: site-próba talált ({d}: {n}), itthon kapható (Klodel 39454)" for d, n in talalt.items() if n > 0]
-    hianyzik = [d for d in SITE_DOMAINEK if d not in talalt]
-    if hianyzik:
-        hibak.append("ITTHON: site-próba eredménnyel hiányzik: " + ", ".join(hianyzik) + " (Klodel 39454)")
-    return hibak
+# The site probe lives in scripts/lib/itthon_rules.py (card 9a4b245c), shared with scripts/lib/hiany_lint.py.
+import os  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))
+from itthon_rules import SITE_DOMAINEK, SITE_SOR, site_hibak  # noqa: E402
 # --zseni (Klodel 39499, Patrik TG 18069: "tényleg MINDEN embert érint és lehet róla viccesen is kommunikalni ... ezek
 # ... erőltetett dolgok"): MINDENKI mező = kit hagy ki. Csak a "senkit" kezdetű érték megy át, és abban sincs autó,
 # kutya, gyerek, szülő, sofőr, tulajdonos (szó elején: az "autós", "kutyás" is). VICCES mező = egy mondat idézőjelben.

@@ -13,7 +13,7 @@
 import { describe, it, expect } from 'vitest'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join, posix } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -37,9 +37,14 @@ const sha256 = (rel: string) => createHash('sha256').update(readFileSync(join(RO
 //   shell: "$HERE/<file>" (HERE = the script's dir) and "$BASE/scripts/<path>" (BASE = the repo root);
 //   python: a top-level `import x` / `from x import ...` that names a sibling x.py, and a file loaded by path as
 //   os.path.join(HERE, 'x.py') or os.path.join(HERE, '..', 'hooks', 'x.py') (msg_gate.py loads hiany_lint.py,
-//   vevo_nem_ir.py and ../hooks/time-claim-gate.py so under `python3 -I`).
+//   vevo_nem_ir.py and ../hooks/time-claim-gate.py so under `python3 -I`), or as
+//   os.path.join(REPO, 'scripts', ..., 'x.py') (REPO = the repo root, normalised; hiany_lint.py loaded the reply gate and the
+//   idea lint so, and neither was pinned: Viktor 41524 L2, 41550, card 9a4b245c).
 function depsOf(rel: string): string[] {
-  const src = readFileSync(join(ROOT, rel), 'utf8')
+  return depsOfSource(rel, readFileSync(join(ROOT, rel), 'utf8'))
+}
+
+function depsOfSource(rel: string, src: string): string[] {
   const dir = dirname(rel)
   const out = new Set<string>()
   if (rel.endsWith('.sh')) {
@@ -53,6 +58,11 @@ function depsOf(rel: string): string[] {
     for (const m of src.matchAll(/os\.path\.join\(\s*HERE,\s*((?:'[A-Za-z0-9_.-]+',\s*)*)'([A-Za-z0-9_.-]+\.py)'\s*\)/g)) {
       const parts = [...m[1].matchAll(/'([A-Za-z0-9_.-]+)'/g)].map((x) => x[1])
       out.add(join(dir, ...parts, m[2]))
+    }
+    for (const m of src.matchAll(/os\.path\.join\(REPO((?:,\s*'[A-Za-z0-9_.-]+')+)\)/g)) {
+      const parts = [...m[1].matchAll(/'([A-Za-z0-9_.-]+)'/g)].map((p) => p[1])
+      const path = posix.normalize(parts.join('/'))
+      if (path.endsWith('.py') && path !== '..' && !path.startsWith('../')) out.add(path)
     }
   }
   return [...out].filter((p) => existsSync(join(ROOT, p))).sort()
@@ -103,11 +113,32 @@ describe('launchd script pins (LAUNCHDPIN1111)', () => {
     expect(depsOf('scripts/lib/msg_gate.py')).toEqual(
       expect.arrayContaining(['scripts/lib/hiany_lint.py', 'scripts/lib/vevo_nem_ir.py', 'scripts/hooks/time-claim-gate.py']),
     )
+    // card 9a4b245c: hiany_lint.py takes its rules from the small shared lib, not from the reply gate or the idea lint
+    expect(depsOf('scripts/lib/hiany_lint.py')).toEqual(['scripts/lib/itthon_rules.py'])
     for (const file of pinFiles) {
       const pinned = new Set(readPins(file).map((p) => p.path))
       const missing = [...pinned].flatMap((p) => depsOf(p).filter((d) => !pinned.has(d)).map((d) => `${p} -> ${d}`))
       expect(missing, `${file}: pinned files depend on unpinned repo files: ${missing.join(', ')}`).toEqual([])
     }
+  })
+
+  // Viktor 41524 L2: the closure missed a file loaded by path from the repo root; a regression of the parser must not
+  // pass silently again (the real files no longer use the shape, so a synthetic source tests it).
+  it('the closure parser follows a file loaded by path from the repo root (REPO-join + _load)', () => {
+    const src = [
+      "_gate = _load('_g', os.path.join(REPO, 'scripts', 'hooks', 'product-image-gate.py'))",
+      "_idea = _load('_i', os.path.join(REPO, 'scripts', 'uzleti-otlet-kapu-lint.py'))",
+      "_in = _load('_n', os.path.join(REPO, 'scripts', 'lib', '..', 'hooks', 'ledger_lib.py'))",
+      // leaves the repo by name, even though the file exists (this checkout seen from its parent)
+      `_out = _load('_o', os.path.join(REPO, '..', '${basename(ROOT)}', 'scripts', 'lib', 'msg_gate.py'))`,
+      "_dir = os.path.join(REPO, 'store')",
+    ].join('\n')
+    // a '..' that stays inside the repo is normalised and followed; one that leaves the repo is not a repo file
+    expect(depsOfSource('scripts/lib/example.py', src)).toEqual([
+      'scripts/hooks/ledger_lib.py',
+      'scripts/hooks/product-image-gate.py',
+      'scripts/uzleti-otlet-kapu-lint.py',
+    ])
   })
 
   it('the instrument is live: a changed byte in a pinned file changes its sha256', () => {
