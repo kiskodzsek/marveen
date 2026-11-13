@@ -29,7 +29,7 @@ zsh (CLAUDE_CODE_SHELL, else SHELL; unknown = zsh, the fleet's shell); check 5 r
   4. EQUALS expansion: an argument that starts with an unquoted '=' and has more after it (`echo ===`, `echo =foo`,
      `[ a == b ]`, `test a == b`; also an assignment value `x==y`). A lone `=`, `=(...)` (process substitution),
      a quoted or escaped '=' ("===", '===', \\=), `a=b`, `--opt=val` and anything inside [[ ]] pass.
-  5. rm -r on a variable: an rm (also /bin/rm, after sudo/command/env/nohup/...) with -r/-R/--recursive whose
+  5. rm -r on a variable: an rm (also /bin/rm, after sudo/command/env/nohup/.../xargs) with -r/-R/--recursive whose
      operand STARTS with a variable expansion ($S, "$S", ${S}, "$S"/*, $S/x). Empty or misspelt, that removes the
      cwd or /. The ${S:?} / ${S?} guard passes (zsh stops on an empty S), and so does any operand that starts with
      a literal (an absolute /path/$X, ./x). $HOME is not exempt: write the path out.
@@ -53,7 +53,7 @@ import sys
 MAX_COMMAND = 256 * 1024
 # Measured on zsh 5.9 (`B=main; print "$B:<letter>x/y"` for every letter): these change the value or fail
 # ("bad substitution" for :s); every other letter leaves "main:<letter>x/y" as written. :g only with s/& after it.
-MODIFIER_RX = re.compile(r'(?<![\\$])\$([A-Za-z_][A-Za-z0-9_]*|[0-9])(:(?:[aAcehlPqQrstu]|g[s&]))')
+MODIFIER_RX = re.compile(r'(?<![\\$])\$([A-Za-z_][A-Za-z0-9_]*|[0-9])(:(?:[aAcehlPqQrstuW]|g[s&]))')
 NAME_RX = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 ASSIGN_RX = re.compile(r'^([A-Za-z_][A-Za-z0-9_]*)(\[[^\]]*\])?\+?=')
 ARRAY_ASSIGN_RX = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*\+?=$')
@@ -63,6 +63,7 @@ ARRAY_SPECIAL = {'@', '*', 'argv', 'path', 'fpath', 'cdpath', 'manpath', 'mailpa
                  'reply', 'funcstack', 'commands'}
 KEYWORDS = {'if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', '!', '{', '}', 'time', 'coproc',
             'esac', 'case'}
+XARGS_VALUE_OPTS = {'-I', '-n', '-P', '-L', '-s', '-E', '-d', '-J', '-R', '-a'}
 PRECMD = {'sudo', 'command', 'builtin', 'exec', 'nocorrect', 'noglob', 'nohup', 'env', 'nice', 'caffeinate'}
 DECLARERS = {'typeset', 'local', 'declare', 'export', 'readonly', 'integer', 'float'}
 OPERATORS = [';;', ';&', ';|', '&&', '||', '|&', '&!', '&|', ';', '|', '&']
@@ -628,6 +629,14 @@ def findings(command, env=None):
         j = k
         while j < len(words):
             pw = words[j].plain()
+            if pw == 'xargs':
+                # Kernel 41291: "... | xargs rm -rf $S" runs rm too; skip xargs' options (and the value of the ones
+                # that take one as a separate word: -I {} -n 1 -P 4 -L 1 -s N -E eof -d c -J x -R n)
+                j += 1
+                while j < len(words) and (words[j].plain() or '').startswith('-'):
+                    o = words[j].plain()
+                    j += 2 if o in XARGS_VALUE_OPTS else 1
+                continue
             if pw in PRECMD or pw in KEYWORDS:
                 j += 1
                 while j < len(words) and ((words[j].plain() or '').startswith('-')
@@ -636,7 +645,9 @@ def findings(command, env=None):
                     j += 1
                 continue
             break
-        if j < len(words) and (words[j].plain() or '').split('/')[-1] == 'rm':
+        # Viktor 41294 LOW 2: "\\rm" (the alias-bypass habit) is rm too: a name of only literal/escaped parts
+        cmd = words[j].text() if j < len(words) and all(k in ('lit', 'esc') for k, _ in words[j].parts) else ''
+        if j < len(words) and cmd.split('/')[-1] == 'rm':
             args = words[j + 1:]
             recursive, operands, opts_done = False, [], False
             for x in args:

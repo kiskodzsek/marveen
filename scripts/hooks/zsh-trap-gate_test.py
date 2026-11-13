@@ -126,7 +126,20 @@ def incident_rm_variable_1113(_):
         'env A=1 rm -rf "$HOME/.cache/x"',
         'echo a; [ -d x ] && rm -rf $TMPDIR/x',
         'X="$(mktemp -d)"; trap "rm -rf $X" EXIT; rm -rf $X',
+        '\\rm -rf $S',                                       # Viktor 41294 LOW 2
+        'echo a | xargs rm -rf $S',                             # Kernel 41291
+        'find . -name x | xargs -I {} -n 1 rm -rf $S/{}',
+        'ls | xargs -0 rm -r "$D"',
     ))
+
+
+@case
+def modifier_letters_measured(_):
+    # Viktor 41294 LOW 1 / INFO 3: every letter zsh 5.9 treats as a modifier (W included), gs and g&, blocks;
+    # a non-modifier letter, an escaped $ and $$ (the PID) pass
+    mods = all(blocks(f'git show "$B:{m}x/y"', 'ZSH-CSAPDA (modifier)') for m in
+               ['a', 'A', 'c', 'e', 'h', 'l', 'P', 'q', 'Q', 'r', 's', 't', 'u', 'W', 'gs', 'g&'])
+    return mods and all(passes(c) for c in ('git show "$B:docs/x"', 'echo "\\$B:s/x"', 'echo "$$B:s/x"'))
 
 
 # ---- more negative forms ---------------------------------------------------------------------------------------
