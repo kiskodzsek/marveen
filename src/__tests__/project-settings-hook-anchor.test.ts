@@ -75,6 +75,7 @@ const EXPECTED: Record<string, string[]> = {
     'pr-kerdes-gate.py', // PRKERDES1111 (Klodel 37320)
     'repo-create-gate.py', // Klodel 40048: GitHub repository creation needs Patrik's verbatim request
     'service-memory-reply-gate.py', // Klodel 40111 (#241): a known service in a main-agent reply needs a memory search first
+    'zsh-trap-gate.py', // retro 2026-11-13 R6 (card cf287c2c): zsh traps + rm -r on a variable, every Bash call
   ],
   Stop: ['marveen-commands.py', 'telegram-reply-guard.py', 'telegram_progress_clear.py', 'slack_progress_clear.py'],
   SessionStart: ['ledger-replay.py', 'taskstate-replay.py', 'clear-replay.py', 'marveen-commands.py'],
