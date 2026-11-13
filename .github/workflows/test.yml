@@ -108,6 +108,8 @@ jobs:
       - run: bash scripts/__tests__/agent-msg-send-gate.test.sh
       # Retro R10 (card 1f943050): the absence-claim lint the send gate runs on Radar's delivered files; temp files.
       - run: python3 -I scripts/__tests__/hiany-lint.test.py
+      # Card 42b5e28a: the buyer-does-not-write word list (send gate rule 7 and the image .ok sheet); no files.
+      - run: python3 -I scripts/lib/vevo_nem_ir_test.py
       # WTPRUNESQUASH1106: the prune decides what `git worktree remove` takes;
       # its "keep unmerged work" cases are the gate. Throwaway git repos in a
       # temp dir, a stub lsof, no network.

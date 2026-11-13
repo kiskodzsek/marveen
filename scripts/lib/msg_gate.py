@@ -94,11 +94,29 @@ Two rules:
    delivered after the R10 rule (11-13 12:00) 3 fail today, 2 of them on a real gap. The lint's verdict equals
    Radar's original script on all 1909 shared/**.md files (393 fail in both, outputs identical).
 
+7. THE BUYER DOES NOT WRITE (card 42b5e28a, Klodel 41486; Patrik TG 18398, 18401, 18412; hibanapló 2026-11-13
+   L308-L310): a video concept had mum writing in the book, a glued-in photo, then an "old way" contrast with an
+   empty baby journal and a pen; Patrik: "nem ragasztgatunk képet nem irogat kézzel", and the contrast is
+   misleading too. A text from VNI_FROM (default klodel, majsztro, magnes, mira: the material briefers) to VNI_TO
+   (default dave, mira, magnes, majsztro: the producers) that names a material format (video, reel, poszt,
+   hirdetés, film, koncepció, jelenet, ...) is refused when it holds a word of scripts/lib/vevo_nem_ir.py: toll,
+   ragasztó / beragaszt, kézírás / kézzel ír, ír a könyvbe, naplóz / naplót vezet, üres / kitöltős / más
+   babanapló. No exception for a contrast. Not checked: Patrik's own words quoted on a "TG n" line (rule 5 asks
+   for them verbatim; TG 18395 says "naplóz") and a "TILOS:" line naming what may not appear. The word list
+   failing to load is exit 4.
+   Measured 2026-11-13 21:5x on 30 days (4439 messages briefer -> producer, 1702 about material): 36 would have
+   been refused. 23 are the kind Patrik refused (mostly "nem kell kézzel írni / képet ragasztani / naplót
+   vezetni", an empty journal and a pen in a scene). 13 are the known price of "no exception": a "kézzel írható
+   oldal" product feature (3), a grandmother's handwritten recipe (2), competitor categories (3), process wording
+   such as "kézzel beírt státuszsor" (3), a feather "toll" (1), a handwriting-like font (1); they pass reworded or
+   on a TILOS: line.
+
 Env (the suite uses them): MARVEEN_MSG_GATE_SECRET_SRC, MARVEEN_MSG_GATE_STRICT (comma list),
 MARVEEN_MSG_GATE_MAX_CHARS, MARVEEN_MSG_GATE_OWN_DOMAINS (comma list), MARVEEN_MSG_GATE_STOP_FROM
 (comma list), MARVEEN_MSG_GATE_SPEC_LOCK (path), MARVEEN_MSG_GATE_SPEC_FROM (comma list),
 MARVEEN_MSG_GATE_KERES_FROM (comma list), MARVEEN_MSG_GATE_LEDGER (path), MARVEEN_MSG_GATE_HIANY_FROM (comma
-list), MARVEEN_HIANY_ROOT (the install whose shared/ is read; default this repo).
+list), MARVEEN_HIANY_ROOT (the install whose shared/ is read; default this repo), MARVEEN_MSG_GATE_VNI_FROM,
+MARVEEN_MSG_GATE_VNI_TO (comma lists).
 """
 import json
 import os
@@ -498,6 +516,21 @@ def csv_env(name, default):
     return [x.strip().lower() for x in os.environ.get(name, default).split(',') if x.strip()]
 
 
+def vni_reason(text):
+    """Rule 7: None, or the refusal reason when a material brief holds a buyer-writes word."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('_vevo_nem_ir', os.path.join(HERE, 'vevo_nem_ir.py'))
+        vni = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(vni)
+    except Exception as e:  # a missing or broken word list is a gate failure, never a silent pass
+        die('scripts/lib/vevo_nem_ir.py does not load (%s)' % e.__class__.__name__)
+    if not vni.is_material(text):
+        return None
+    labels = vni.found(text)
+    return vni.reason(labels, 'a brief Marabel-anyagról szól, és benne van:') if labels else None
+
+
 def main(argv):
     frm = to = None
     i = 0
@@ -561,6 +594,12 @@ def main(argv):
 
     if frm.lower() in csv_env('MARVEEN_MSG_GATE_HIANY_FROM', 'radar'):
         r = hiany_reason(text)
+        if r:
+            reasons.append(r)
+
+    if (frm.lower() in csv_env('MARVEEN_MSG_GATE_VNI_FROM', 'klodel,majsztro,magnes,mira')
+            and to.lower() in csv_env('MARVEEN_MSG_GATE_VNI_TO', 'dave,mira,magnes,majsztro')):
+        r = vni_reason(text)
         if r:
             reasons.append(r)
 

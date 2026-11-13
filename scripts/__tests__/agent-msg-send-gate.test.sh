@@ -13,6 +13,10 @@
 # Retro R10 (card 1f943050): a shared/**.md file Radar delivers (a delivery word on the path's line) must pass
 # scripts/lib/hiany_lint.py; a mention, a negated delivery, another sender pass; the lint missing is exit 4.
 #
+# Rule 7 (card 42b5e28a): a material brief from a briefer to a producer naming a pen, glue, handwriting, writing in
+# the book, journaling or an empty journal is refused, also as a contrast; a TILOS: line and Patrik's quote on a TG
+# line pass; the word list missing is exit 4.
+#
 # Run:  bash scripts/__tests__/agent-msg-send-gate.test.sh
 set -uo pipefail
 
@@ -593,6 +597,51 @@ ok "hiany: the lint missing when the rule fires: exit 4, no POST" "$([ "$RC" = "
 text 'Kész a heti összefoglaló, nincs fájl.'
 GATE_ENV="$HROOT MARVEEN_MSG_GATE_BIN=$SANDBOX/gate-only/msg_gate.py MARVEEN_MSG_GATE_SECRET_SRC=$ROOT/src/security/secret-gate.ts" run radar klodel
 ok "hiany: the lint missing, no delivered file: sent" "$(sent)" "rc=$RC posts=$POSTS"
+
+# --- rule 7 (card 42b5e28a, Patrik TG 18398, 18401, 18412): the buyer does not write ---
+text 'Reel koncepció: anya tollal beleírja a könyvbe az első szót.'
+run majsztro dave
+ok "vni: a material brief with a pen and writing in the book: refused" "$(refused)" "rc=$RC posts=$POSTS"
+ok "vni: the refusal names the labels and Patrik's TG" "$(grep -q 'toll' "$SANDBOX/err" && grep -q 'ír a könyvbe' "$SANDBOX/err" && grep -q 'TG 18398' "$SANDBOX/err" && echo 0 || echo 1)"
+text 'Hirdetéskép szöveg: nem kell naplót vezetni, sem képet ragasztani.'
+run mira magnes
+ok "vni: the contrast form (\"nem kell naplót vezetni\") is refused too" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Videó jelenet: mellette egy üres babanapló és egy kézírásos cetli.'
+run magnes mira
+ok "vni: an empty journal and handwriting in a scene: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Új jelenet: anya mesél, a könyv magától készül.
+TILOS: toll, ragasztó, kézírás, ír a könyvbe, naplóz, üres babanapló'
+run majsztro dave
+ok "vni: the forbidden words on a TILOS: line: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Videó: Patrik TG 18395 "a könyv ahogy naplóz anya benne", a jelenet mesélés.'
+run majsztro dave
+ok "vni: Patrik's own words quoted on a TG line: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Videó: "anya naplóz benne" a jelenet.'
+run majsztro dave
+ok "vni: a quote without a TG number is checked: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'A kapu tesztje: toll, ragasztó, naplóz.'
+run majsztro dave
+ok "vni: not about material (no format word): sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Reel koncepció: anya tollal ír.'
+run kernel dave
+ok "vni: another sender (kernel): sent" "$(sent)" "rc=$RC posts=$POSTS"
+run majsztro pulzus
+ok "vni: another recipient (pulzus): sent" "$(sent)" "rc=$RC posts=$POSTS"
+GATE_ENV="MARVEEN_MSG_GATE_VNI_FROM=radar MARVEEN_MSG_GATE_VNI_TO=pulzus" run radar pulzus
+ok "vni: the sender/recipient lists come from the env" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Reel: Pamacs tollazata puha, ragasztott kötés, naplózva a ledgerben.'
+run majsztro dave
+ok "vni: the narrowed-out forms (tollazat, ragasztott kötés, naplózva): sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Reel koncepció: anya nap​lóz.'
+run majsztro dave
+ok "vni: a zero-width character inside the word: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# the word list missing next to the gate: exit 4, nothing sent (never a silent pass)
+mkdir -p "$SANDBOX/gate-vni"; cp "$GATE" "$SANDBOX/gate-vni/msg_gate.py"
+text 'Reel koncepció: anya mesél.'
+GATE_ENV="MARVEEN_MSG_GATE_BIN=$SANDBOX/gate-vni/msg_gate.py MARVEEN_MSG_GATE_SECRET_SRC=$ROOT/src/security/secret-gate.ts" run majsztro dave
+ok "vni: the word list missing when the rule fires: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+GATE_ENV="MARVEEN_MSG_GATE_BIN=$SANDBOX/gate-vni/msg_gate.py MARVEEN_MSG_GATE_SECRET_SRC=$ROOT/src/security/secret-gate.ts" run kernel dave
+ok "vni: the word list missing, the rule does not fire (kernel): sent" "$(sent)" "rc=$RC posts=$POSTS"
 
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."
