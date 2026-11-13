@@ -129,8 +129,9 @@ class Hook(unittest.TestCase):
         names = {'mira', 'kernel', 'dave', 'main'}
         self.assertIsNone(gate.value_problem(GOOD, names, 'main'))
         self.assertIsNone(gate.value_problem('Kernel 41154: a targeting search csak Patrik tokenjével', names, 'main'))
-        self.assertIn('msg_id', gate.value_problem('mira mérte, nincs belső út', names, 'main'))
-        self.assertIn('msg_id', gate.value_problem('mira 123: rövid id', names, 'main'))
+        # the missing msg_id is named as such, not as an unreadable queue (an empty IN () would also fail)
+        self.assertIn('nincs benne a mérés msg_id', gate.value_problem('mira mérte, nincs belső út', names, 'main'))
+        self.assertIn('nincs benne a mérés msg_id', gate.value_problem('mira 123: rövid id', names, 'main'))
         self.assertIn('csapattag', gate.value_problem('valaki 41144: nincs belső út', names, 'main'))
         self.assertIn('saját', gate.value_problem('main 41200: én mértem', names, 'main'))   # own name
         self.assertIn('üzenetsor', gate.value_problem('dave 41144: nincs út', names, 'main'))  # dave not a party
