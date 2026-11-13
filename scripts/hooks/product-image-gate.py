@@ -1486,6 +1486,7 @@ def main():
         data = json.load(sys.stdin)
     except Exception:
         return 0
+    reply_marks.bind_call(data)  # a mark is held for this call and spent once it is sent (Klodel 41147)
     ti = data.get('tool_input') or {}
     # Patrik TG 14472 ("elég a marabel csapat chat"), card 0ecad9e5, TG 1862: team work goes to the group,
     # not to Patrik's private chat. A private reply passes only with a written reason in the text:

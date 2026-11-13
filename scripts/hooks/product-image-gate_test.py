@@ -2656,6 +2656,39 @@ def NEG_mark_two_hooks_at_once_one_passes(root):
 
 
 @case
+def NEG_mark_kept_after_another_gate_blocks_the_call(root):
+    # Klodel 41147: the gate HOLDS the mark for its tool call; only reply-marks-spend.py (PostToolUse, the reply went
+    # out) spends it. A call another gate blocked (is_error tool_result in the transcript) leaves the mark.
+    mark(root, 'PRIVAT-OK', PRIV)
+    tr = os.path.join(root, 'session.jsonl')
+    open(tr, 'w').close()
+    env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
+           'LEDGER_DB_PATH': os.path.join(root, 'nincs-ledger.db'), 'MARVEEN_AGENT_ID': 'klodel',
+           'REPLY_MARKS_PATH': os.path.join(root, 'store', 'reply-marks.jsonl')}
+
+    def pre(call):
+        body = {'tool_input': {'chat_id': PRIV, 'text': 'Kész.'}, 'tool_use_id': call, 'transcript_path': tr}
+        return subprocess.run([sys.executable, '-I', HOOK], input=json.dumps(body), capture_output=True, text=True,
+                              env=env, timeout=20).returncode
+
+    def blocked(call):
+        with open(tr, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': call, 'is_error': True}]}}, separators=(',', ':')) + '\n')
+
+    spend = os.path.join(os.path.dirname(os.path.abspath(HOOK)), 'reply-marks-spend.py')
+    a = pre('toolu_A')
+    in_flight = pre('toolu_X')  # toolu_A has no tool_result yet: it may still send
+    blocked('toolu_A')
+    blocked('toolu_X')
+    b = pre('toolu_B')
+    subprocess.run([sys.executable, '-I', spend], input=json.dumps({'tool_use_id': 'toolu_B'}), env=env,
+                   capture_output=True, text=True, timeout=20)
+    c = pre('toolu_C')
+    return (a, in_flight, b, c) == (0, 2, 0, 2)
+
+
+@case
 def NEG_marker_line_in_text_refused_private_group_edit(root):
     # Viktor 40894 (b): the marker as a line of the text is refused in the private chat, the group and edits.
     out = []

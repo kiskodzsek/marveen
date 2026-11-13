@@ -106,6 +106,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of time-claim-gate.py (run: python3 -I scripts/hooks/time-claim-gate_test.py); not itself a hook (Klodel 38401)',
   'link-request-reply-gate_test.py':
     'the unit test of link-request-reply-gate.py (run: python3 -I scripts/hooks/link-request-reply-gate_test.py); not itself a hook (#219, card 18b2002b)',
+  'reply-marks-spend_test.py':
+    'the unit test of reply-marks-spend.py and the hold/spend half of scripts/lib/reply_marks.py (run: python3 -I scripts/hooks/reply-marks-spend_test.py); not itself a hook (Klodel 41147)',
   'patrik-reply-volume-gate_test.py':
     'the unit test of patrik-reply-volume-gate.py (run: python3 -I scripts/hooks/patrik-reply-volume-gate_test.py); not itself a hook (card 9df14a4c)',
   'pr-kerdes-gate_test.py':
@@ -162,6 +164,8 @@ function registrationCorpus(): string {
 const CHECKOUT_ONLY: Record<string, string> = {
   'link-request-reply-gate.py':
     'the owner asked the MAIN agent for a link (Patrik TG 17974, TG 18022; #219, card 18b2002b): the gate reads the latest inbound message of the chat from conversation_log through ledger_lib, and that ledger is written only for the main channels session (ledger-capture.py is CHECKOUT_ONLY below), so on a seeded sub-agent it would find no inbound row and pass every reply; seeding it needs a sub-agent ledger first (a separate decision)',
+  'reply-marks-spend.py':
+    'the PostToolUse half of the reply marks (Klodel 41147): it spends the marks that patrik-reply-volume-gate.py and product-image-gate.py held for a sent reply, and both of those are CHECKOUT_ONLY on the main agent; seeded alone it would spend marks no gate on that agent holds, a silent no-op',
   'patrik-reply-volume-gate.py':
     'the MAIN agent spammed the owner\'s chats (Patrik TG 18129; card 9df14a4c): the gate counts the main agent\'s outbound rows since the latest inbound row of the chat in conversation_log through ledger_lib, and that ledger is written only for the main channels session (ledger-capture.py is CHECKOUT_ONLY below); the gate itself passes every other agent',
   'private-topic-group-gate.py':
