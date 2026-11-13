@@ -3174,6 +3174,8 @@ async function settleIdentityRename(session: string, displayName: string, host: 
       return 'entered'
     }
   }
+  // Viktor 40072: one last look right before the clear, so only our own line is ever cleared.
+  if (!identityRenameParked(capturePane(session, host), displayName)) return 'submitted'
   const cleared = await clearInputBuffer(session, host)
   logger.warn({ session, displayName, cleared }, 'Identity /rename stayed parked after extra Enters; cleared the box, the session keeps its default name (RENAMEPARK1113)')
   return cleared ? 'cleared' : 'still-parked'

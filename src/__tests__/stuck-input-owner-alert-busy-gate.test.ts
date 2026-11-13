@@ -75,7 +75,7 @@ describe('wiring: the owner alert goes through the gate, recovery does not', () 
     // the body before the gate call. SUBSTUCK1113: the alert is routed (main
     // agent's inbox), never a direct sendAlert to the owner.
     const gateIdx = fnBody.indexOf('shouldAlertParkedGiveUp(')
-    const alertIdx = fnBody.indexOf('routeStuckInputAlert(')
+    const alertIdx = fnBody.indexOf('routeAgentAlert(')
     expect(alertIdx).toBeGreaterThan(gateIdx)
     expect(fnBody).not.toMatch(/sendAlert\(/)
   })
