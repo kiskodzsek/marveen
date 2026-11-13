@@ -71,11 +71,13 @@ describe('wiring: the owner alert goes through the gate, recovery does not', () 
   it('checkLocalSession exists and its alert is gated by shouldAlertParkedGiveUp', () => {
     expect(start).toBeGreaterThanOrEqual(0)
     expect(fnBody).toMatch(/shouldAlertParkedGiveUp\(/)
-    // The sendAlert call must be INSIDE the gated branch: no sendAlert may
-    // appear in the body before the gate call.
+    // The alert call must be INSIDE the gated branch: no alert may appear in
+    // the body before the gate call. SUBSTUCK1113: the alert is routed (main
+    // agent's inbox), never a direct sendAlert to the owner.
     const gateIdx = fnBody.indexOf('shouldAlertParkedGiveUp(')
-    const alertIdx = fnBody.indexOf('sendAlert(')
+    const alertIdx = fnBody.indexOf('routeStuckInputAlert(')
     expect(alertIdx).toBeGreaterThan(gateIdx)
+    expect(fnBody).not.toMatch(/sendAlert\(/)
   })
 
   it('the pane state is read fresh at alert time (capturePane + detectPaneState)', () => {

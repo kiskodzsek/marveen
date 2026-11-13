@@ -3134,6 +3134,51 @@ export function identitySlashCommands(displayName: string): string[] {
   return [`/rename ${displayName}`]
 }
 
+// RENAMEPARK1113: the identity `/rename` was sent with `send-keys <cmd> Enter`
+// and never checked. Measured 2026-11-13 (store/dashboard.log): the router had
+// to clear a parked "/rename Klodel" (10:22), "/rename Pulzus" (10:32) and
+// "/rename Viktor" (10:38) by hand, and at 11:12 the parked "/rename Juró" /
+// "/rename Lex" outlived soft recovery and fired the overdue-guard alert. The
+// cause of the swallowed Enter is not measured [tipp: the TUI not yet accepting
+// a submit after a slow, load-heavy boot]. Whatever swallows it, the fix is the
+// same as for every other writer: look at the box after sending.
+//
+// Pure: true when the live input box still holds exactly this session's own
+// identity command (whitespace-collapsed). Anything else in the box -- an
+// empty prompt, a delivered message, a human draft -- is not ours to touch.
+export function identityRenameParked(pane: string | null, displayName: string): boolean {
+  if (pane == null) return false
+  const parked = parkedInputText(pane)
+  if (parked == null) return false
+  const own = identitySlashCommands(displayName).map((c) => c.replace(/\s+/g, ' ').trim())
+  return own.includes(parked)
+}
+
+// How many extra Enters the identity setup sends when its `/rename` is still
+// parked, and the settle time before each re-read. After that the box is
+// CLEARED: a session without its display name is cosmetic, a parked line is
+// not (the router reads the pane as busy and the overdue-guard alerts).
+const IDENTITY_SUBMIT_EXTRA_ENTERS = 3
+const IDENTITY_SUBMIT_SETTLE_MS = 1500
+
+// Runs inside the identity send lane (the caller holds it). Returns what
+// happened, for the log line and the unit test of the decision above.
+async function settleIdentityRename(session: string, displayName: string, host: string | null): Promise<'submitted' | 'entered' | 'cleared' | 'still-parked'> {
+  await delay(IDENTITY_SUBMIT_SETTLE_MS)
+  if (!identityRenameParked(capturePane(session, host), displayName)) return 'submitted'
+  for (let i = 1; i <= IDENTITY_SUBMIT_EXTRA_ENTERS; i++) {
+    runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), 'Enter'], { timeout: 5000 })
+    await delay(IDENTITY_SUBMIT_SETTLE_MS)
+    if (!identityRenameParked(capturePane(session, host), displayName)) {
+      logger.warn({ session, displayName, extraEnters: i }, 'Identity /rename was parked; an extra Enter submitted it (RENAMEPARK1113)')
+      return 'entered'
+    }
+  }
+  const cleared = await clearInputBuffer(session, host)
+  logger.warn({ session, displayName, cleared }, 'Identity /rename stayed parked after extra Enters; cleared the box, the session keeps its default name (RENAMEPARK1113)')
+  return cleared ? 'cleared' : 'still-parked'
+}
+
 // Delays mirror the observed Claude Code first-render timing: the first-run /
 // resume modals appear within ~4-6s, so dismiss at 8s; the prompt input is
 // reliably ready ~5s after that.
@@ -3207,9 +3252,9 @@ export async function scheduleIdentitySetup(session: string, displayName: string
             try {
               for (const cmd of identitySlashCommands(displayName)) {
                 runTmux(host, ['send-keys', '-t', exactTmuxTarget(session), cmd, 'Enter'], { timeout: 5000 })
-                await delay(1000)
               }
-              logger.info({ session, displayName, attempt }, 'Set session /rename')
+              const outcome = await settleIdentityRename(session, displayName, host)
+              logger.info({ session, displayName, attempt, outcome }, 'Set session /rename')
             } catch (err) {
               logger.warn({ err, session, displayName }, 'Failed to set session /rename')
             } finally {

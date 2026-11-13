@@ -12,7 +12,7 @@ import { mainRelaunchSucceeded } from '../auto-restart.js'
 import { MAIN_AGENT_ID, SERVICE_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT, RESPAWN_ENABLED } from '../config.js'
 import { launchableDistributionDefaultSync } from './default-model-guard.js'
 import { agentDir, listAgentNames, readAgentChannelProvider } from './agent-config.js'
-import { listKanbanCards } from '../db.js'
+import { listKanbanCards, createSystemMessage } from '../db.js'
 import {
   agentHasChannel,
   agentSessionName,
@@ -1691,7 +1691,7 @@ function maybeAlertStuckSubAgent(session: string, agentName: string | null, stat
   subAgentOverdueAlertedAt.set(session, now)
   const label = agentName ?? session
   logger.error({ session, agentName, attempts: state.attempts }, 'Sub-agent stuck input survived soft recovery -- overdue-guard alert (no auto-restart)')
-  sendAlert(`⚠️ A(z) ${label} session bemenete beragadt, ${state.attempts} automatikus próbálkozás sem szabadította ki (kb. 4-4.5 perce). Kézi ellenőrzés javasolt: \`tmux attach -t ${session}\`, szükség esetén \`tmux respawn-pane -k -t ${session}\`.`)
+  routeStuckInputAlert(agentName, `A(z) ${label} session bemenete beragadt, ${state.attempts} automatikus próbálkozás sem szabadította ki (kb. 4-4.5 perce). Kézi ellenőrzés: \`tmux attach -t ${session}\`, szükség esetén \`tmux respawn-pane -k -t ${session}\`.`)
 }
 
 // --- Keep-alive staleness watchdog (deafness safety net, decision #3) ---
@@ -1969,6 +1969,46 @@ function checkMainKeepaliveStaleness(): void {
 
 export function sendAlert(text: string): void {
   notifyChannel(text).catch(() => {})
+}
+
+// SUBSTUCK1113 (Patrik, privát TG 18139, 2026-11-13 11:12, Klodel 40029): a
+// sub-agent's stuck-input alert went to the OWNER's Telegram via sendAlert ->
+// notifyChannel, for juro and lex, whose boxes held nothing but a parked
+// identity "/rename". The owner does not run tmux; the main agent does, and it
+// already has a triage procedure for exactly this ([session-stuck], the same
+// prefix message-router.ts uses for notifyOrchestratorOfStuckSession).
+//
+// Rule: a stuck-input alert about a SUB-agent goes to the main agent's inbox as
+// a system message, NEVER to the owner. Only the main agent's OWN wedge may
+// reach the owner (it cannot read its own inbox while wedged). If the inbox
+// write fails, the alert is logged and dropped -- falling back to the owner is
+// exactly the behaviour this removes.
+export type StuckAlertTarget = 'main-agent' | 'owner'
+
+export function stuckInputAlertTarget(agentName: string | null, mainAgentId: string = MAIN_AGENT_ID): StuckAlertTarget {
+  return agentName != null && agentName === mainAgentId ? 'owner' : 'main-agent'
+}
+
+export function routeStuckInputAlert(
+  agentName: string | null,
+  text: string,
+  deps: { toMainAgent: (text: string) => void, toOwner: (text: string) => void } = {
+    toMainAgent: (t) => { createSystemMessage(MAIN_AGENT_ID, t) },
+    toOwner: sendAlert,
+  },
+  mainAgentId: string = MAIN_AGENT_ID,
+): StuckAlertTarget {
+  const target = stuckInputAlertTarget(agentName, mainAgentId)
+  if (target === 'owner') {
+    deps.toOwner(text)
+    return target
+  }
+  try {
+    deps.toMainAgent(`[session-stuck] ${text}`)
+  } catch (err) {
+    logger.error({ err, agentName }, 'Sub-agent stuck-input alert could not be queued for the main agent; dropped (never re-routed to the owner, SUBSTUCK1113)')
+  }
+  return target
 }
 
 async function handleMarveenDown(): Promise<void> {
