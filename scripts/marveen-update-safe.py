@@ -33,7 +33,8 @@ the fetched upstream (<remote>/<branch>):
 --apply writes a backup under <root>/store/update-safe/<YYYYmmdd-HHMMSS>/ (files + settings + manifest.json), runs
 `AUTO_STASH=1 <update-cmd>`, then verifies. If update.sh fails with HEAD unchanged, the parked / reset files and
 the local settings are put back. A grown `git stash list` (an auto-stash pop that failed) is reported as a failure.
-Exit: 0 = OK (check: would proceed), 1 = STOP or a failed verification, 2 = usage, 128+N = stopped by signal N.
+Exit: 0 = OK (check: would proceed), 1 = STOP or a failed verification, 2 = usage, 3 = OWNER-AKTÍV hold (a human
+wrote to the main agent in the last 15 min; --owner-active-ok "<reason>" overrides), 128+N = stopped by signal N.
 
 Stopping it (Pulzus 39788, first live run 2026-11-13: a SIGTERM mid-run killed the wrapper, update.sh ran on
 orphaned with the restart, and the settings merge and the verification never ran). The CHECK and the
@@ -434,6 +435,86 @@ def _apply(root, up, actions, update_cmd, sig):
     return 1 if failed else 0
 
 
+# --- owner-activity hold (Klodel 40046, Patrik TG 18158 "ez hogy fordulhatott elő megint?", 2026-11-13) ---------------
+# update.sh restarts the main channels session, and channels.sh always starts a FRESH conversation
+# (scripts/channels.sh, "--continue is intentionally omitted"). Measured on 2026-11-13: the updates at 10:40:52 and
+# 11:06:08 ran 20 s after a message of Patrik's (conversation_log, last 'in' row of the main agent at 10:40:32 and
+# 11:05:46), the session restarted mid-conversation, and he saw only "Dolgozik" while the new session knew nothing
+# of what he had asked. --apply therefore holds while a human wrote to the main agent within the window -- the same
+# signal and the same 15 minutes as the dashboard's scheduled-prompt deferral (src/web/owner-activity.ts). The
+# override is --owner-active-ok "<reason>" (an outage fix that cannot wait). CHECK mode only reports it.
+# Fails OPEN (no hold) when the ledger cannot be read: a missing or broken ledger must not block every update.
+# Test seams: LEDGER_DB_PATH (default <root>/store/claudeclaw.db), MAIN_AGENT_ID (default: <root>/.env, plain or
+# `export` form; set nowhere -> no hold, with a stderr line).
+OWNER_ACTIVE_WINDOW_SEC = 15 * 60
+OWNER_ACTIVE_OK_MIN = 8
+OWNER_ACTIVE_EXIT = 3
+OWNER_ACTIVE_REASON = (
+    'STOP     OWNER-AKTÍV (Klodel 40046): az utolsó 15 percben ember írt a fő ágensnek. A frissítés újraindítja a fő '
+    'channels sessiont, és a beszélgetés elvész. Várd ki a csendet (a check újrafuttatása megmutatja), vagy kiesés-'
+    'javításnál: --owner-active-ok "<indok szavakban>". / A human wrote to the main agent within 15 min; the update '
+    'would restart its session mid-conversation. Wait, or pass --owner-active-ok "<reason>".')
+
+
+def _main_agent_id(root):
+    """MAIN_AGENT_ID from the environment, else from <root>/.env (plain or `export` form; only that one line is
+    parsed, nothing else is kept). None when it is set nowhere -- the caller fails open and SAYS so (Viktor 40106
+    L2a: a silent default id would read an empty ledger and turn the hold off without a trace)."""
+    v = (os.environ.get('MAIN_AGENT_ID') or '').strip()
+    if v:
+        return v
+    try:
+        with open(os.path.join(root, '.env'), encoding='utf-8') as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith('export '):
+                    line = line[len('export '):].lstrip()
+                if line.startswith('MAIN_AGENT_ID='):
+                    v = line.split('=', 1)[1].split('#', 1)[0].strip().strip('"\'')
+                    if v:
+                        return v
+    except OSError:
+        pass
+    return None
+
+
+def _hold_warn(msg):
+    print(f'OWNER-AKTIV check skipped (fail open): {msg}', file=sys.stderr)
+
+
+def owner_active_minutes(root, now=None):
+    """Minutes since the latest inbound conversation_log row of the main agent when it is inside the window,
+    else None (also None when the ledger is unreadable: fail open). A future timestamp counts as active (0)."""
+    import sqlite3
+    db = os.environ.get('LEDGER_DB_PATH') or os.path.join(root, 'store', 'claudeclaw.db')
+    if not os.path.isfile(db):
+        return None
+    agent = _main_agent_id(root)
+    if not agent:
+        _hold_warn('MAIN_AGENT_ID is set neither in the environment nor in <root>/.env')
+        return None
+    try:
+        con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=5)
+        try:
+            row = con.execute("SELECT MAX(created_at) FROM conversation_log WHERE agent_id = ? AND direction = 'in'",
+                              (agent,)).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        _hold_warn(f'ledger unreadable ({type(e).__name__})')
+        return None
+    last = row[0] if row else None
+    if last is None:
+        return None
+    try:
+        age = (now if now is not None else datetime.datetime.now().timestamp()) - float(last)
+    except (TypeError, ValueError):
+        return None
+    if age >= OWNER_ACTIVE_WINDOW_SEC:
+        return None
+    return max(0, int(age // 60))
+
+
 def main(argv):
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument('--apply', action='store_true')
@@ -442,6 +523,8 @@ def main(argv):
     ap.add_argument('--remote', default='origin')
     ap.add_argument('--branch', default=None)
     ap.add_argument('--list', action='store_true', help='print every KEEP file, not one line per folder')
+    ap.add_argument('--owner-active-ok', default=None,
+                    help='apply even though a human wrote to the main agent in the last 15 min; the reason, in words')
     try:
         a = ap.parse_args(argv[1:])
     except SystemExit:
@@ -464,9 +547,19 @@ def main(argv):
     print_plan(actions, stops, head, upstream_sha, a.list)
     if stops:
         return 1
+    active = owner_active_minutes(root)
+    if active is not None:
+        print(f'OWNER-AKTIV  a human wrote to the main agent {active} min ago (window {OWNER_ACTIVE_WINDOW_SEC // 60} min); '
+              'update.sh restarts the main channels session and the conversation is lost')
     if not a.apply:
         print('CHECK OK: run again with --apply to update')
         return 0
+    if active is not None:
+        reason = (a.owner_active_ok or '').strip()
+        if len(reason) < OWNER_ACTIVE_OK_MIN:
+            print(OWNER_ACTIVE_REASON)
+            return OWNER_ACTIVE_EXIT
+        print(f'OWNER-AKTIV override: {reason}')
     cmd = a.update_cmd.split() if a.update_cmd else ['bash', os.path.join(root, 'update.sh')]
     return apply(root, up, actions, cmd)
 

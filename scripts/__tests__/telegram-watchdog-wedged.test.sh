@@ -259,6 +259,128 @@ assert_eq "falls back to generic error" "1" "$(count editMessageText)"
 assert_eq "state file removed" "no" "$(pend_exists "$PJ")"
 
 # ---------------------------------------------------------------------------
+# TGAPIERR1113 (Klodel 40067, Patrik TG 18218): the API-error chrome is never
+# delivered, and one chat gets one message however many placeholders pend.
+# ---------------------------------------------------------------------------
+# layout = flag     -> round ends in an isApiErrorMessage:true row (CC 2.1.32x)
+#          noflag   -> same text, no flag (older format)
+#          recovered-> API error, then a real assistant text in the same round
+make_api_case() { # name layout age_seconds chats(comma list, one placeholder each)
+    local name="$1" layout="$2" age="$3" chats="$4"
+    local pdir="$TMP/root/agents/$name/.claude/channels/telegram/progress"
+    local sdir="$TMP/root/agents/$name/.claude/channels/telegram"
+    mkdir -p "$pdir"
+    printf 'TELEGRAM_BOT_TOKEN=TESTTOKEN\n' > "$sdir/.env"
+    local tr="$sdir/transcript.jsonl"
+    python3 - "$tr" "$layout" "$age" "$chats" "$pdir/SID.json" <<'PY2'
+import datetime, json, os, sys, time
+tr, layout, age, chats, marker = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4].split(","), sys.argv[5]
+now = time.time()
+iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+err = "Please run /login · API Error: 403 Attention Required! | Cloudflare"
+ev = [{"type": "user", "timestamp": iso(now - age), "message": {"role": "user", "content": "patrik kerdese"}}]
+row = {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": err}]}}
+if layout != "noflag":
+    row["isApiErrorMessage"] = True
+ev.append(row)
+if layout == "recovered":
+    ev.append({"type": "assistant", "message": {"role": "assistant",
+               "content": [{"type": "text", "text": "VALODI_UTANA_VALASZ"}]}})
+with open(tr, "w") as f:
+    for e in ev:
+        f.write(json.dumps(e) + "\n")
+pend = [{"chat_id": c, "message_id": 700 + i, "transcript_path": tr} for i, c in enumerate(chats)]
+with open(marker, "w") as f:
+    json.dump(pend, f)
+os.utime(marker, (now - age,) * 2)
+PY2
+    echo "$pdir"
+}
+
+echo ""
+echo "(k) 11:34 replay: 4+2 placeholders, round ended in an API error -> one Hungarian line per chat"
+PK="$(make_api_case wk flag 1000 "P,P,P,P,G,G")"
+run_wd 1 1
+assert_eq "one send per chat (2 chats), not one per placeholder" "2" "$(count sendMessage)"
+assert_eq "raw API-error chrome NOT sent" "no" "$(body_has "API Error")"
+assert_eq "no /login text sent" "no" "$(body_has "Please run")"
+assert_eq "the one-sentence Hungarian line is sent" "yes" "$(body_has "Claude-szolg")"
+assert_eq "all six placeholders removed" "6" "$(count deleteMessage)"
+assert_eq "state file removed" "no" "$(pend_exists "$PK")"
+
+echo ""
+echo "(l) Cross-run dedup: a round that was ALREADY waiting when the line went out is not answered twice"
+PL="$(make_api_case wk flag 1000 "P")"   # same agent dir -> same dedup state; started 1000s ago, before (k)'s send
+run_wd 1 1
+assert_eq "no second send to the same chat" "0" "$(count sendMessage)"
+assert_eq "its placeholder is still removed" "1" "$(count deleteMessage)"
+
+# Viktor 40106 L1: a question asked AFTER the line went out (Patrik retrying) must get its own message,
+# even inside the 10-min window. Fixture: the line went to chat P 300s ago; the new round started 60s ago.
+set_dedup() { # agent_name seconds_ago
+    python3 - "$WATCHDOG" "$TMP/root/agents/$1/.claude/channels/telegram/progress" "$2" <<'PY2'
+import importlib.util, json, os, sys, time
+spec = importlib.util.spec_from_file_location("wd", sys.argv[1]); wd = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wd)
+with open(os.path.join(sys.argv[2], wd.DEDUP_FILE), "w") as f:
+    json.dump({wd._dedup_key("P", wd.API_ERROR_TEXT): time.time() - int(sys.argv[3])}, f)
+PY2
+}
+echo ""
+echo "(l2) NEGATIVE for the dedup: a round started AFTER the delivery, within 10 min -> its own message"
+PL2="$(make_api_case wl flag 60 "P")"
+set_dedup wl 300
+run_wd 1 900
+assert_eq "the retry gets one send" "1" "$(count sendMessage)"
+assert_eq "it is the Hungarian line" "yes" "$(body_has "Claude-szolg")"
+
+echo ""
+echo "(l3) Control: same window, but the round started BEFORE the delivery -> swallowed"
+PL3="$(make_api_case wl3 flag 400 "P")"
+set_dedup wl3 300
+run_wd 1 900
+assert_eq "no send for a round that the earlier line already answered" "0" "$(count sendMessage)"
+assert_eq "placeholder removed" "1" "$(count deleteMessage)"
+
+echo ""
+echo "(m) Older format (no isApiErrorMessage flag): the chrome line is still not sent"
+PM="$(make_api_case wm noflag 1000 "P")"
+run_wd 1 1
+assert_eq "one send" "1" "$(count sendMessage)"
+assert_eq "raw chrome NOT sent" "no" "$(body_has "API Error")"
+
+echo ""
+echo "(n) API error, then a real answer in the same round: the real answer wins"
+PN="$(make_api_case wn recovered 1000 "P")"
+run_wd 1 1
+assert_eq "one send" "1" "$(count sendMessage)"
+assert_eq "the real answer is delivered" "yes" "$(body_has "VALODI_UTANA_VALASZ")"
+assert_eq "not the error line" "no" "$(body_has "Claude-szolg")"
+
+echo ""
+echo "(o) Round died on an API error (no Stop hook): fires within a minute, not at the 15-min backstop"
+PO="$(make_api_case wo flag 60 "P")"
+run_wd 1 900
+assert_eq "fires at 60s (api-error path)" "1" "$(count sendMessage)"
+assert_eq "the Hungarian line, not the chrome" "yes" "$(body_has "Claude-szolg")"
+assert_eq "state file removed" "no" "$(pend_exists "$PO")"
+
+echo ""
+echo "(p) NEGATIVE: an API error only 10s old is left alone (Claude Code may still be retrying)"
+PP="$(make_api_case wp flag 10 "P")"
+run_wd 1 900
+assert_eq "no send yet" "0" "$(count sendMessage)"
+assert_eq "placeholder kept" "yes" "$(pend_exists "$PP")"
+
+echo ""
+echo "(q) NEGATIVE: API error followed by a real answer is NOT an api-error round"
+PQ="$(make_api_case wq recovered 60 "P")"
+run_wd 1 900
+assert_eq "no early send (normal 15-min backstop applies)" "0" "$(count sendMessage)"
+assert_eq "placeholder kept" "yes" "$(pend_exists "$PQ")"
+rm -rf "$TMP/root/agents/wp" "$TMP/root/agents/wq"
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=============================="
 TOTAL=$((PASS + FAIL))

@@ -26,7 +26,7 @@ once; `stop_hook_active` is also honored. Silent on stdout EXCEPT the single
 decision JSON when blocking. Token/state dir resolution mirrors the plugin
 (TELEGRAM_STATE_DIR else default).
 """
-import sys, os, json, glob, urllib.request
+import sys, os, json, glob, re, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
@@ -102,6 +102,22 @@ def api(tok, method, payload):
         return json.loads(r.read().decode())
 
 
+# TGAPIERR1113 (Klodel 40067, Patrik TG 18218): Claude Code's own error chrome ("Please run /login · API Error:
+# 403 ...", isApiErrorMessage:true) is an assistant row in the transcript, not the agent's answer. It must never be
+# delivered raw; it maps to one Hungarian sentence, and a later real text wins. Mirrors
+# telegram_progress_watchdog.py (kept local: this hook may be installed without its siblings).
+API_ERROR_TEXT = ("⚠️ Erre most nem tudtam válaszolni, mert a Claude-szolgáltatás hibát adott "
+                  "(nem a gépen van a gond, újraindítás nem segít), kérlek, pár perc múlva írd újra.")
+_API_ERROR_RX = re.compile(r"(?:^|\s)API Error:\s*\d{3}\b|Please run /login", re.I)
+
+
+def _is_api_error(ev, text):
+    if ev.get("isApiErrorMessage") is True:
+        return True
+    t = (text or "").strip()
+    return bool(t) and len(t) <= 200 and "\n" not in t and bool(_API_ERROR_RX.search(t))
+
+
 def last_assistant_text(transcript_path):
     """Return the last non-empty assistant text message from the JSONL transcript
     (the agent's final user-facing answer). Empty string if none / unreadable."""
@@ -129,7 +145,9 @@ def last_assistant_text(transcript_path):
                 elif isinstance(content, str):
                     parts.append(content)
                 t = "\n".join(p for p in parts if p).strip()
-                if t:
+                if _is_api_error(ev, t):
+                    text = API_ERROR_TEXT  # never the raw chrome
+                elif t:
                     text = t  # keep the LAST non-empty one
     except Exception:
         pass
@@ -211,9 +229,11 @@ def main():
     answer = last_assistant_text(transcript)
     tok = token(sd)
     if tok:
+        sent_to = set()  # TGAPIERR1113: one delivery per chat, however many placeholders pend there
         for p in pend:
             cid, mid = p.get("chat_id"), p.get("message_id")
-            if answer:
+            if answer and str(cid) not in sent_to:
+                sent_to.add(str(cid))
                 try:
                     api(tok, "sendMessage", {"chat_id": cid, "text": answer[:4000]})
                 except Exception as e:

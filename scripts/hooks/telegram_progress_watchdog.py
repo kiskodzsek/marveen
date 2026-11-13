@@ -44,7 +44,7 @@ Standalone: scans every agent's per-agent telegram state dir. No marveen src
 dependency; only Python stdlib + the `tmux` binary. Bot API base is overridable
 via TELEGRAM_API_BASE (tests point it at a local stub).
 """
-import datetime, os, glob, json, time, subprocess, urllib.request
+import datetime, hashlib, os, glob, json, re, time, subprocess, urllib.request
 
 # State dirs to scan: per-agent dirs under the fleet, plus the default dir.
 #
@@ -105,6 +105,39 @@ TURN_ANCHOR_SLACK_SEC = 120
 DEFAULT_WEDGED_UP_SEC = 180
 ERROR_TEXT = ("⚠️ Valami elakadt, és erre nem érkezett válasz. "
               "Lehet, hogy újra kell indítani az ügynököt, vagy próbáld újra kicsit később.")
+
+# TGAPIERR1113 (Klodel 40067, Patrik TG 18218, 2026-11-13): Claude Code writes its OWN error chrome into the
+# transcript as an assistant row ("Please run /login · API Error: 403 Attention Required! | Cloudflare", flagged
+# isApiErrorMessage:true). It is not the agent's answer, but the last-assistant-text scrape took it as one: at
+# 11:34:25 the wedged-backstop delivered it six times (once per pending placeholder of the dead session
+# b8999041), four of them into Patrik's private chat, and the second dead session's marker added a generic error.
+# Two fixes: (1) an API-error row never becomes the answer -- it maps to ONE Hungarian sentence (API_ERROR_TEXT),
+# and a later real assistant text in the same round still wins; (2) one delivery per chat: within a run, the first
+# placeholder of a chat carries the text, the rest are only deleted; across runs the same text to the same chat
+# is not repeated within DEDUP_SEC (progress/sent-dedup.state) -- but ONLY for a round that started at or before
+# that delivery (Viktor 40106 L1): a question asked AFTER the line went out is a new question (e.g. Patrik
+# retrying) and gets its own message, otherwise the dedup would swallow exactly what this fix is for.
+API_ERROR_TEXT = ("⚠️ Erre most nem tudtam válaszolni, mert a Claude-szolgáltatás hibát adott "
+                  "(nem a gépen van a gond, újraindítás nem segít), kérlek, pár perc múlva írd újra.")
+API_ERROR_RX = re.compile(r"(?:^|\s)API Error:\s*\d{3}\b|Please run /login", re.I)
+DEDUP_SEC = 10 * 60
+# TGAPIERR1113 b (Dave 40050, Patrik TG 658/660): on an API error Claude Code ends the turn WITHOUT the Stop hook
+# (measured 2026-11-13 11:15-11:19: five 403 rows in b8999041, no "[enforce]" line in debug.log), so the
+# placeholder sat until the 15-min backstop while Patrik saw only "Dolgozom rajta" and restarted the session twice,
+# which cannot help an API-side error. A round whose LAST assistant row is an API error fires after this many
+# seconds with the one-sentence line above. Env: TELEGRAM_WATCHDOG_API_ERROR_SEC.
+DEFAULT_API_ERROR_SEC = 30
+DEDUP_FILE = "sent-dedup.state"  # NOT *.json: the marker scan globs *.json
+
+
+def is_api_error_event(ev, text=""):
+    """True for Claude Code's own error row: the isApiErrorMessage flag, or (older format without the flag) an
+    assistant text that is nothing but the API-error chrome. A real answer that merely MENTIONS an API error
+    is longer than the chrome line and is not matched by the length guard."""
+    if ev.get("isApiErrorMessage") is True:
+        return True
+    t = (text or "").strip()
+    return bool(t) and len(t) <= 200 and "\n" not in t and bool(API_ERROR_RX.search(t))
 
 
 def _env_int(name, default):
@@ -218,6 +251,14 @@ def _is_user_prompt(ev):
     return False
 
 
+def _plain_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join((b.get("text") or "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
 class _Acc:
     """Accumulator for one scan window of the transcript."""
     def __init__(self):
@@ -225,12 +266,19 @@ class _Acc:
         self.results = set()      # tool_use_ids that have a tool_result
         self.reply_ids = set()    # tool_use_ids of Telegram reply calls
         self.last_tool_use = None  # (id, is_reply) of the most recent tool_use
+        self.api_error_last = False  # the most recent assistant row is Claude Code's API-error chrome
 
     def feed(self, ev):
         msg = ev.get("message") or {}
         role = msg.get("role") or ev.get("role")
         content = msg.get("content", ev.get("content"))
         is_assistant = ev.get("type") == "assistant" or role == "assistant"
+        if is_assistant and is_api_error_event(ev, _plain_text(content)):
+            self.text = API_ERROR_TEXT  # TGAPIERR1113: never the raw chrome; a later real text overrides
+            self.api_error_last = True
+            return
+        if is_assistant:
+            self.api_error_last = False
         if isinstance(content, list):
             for b in content:
                 if not isinstance(b, dict):
@@ -262,7 +310,10 @@ class _Acc:
 
 
 def read_transcript(transcript_path, turn_start=None):
-    """Return (last_assistant_text, reply_is_hung, reply_delivered).
+    """Return (last_assistant_text, reply_is_hung, reply_delivered, api_error_last).
+
+    api_error_last (TGAPIERR1113 b): the round's most recent assistant row is Claude Code's API-error chrome
+    (the turn died on an API error; last_assistant_text is then API_ERROR_TEXT).
 
     last_assistant_text: the agent's final user-facing answer (last non-empty
     assistant text block) -- the same source the Stop hook's fallback uses.
@@ -305,9 +356,9 @@ def read_transcript(transcript_path, turn_start=None):
             scoped.feed(ev)
     if turn_start is not None and have_ts_prompt:
         if not anchor_seen:
-            return "", False, False
-        return scoped.text, scoped.reply_hung(), scoped.reply_delivered()
-    return whole.text, whole.reply_hung(), False
+            return "", False, False, False
+        return scoped.text, scoped.reply_hung(), scoped.reply_delivered(), scoped.api_error_last
+    return whole.text, whole.reply_hung(), False, whole.api_error_last
 
 
 def log(progress_dir, msg):
@@ -316,6 +367,35 @@ def log(progress_dir, msg):
             f.write(f"[watchdog {time.strftime('%H:%M:%S')}] {msg}\n")
     except Exception:
         pass
+
+
+def _dedup_load(progress_dir, now):
+    try:
+        d = json.load(open(os.path.join(progress_dir, DEDUP_FILE)))
+        return {k: v for k, v in d.items() if isinstance(v, (int, float)) and now - v < DEDUP_SEC}
+    except Exception:
+        return {}
+
+
+def _dedup_save(progress_dir, d):
+    try:
+        with open(os.path.join(progress_dir, DEDUP_FILE), "w") as f:
+            json.dump(d, f)
+    except Exception:
+        pass
+
+
+def _dedup_key(chat_id, text):
+    return f"{chat_id}:" + hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def drop_placeholder(tok, chat_id, message_id, progress_dir):
+    """A duplicate of a delivery already made to this chat: only remove the placeholder."""
+    try:
+        api(tok, "deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+    except Exception as e:
+        log(progress_dir, f"placeholder delete failed (mid={message_id}): {e}")
+    return "dedup-deleted"
 
 
 def deliver(tok, chat_id, message_id, answer, progress_dir):
@@ -356,7 +436,11 @@ def handle_dir(progress_dir):
             pass
     tok = None
     up_sec = wedged_up_sec()
+    api_err_sec = _env_int("TELEGRAM_WATCHDOG_API_ERROR_SEC", DEFAULT_API_ERROR_SEC)
     max_age = stale_sec()
+    # TGAPIERR1113: one delivery per chat -- key = chat + the text that would go out (answer or the error line).
+    dedup = _dedup_load(progress_dir, now)
+    dedup_dirty = False
     for path in glob.glob(os.path.join(progress_dir, "*.json")):
         try:
             age = now - os.path.getmtime(path)
@@ -366,7 +450,7 @@ def handle_dir(progress_dir):
             pend = json.load(open(path))
         except Exception:
             pend = []
-        if not pend:
+        if not pend or not isinstance(pend, list):
             continue
 
         # UPPER age bound (TGORPHAN908): a marker this old marks a DEAD round.
@@ -404,7 +488,7 @@ def handle_dir(progress_dir):
             if p.get("transcript_path"):
                 transcript_path = p["transcript_path"]
                 break
-        answer, reply_hung, reply_delivered = read_transcript(
+        answer, reply_hung, reply_delivered, api_error_last = read_transcript(
             transcript_path, turn_start=now - age)
 
         # Fire decision.
@@ -414,6 +498,9 @@ def handle_dir(progress_dir):
         elif reply_hung and age > up_sec:
             fire = True
             reason = "reply-hung"
+        elif api_error_last and age > api_err_sec:
+            fire = True
+            reason = "api-error"
         elif age > WEDGED_SEC:
             fire = True
             reason = "wedged-backstop"
@@ -453,8 +540,17 @@ def handle_dir(progress_dir):
 
         modes = []
         for p in pend:
-            modes.append(deliver(tok, p.get("chat_id"), p.get("message_id"),
-                                 answer, progress_dir))
+            cid = p.get("chat_id")
+            key = _dedup_key(cid, answer or ERROR_TEXT)
+            # marker mtime = the round's start; only a round already waiting when the line went out is covered
+            if key in dedup and (now - age) <= dedup[key]:
+                modes.append(drop_placeholder(tok, cid, p.get("message_id"), progress_dir))
+                continue
+            mode = deliver(tok, cid, p.get("message_id"), answer, progress_dir)
+            modes.append(mode)
+            if mode in ("real-answer", "generic-error"):
+                dedup[key] = now
+                dedup_dirty = True
         try:
             os.remove(path)
         except Exception:
@@ -462,6 +558,8 @@ def handle_dir(progress_dir):
         log(progress_dir, f"orphan handled ({reason}): {os.path.basename(path)} "
                           f"agent_up={agent_up} age={int(age)}s "
                           f"delivered={','.join(modes)}")
+    if dedup_dirty:
+        _dedup_save(progress_dir, dedup)
 
 
 def main():
