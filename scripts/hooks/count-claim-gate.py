@@ -76,9 +76,14 @@ ZERO_RX = re.compile(
     r'|(?<!\w)nincs(?:[ \t]+több)?[ \t]+(?:maradék|maradvány|találat)\w*'
     r'|(?<!\w)egy(?:[ \t]+\w+)?[ \t]+sem[ \t]+maradt(?!\w)', re.I)
 COUNTING_RX = re.compile(r'(?<![\w-])(?:find|wc|grep[ \t]+-[a-zA-Z]*c)(?![\w-])|count\(', re.I)
-# ls as a COMMAND (at the start, after a backtick, $(, |, ; or &) with a glob in its own arguments; "ls*" inside a
-# find pattern or the word ls in prose is not one (Viktor 41354 INFO 3).
-LS_GLOB_RX = re.compile(r'(?:^|[`|;&(]|\$\()[ \t]*ls(?:[ \t]+[^|;&`)\s]*)*?[ \t]+[^|;&`)\s]*[*?\[]')
+# ls as a COMMAND (at the start, after a backtick, $(, |, ;, &, (, {, !, a quote, or the words do / then / else /
+# time / sudo / command; also /bin/ls and \ls) with a glob in its own arguments; "ls*" inside a find pattern or the
+# word ls in prose is not one (Viktor 41354 INFO 3, 41387 INFO 1). Every argument token is non-empty, so a run of
+# blanks splits one way only: the regex stays linear (Viktor 41387 LOW, CWE-1333: the empty-token form backtracked
+# exponentially, 27 blanks took 11 s, past the 10 s hook timeout).
+LS_GLOB_RX = re.compile(
+    r'(?:^|[`|;&({!\'"]|\$\(|(?<![\w-])(?:do|then|else|time|sudo|command)(?=[ \t]))'
+    r'[ \t]*(?:\\|/(?:[\w.-]+/)*)?ls(?:[ \t]+[^|;&`)\s]+)*[ \t]+[^|;&`)\s]*[*?\[]')
 NOUNS = (r'db|darab|komment\w*|blokk\w*|sor(?:a|t|ok\w*|ból|ban|ra)?|üzenet\w*|kártyá?\w*|fájl\w*|eset\w*|'
          r'találat\w*|hibá?\w*|oldal\w*|PR\w*|commit\w*|teszt\w*|mutáns\w*|ügynök\w*')
 COUNT_RX = re.compile(r'(?<![\w.:/#-])\d+(?:[.,]\d+)?(?:[ \t]+[\w-]+){0,2}?[ \t-]+(?:' + NOUNS + r')(?![\w])', re.I)

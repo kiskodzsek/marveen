@@ -115,6 +115,17 @@ def zero_claim_needs_a_counting_measurement(root):
         '0 találat\nMÉRVE: `ls /tmp/a?`',
         '0 db\nMÉRVE: `cd /x && ls -d t1-* | wc -l`',                  # ls after &&
         '0 db\nMÉRVE: `echo $(ls x-* | wc -l)`',                       # ls in $(...)
+        # Viktor 41387 INFO 1: the forms the first prefix list missed
+        '0 db\nMÉRVE: `for d in a b; do ls $d/x-* | wc -l; done`',
+        '0 db\nMÉRVE: `if true; then ls x-* | wc -l; fi`',
+        '0 db\nMÉRVE: `time ls x-* | wc -l`',
+        '0 db\nMÉRVE: `sudo ls x-* | wc -l`',
+        '0 db\nMÉRVE: `command ls x-* | wc -l`',
+        '0 db\nMÉRVE: `/bin/ls x-* | wc -l`',
+        '0 db\nMÉRVE: `\\ls x-* | wc -l`',
+        '0 db\nMÉRVE: `{ ls x-*; } | wc -l`',
+        '0 db\nMÉRVE: `! ls x-* | wc -l`',
+        "0 db\nMÉRVE: `bash -c 'ls x-* | wc -l'`",
     ]
     passed = [
         '0 db t1-* maradék\nMÉRVE: `find /tmp -maxdepth 1 -name \'t1-*\' | wc -l`',
@@ -127,6 +138,26 @@ def zero_claim_needs_a_counting_measurement(root):
     ]
     return (all(run(root, MSG + t + '\nMSG')[0] == 2 for t in blocked)
             and all(run(root, MSG + t + '\nMSG')[0] == 0 for t in passed))
+
+
+@case
+def ls_glob_regex_stays_linear(root):
+    # Viktor 41387 LOW (CWE-1333): "ls" + 27 blanks + "x" with no glob took 11 s in the old regex (10 s hook timeout).
+    import importlib.util
+    import time
+    spec = importlib.util.spec_from_file_location('ccg', os.path.join(HERE, HOOK))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    # 26 blanks first: the old regex needs about 3 s there (measured), so it fails fast instead of hanging on the
+    # long lines below.
+    t0 = time.time()
+    if mod.LS_GLOB_RX.search('`find /x | wc -l` ; ls' + ' ' * 26 + 'x') or time.time() - t0 > 1.0:
+        return False
+    t0 = time.time()
+    for line in ('ls' + ' \t' * 20000 + 'x', 'ls' + ' a' * 20000 + ' b'):
+        if mod.LS_GLOB_RX.search(line):
+            return False
+    return time.time() - t0 < 1.0 and mod.LS_GLOB_RX.search('ls' + ' ' * 40 + 'x-*') is not None
 
 
 @case
