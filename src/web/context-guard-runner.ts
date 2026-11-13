@@ -496,12 +496,16 @@ export function resumePrompt(
     `-- ha repo-munka kell, használj worktree-t (git worktree add). ` +
     // The main agent's channel is the OWNER's channel (Telegram), and session
     // meta must never go there (standing owner preference; a 3am status
-    // notice measured on 2026-08-05, review msg 14197). Sub-agents' channel
-    // is the inter-agent queue, where the notice belongs. This prompt is the
-    // fresh session's ONLY rule set, so the split must live here.
+    // notice measured on 2026-08-05, review msg 14197). The same holds for a
+    // sub-agent: one with its own Telegram bot read "jelezz a csatornádon" as
+    // "tell the owner" and sent him the restart notice twice (Dave 40654,
+    // Patrik in Dave's chat TG 666: "soha többé nem akarom"; Klodel 40657).
+    // And the inter-agent queue takes no acks (they wake the receiver). So
+    // every agent gets the transcript line; this prompt is the fresh
+    // session's ONLY rule set, so the rule must live here.
     (name === MAIN_AGENT_ID
       ? `Zárásul egyetlen transzkript-sorban rögzítsd, hogy friss kontextussal folytatod -- a csatornádra (a gazda Telegramjára) session-meta NEM mehet ki.`
-      : `Röviden jelezz a csatornádon, hogy friss kontextussal folytatod.`)
+      : `Zárásul egyetlen transzkript-sorban rögzítsd, hogy friss kontextussal folytatod -- a csatornádra (saját Telegram-bot, Slack, bárki chatje) és inter-agent üzenetben session-meta NEM mehet ki.`)
   )
 }
 

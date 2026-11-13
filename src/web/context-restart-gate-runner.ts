@@ -68,7 +68,11 @@ export function gateWakePrompt(): string {
     'Olvasd be oket, ellenorizd a kanban tabladat es a hot memoriaidat, es FOLYTASD onnan ahol abbamaradt. ' +
     'Ne kezdd elolrol ami mar kesz, es ne delegald ujra amit mar atadtal. ' +
     'Ha nem volt futo munkad, az is teljes erteku allapot -- olyankor ne talalj ki magadnak feladatot. ' +
-    'Rovid jelzest kuldj a sajat csatornadon, hogy friss kontextussal folytatod.'
+    // No restart notice anywhere: an agent with its own Telegram bot sent it to
+    // the owner (Dave 40654, Patrik TG 666 in Dave's chat; Klodel 40657), and
+    // this nudge goes to every agent, the main one included.
+    'Zarasul egyetlen transzkript-sorban rogzitsd, hogy friss kontextussal folytatod -- ' +
+    'a csatornadra (Telegram, Slack, barki chatje) es inter-agent uzenetben session-meta NEM mehet ki.'
   )
 }
 
