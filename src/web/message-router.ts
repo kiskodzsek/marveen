@@ -8,6 +8,8 @@ import {
   markMessageDelivered,
   markMessageDone,
   markMessageFailed,
+  requeueAbandonedForAgent,
+  listAgentsWithFailedReason,
   markPendingFederatedFailed,
   setMessageResult,
   createSystemMessage,
@@ -43,6 +45,36 @@ import { selectTickWindow } from './message-router-window.js'
 // queue and we stop re-scanning it forever. Matches the scheduled-task retry
 // window so a long turn that ate one also eats the other.
 const MESSAGE_ABANDON_WINDOW_MS = 60 * 60 * 1000
+// The window above is "the target was ABSENT for the full window", so it must be
+// counted from when THIS router first saw the session gone, not from the row's
+// created_at. Measured 2026-11-13 (card 6a9c1cc0, Klodel 39907): the machine went
+// down at 09:15 and was force-restarted at 10:07; the router's first tick at 10:08
+// saw two 09:07 rows (39893, 39894) at age 61 min with the agents not yet started
+// and failed them at once -- an absence nobody had observed. If the router's own
+// ticks stop for longer than this gap (process down, machine asleep), every
+// absence clock starts over: during the gap nothing was watching.
+const ROUTER_OBSERVATION_GAP_MS = 5 * 60 * 1000
+// The two terminal reasons for an absent target. The first is re-sent ONCE when
+// the session comes back (requeueAbandonedForAgent); the second is final. The
+// first deliberately differs from the pre-6a9c1cc0 text ('Abandoned: target
+// session absent for full retry window'): rows failed before this change were
+// already re-sent by hand, and must not go out a second time on deploy.
+export const ABANDON_REASON_ABSENT = 'Abandoned, re-sent once when the target session returns: target session absent for full retry window'
+export const ABANDON_REASON_ABSENT_AGAIN = 'Abandoned again after one automatic re-send: target session absent for full retry window'
+export const REQUEUED_AFTER_ABSENCE_MARKER = 'Re-queued once: the target session returned after an abandon for absence'
+// Only a recent abandon is re-sent: a week-old failure to an agent that was
+// switched off on purpose must not come alive with it.
+const REQUEUE_MAX_AGE_MS = 24 * 60 * 60 * 1000
+// The return check reads the DB, not the tick's receiver set: an agent whose
+// only rows were abandoned has nothing pending, so the per-tick presence scan
+// never looks at it. It also survives a router restart. Throttled: one indexed
+// query (idx_agent_messages_status) plus one session check per such agent.
+const REQUEUE_SCAN_INTERVAL_MS = 30 * 1000
+let lastRequeueScanAt = 0
+// agent -> first tick (ms) at which the router saw its session absent while a
+// message to it was waiting; deleted as soon as it is present or unobserved.
+const agentAbsentSince = new Map<string, number>()
+let lastRouterTickAt: number | null = null
 // How long a message must have waited before the stale-parked-input janitor is
 // allowed to clear the receiver's input box. Long enough that a brief, genuine
 // "agent parked a draft it is about to submit" never gets clobbered; short
@@ -145,6 +177,28 @@ function notifyOrchestratorOfStuckSession(agent: string, session: string, stuckM
   } catch (err) {
     logger.warn({ err, agent }, 'Failed to enqueue session-stuck notification')
   }
+}
+
+// Klodel 39907: a row abandoned because its target was absent goes out once
+// more when the target's session is back. Exported for the unit test; the
+// session check is injected so the test needs no tmux.
+export function requeueAbandonedOnReturn(now: number, sessionIsUp: (agent: string) => boolean): number[] {
+  const requeued: number[] = []
+  try {
+    const sinceSec = Math.floor((now - REQUEUE_MAX_AGE_MS) / 1000)
+    for (const agent of listAgentsWithFailedReason(ABANDON_REASON_ABSENT, sinceSec)) {
+      if (agent === MAIN_AGENT_ID || isQualifiedId(agent)) continue
+      if (!sessionIsUp(agent)) continue
+      const ids = requeueAbandonedForAgent(agent, ABANDON_REASON_ABSENT, REQUEUED_AFTER_ABSENCE_MARKER, sinceSec)
+      if (ids.length > 0) {
+        logger.info({ agent, ids }, 'message-router: target session returned -- abandoned message(s) re-queued once')
+        requeued.push(...ids)
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, 'message-router: re-queue of abandoned messages failed')
+  }
+  return requeued
 }
 
 function notifyOrchestratorOfFailedHandoff(msg: AgentMessage, reason: string): void {
@@ -359,8 +413,39 @@ const agentBatchedThisReconnect = new Set<string>()
  * @param ageMs         How long the message has been pending (ms).
  * @param windowMs      The abandon window threshold (ms).
  */
-export function shouldAbandon(sessionExists: boolean, ageMs: number, windowMs: number): boolean {
-  return !sessionExists && ageMs > windowMs
+export function shouldAbandon(sessionExists: boolean, ageMs: number, windowMs: number, observedAbsentMs: number): boolean {
+  return !sessionExists && ageMs > windowMs && observedAbsentMs > windowMs
+}
+
+/**
+ * Pure: the terminal reason for a row abandoned because its target was absent.
+ * A row that was already re-queued once after an abandon gets the final reason,
+ * which requeueAbandonedForAgent never matches -- so the re-send happens once.
+ */
+export function absentAbandonReason(currentResult: string | null | undefined): string {
+  return currentResult === REQUEUED_AFTER_ABSENCE_MARKER ? ABANDON_REASON_ABSENT_AGAIN : ABANDON_REASON_ABSENT
+}
+
+/**
+ * Pure: update the per-agent absence clocks for one tick. A clock starts at the
+ * first tick the session is seen absent and is dropped when the agent is present
+ * or no longer observed; all clocks restart after a gap in the router's own
+ * ticks longer than gapMs (nobody was watching during it).
+ */
+export function updateAbsenceClocks(
+  clocks: Map<string, number>,
+  absentNow: ReadonlySet<string>,
+  now: number,
+  lastTickAt: number | null,
+  gapMs: number,
+): void {
+  if (lastTickAt !== null && now - lastTickAt > gapMs) clocks.clear()
+  for (const agent of [...clocks.keys()]) {
+    if (!absentNow.has(agent)) clocks.delete(agent)
+  }
+  for (const agent of absentNow) {
+    if (!clocks.has(agent)) clocks.set(agent, now)
+  }
 }
 
 // ---- Hold delivery while the context-guard waits for a handoff (GUARDHOLD1013) ----
@@ -762,6 +847,13 @@ export async function runMessageRouterTick(): Promise<void> {
     for (const agent of presentNow) {
       agentWasAbsent.delete(agent)
     }
+    updateAbsenceClocks(agentAbsentSince, absentNow, now, lastRouterTickAt, ROUTER_OBSERVATION_GAP_MS)
+    lastRouterTickAt = now
+    if (now - lastRequeueScanAt >= REQUEUE_SCAN_INTERVAL_MS) {
+      lastRequeueScanAt = now
+      // Re-queued rows are picked up from the next tick on (this tick's window is fixed).
+      requeueAbandonedOnReturn(now, (agent) => sessionExistsOnHost(readAgentRemoteHost(agent), agentSessionName(agent)))
+    }
 
     // Federated (slash-qualified) recipients delivered over the HTTPS bridge,
     // on their own budget so neither queue starves the other.
@@ -843,12 +935,17 @@ export async function runMessageRouterTick(): Promise<void> {
           'worksource agent is not serving its queue (session absent or parked on a startup dialog) -- keeping the tmux stall gates armed')
       }
 
-      if (!worksourceServing && shouldAbandon(sessionExists, ageMs, MESSAGE_ABANDON_WINDOW_MS)) {
-        logger.warn({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ageMs }, 'Agent message abandoned: target session absent for full retry window')
-        if (!markMessageFailed(msg.id, 'Abandoned: target session absent for full retry window')) {
+      const absentSince = agentAbsentSince.get(msg.to_agent)
+      const observedAbsentMs = absentSince === undefined ? 0 : now - absentSince
+      if (!worksourceServing && shouldAbandon(sessionExists, ageMs, MESSAGE_ABANDON_WINDOW_MS, observedAbsentMs)) {
+        const reason = absentAbandonReason(msg.result)
+        logger.warn({ id: msg.id, from: msg.from_agent, to: msg.to_agent, ageMs, observedAbsentMs, final: reason === ABANDON_REASON_ABSENT_AGAIN }, 'Agent message abandoned: target session absent for full retry window')
+        if (!markMessageFailed(msg.id, reason)) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
-        notifyOrchestratorOfFailedHandoff(msg, 'target session was absent for the entire retry window')
+        notifyOrchestratorOfFailedHandoff(msg, reason === ABANDON_REASON_ABSENT
+          ? 'target session was absent for the entire retry window. It is re-sent automatically ONCE when the session returns (within 24 h) -- do NOT re-send it by hand'
+          : 'target session was absent for the entire retry window AGAIN, after one automatic re-send. No further automatic re-send')
         routerInjectFailures.delete(msg.id)
         routerLoggedMisses.delete(msg.id)
         continue

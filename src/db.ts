@@ -3910,6 +3910,31 @@ export function markMessageFailed(id: number, error?: string): boolean {
   return db.prepare("UPDATE agent_messages SET status = 'failed', result = ?, completed_at = ? WHERE id = ?").run(error ?? null, now, id).changes > 0
 }
 
+// Put a message the router abandoned because its target session was absent
+// back into the queue, ONCE, when that session returns (Klodel 39907, card
+// 6a9c1cc0). Only rows failed with exactly `abandonReason` since `sinceSec`
+// qualify; the row gets `marker` as its result so a second abandon can tell it
+// was already re-sent and fail it for good with a different reason (no loop).
+// ONE statement (claimPendingForAgent idiom): no SELECT-then-UPDATE window.
+// created_at is kept, so the row keeps its FIFO place among the recipient's
+// queue.
+// Recipients with a row failed for `reason` since `sinceSec` (status index).
+export function listAgentsWithFailedReason(reason: string, sinceSec: number): string[] {
+  const rows = db.prepare(
+    "SELECT DISTINCT to_agent FROM agent_messages WHERE status = 'failed' AND result = ? AND completed_at >= ?",
+  ).all(reason, sinceSec) as Array<{ to_agent: string }>
+  return rows.map((r) => r.to_agent)
+}
+
+export function requeueAbandonedForAgent(toAgent: string, abandonReason: string, marker: string, sinceSec: number): number[] {
+  const rows = db.prepare(
+    `UPDATE agent_messages SET status = 'pending', result = ?, delivered_at = NULL, completed_at = NULL
+       WHERE to_agent = ? AND status = 'failed' AND result = ? AND completed_at >= ?
+     RETURNING id`,
+  ).all(marker, toAgent, abandonReason, sinceSec) as Array<{ id: number }>
+  return rows.map((r) => r.id).sort((a, b) => a - b)
+}
+
 // Status-guarded fail for the federation bridge's terminal branches: it must
 // only fire (and only bounce a failure notice) when THIS call actually closed
 // a still-pending row. The unguarded markMessageFailed above would also
