@@ -535,6 +535,21 @@ def main():
     aged(lib, "5320")
     d, r, _ = run_hook(db, extra_env={"MARVEEN_AGENT_ID": "klodel"})
     check("R9: addressed to this agent by name -> reply directive", (d, r.startswith("⚠️ VÁLASZOLATLAN")), ("block", True))
+    # Viktor 41446 LOW 1: the agent's own name anywhere keeps the reply directive
+    for i, text in enumerate(("Klodel, mit szól ehhez Patrik?", "Patrik, Klodel, mi a helyzet a számlával?",
+                              "@patrik @klodel nézzétek meg", "Klodel, kérdezd meg Balázs?")):
+        db = fresh_db()
+        lib = load_lib(db)
+        lib.log_inbound("klodel", GRP, str(5330 + i), text, "2026-11-11T13:15:00.000Z")
+        aged(lib, str(5330 + i))
+        d, r, _ = run_hook(db, extra_env={"MARVEEN_AGENT_ID": "klodel"})
+        check(f"R9: own name in {text!r} -> reply directive", (d, r.startswith("⚠️ VÁLASZOLATLAN")), ("block", True))
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound("klodel", GRP, "5340", "jó így, Patrik ?", "2026-11-11T13:16:00.000Z")
+    aged(lib, "5340")
+    d, r, _ = run_hook(db, extra_env={"MARVEEN_AGENT_ID": "klodel"})
+    check("R9: control -- without the own name the same agent gets NEM-NEKEM", (d, r.startswith("⚠️ NEM-NEKEM?")), ("block", True))
 
     # the drain dedups a surfaced id, so the close is checked on a DB the drain has not seen yet
     db = fresh_db()

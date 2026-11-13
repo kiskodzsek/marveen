@@ -106,8 +106,9 @@ _NAME_ALT = "|".join(sorted(_ADDRESSEES, key=len, reverse=True))
 _VOCATIVE_RX = (
     re.compile(r"^\s*@?(" + _NAME_ALT + r")\s*[,:!?]"),          # "Patrik, regeljek be?"
     re.compile(r"^\s*@(" + _NAME_ALT + r")\b"),                  # "@patrik regeljek be?"
-    re.compile(r"[,?!]\s*(" + _NAME_ALT + r")\s*[?!.]*\s*$"),     # "regeljek be ? Patrik", "jó így, Patrik?"
-    re.compile(r"\s(" + _NAME_ALT + r")\s*\?+\s*$"),              # "mit gondolsz Patrik?"
+    # Viktor 41446 INFO 3: matched on the right-stripped line, no trailing \s* (that was quadratic on long blanks)
+    re.compile(r"[,?!]\s*(" + _NAME_ALT + r")(?:\s*[?!.])*$"),     # "regeljek be ? Patrik", "jó így, Patrik ?"
+    re.compile(r"\s(" + _NAME_ALT + r")\s*\?+$"),                  # "mit gondolsz Patrik?"
 )
 
 
@@ -119,16 +120,21 @@ def _fold(text):
 
 def _addressed_to_other(text, agent_id):
     """The display name of the person or agent a message addresses by name, if that is not this agent; else None.
-    A message that also addresses this agent by name is this agent's (None)."""
+    A message that names this agent anywhere is this agent's (None)."""
     t = _fold(text)
+    # Viktor 41446 LOW 1: a message that names this agent anywhere ("Klodel, mit szól ehhez Patrik?", "@patrik
+    # @klodel nézzétek meg") involves it: the reply directive stays. Only the humans' names are addressees above,
+    # so the agent's own name has to be looked for on its own.
+    own = _fold(agent_id).strip()
+    if own and re.search(r"(?<![\w])@?" + re.escape(own) + r"(?![\w])", t):
+        return None
     found = []
     for rx in _VOCATIVE_RX:
         for line in (t.splitlines() or [t]):
-            m = rx.search(line)
+            m = rx.search(line.rstrip())
             if m:
                 found.append(m.group(1))
-    own = _fold(agent_id).strip()
-    if not found or own in found:
+    if not found:
         return None
     return _ADDRESSEES.get(found[0])
 

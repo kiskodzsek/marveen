@@ -123,6 +123,19 @@ class Hook(unittest.TestCase):
                                timeout=30)
             self.assertEqual(p.returncode, 0, raw)
 
+    def test_broken_identity_check_logs(self):
+        # Viktor 41446 INFO 4: an unreadable ledger_lib is logged, not silent
+        log = os.path.join(tempfile.mkdtemp(), 'hook-errors.log')
+        env = dict(os.environ, MARVEEN_OWNER_CHATS=GROUP, HOOK_ERRLOG_PATH=log)
+        code = ('import runpy, sys, types; sys.path.insert(0, %r); m = types.ModuleType("ledger_lib"); '
+                'sys.modules["ledger_lib"] = m; runpy.run_path(%r, run_name="__main__")' % (HERE, GATE))
+        payload = json.dumps({'tool_name': TOOL, 'tool_input': {'chat_id': GROUP, 'text': INCIDENT}})
+        p = subprocess.run([sys.executable, '-I', '-c', code], input=payload, env=env, capture_output=True,
+                           text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(log, encoding='utf-8') as f:
+            self.assertIn('identity unreadable', f.read())
+
     def test_internal_error_fails_open_and_logs(self):
         log = os.path.join(tempfile.mkdtemp(), 'hook-errors.log')
         env = dict(os.environ, MAIN_AGENT_ID='main', MARVEEN_AGENT_ID='main', MARVEEN_OWNER_CHATS=GROUP,

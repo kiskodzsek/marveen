@@ -25,7 +25,9 @@ What blocks (exit 2, one Hungarian line), only for the MAIN agent's reply into o
 Sources stay ("Mira 41233", "TG 6033", "#1298"): the claim-source gate asks for them.
 Anything unreadable (bad payload, other agent, other tool, other chat) passes; an internal error fails open with a
 line in store/hook-errors.log.
-Wiring: .claude/settings.json PreToolUse, matcher "mcp__plugin_telegram_telegram__reply" (main agent only).
+Wiring: .claude/settings.json PreToolUse, next to patrik-reply-volume-gate.py under the reply|edit_message matcher
+(main agent only). Only reply is checked, on purpose (Viktor 41446 INFO 2): a summary goes out as a reply, and
+edit_message is the live status message edited in place, which the volume gate leaves alone for the same reason.
 Tests: summary-form-reply-gate_test.py next to this file.
 """
 import json
@@ -147,7 +149,12 @@ def main():
         agent_id = ledger_lib.agent_id_from_payload(payload) or ledger_lib.main_agent_id()
         if agent_id != ledger_lib.main_agent_id():
             return 0
-    except Exception:
+    except Exception as ex:  # Viktor 41446 INFO 4: a broken identity check must not switch the gate off silently
+        try:
+            import hook_errlog
+            hook_errlog.report('summary-form-reply-gate', 'agent identity unreadable, allowed', ex)
+        except Exception:
+            pass
         return 0
     msg = check(ti['text'])
     if msg:
