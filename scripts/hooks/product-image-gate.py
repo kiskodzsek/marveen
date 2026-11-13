@@ -1390,57 +1390,13 @@ def creatorz_check(chat, text, reply_to):
 # there since #203/#204) AND every ITTHON block names Meska, Pepita and eMAG, each with a measured result or
 # "NINCS ADAT <reason>" (the site-probe line does not count as a shop). Patterns measured on Klodel's 2577 sent texts
 # of 7 days: 34 hits, all "not available here" claims (data-gap sentences such as "magyar mérés nincs" do not hit).
-ITTHON_VERB = r'(talál|kaph|árul|forgalmaz|létezik|érhető el|csinál|kínál|gyárt)'
-ITTHON_CLAIM = [
-    re.compile(r'(?i)\bitthon(\s+(még|viszont|pedig|is|sem|már))?\s+(nincs|sincs|hiányzik)\b'),
-    re.compile(r'(?i)\bitthon\s+nem\s*[:.,;)]'),
-    re.compile(r'(?i)\bitthon\b(\s+[\wáéíóöőúüű-]+){0,4}?\s+(nem|sem)\s+' + ITTHON_VERB),
-    re.compile(r'(?i)\bitthon\s+senki\s+(sem|nem)\b'),
-    re.compile(r'(?i)\bitthon\s+egyik\w*(\s+[\w-]+){0,2}\s+sem\b'),
-    re.compile(r'(?i)\b(magyar|hazai)\s+(bolt|webshop|piac|platform|szolgáltat|stúdió|ügynökség|alapítású|megfelel|'
-               r'változat|versenytárs|cég|app|termék)\w*[^.\n]{0,60}?(nem talál|nincs|sincs|nem kaph|nem árul)'),
-    re.compile(r'(?i)nincs\s+(magyar|hazai)\s+(megfelel|változat|bolt|versenytárs|kínál|termék|app|platform)'),
-]
+# The ITTHON patterns and the shop check live in scripts/lib/itthon_rules.py (card 9a4b245c), shared with the
+# file lint (scripts/lib/hiany_lint.py) so its pin covers them; the lib dir is on sys.path (top of this file).
+from itthon_rules import (  # noqa: E402
+    ITTHON_CLAIM, ITTHON_NO_DATA, ITTHON_NOT_MEASURED, ITTHON_RESULT, ITTHON_SHOPS, ITTHON_SITE, ITTHON_VERB,
+    itthon_blocks, itthon_shop_gaps,
+)
 ITTHON_MERT_RE = re.compile(r'(?mi)^\s*ITTHON-M[EÉ]RT:[ \t]*(\S+)')
-ITTHON_SHOPS = {'meska': r'meska', 'pepita': r'pepita', 'emag': r'e-?mag'}
-ITTHON_RESULT = re.compile(r'(?i)\d|nincs találat|nem hozott találatot|nem talált')
-ITTHON_NOT_MEASURED = re.compile(r'(?i)nem mérhető|nem mért|(?<!\d)(403|404|410)(?!\d)|captcha')
-ITTHON_NO_DATA = re.compile(r'(?i)NINCS ADAT\W+\w[^\n]{9,}')
-ITTHON_SITE = re.compile(r'(?i)(?<!\w)site(:|-szűrt|-próba| szűrt)')
-
-
-def itthon_blocks(t):
-    out, lines = [], t.splitlines()
-    for i, ln in enumerate(lines):
-        if re.match(r'^\s*[-*]?\s*ITTHON:', ln):
-            blk = [ln]
-            for k in lines[i + 1:]:
-                if k.startswith('  ') and k.strip():
-                    blk.append(k)
-                else:
-                    break
-            out.append(blk)
-    return out
-
-
-def itthon_shop_gaps(blk):
-    """The shops of ITTHON_SHOPS that this ITTHON block does not answer (measured result or NINCS ADAT + reason)."""
-    gaps = []
-    for name, rx in ITTHON_SHOPS.items():
-        ok = False
-        for ln in blk:
-            # On a site-probe line the domains (emag.hu, ...) are absence evidence, not a shop search (Klodel 39550):
-            # they are cut out, the line's own shop name ("eMAG: NINCS ADAT ..., a site-próba pótolja") still counts.
-            if ITTHON_SITE.search(ln):
-                ln = re.sub(r'(?i)(?<![\w.])[\w-]+\.hu(?!\w)', ' ', ln)
-            if not re.search(r'(?i)(?<!\w)' + rx + r'(?!\w)', ln):
-                continue
-            if ITTHON_NO_DATA.search(ln) or (ITTHON_RESULT.search(ln) and not ITTHON_NOT_MEASURED.search(ln)):
-                ok = True
-                break
-        if not ok:
-            gaps.append(name)
-    return gaps
 
 
 def itthon_mert_check(text):

@@ -5,8 +5,8 @@
 
 Written by Radar (agents/radar/.claude/skills/magyar-problema-meres/scripts/hiany_lint.py, 41254); moved into the repo
 so the send gate (scripts/lib/msg_gate.py rule 6) can run it. The patterns are NOT copied: the absence-claim patterns,
-the ITTHON block reader and the shop check come from the reply gate (scripts/hooks/product-image-gate.py), the 4-domain
-site probe from the shared idea lint (scripts/uzleti-otlet-kapu-lint.py site_hibak), so a change there covers files too.
+the ITTHON block reader, the shop check and the 4-domain site probe come from scripts/lib/itthon_rules.py, which the
+reply gate and the shared idea lint import too, so a change there covers files too (card 9a4b245c).
 
 R10a ITTHON: a sentence claiming something is missing at home needs, in the same file, an "ITTHON-MERT: <file>" line
      ("ITTHON-MERT: ez a fájl" points to itself). The target file (inside the install) needs at least one "ITTHON:"
@@ -40,12 +40,12 @@ def _load(name, path):
     return mod
 
 
-_gate = _load('_pig_for_hiany', os.path.join(REPO, 'scripts', 'hooks', 'product-image-gate.py'))
-_idea = _load('_uok_for_hiany', os.path.join(REPO, 'scripts', 'uzleti-otlet-kapu-lint.py'))
-ITTHON_CLAIM = _gate.ITTHON_CLAIM
-itthon_blocks = _gate.itthon_blocks
-itthon_shop_gaps = _gate.itthon_shop_gaps
-site_hibak = _idea.site_hibak
+# The shared rules by path (python3 -I does not put this dir on sys.path); pinned with this file (card 9a4b245c).
+_rules = _load('_itthon_rules_for_hiany', os.path.join(HERE, 'itthon_rules.py'))
+ITTHON_CLAIM = _rules.ITTHON_CLAIM
+itthon_blocks = _rules.itthon_blocks
+itthon_shop_gaps = _rules.itthon_shop_gaps
+site_hibak = _rules.site_hibak
 
 # The file form allows a list dash and a phrase ("ez a fájl"); the reply gate's ITTHON_MERT_RE takes one token.
 ITTHON_MERT_RE = re.compile(r'(?mi)^\s*[-*]?\s*ITTHON-M[EÉ]RT:[ \t]*(.+?)\s*$')

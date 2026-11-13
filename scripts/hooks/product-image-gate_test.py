@@ -1716,6 +1716,7 @@ def idea_refused_list_missing_fails_closed(root):
     shutil.copy(HOOK, hook)
     shutil.copy(os.path.join(here, '..', 'lib', 'owner_chat.py'), os.path.join(root, 'scripts', 'lib', 'owner_chat.py'))
     shutil.copy(os.path.join(here, '..', 'lib', 'reply_marks.py'), os.path.join(root, 'scripts', 'lib', 'reply_marks.py'))
+    shutil.copy(os.path.join(here, '..', 'lib', 'itthon_rules.py'), os.path.join(root, 'scripts', 'lib', 'itthon_rules.py'))
     shutil.copy(os.path.join(here, 'ledger_lib.py'), os.path.join(root, 'scripts', 'hooks', 'ledger_lib.py'))
     budget(root, 100)
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV}
@@ -1739,6 +1740,7 @@ def gate_copy(root, lint_text):
     shutil.copy(HOOK, hook)
     shutil.copy(os.path.join(here, '..', 'lib', 'owner_chat.py'), os.path.join(root, 'scripts', 'lib', 'owner_chat.py'))
     shutil.copy(os.path.join(here, '..', 'lib', 'reply_marks.py'), os.path.join(root, 'scripts', 'lib', 'reply_marks.py'))
+    shutil.copy(os.path.join(here, '..', 'lib', 'itthon_rules.py'), os.path.join(root, 'scripts', 'lib', 'itthon_rules.py'))
     shutil.copy(os.path.join(here, 'ledger_lib.py'), os.path.join(root, 'scripts', 'hooks', 'ledger_lib.py'))
     if lint_text is not None:
         with open(os.path.join(root, 'scripts', 'uzleti-otlet-kapu-lint.py'), 'w', encoding='utf-8') as f:
