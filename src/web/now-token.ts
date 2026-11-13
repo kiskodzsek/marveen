@@ -17,7 +17,7 @@ export const NOW_TOKEN = '{{NOW}}'
 
 const HHMM = new Intl.DateTimeFormat('sv-SE', { timeZone: APP_TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
 
-export function fillNowToken(text: string, now: Date = new Date()): string
+export function fillNowToken(text: string, now?: Date): string
 export function fillNowToken(text: string | undefined | null, now?: Date): string | undefined | null
 export function fillNowToken(text: string | undefined | null, now: Date = new Date()): string | undefined | null {
   if (typeof text !== 'string' || !text.includes(NOW_TOKEN)) return text
