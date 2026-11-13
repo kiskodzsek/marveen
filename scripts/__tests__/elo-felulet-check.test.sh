@@ -59,6 +59,8 @@ printf '%s\n' 'import { LiveCard } from "@/components/live-card";' \
 printf '%s\n' 'import { LiveCard } from "@/components/live-card";' 'const p = "@/components/dead-var";' \
   'const D = dynamic(() => import(p));' > "$W/src/app/app-preview/dynvar.tsx"
 printf '%s\n' 'import { LiveCard } from "@/components/live-card";' \
+  'const D = dynamic(() => import("@/components/" + name));' > "$W/src/app/app-preview/dynprefix.tsx"
+printf '%s\n' 'import { LiveCard } from "@/components/live-card";' \
   'const L = await import(`lodash`); const v = cfg.import(x);' > "$W/src/app/app-preview/dynother.tsx"
 git -C "$W" add -A && git -C "$W" commit -qm init && git -C "$W" push -q origin main 2>/dev/null
 
@@ -102,6 +104,8 @@ run "$W" src/app/app-preview/dyntpl.tsx
 check "a template-literal import() of a component stops the check (exit 2)" "$(ok "$RC" = 2)" "rc=$RC $OUT"
 run "$W" src/app/app-preview/dynvar.tsx
 check "an import() of a variable stops the check (exit 2)" "$(ok "$RC" = 2)" "rc=$RC $OUT"
+run "$W" src/app/app-preview/dynprefix.tsx
+check "a prefix-literal import() (\"@/components/\" + name) stops the check (exit 2)" "$(ok "$RC" = 2)" "rc=$RC $OUT"
 run "$W" src/app/app-preview/dynother.tsx
 check "an other-module template literal and a method named import pass (exit 0, LiveCard)" "$(ok "$RC" = 0)" "rc=$RC $OUT"
 
