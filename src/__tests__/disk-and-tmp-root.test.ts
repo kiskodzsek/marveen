@@ -126,5 +126,8 @@ describe('per-run temp root', () => {
     expect(msg).toContain('n9')
     expect(msg).not.toContain('n10')
     expect(leftoverProblem('/r', [])).toBeNull()
+    // the ssh seam is a bounded, reused directory, not a leftover; anything next to it still is
+    expect(leftoverProblem('/r', ['marveen-ssh-seam'])).toBeNull()
+    expect(leftoverProblem('/r', ['marveen-ssh-seam', 'x'])).toContain('1 bejegyzés')
   })
 })

@@ -37,7 +37,13 @@ export function diskProblem(dir: string, min: number, free: (d: string) => numbe
     `/ DISK GATE: ${have.toFixed(1)} GiB free on the temp volume, floor ${min} GiB; the run does not start.`
 }
 
-export function leftoverProblem(root: string, names: string[]): string | null {
+// Bounded on purpose, not a leak: default-ssh-dir-seam.ts keeps one reused directory per worker slot under here
+// (cleared on entry). It is removed with the root like everything else, but it is not reported as a leftover
+// (Viktor 41424 INFO 3: under MARVEEN_TEST_TMP_STRICT=1 it would turn every run red).
+export const KNOWN_SEAMS = ['marveen-ssh-seam']
+
+export function leftoverProblem(root: string, all: string[]): string | null {
+  const names = all.filter((n) => !KNOWN_SEAMS.includes(n))
   if (names.length === 0) return null
   return `TMP-MARADEK: a tesztfutás után ${names.length} bejegyzés maradt a ${root} alatt (törölve): ` +
     names.slice(0, 10).join(', ') + (names.length > 10 ? ', ...' : '') +
