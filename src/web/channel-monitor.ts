@@ -12,7 +12,7 @@ import { mainRelaunchSucceeded } from '../auto-restart.js'
 import { MAIN_AGENT_ID, SERVICE_ID, BOT_NAME, CHANNEL_PROVIDER, PROJECT_ROOT, RESPAWN_ENABLED } from '../config.js'
 import { launchableDistributionDefaultSync } from './default-model-guard.js'
 import { agentDir, listAgentNames, readAgentChannelProvider } from './agent-config.js'
-import { listKanbanCards } from '../db.js'
+import { listKanbanCards, createSystemMessage } from '../db.js'
 import {
   agentHasChannel,
   agentSessionName,
@@ -1631,7 +1631,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   if (action === 'skip') return
   if (action === 'alert') {
     logger.error({ session: MAIN_CHANNELS_SESSION }, 'Stuck main channel input survived max restart escalations -- manual intervention needed')
-    sendAlert(`⛔ A ${MAIN_CHANNELS_SESSION} bemenete beragadt es ${STUCK_RESTART_MAX_CONSECUTIVE} automatikus respawn-pane sem szabaditotta ki. Kezi beavatkozas kell: inditsd ujra a ${SERVICE_ID}-channels szolgaltatast.`)
+    sendAlert(`⛔ A fő session bemenete beragadt, ${STUCK_RESTART_MAX_CONSECUTIVE} automatikus újraindítás sem segített: a ${SERVICE_ID}-channels kézi újraindítása kell.`)
     stuckRestartCount++ // tick past the cap so the alert fires only once
     return
   }
@@ -1689,9 +1689,9 @@ function maybeAlertStuckSubAgent(session: string, agentName: string | null, stat
   const now = Date.now()
   if (!shouldAlertStuckSubAgent(state, MAIN_STUCK_THRESHOLDS.maxAttempts, last, now, SUBAGENT_OVERDUE_ALERT_MIN_INTERVAL_MS)) return
   subAgentOverdueAlertedAt.set(session, now)
-  const label = agentName ?? session
+  const label = safeAgentLabel(agentName ?? session)
   logger.error({ session, agentName, attempts: state.attempts }, 'Sub-agent stuck input survived soft recovery -- overdue-guard alert (no auto-restart)')
-  sendAlert(`⚠️ A(z) ${label} session bemenete beragadt, ${state.attempts} automatikus próbálkozás sem szabadította ki (kb. 4-4.5 perce). Kézi ellenőrzés javasolt: \`tmux attach -t ${session}\`, szükség esetén \`tmux respawn-pane -k -t ${session}\`.`)
+  routeAgentAlert(agentName, `A(z) ${label} session bemenete beragadt, ${state.attempts} automatikus próbálkozás sem szabadította ki (kb. 4-4.5 perce). Kézi ellenőrzés: \`tmux attach -t ${session}\`, szükség esetén \`tmux respawn-pane -k -t ${session}\`.`)
 }
 
 // --- Keep-alive staleness watchdog (deafness safety net, decision #3) ---
@@ -1939,7 +1939,7 @@ function checkMainKeepaliveStaleness(): void {
     if (loop.decision === 'hold-and-alert') {
       keepaliveLoopAlerted = true
       logger.warn({ ageMs, uselessRespawns: loop.uselessRespawns }, 'Keepalive loop breaker: respawns did not advance the keepalive while the poller is alive -- holding further respawns (KEEPALIVELOOP923)')
-      sendAlert(`⚠️ A fő channel keep-alive ${ageMin} perce nem frissül, de a Telegram-poller él, és ${loop.uselessRespawns} újraindítás sem segített. További újraindítást NEM csinálok (csak a beszélgetést vinné el). Valószínűleg a jelző-forrás akadt el: nézd meg a com.marveen.channel-keepalive-probe launchd jobot és a store/channel-keepalive-probe.log-ot. Ha a jelző újra frissül, a figyelő magától visszaáll.`)
+      sendAlert(`⚠️ A fő csatorna életjele ${ageMin} perce nem frissül, ${loop.uselessRespawns} újraindítás sem segített, többet nem indítok újra (a keepalive-probe-ot kell megnézni).`)
     }
     return
   }
@@ -1969,6 +1969,69 @@ function checkMainKeepaliveStaleness(): void {
 
 export function sendAlert(text: string): void {
   notifyChannel(text).catch(() => {})
+}
+
+// SUBSTUCK1113 (Patrik, privát TG 18139, 2026-11-13 11:12, Klodel 40029): a
+// sub-agent's stuck-input alert went to the OWNER's Telegram via sendAlert ->
+// notifyChannel, for juro and lex, whose boxes held nothing but a parked
+// identity "/rename". The owner does not run tmux; the main agent does, and it
+// already has a triage procedure for exactly this ([session-stuck], the same
+// prefix message-router.ts uses for notifyOrchestratorOfStuckSession).
+//
+// Rule: a stuck-input alert about a SUB-agent goes to the main agent's inbox as
+// a system message, NEVER to the owner. Only the main agent's OWN wedge may
+// reach the owner (it cannot read its own inbox while wedged). If the inbox
+// write fails, the alert is logged and dropped -- falling back to the owner is
+// exactly the behaviour this removes.
+//
+// Klodel 40071 widened the rule to EVERY alert about a sub-agent (thinking-block
+// 400, login, trust dialog, permission prompt, dead channel): none reaches the
+// owner; the owner hears only about the main session itself.
+export type StuckAlertTarget = 'main-agent' | 'owner'
+
+export function stuckInputAlertTarget(agentName: string | null, mainAgentId: string = MAIN_AGENT_ID): StuckAlertTarget {
+  return agentName != null && agentName === mainAgentId ? 'owner' : 'main-agent'
+}
+
+// Viktor 40072 (LOW): the alert now lands in the main agent's LLM context as a
+// SYSTEM-sender row, and agent names come from directory names with no
+// validation (agent-config.ts listAllAgentNames). A name is shown only if it is
+// a plain id; the whole text is flattened to one line and any bracketed header
+// the fleet trusts ([SYSTEM..., [CONTEXT-GUARD, ...) is defused.
+const SAFE_AGENT_LABEL_RX = /^[A-Za-z0-9._-]{1,40}$/
+export function safeAgentLabel(name: string | null | undefined): string {
+  return typeof name === 'string' && SAFE_AGENT_LABEL_RX.test(name) ? name : '<invalid-name>'
+}
+
+const TRUSTED_HEADER_RX = /\[\s*(?=SYSTEM|CONTEXT-GUARD|CONTEXT-RESTART-GATE|Uzenet @|TEAM MEMBER|telegram-wake|Inbox\])/gi
+export function sanitizeAlertText(text: string): string {
+  return text
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ')
+    .replace(TRUSTED_HEADER_RX, '(')
+    .slice(0, 2000)
+}
+
+export function routeAgentAlert(
+  agentName: string | null,
+  text: string,
+  deps: { toMainAgent: (text: string) => void, toOwner: (text: string) => void } = {
+    toMainAgent: (t) => { createSystemMessage(MAIN_AGENT_ID, t) },
+    toOwner: sendAlert,
+  },
+  mainAgentId: string = MAIN_AGENT_ID,
+): StuckAlertTarget {
+  const target = stuckInputAlertTarget(agentName, mainAgentId)
+  if (target === 'owner') {
+    deps.toOwner(text)
+    return target
+  }
+  try {
+    deps.toMainAgent(`[session-stuck] ${sanitizeAlertText(text)}`)
+  } catch (err) {
+    logger.error({ err, agentName: safeAgentLabel(agentName) }, 'Sub-agent alert could not be queued for the main agent; dropped (never re-routed to the owner, SUBSTUCK1113)')
+  }
+  return target
 }
 
 async function handleMarveenDown(): Promise<void> {
@@ -2075,7 +2138,7 @@ async function handleMarveenDown(): Promise<void> {
     marveenDownState.lastAlertAt = now
     logger.warn({ provider: providerLabel }, 'Marveen channel plugin still down -- stage 4 (hard restart)')
     const svcName = process.platform === 'linux' ? 'systemctl' : 'launchctl'
-    sendAlert(`⚠️ Session resume nem segitett. Hard restart (${svcName}) most a ${MAIN_CHANNELS_SESSION} session-on...`)
+    sendAlert(`⚠️ A fő session nem állt helyre, most teljesen újraindítom (${svcName}).`)
     hardRestartMarveenChannels()
     return
   }
@@ -2089,12 +2152,12 @@ async function handleMarveenDown(): Promise<void> {
     // Issue #189: a plain `tmux attach -t ...` may itself fail with "Permission
     // denied" when the operator is running it from another tmux session. Prefix
     // with `unset TMUX` so the hint works in both nested and non-nested cases.
-    sendAlert(`🚨 Hard restart SEM segitett. Kezzel kell megnezni: \`unset TMUX && tmux attach -t ${MAIN_CHANNELS_SESSION}\` es ${serviceCmd}.`)
+    sendAlert(`🚨 A fő session a teljes újraindítás után sem állt helyre, kézi beavatkozás kell (${serviceCmd}).`)
     return
   }
   if (now - marveenDownState.lastAlertAt > PLUGIN_ALERT_DEDUP_MS) {
     marveenDownState.lastAlertAt = now
-    sendAlert(`🚨 ${BOT_NAME} ${providerLabel} plugin meg mindig halott. Nezd meg kezzel.`)
+    sendAlert(`🚨 A(z) ${BOT_NAME} ${providerLabel} csatornája még mindig nem működik, kézi ellenőrzés kell.`)
   }
 }
 
@@ -2142,8 +2205,7 @@ function handleMarveenUp(): void {
     const disruptive = stage !== 'soft' && stage !== 'save'
     if (disruptive || downedFor >= 180) {
       sendAlert(
-        `✅ ${BOT_NAME} ${providerLabel} kapcsolat helyreallt (${downedFor}s kieses, ${stage} szint). ` +
-        `Ha a kieses alatt irtal es nem jott valasz, mindjart potolom.`,
+        `✅ A(z) ${BOT_NAME} ${providerLabel} kapcsolata helyreállt (${downedFor} mp kiesés); ha közben írtál, pótolom a választ.`,
       )
     }
     marveenDownState = null
@@ -2253,9 +2315,10 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         paneErrorState.set(t.session, decision.next)
       }
       if (decision.alert) {
-        const label = t.isMarveen ? BOT_NAME : (t.agentName ?? t.session)
+        const label = t.isMarveen ? BOT_NAME : safeAgentLabel(t.agentName ?? t.session)
+        const alertWho = t.isMarveen ? MAIN_AGENT_ID : (t.agentName ?? null)
         logger.error({ session: t.session, agent: label }, 'Agent wedged on thinking-block API error -- manual reset needed')
-        sendAlert(`🚨 A(z) ${label} ágens elakadt egy thinking-block API hibában (a session-history korrupt, minden új prompt ugyanazt a 400-at adja). Kézi reset kell: állítsd le és indítsd újra, friss session indul. Részletek: tmux attach -t ${t.session}`)
+        routeAgentAlert(alertWho, `🚨 A(z) ${label} ágens elakadt egy thinking-block API hibában (a session-history korrupt, minden új prompt ugyanazt a 400-at adja). Kézi reset kell: állítsd le és indítsd újra, friss session indul. Részletek: tmux attach -t ${t.session}`)
       }
     }
 
@@ -2301,15 +2364,16 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         paneMenuState.set(t.session, decision.next)
       }
       if (decision.alert) {
-        const label = t.isMarveen ? BOT_NAME : (t.agentName ?? t.session)
+        const label = t.isMarveen ? BOT_NAME : safeAgentLabel(t.agentName ?? t.session)
+        const alertWho = t.isMarveen ? MAIN_AGENT_ID : (t.agentName ?? null)
         if (firstRunGate === 'login') {
           logger.warn({ session: t.session, agent: label }, 'Session parked on the Claude Code login picker -- operator login needed, alerting (no keystrokes sent)')
-          sendAlert(`🔑 A(z) ${label} agentnek Claude-belépés kell (első indítás, "Select login method" képernyő). Lépj be: tmux attach -t ${t.session}, majd válaszd ki a belépési módot. Addig az ütemezett feladatai és üzenetei várakoznak, belépés után maguktól kézbesítődnek.`)
+          routeAgentAlert(alertWho, `🔑 A(z) ${label} agentnek Claude-belépés kell (első indítás, "Select login method" képernyő). Lépj be: tmux attach -t ${t.session}, majd válaszd ki a belépési módot. Addig az ütemezett feladatai és üzenetei várakoznak, belépés után maguktól kézbesítődnek.`)
         } else if (firstRunGate) {
           logger.warn({ session: t.session, agent: label, gate: firstRunGate }, 'Session parked on a Claude Code first-run dialog -- answering the dialog chain')
           const res = await answerFirstRunGates(t.session)
           if (res === 'login') {
-            sendAlert(`🔑 A(z) ${label} agent első-indítási dialogjait továbbléptettem, de Claude-belépés kell ("Select login method"). Lépj be: tmux attach -t ${t.session}. Utána minden várakozó feladat magától kézbesítődik.`)
+            routeAgentAlert(alertWho, `🔑 A(z) ${label} agent első-indítási dialogjait továbbléptettem, de Claude-belépés kell ("Select login method"). Lépj be: tmux attach -t ${t.session}. Utána minden várakozó feladat magától kézbesítődik.`)
           } else if (res === 'blocked') {
             // TRUSTGATE901: the trust dialog rendered in a shape we do not
             // model, so NO keystroke was sent -- deliberately. Neither Enter
@@ -2317,7 +2381,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
             // Enter confirms whatever is highlighted, which in 2.1.252 is the
             // exit). A human picks; we only say so, loudly.
             logger.warn({ session: t.session, agent: label }, 'first-run trust dialog in an unrecognised shape -- parked, NO keystrokes sent')
-            sendAlert(`🛑 A(z) ${label} session a mappa-megbízhatósági dialóguson parkol, de a panel alakját nem ismerem fel, ezért NEM nyomtam meg semmit. Se az Enter, se az Escape nem semleges rajta (az Escape a "No, exit"). Válassz kézzel: tmux attach -t ${t.session}, majd a "Yes, I trust this folder" sort jelöld ki és Enter.`)
+            routeAgentAlert(alertWho, `🛑 A(z) ${label} session a mappa-megbízhatósági dialóguson parkol, de a panel alakját nem ismerem fel, ezért NEM nyomtam meg semmit. Se az Enter, se az Escape nem semleges rajta (az Escape a "No, exit"). Válassz kézzel: tmux attach -t ${t.session}, majd a "Yes, I trust this folder" sort jelöld ki és Enter.`)
           } else {
             sendRoutineAlert(`firstrun-gate:${label}`, `🧭 A(z) ${label} session a Claude Code első-indítási képernyőjén parkolt (${firstRunGate}); automatikusan továbbléptettem. A várakozó ütemezett feladatok a következő körben kézbesítődnek.`)
           }
@@ -2343,7 +2407,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
             // they had approved them. Same rule as the unrecognised trust dialog
             // above: no keystroke is neutral, so send none and say so, loudly.
             logger.warn({ session: t.session, agent: label }, 'Blocking "menu" is a tool-permission prompt -- a human decides, NO keystrokes sent')
-            sendAlert(`🔐 A(z) ${label} session egy engedélykérésen vár, és NEM nyomtam meg semmit: ott az Escape NEM-et jelentene. Döntsd el te: tmux attach -t ${t.session}`)
+            routeAgentAlert(alertWho, `🔐 A(z) ${label} session egy engedélykérésen vár, és NEM nyomtam meg semmit: ott az Escape NEM-et jelentene. Döntsd el te: tmux attach -t ${t.session}`)
           } else {
             logger.warn({ session: t.session, agent: label }, 'Session parked in a blocking interactive menu -- sending Escape to recover')
             try {
@@ -2552,7 +2616,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           // leave it deaf. Ask the operator once, then keep deferring.
           if (!agentBusyDeferAlerted.has(t.session)) {
             logger.error({ agent: t.agentName, provider: t.provider, msDown }, 'Agent channel plugin down past busy-defer cap -- agent still working, alerting operator instead of killing it')
-            sendAlert(`⚠️ A(z) ${t.agentName} ágens ${t.provider} csatornája ${Math.round(msDown / 60000)} perce halott, de az ágens KÖZBEN DOLGOZIK. Nem indítom újra (a restart FRISS session -- elveszne a folyamatban lévő munkája). Döntsd el: várjuk meg amíg végez (akkor magától újraindul), vagy kézzel állítsd meg. Session: ${t.session}.`)
+            routeAgentAlert(t.agentName ?? null, `⚠️ A(z) ${safeAgentLabel(t.agentName)} ágens ${t.provider} csatornája ${Math.round(msDown / 60000)} perce halott, de az ágens KÖZBEN DOLGOZIK. Nem indítom újra (a restart FRISS session -- elveszne a folyamatban lévő munkája). Döntsd el: várjuk meg amíg végez (akkor magától újraindul), vagy kézzel állítsd meg. Session: ${t.session}.`)
             agentBusyDeferAlerted.add(t.session)
           }
           continue
@@ -2591,11 +2655,11 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
             })
           }
           const stillPrefix = isRepeat
-            ? `⛔ MÉG MINDIG: a(z) ${t.agentName} ágens ${t.provider} csatornája halott, és nem próbálom újraindítani. `
+            ? `⛔ MÉG MINDIG: a(z) ${safeAgentLabel(t.agentName)} ágens ${t.provider} csatornája halott, és nem próbálom újraindítani. `
             : ''
-          sendAlert(absentConfirmed
-            ? `${stillPrefix}⛔ A(z) ${t.agentName} ágens ${t.provider} plugin-je BE SEM TÖLTŐDÖTT (absent a /mcp listából), a fresh-restart ezt nem javítja -- tovább nem próbálom (minden restart elveszi a session kontextusát). Kézi TISZTA újraindítás kell (üresen, más ágens indulásával nem átlapolva): ${t.session}.`
-            : `${stillPrefix}⛔ A(z) ${t.agentName} ágens ${t.provider} csatornája ${AGENT_MAX_RESTART_ATTEMPTS} automatikus újraindítás után sem állt helyre. Tovább nem indítom újra (minden restart elveszi a session kontextusát). Kézi beavatkozás kell: nézd meg a ${t.session} session-t és a ${SERVICE_ID} csatorna-plugint.`)
+          routeAgentAlert(t.agentName ?? null, absentConfirmed
+            ? `${stillPrefix}⛔ A(z) ${safeAgentLabel(t.agentName)} ágens ${t.provider} plugin-je BE SEM TÖLTŐDÖTT (absent a /mcp listából), a fresh-restart ezt nem javítja -- tovább nem próbálom (minden restart elveszi a session kontextusát). Kézi TISZTA újraindítás kell (üresen, más ágens indulásával nem átlapolva): ${t.session}.`
+            : `${stillPrefix}⛔ A(z) ${safeAgentLabel(t.agentName)} ágens ${t.provider} csatornája ${AGENT_MAX_RESTART_ATTEMPTS} automatikus újraindítás után sem állt helyre. Tovább nem indítom újra (minden restart elveszi a session kontextusát). Kézi beavatkozás kell: nézd meg a ${t.session} session-t és a ${SERVICE_ID} csatorna-plugint.`)
           // Only the FIRST alert of a spell ticks the counter past the cap.
           // Later ones are the same standing fact repeated on a cadence, and
           // incrementing there would inflate a number the operator reads as

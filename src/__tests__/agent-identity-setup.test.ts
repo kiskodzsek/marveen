@@ -26,3 +26,33 @@ describe('identitySlashCommands', () => {
     expect(identitySlashCommands('Mr. Wolf').some((c) => c.includes('/remote-control'))).toBe(false)
   })
 })
+
+// RENAMEPARK1113 (2026-11-13, store/dashboard.log): the identity "/rename" was
+// left parked in the input box of klodel, pulzus, viktor, juro and lex; at
+// 11:12 the juro/lex ones fired the overdue-guard alert to the owner. The setup
+// now re-reads the box after sending. identityRenameParked is the decision: it
+// must fire ONLY on this session's own parked identity command.
+import { identityRenameParked } from '../web/agent-process.js'
+
+const SEP = '─'.repeat(80)
+const FOOTER = '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ↓ to manage'
+const box = (text: string) => [SEP, `❯ ${text}`, SEP, FOOTER].join('\n')
+const EMPTY = [SEP, '❯ ', SEP, FOOTER].join('\n')
+
+describe('identityRenameParked', () => {
+  it('NEGATIVE: the parked /rename of this session is detected (juro, lex shape)', () => {
+    expect(identityRenameParked(box('/rename Juró'), 'Juró')).toBe(true)
+    expect(identityRenameParked(box('/rename Lex'), 'Lex')).toBe(true)
+  })
+  it('an empty box (submitted) is not parked', () => {
+    expect(identityRenameParked(EMPTY, 'Juró')).toBe(false)
+  })
+  it('no pane (capture failed) is not parked -- nothing is touched', () => {
+    expect(identityRenameParked(null, 'Juró')).toBe(false)
+  })
+  it("another session's name or a different text is NOT ours to submit or clear", () => {
+    expect(identityRenameParked(box('/rename Lex'), 'Juró')).toBe(false)
+    expect(identityRenameParked(box('Finish the migration before lunch'), 'Juró')).toBe(false)
+    expect(identityRenameParked(box('/rename Juró and also do this'), 'Juró')).toBe(false)
+  })
+})

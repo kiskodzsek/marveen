@@ -302,7 +302,7 @@ async function checkSession(label: string, session: string): Promise<void> {
     const downMin = Math.max(1, Math.round((Date.now() - pendingAlert) / 60000))
     writePendingFailureAlert(null)
     logger.info({ label, session, downMin }, 'stuck-tool-call-watcher: failed-recovery alert closed out -- session healthy again')
-    sendAlert(`✅ A fő session magától helyreállt, nincs teendőd. A ${downMin} perce küldött "kézi beavatkozás kellhet" riasztás ezzel le van zárva.`)
+    sendAlert(`✅ A fő session magától helyreállt, nincs teendőd: a ${downMin} perce küldött "kézi beavatkozás kellhet" riasztás ezzel le van zárva.`)
   }
 
   const prev = watchState.get(session) ?? NO_STATE
@@ -485,7 +485,7 @@ async function checkSession(label: string, session: string): Promise<void> {
       // one must not push the timestamp forward, or the all-clear would report
       // a shorter outage than the owner actually lived through.
       if (readPendingFailureAlert() === null) writePendingFailureAlert(Date.now())
-      sendAlert(`🚨 A fő session beragadt, és az automatikus újraindítás NEM sikerült. Kézi beavatkozás kellhet: tmux attach -t ${session}, vagy scripts/stop.sh && scripts/start.sh a marveen mappából.`)
+      sendAlert(`🚨 A fő session beragadt, és az automatikus újraindítás NEM sikerült: kézi beavatkozás kellhet (${session}).`)
     }
   }
 }

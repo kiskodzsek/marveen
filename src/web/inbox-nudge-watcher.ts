@@ -246,9 +246,7 @@ async function tick(): Promise<void> {
       if (pre.staleAlert) {
         logger.warn({ inboxNudge: true, oldestId: oldest?.id, staleNudges: MAX_STALE_NUDGES }, 'inbox nudge: drain did not claim after repeated nudges; stopping and alerting owner')
         sendAlert(
-          `⚠️ A fő-ügynök inbox auto-drain ${MAX_STALE_NUDGES} noszogatás után sem vette át a függő üzenetet (#${oldest?.id}). ` +
-          'Valószínű okok: a UserPromptSubmit drain-hook nincs bekötve a session cwd-jéhez (inbox-drain.py), telepítési útvonal-eltérés, ' +
-          'vagy a channels-session beragadt. Kézi ellenőrzés kell; a noszogatás szünetel, amíg ez az üzenet függőben van.',
+          `⚠️ A fő ügynök ${MAX_STALE_NUDGES} noszogatás után sem vette át a függő üzenetét (#${oldest?.id}), kézi ellenőrzés kell.`,
         )
       }
       if (pre.budgetLog) {
