@@ -89,7 +89,9 @@ def only_opted_in_agents_and_only_sends(root):
             and run(root, MSG + '29 új blokk\nMSG', agent='klodel')[0] == 0
             and run(root, 'echo "29 új blokk, msg 39836"')[0] == 0
             and run(root, 'git commit -m "29 new blocks (39861)"')[0] == 0
-            and run(root, 'curl -s -H "Authorization: Bearer x" "http://localhost:3420/api/daily-log?agent=kernel"')[0] == 0)
+            and run(root, 'curl -s -H "Authorization: Bearer x" "http://localhost:3420/api/daily-log?agent=kernel"')[0] == 0
+            # a read of the log with an id in the same command is not a write (mutation M19)
+            and run(root, 'curl -s "http://localhost:3420/api/daily-log?agent=kernel" | grep -c 41038')[0] == 0)
 
 
 @case

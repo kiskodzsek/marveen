@@ -143,6 +143,18 @@ def block_send_path_near_future_measured_time(root):
             and run(h, 'Bash', {'command': MSG + 'mérve 15:50\nTXT'}, now='15:35')[0] == 2)  # the window's edge
 
 
+
+@case
+def send_path_file_payload_is_json_decoded(root):
+    # A json.dumps body file: the marker's e-acute is a \u escape and the line break a literal \n (mutation M13).
+    body = os.path.join(root['dir'], 'close-body.json')
+    with open(body, 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'status': 'done', 'result': 'kész\nMérve 15:39: a letöltés lefutott'}))
+    with open(body, encoding='utf-8') as fh:
+        raw = fh.read()
+    return ('\\u00e9' in raw and '\\n' in raw
+            and run(root['hook'], 'Bash', {'command': API + 'messages/77 -X PUT --data-binary @' + body}, now='15:35')[0] == 2)
+
 @case
 def allow_send_path_now_plans_estimates_and_far_times(root):
     h = root['hook']
