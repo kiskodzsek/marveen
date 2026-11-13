@@ -710,6 +710,45 @@ printf 'import sys\nsys.exit(0)\n' > "$SANDBOX/exits/lib/hiany_lint.py"
 text 'KÉSZ: shared/k/good.md'
 GATE_ENV="$EXITS $HROOT" run radar klodel
 ok "hiany: the lint calls sys.exit(0) while it loads: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+# Viktor 41651 INFO (card 3629642f): the same exit AFTER the load, in a function the rule calls (outside the
+# loaders' try). Each stub loads the real file and replaces one function with sys.exit; a secret shape in the text
+# proves the reasons gathered before (the secret rule) are not lost. Before the fix: rc 0 and the message went out.
+stub() {  # stub <file> <real path> <function> <exit arg>
+  printf 'import importlib.util as _u, sys\n_s = _u.spec_from_file_location("_real_%s", %s)\n_m = _u.module_from_spec(_s)\n_s.loader.exec_module(_m)\nglobals().update({k: v for k, v in vars(_m).items() if not k.startswith("__")})\ndef %s(*a, **k):\n    sys.exit(%s)\n' \
+    "$3" "'$2'" "$3" "$4" > "$1"
+}
+cp "$ROOT/scripts/lib/hiany_lint.py" "$SANDBOX/exits/lib/hiany_lint.py"
+stub "$SANDBOX/exits/lib/vevo_nem_ir.py" "$ROOT/scripts/lib/vevo_nem_ir.py" is_material 0
+text "Reel koncepció: anya mesél. a kulcs: $STRIPE"
+GATE_ENV="$EXITS" run majsztro dave
+ok "vni: is_material calls sys.exit(0) after the load, secret shape: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+ok "vni: the exit-4 reason names the rule and SystemExit" "$(grep -q 'vevo-nem-ir: a loaded file exited while the rule ran (SystemExit 0)' "$SANDBOX/err" && echo 0 || echo 1)"
+stub "$SANDBOX/exits/lib/vevo_nem_ir.py" "$ROOT/scripts/lib/vevo_nem_ir.py" found None
+text 'Reel koncepció: anya mesél, a babakönyvbe ír.'
+GATE_ENV="$EXITS" run majsztro dave
+ok "vni: found calls sys.exit() (None) after the load: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+stub "$SANDBOX/exits/lib/vevo_nem_ir.py" "$ROOT/scripts/lib/vevo_nem_ir.py" is_material 3
+text 'Reel koncepció: anya mesél.'
+GATE_ENV="$EXITS" run majsztro dave
+ok "vni: an exit 3 from a loaded file is a gate failure too (exit 4), not a verdict" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+cp "$ROOT/scripts/lib/vevo_nem_ir.py" "$SANDBOX/exits/lib/vevo_nem_ir.py"
+stub "$SANDBOX/exits/lib/hiany_lint.py" "$ROOT/scripts/lib/hiany_lint.py" lint 0
+text "KÉSZ: shared/k/good.md, a kulcs: $STRIPE"
+GATE_ENV="$EXITS $HROOT" run radar klodel
+ok "hiany: lint() calls sys.exit(0) after the load, secret shape: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+stub "$SANDBOX/exits/lib/hiany_lint.py" "$ROOT/scripts/lib/hiany_lint.py" root 0
+text 'KÉSZ: shared/k/good.md'
+GATE_ENV="$EXITS $HROOT" run radar klodel
+ok "hiany: root() calls sys.exit(0) after the load: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+cp "$ROOT/scripts/lib/hiany_lint.py" "$SANDBOX/exits/lib/hiany_lint.py"
+stub "$SANDBOX/exits/hooks/time-claim-gate.py" "$ROOT/scripts/hooks/time-claim-gate.py" send_findings 0
+text "Kész, a kulcs: $STRIPE"
+GATE_ENV="$EXITS" run kernel pulzus
+ok "time: send_findings calls sys.exit(0) after the load, secret shape: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+cp "$ROOT/scripts/hooks/time-claim-gate.py" "$SANDBOX/exits/hooks/time-claim-gate.py"
+text 'Reel koncepció: anya mesél.'
+GATE_ENV="$EXITS" run majsztro dave
+ok "the real files back in the sandbox: the same message passes (the stubs, not the sandbox, made it fail)" "$([ "$RC" = "0" ] && [ "$POSTS" = "1" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
 
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."
