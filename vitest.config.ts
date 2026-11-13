@@ -50,6 +50,8 @@ export default defineConfig({
     //    the live-install gate above: that one inspects the CHECKOUT, and ~/.ssh is
     //    HOME-scoped -- a clean worktree run leaked 62 real keys (ENROLL813,
     //    2026-09-15). A seam, not a gate: it sets state, so it lives in its own file.
+    // Card 8ae42dd0 (retro 2026-11-13): disk floor before the run, a per-run TMPDIR removed after it.
+    globalSetup: ['./src/__tests__/setup/disk-and-tmp-root.ts'],
     setupFiles: [
       './src/__tests__/setup/assert-not-live-install.ts',
       './src/__tests__/setup/assert-supported-node.ts',
