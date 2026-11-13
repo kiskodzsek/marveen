@@ -71,12 +71,13 @@ def _call_failed(tid):
                     st = os.fstat(fd)
                     if stat.S_ISREG(st.st_mode):
                         os.lseek(fd, max(0, st.st_size - TRANSCRIPT_TAIL_BYTES), os.SEEK_SET)
-                        chunks = []
-                        while True:
-                            b = os.read(fd, 1 << 20)
+                        chunks, left = [], TRANSCRIPT_TAIL_BYTES  # bounded even if the file grows meanwhile
+                        while left > 0:
+                            b = os.read(fd, min(1 << 20, left))
                             if not b:
                                 break
                             chunks.append(b)
+                            left -= len(b)
                         data = b''.join(chunks)
                 finally:
                     os.close(fd)
