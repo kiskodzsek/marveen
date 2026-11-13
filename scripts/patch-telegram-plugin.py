@@ -84,11 +84,17 @@ EVID_INSERT = (
 # edit_message. Not a PreToolUse updatedInput: nine hooks run in parallel on this tool, and which rewrite wins when
 # more than one rewrites is not documented; the plugin is one place, deterministic, and testable.
 # Cut: a line starting with ÖTLET-KAPU / BALAZS-OK (Balázs OK) / PATRIK-KÉRTE / ELVETETT-DE-KÉRT (any case, as the
-# gates accept them) and a PRIVÁT-OK: line. A FORRÁS: line is NOT cut (Klodel 38117, Viktor I1: Patrik must see
+# gates accept them) and a PRIVÁT-OK: line. v2 (Klodel 39799: an internal gate line must not reach Patrik): also
+# the idea gate's reviewer lines in the forms product-image-gate.py accepts, "ATNEZO: MEHET|nincs-otlet ..." and
+# "MAJSZTRO: MEHET|helyettes-klodel|nem-marketing|kivetel-1881 ..."; a prose line that starts "Majsztro: ..." stays.
+# A v1 line already in server.ts is replaced (the patch's "supersedes"). A FORRÁS: line is NOT cut (Klodel 38117, Viktor I1: Patrik must see
 # the source). The cut lines go to <STATE_DIR>/outbound-markers.jsonl (0600,
 # past 256 KiB the file becomes .1) for audit. A text that is ONLY markers is refused, not sent empty.
 # Uses only names server.ts already imports (writeFileSync, statSync, renameSync, rmSync, join) and req/args.
-STRIP_MARKER = "// MARVEEN-PATCH(kapu-jelolo-38054): gate markers out of the sent text"
+STRIP_MARKER_V1 = "// MARVEEN-PATCH(kapu-jelolo-38054): gate markers out of the sent text"
+# v2 keeps the v1 text as its prefix, so src/web/system-status.ts (substring "MARVEEN-PATCH(kapu-jelolo-38054)")
+# reports both versions as the strip patch.
+STRIP_MARKER = STRIP_MARKER_V1 + ", v2 ATNEZO/MAJSZTRO (39799)"
 STRIP_ANCHORS = [
     ("reply case", re.compile(r"^( *)case 'reply': \{\n", re.MULTILINE)),
     ("edit_message case", re.compile(r"^( *)case 'edit_message': \{\n", re.MULTILINE)),
@@ -113,7 +119,9 @@ def ROTATE_JS(f):
 STRIP_JS = (
     r"{indent}  if (typeof args.text === 'string') {{ const __gone = []; const __cut = m => {{ __gone.push(m.trim()); "
     r"return '' }}; const __t0 = args.text"
-    r".replace(/^[ \t]*(?:ÖTLET\\?-KAPU|BAL[AÁ]ZS[ \t\\-]?OK|PATRIK.K[EÉ]RTE|ELVETETT\\?-DE\\?-K[EÉ]RT|PRIVÁT\\?-OK)[ \t]*:[^\n]*(?:\r?\n|$)/gimu, __cut); "
+    r".replace(/^[ \t]*(?:(?:ÖTLET\\?-KAPU|BAL[AÁ]ZS[ \t\\-]?OK|PATRIK.K[EÉ]RTE|ELVETETT\\?-DE\\?-K[EÉ]RT|PRIVÁT\\?-OK)[ \t]*:"
+    r"|ATN[EÉ]Z[OŐ][ \t]*:[ \t]*(?:MEHET|nincs\\?-[oö]tlet)(?![\p{{L}}\p{{N}}_])"
+    r"|MAJSZTR[OÓ][ \t]*:[ \t]*(?:MEHET|helyettes\\?-klodel|nem\\?-marketing|kivetel\\?-1881)(?![\p{{L}}\p{{N}}_]))[^\n]*(?:\r?\n|$)/gimu, __cut); "
     r"if (__gone.length) {{ const __t = __t0.replace(/\s+$/u, ''); "
     r"const __short = x => {{ if (x.length <= 80) return x; const r = x.match(/(?:TG|msg(?:_id)?|PR)\s*[#:=]?\s*\d{{2,}}/giu) || []; "
     r"return x.slice(0, 80) + '…' + (r.length ? ' [' + r.join(', ') + ']' : '') }}; let __ok = false; "
@@ -150,7 +158,7 @@ PATCHES = [
      "insert": EVID_INSERT,
      "fallback": "no inbound evidence is recorded, owner write commands are refused"},
     {"name": "strip", "marker": STRIP_MARKER, "anchors": STRIP_ANCHORS, "mode": "insert-after",
-     "insert": STRIP_JS,
+     "insert": STRIP_JS, "supersedes": [STRIP_MARKER_V1],
      "fallback": "gate marker lines (ÖTLET-KAPU, PRIVÁT-OK, BALAZS-OK, ...) are sent as written"},
     {"name": "who", "marker": WHO_MARKER, "anchors": [EVID_ANCHOR], "mode": "insert-before",
      "insert": WHO_INSERT,
@@ -167,6 +175,12 @@ def apply_patch(text, patch):
     if patch["marker"] in text:
         return text, "already"
     out = text
+    # An older version of this patch (its own marker, one inserted line per anchor) is taken out first, so the
+    # anchors are found again and the new version lands in its place. Checked after "already": a newer marker may
+    # carry the older one as its prefix.
+    for old in patch.get("supersedes", []):
+        if old in out:
+            out = "".join(ln for ln in out.splitlines(keepends=True) if old not in ln)
     for name, rx in patch["anchors"]:
         found = list(rx.finditer(out))
         if len(found) != 1:

@@ -103,6 +103,18 @@ check("insert sits inside each case, before the text is read",
       new.index("case 'reply': {") < new.index(ptp.STRIP_MARKER) < new.index("const text = args.text")
       and new.index("case 'edit_message': {") < new.rindex(ptp.STRIP_MARKER) < new.index("const t2 = args.text"))
 check("idempotent", ptp.apply_patch(new, STRIP) == (new, "already"))
+# v1 -> v2 (Klodel 39799): a server.ts that carries the v1 line gets exactly what a fresh patch gives, once.
+V1_JS = ptp.STRIP_JS.replace(ptp.STRIP_MARKER, ptp.STRIP_MARKER_V1)
+v1, st1 = ptp.apply_patch(FIXTURE, dict(STRIP, marker=ptp.STRIP_MARKER_V1, insert=V1_JS, supersedes=[]))
+up, st2 = ptp.apply_patch(v1, STRIP)
+check("upgrade: a v1-patched file becomes the fresh v2 file",
+      st1 == "patched" and v1.count(ptp.STRIP_MARKER_V1) == 2 and ptp.STRIP_MARKER not in v1
+      and st2 == "patched" and up == new and ptp.apply_patch(up, STRIP) == (up, "already"), st2)
+v1_half = v1.replace("case 'edit_message': {", "case 'edit': {")
+check("upgrade: anchor missing leaves the v1 file untouched (all-or-nothing)",
+      ptp.apply_patch(v1_half, STRIP) == (v1_half, "anchor-missing:edit_message case"))
+check("the v2 marker keeps the v1 text as prefix (system-status.ts substring)",
+      ptp.STRIP_MARKER.startswith(ptp.STRIP_MARKER_V1) and "MARVEEN-PATCH(kapu-jelolo-38054)" in ptp.STRIP_MARKER)
 half = FIXTURE.replace("case 'edit_message': {", "case 'edit': {")
 check("all-or-nothing", ptp.apply_patch(half, STRIP) == (half, "anchor-missing:edit_message case"))
 
@@ -116,6 +128,13 @@ cases = [
     ("ELVETETT-DE-KERT line", "ELVETETT-DE-KERT: TG 17454\nÚj irány: szalon.", "Új irány: szalon."),
     ("PRIVÁT-OK line", "Kész.\nPRIVÁT-OK: Patrik privátban kérdezte\nRészletek lent.", "Kész.\nRészletek lent."),
     ("indented marker line", "Szöveg.\n  ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve x\nVége.", "Szöveg.\nVége."),
+    # Klodel 39799: the reviewer lines the idea gate wants are internal too
+    ("ATNEZO: MEHET line", "Új ötlet: kalkulátor.\nATNEZO: MEHET a1b2c3d4e5\nVége.", "Új ötlet: kalkulátor.\nVége."),
+    ("ATNÉZŐ: nincs-ötlet line", "Állapot.\nATNÉZŐ: nincs-ötlet csak állapot, nincs új irány", "Állapot."),
+    ("MAJSZTRO: MEHET line", "Ötlet.\nMAJSZTRO: MEHET 39550\nVége.", "Ötlet.\nVége."),
+    ("MAJSZTRÓ: helyettes-klodel line, any case", "Ötlet.\nmajsztró: Helyettes-Klodel keret 100 %", "Ötlet."),
+    ("MarkdownV2-escaped hyphen", "Ötlet.\nMAJSZTRO: helyettes\\-klodel keret\nATNEZO: nincs\\-otlet csak állapot", "Ötlet."),
+    ("MAJSZTRO: nem-marketing / kivetel-1881", "Kép.\nMAJSZTRO: nem-marketing belső ábra\nMAJSZTRO: kivetel-1881 39001", "Kép."),
 ]
 for name, text, want in cases:
     got, err, log, mode, _ = strip(text)
@@ -125,6 +144,11 @@ keep = ("A Forrás: KSH 2024 szerint 48 141 vállalkozás.\nforrás: Eurostat\nA
         "FORRÁS: msg 38057, ads-1111.csv")
 got, err, log, _, _ = strip(keep)
 check("kept: FORRÁS: line (Klodel 38117), prose Forrás:, a marker word mid-sentence", got == keep and not log, repr(got))
+
+keep2 = ("Majsztro: kész a heti szöveg, holnap nézi Patrik.\nMAJSZTRO: szerintem jó\nATNEZO szerint mehet.\n"
+         "A MAJSZTRO: MEHET 1 sor a mondat közepén marad.\nMAJSZTRO: MEHETNÉK holnap?\nMAJSZTRO: MEHETÉS?\nATNEZO: MEHETNÉK holnap?")
+got, err, log, _, _ = strip(keep2)
+check("kept: prose Majsztro:/ATNEZO lines, a gate form mid-sentence or as a longer word", got == keep2 and not log, repr(got))
 
 got, err, log, _, _ = strip("A szám 12 100.\nÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6)\nFORRÁS: msg 38057")
 check("ÖTLET-KAPU cut, FORRÁS kept beside it", got == "A szám 12 100.\nFORRÁS: msg 38057" and len(log) == 1, repr(got))
@@ -189,15 +213,15 @@ with tempfile.TemporaryDirectory() as sd:
 # 3. end to end with the real gate (ÖTLET-KAPU)
 pitch = "Új ötlet: hűtőmágnes-bolt."
 line = "ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel)"
-# Since Klodel 39520 / 39550 the idea gate also wants the blind reviewer's and Majsztro's lines. The strip cuts only
-# the ÖTLET-KAPU line; ATNEZO and MAJSZTRO are not on its cut list, so they are sent as written (pinned here).
+# Since Klodel 39520 / 39550 the idea gate also wants the blind reviewer's and Majsztro's lines; since 39799 the
+# strip cuts them too, so only the pitch reaches the chat.
 reviewed = "ATNEZO: MEHET a1b2c3d4e5\nMAJSZTRO: helyettes-klodel teszt, Májsztró kerete 100 %-on"
 check("gate: no marker still blocks", gate(pitch) == 2)
 check("gate: ÖTLET-KAPU without the reviewer lines still blocks", gate(pitch + "\n" + line) == 2)
 both = pitch + "\n" + line + "\n" + reviewed
 sent, err, _, _, _ = strip(both)
-check("gate: with all marker lines passes, and the sent text has no ÖTLET-KAPU line",
-      gate(both) == 0 and sent == pitch + "\n" + reviewed and "ÖTLET-KAPU" not in (sent or ""), repr(sent))
+check("gate: with all marker lines passes, and the sent text has no gate line",
+      gate(both) == 0 and sent == pitch, repr(sent))
 
 # 4. the installed plugin, if any
 plugins = sorted(glob.glob(os.path.expanduser("~/.claude/plugins/cache/claude-plugins-official/telegram/*/server.ts")))
