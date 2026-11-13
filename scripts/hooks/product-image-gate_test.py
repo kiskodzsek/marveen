@@ -22,7 +22,9 @@ GROUP = '-1000000000001'  # synthetic group chat id (Viktor 29457 INFO-4)
 
 
 def run(root, tool_input):
-    env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV}
+    # LEDGER_DB_PATH points at a file that does not exist: the live ledger never decides a case (card 9df14a4c).
+    env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
+           'LEDGER_DB_PATH': os.path.join(root, 'nincs-ledger.db')}
     p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_input': tool_input}),
                        capture_output=True, text=True, env=env, timeout=20)
     return p.returncode, p.stderr
@@ -2156,6 +2158,73 @@ def itthon_claims_from_the_ledger_detected(root):
     plain = ['Magyar bevételi adat (RPM) nincs.', 'A magyar mérés pedig nincs meg.', 'Itthon is kapható a Meskán.',
              'Hogy itthon kellene-e, azt nem tudjuk.', 'Kész a riport.']
     return (all(mod.itthon_mert_check(t) for t in claims) and not any(mod.itthon_mert_check(t) for t in plain))
+
+
+# Card 9df14a4c (Klodel 40009, Patrik csoport TG 5704: "most meg ide reagálsz arra az üzenetemre amit a másik
+# chatbe irtam"): where the owner wrote last decides. A throw-away conversation_log ledger, synthetic ids.
+def ledger(root, *chats, agent='main'):
+    import sqlite3
+    db = os.path.join(root, 'ledger.db')
+    con = sqlite3.connect(db)
+    con.execute('CREATE TABLE conversation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, '
+                'chat_id TEXT, direction TEXT, text TEXT, created_at INTEGER)')
+    for chat in chats:
+        con.execute("INSERT INTO conversation_log (agent_id, chat_id, direction, text, created_at) "
+                    "VALUES (?, ?, 'in', 'x', 0)", (agent, chat))
+    con.commit()
+    con.close()
+    return db
+
+
+def run_ledger(root, db, tool_input, agent='main'):
+    env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
+           'MARVEEN_OWNER_GROUP_CHAT': GROUP, 'LEDGER_DB_PATH': db, 'MAIN_AGENT_ID': 'main',
+           'MARVEEN_AGENT_ID': agent}
+    p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_input': tool_input}),
+                       capture_output=True, text=True, env=env, timeout=20)
+    return p.returncode, p.stderr
+
+
+@case
+def latest_private_private_reply_without_marker_allowed(root):
+    db = ledger(root, GROUP, PRIV)
+    rc, err = run_ledger(root, db, {'chat_id': PRIV, 'text': 'Rendben, megnézem.'})
+    return rc == 0 and 'Traceback' not in err
+
+
+@case
+def latest_private_group_reply_blocked(root):
+    db = ledger(root, GROUP, PRIV)
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'text': 'Rendben, megnézem.'})
+    return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err
+
+
+@case
+def latest_group_private_reply_without_marker_blocked(root):
+    db = ledger(root, PRIV, GROUP)
+    rc, err = run_ledger(root, db, {'chat_id': PRIV, 'text': 'Rendben, megnézem.'})
+    return rc == 2 and 'PRIVÁT-KAPU' in err and 'PRIVÁT-VÁLASZ-KAPU' not in err
+
+
+@case
+def latest_group_group_reply_allowed(root):
+    db = ledger(root, PRIV, GROUP)
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'text': 'Rendben, megnézem.'})
+    return rc == 0 and 'Traceback' not in err
+
+
+@case
+def other_agent_latest_private_keeps_marker_rule(root):
+    # dave's own rows say "latest private": the main-agent-only rule must still not release his reply
+    db = ledger(root, GROUP, PRIV, agent='dave')
+    rc, err = run_ledger(root, db, {'chat_id': PRIV, 'text': 'Rendben.'}, agent='dave')
+    return rc == 2 and 'PRIVÁT-KAPU' in err
+
+
+@case
+def no_ledger_keeps_marker_rule(root):
+    rc, err = run_ledger(root, os.path.join(root, 'nincs.db'), {'chat_id': PRIV, 'text': 'Rendben.'})
+    return rc == 2 and 'PRIVÁT-KAPU' in err and not os.path.exists(os.path.join(root, 'nincs.db'))
 
 
 def main():
