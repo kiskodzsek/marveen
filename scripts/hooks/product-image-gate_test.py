@@ -2548,6 +2548,79 @@ def mark(root, kind, chat, value='Patrik privátban kérdezte, privát ügy', ag
 
 
 @case
+def NEG_mark_spend_recheck_two_runs_one_mark(root):
+    # Viktor 40933 INFO 1: two hook runs reserve the same mark before either spends it; only the first spend
+    # passes. Simulated in one process (the real hooks are serialised by process start-up, so the race needs this).
+    mark(root, 'PRIVAT-OK', PRIV)
+    reply_marks._pending.clear()
+    a_val = reply_marks.take('PRIVAT-OK', PRIV, 'klodel')
+    run_a = list(reply_marks._pending)
+    reply_marks._pending.clear()
+    b_val = reply_marks.take('PRIVAT-OK', PRIV, 'klodel')
+    run_b = list(reply_marks._pending)
+    reply_marks._pending[:] = run_a
+    first = reply_marks.spend_pending()
+    reply_marks._pending[:] = run_b
+    second = reply_marks.spend_pending()
+    return bool(a_val) and a_val == b_val and first is True and second is False
+
+
+@case
+def mark_taken_twice_in_one_run_spent_once(root):
+    # Viktor 40933 INFO 5: the same mark taken twice in one run is one pending entry, so the spend passes.
+    mark(root, 'PRIVAT-OK', PRIV)
+    reply_marks._pending.clear()
+    v1 = reply_marks.take('PRIVAT-OK', PRIV, 'klodel')
+    v2 = reply_marks.take('PRIVAT-OK', PRIV, 'klodel')
+    pending = len(reply_marks._pending)
+    ok = reply_marks.spend_pending()
+    with open(os.environ['REPLY_MARKS_PATH'], encoding='utf-8') as f:
+        used = sum(1 for line in f if '"used"' in line)
+    return bool(v1) and v1 == v2 and pending == 1 and ok is True and used == 1
+
+
+def load_gate_in(root):
+    """The hook module loaded from a copy under root (scripts/hooks, scripts/lib linked), so its install-relative
+    files (store/projektek.json) are root's."""
+    import importlib.util
+    real = os.path.dirname(os.path.dirname(os.path.abspath(HOOK)))
+    os.makedirs(os.path.join(root, 'scripts', 'hooks'), exist_ok=True)
+    if not os.path.exists(os.path.join(root, 'scripts', 'lib')):
+        os.symlink(os.path.join(real, 'lib'), os.path.join(root, 'scripts', 'lib'))
+    for f in os.listdir(os.path.join(real, 'hooks')):
+        if f.endswith('.py') and not f.endswith('_test.py'):
+            dst = os.path.join(root, 'scripts', 'hooks', f)
+            if not os.path.exists(dst):
+                os.symlink(os.path.join(real, 'hooks', f), dst)
+    gate = os.path.join(root, 'scripts', 'hooks', 'gate_copy.py')
+    with open(HOOK, encoding='utf-8') as src, open(gate, 'w', encoding='utf-8') as dst:
+        dst.write(src.read())
+    spec = importlib.util.spec_from_file_location('gate_copy', gate)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+@case
+def NEG_owner_group_chat_from_projektek_normalised(root):
+    # Viktor 40940 INFO: the store/projektek.json branch (no env) is normalised too: "-0..." text, an integer,
+    # and {"chat_id": " ... "} are the same group as the canonical id.
+    m = load_gate_in(root)
+    os.makedirs(os.path.join(root, 'store'), exist_ok=True)
+    saved = os.environ.pop('MARVEEN_OWNER_GROUP_CHAT', None)
+    out = []
+    try:
+        for g in ('-0' + GROUP[1:], int(GROUP), {'chat_id': ' ' + GROUP + ' '}):
+            with open(os.path.join(root, 'store', 'projektek.json'), 'w', encoding='utf-8') as f:
+                json.dump({'elo_uzenet': {'csoport': g}}, f)
+            out.append(m.owner_group_chat() == GROUP)
+    finally:
+        if saved is not None:
+            os.environ['MARVEEN_OWNER_GROUP_CHAT'] = saved
+    return all(out)
+
+
+@case
 def mark_private_ok_one_message_only(root):
     # Viktor 40894 (a): one mark = one message. The second message needs a new mark (replay refused).
     mark(root, 'PRIVAT-OK', PRIV)
