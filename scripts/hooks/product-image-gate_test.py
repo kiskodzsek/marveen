@@ -2409,11 +2409,46 @@ def NEG_private_command_blocked_in_edit_and_with_marker(root):
 
 
 @case
+def NEG_private_command_viktor_40870_shapes_blocked(root):
+    # Viktor 40870 LOW: inline code, numbered and bulleted lines, upper-case sudo, more commands, curl without a
+    # dash, a zero-width character inside sudo, full-width letters.
+    out = []
+    for text in ('Futtasd: `npm install foo`', '1. cd ~/x', '- npm install', 'SUDO ls', 'Sudo ls', 'rm -rf x',
+                 'osascript -e x', 'open /Applications/X.app', 'ssh user@host', 'kill 123', 'pip install x',
+                 'tar xzf a.tgz', 'mv a b', 'curl https://example.com/x', 'su\u200bdo ls',
+                 '\uff53\uff55\uff44\uff4f ls'):
+        rc, err = run(root, {'chat_id': PRIV, 'text': 'PRIVÁT-OK: ' + REASON + '\n' + text})
+        out.append(rc == 2 and 'PARANCS-KAPU' in err)
+    return all(out)
+
+
+@case
+def NEG_private_command_accented_path_blocked(root):
+    # Viktor 40886 LOW: an accented folder name does not make a command line a sentence.
+    out = []
+    for text in ('cd ~/Letöltések', 'rm -rf ~/Letöltések/x', 'open ~/Letöltések/x.pkg', 'git commit -m "javítás"'):
+        rc, err = run(root, {'chat_id': PRIV, 'text': 'PRIVÁT-OK: ' + REASON + '\n' + text})
+        out.append(rc == 2 and 'PARANCS-KAPU' in err)
+    return all(out)
+
+
+@case
+def NEG_private_chat_id_forms_blocked(root):
+    # Viktor 40886 INFO 2: "+id", "0id" and an integer id are the same private chat.
+    out = []
+    for cid in ('+' + PRIV, '0' + PRIV, int(PRIV)):
+        rc, err = run(root, {'chat_id': cid, 'text': 'PRIVÁT-OK: ' + REASON + '\nsudo ls'})
+        out.append(rc == 2 and 'PARANCS-KAPU' in err)
+    return all(out)
+
+
+@case
 def private_plain_text_not_a_command(root):
     window(root, time.time() + 3600)
     ok = []
     for text in ('Kész a film, itt van.', 'Node 22 kell hozzá, ezt mi intézzük.', '#marabel #karacsony',
-                 '50 % kedvezmény a második könyvre', 'A git-ben megvan, a csapat élesíti.', 'Install nélkül megy.'):
+                 '50 % kedvezmény a második könyvre', 'A git-ben megvan, a csapat élesíti.', 'Install nélkül megy.',
+                 'git push megtörtént', 'open: a link nyitva van, nézd meg', '1. Kész a borító.'):
         rc, err = run(root, {'chat_id': PRIV, 'text': text})
         ok.append(rc == 0 and 'PARANCS-KAPU' not in err)
     return all(ok)
