@@ -572,6 +572,20 @@ def time_reason(text):
             'futtasd a date-et közvetlenül a küldés előtt.' % (shown, now.hour, now.minute))
 
 
+def guarded(label, rule, text):
+    """Run a rule that calls into a loaded file. The loaders turn an import-time exit into die(), but the calls after
+    the load (lint.root/lint.lint, vni.is_material/vni.found) ran outside them: a sys.exit(0) there returned rc 0 and
+    the reasons gathered so far, the secret rule too, were lost (Viktor 41651 INFO, CWE-755; card 3629642f). Any
+    SystemExit from a rule is a gate failure; die()'s own exit 4 passes through unchanged. Other exceptions already
+    end the gate with rc 1, which agent-msg.sh refuses. Not caught: os._exit, which bypasses Python."""
+    try:
+        return rule(text)
+    except SystemExit as e:
+        if e.code == 4:
+            raise
+        die('%s: a loaded file exited while the rule ran (SystemExit %r); the gate cannot decide' % (label, e.code))
+
+
 def main(argv):
     frm = to = None
     i = 0
@@ -634,17 +648,17 @@ def main(argv):
             reasons.append(r)
 
     if frm.lower() in csv_env('MARVEEN_MSG_GATE_HIANY_FROM', 'radar'):
-        r = hiany_reason(text)
+        r = guarded('hiany', hiany_reason, text)
         if r:
             reasons.append(r)
 
     if (frm.lower() in csv_env('MARVEEN_MSG_GATE_VNI_FROM', 'klodel,majsztro,magnes,mira')
             and to.lower() in csv_env('MARVEEN_MSG_GATE_VNI_TO', 'dave,mira,magnes,majsztro')):
-        r = vni_reason(text)
+        r = guarded('vevo-nem-ir', vni_reason, text)
         if r:
             reasons.append(r)
 
-    r = time_reason(text)
+    r = guarded('time', time_reason, text)
     if r:
         reasons.append(r)
 
