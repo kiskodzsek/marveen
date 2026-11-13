@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Tests for count-claim-gate.py (Klodel 39869).
+
+Runs a COPY of the hook (with ledger_lib.py and hook_errlog.py) in a throw-away install root, as Claude Code does
+(PreToolUse JSON on stdin; exit 0 allow, 2 block). The agent comes from transcript_path under <root>/agents/<id>/.
+Run: python3 -I scripts/hooks/count-claim-gate_test.py
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+HOOK = 'count-claim-gate.py'
+MSG = "bash /Users/klodel/marveen/agents/kernel/tools/kernel-msg.sh klodel - <<'MSG'\n"
+CARD = ("curl -s -X POST http://localhost:3420/api/kanban/b71236d8/comments -H 'Content-Type: application/json' "
+        "--data-binary @- <<'JSON'\n")
+CLOSE = "curl -s -X PUT http://localhost:3420/api/messages/39858 -H 'Content-Type: application/json' --data-binary @- <<'JSON'\n"
+CASES = []
+
+
+def case(fn):
+    CASES.append(fn)
+    return fn
+
+
+def make_root(tmp):
+    hooks = os.path.join(tmp, 'scripts', 'hooks')
+    os.makedirs(hooks)
+    for f in (HOOK, 'ledger_lib.py', 'hook_errlog.py'):
+        shutil.copy(os.path.join(HERE, f), hooks)
+    return os.path.join(hooks, HOOK)
+
+
+def run(root, command, agent='kernel', tool='Bash', raw=None, cwd=None):
+    hook = os.path.join(root, 'scripts', 'hooks', HOOK)
+    tp = os.path.join(root, 'agents', agent, '.claude-config', 'projects', 'x', 's.jsonl')
+    body = {'tool_name': tool, 'tool_input': {'command': command}, 'transcript_path': tp, 'cwd': cwd or root}
+    env = {'PATH': '/usr/bin:/bin', 'HOOK_ERRLOG_PATH': os.devnull, 'MAIN_AGENT_ID': 'klodel'}
+    p = subprocess.run([sys.executable, '-I', hook], input=raw if raw is not None else json.dumps(body),
+                       capture_output=True, text=True, env=env, timeout=20)
+    return p.returncode, p.stdout, p.stderr
+
+
+def card(content):
+    return CARD + json.dumps({'author': 'kernel', 'content': content}, ensure_ascii=False) + '\nJSON'
+
+
+@case
+def block_guessed_count_and_id(root):
+    # The three 11-13 shapes: a count in a push request, a guessed msg id on a card, a card id.
+    code, out, err = run(root, MSG + 'a 29 új blokkból 15 Klodel-komment\nMSG')
+    return (code == 2 and 'MÉRVE' in err and '29 új blokk' in err and out == ''
+            and run(root, card('Pulzustól kértem egy count-ot (39836 körül).'))[0] == 2
+            and run(root, card('a kártya b71236d8 lezárva'))[0] == 2
+            and run(root, MSG + 'msg 3986 és id=39861\nMSG')[0] == 2
+            and run(root, MSG + 'lásd msg 3986\nMSG')[0] == 2
+            and run(root, CLOSE + '{"status":"done","result":"963 komment, 0 elengedett"}\nJSON')[0] == 2)
+
+
+@case
+def evidence_line_lets_it_through(root):
+    return (run(root, MSG + 'a 29 új blokkból 20 Klodel-komment\nMÉRVE: /private/tmp/x/regress.py kimenete\nMSG')[0] == 0
+            # a JSON string's line break is a literal \n
+            and run(root, card('kérés: 39834\\nMÉRVE: `kernel-msg.sh` válasza, OK id=39834'))[0] == 0
+            and run(root, MSG + '963 komment\n- merve: scripts/hooks/time-claim-gate.py:229\nMSG')[0] == 0)
+
+
+@case
+def evidence_without_a_source_does_not_count(root):
+    return (run(root, MSG + '29 új blokk\nMÉRVE: igen, megszámoltam\nMSG')[0] == 2
+            and run(root, MSG + '29 új blokk, MÉRVE: /tmp/x mid-line\nMSG')[0] == 2)
+
+
+@case
+def no_claim_passes(root):
+    return all(run(root, MSG + t + '\nMSG')[0] == 0 for t in (
+        'Kész, nincs teendő.',
+        'A flotta kerete 22 % 08:50-kor, 3 pont rendben.',
+        'Ág feat/x 03c41d7e, alap 8db3b0b0, 2026-11-13.',
+        'Lásd http://localhost:3420/api/messages/39858 és /api/kanban/b71236d8/comments'))
+
+
+@case
+def only_opted_in_agents_and_only_sends(root):
+    return (run(root, MSG + '29 új blokk\nMSG', agent='dave')[0] == 0
+            and run(root, MSG + '29 új blokk\nMSG', agent='klodel')[0] == 0
+            and run(root, 'echo "29 új blokk, msg 39836"')[0] == 0
+            and run(root, 'git commit -m "29 new blocks (39861)"')[0] == 0
+            and run(root, "curl -s -X POST http://localhost:3420/api/daily-log -d '{\"content\":\"29 blokk\"}'")[0] == 0)
+
+
+@case
+def file_payloads_are_judged(root):
+    body = os.path.join(root, 'body.json')
+    with open(body, 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'content': 'Pulzustól kértem (39836 körül).'}))
+    msg = os.path.join(root, 'msg.txt')
+    with open(msg, 'w', encoding='utf-8') as fh:
+        fh.write('29 új blokk\n')
+    ok_msg = os.path.join(root, 'ok.txt')
+    with open(ok_msg, 'w', encoding='utf-8') as fh:
+        fh.write('29 új blokk\nMÉRVE: /tmp/regress.py\n')
+    return (run(root, 'curl -s -X POST http://localhost:3420/api/kanban/abc/comments --data-binary @' + body)[0] == 2
+            and run(root, 'bash agents/kernel/tools/kernel-msg.sh klodel - < msg.txt', cwd=root)[0] == 2
+            and run(root, 'bash agents/kernel/tools/kernel-msg.sh klodel - < ' + ok_msg)[0] == 0)
+
+
+@case
+def cli_check_for_the_wrapper(root):
+    hook = os.path.join(root, 'scripts', 'hooks', HOOK)
+    bad, good = os.path.join(root, 'b.txt'), os.path.join(root, 'g.txt')
+    with open(bad, 'w', encoding='utf-8') as fh:
+        fh.write('15 Klodel-komment\n')
+    with open(good, 'w', encoding='utf-8') as fh:
+        fh.write('20 Klodel-komment\nMÉRVE: /tmp/regress.py\n')
+    r = lambda f: subprocess.run([sys.executable, '-I', hook, '--check', f], capture_output=True, text=True).returncode
+    return r(bad) == 1 and r(good) == 0 and r(os.path.join(root, 'missing.txt')) == 1
+
+
+@case
+def other_tools_and_garbage_pass(root):
+    return (run(root, MSG + '29 blokk\nMSG', tool='Write')[0] == 0
+            and run(root, None, raw='not json')[0] == 0
+            and run(root, None, raw=json.dumps({'tool_name': 'Bash', 'tool_input': ['x']}))[0] == 0
+            and run(root, None, raw=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 5}}))[0] == 0)
+
+
+def main():
+    failed = 0
+    for fn in CASES:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = os.path.realpath(tmp)
+            make_root(tmp)
+            try:
+                ok = fn(tmp)
+            except Exception as e:  # a crash is a failure, with its reason
+                ok = False
+                print(f'  {fn.__name__}: {e!r}')
+        print(('PASS ' if ok else 'FAIL ') + fn.__name__)
+        failed += not ok
+    print(f'{len(CASES) - failed}/{len(CASES)} passed')
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
