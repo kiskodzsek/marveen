@@ -82,6 +82,7 @@ Exit 0 = allow, exit 2 = block (stderr to the model).
 """
 import hashlib
 import json
+import sqlite3
 import os
 import re
 import shutil
@@ -98,6 +99,7 @@ ROOT = os.environ.get('CLAUDE_PROJECT_DIR', '/Users/klodel/marveen')
 KAPU = os.path.join(ROOT, 'store', 'kep-kapu')
 REQ = ('KONYV', 'A5', 'PAPIR', 'SAJAT', 'KERES', 'NAGYITVA')
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # ledger_lib (owner_latest_inbound_chat)
 import owner_chat  # noqa: E402
 
 
@@ -113,6 +115,59 @@ def owner_private_chat():
         return str(owner_chat.resolve_owner_chat_id(os.path.join(install, '.env')) or '')
     except Exception:
         return ''
+
+
+def owner_group_chat():
+    """The owner's team group chat: MARVEEN_OWNER_GROUP_CHAT, else store/projektek.json elo_uzenet "csoport"
+    (a plain id or {"chat_id": ...}). Never hard-coded (personal data). "" when unknown."""
+    v = (os.environ.get('MARVEEN_OWNER_GROUP_CHAT') or '').strip()
+    if v:
+        return v
+    install = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        with open(os.path.join(install, 'store', 'projektek.json'), encoding='utf-8') as f:
+            g = (json.load(f).get('elo_uzenet') or {}).get('csoport')
+        if isinstance(g, dict):
+            g = g.get('chat_id')
+        return str(g).strip() if g is not None else ''
+    except Exception:
+        return ''
+
+
+# Viktor 40081 L2: "where the owner wrote last" is about the conversation going on now. An inbound older than this
+# no longer opens the private chat without the PRIVÁT-OK marker, and no longer closes the group.
+LATEST_INBOUND_MAX_AGE_S = 30 * 60
+
+
+def owner_latest_inbound_chat(payload, now=None):
+    """Which of the owner's two chats (private / group) the MAIN agent's latest inbound message came in
+    (store/claudeclaw.db conversation_log, by row id), if it came at most LATEST_INBOUND_MAX_AGE_S ago. None for
+    another agent, for an older message, or when unknown."""
+    priv, group = owner_private_chat(), owner_group_chat()
+    if not priv or not group:
+        return None
+    try:
+        import ledger_lib
+        agent = ledger_lib.agent_id_from_payload(payload) or ledger_lib.main_agent_id()
+        if agent != ledger_lib.main_agent_id():
+            return None
+        con = sqlite3.connect(f'file:{ledger_lib.db_path()}?mode=ro', uri=True, timeout=5)  # never create a ledger
+        try:
+            row = con.execute(
+                "SELECT chat_id, created_at FROM conversation_log WHERE agent_id=? AND direction='in' AND chat_id IN (?, ?)"
+                " ORDER BY id DESC LIMIT 1", (str(agent), priv, group)).fetchone()
+        finally:
+            con.close()
+        if not row:
+            return None
+        now = time.time() if now is None else now
+        try:
+            fresh = now - float(row[1]) <= LATEST_INBOUND_MAX_AGE_S
+        except (TypeError, ValueError):
+            fresh = False
+        return str(row[0]) if fresh else None
+    except Exception:
+        return None
 
 
 WINDOW_MAX_S = 86400
@@ -1275,7 +1330,20 @@ def main():
     # want to see the "PRIVÁT-OK" line. An open private window (store/privat-ablak.json:
     # {"until": <unix ts>, "ok": "<reason, TG id>"}) lets private replies pass without the marker.
     chat = str(ti.get('chat_id') or '').strip()
-    if chat and chat == owner_private_chat() and not private_window_open():
+    # Patrik csoport TG 5704 (card 9df14a4c, Klodel 40009): "most meg ide reagálsz arra az üzenetemre amit a
+    # másik chatbe irtam". The marker rule above sent the answer to a PRIVATE message into the group. Where the
+    # owner wrote last decides: his latest message came in the private chat -> the reply goes there without the
+    # PRIVÁT-OK line, and not to the group.
+    latest = owner_latest_inbound_chat(data) if chat else None
+    # Viktor 40081 L1: only a REPLY is redirected; the live status message in the group is edited in place
+    # (edit_message) and must keep updating while Patrik writes privately.
+    is_edit = str(data.get('tool_name') or '').endswith('edit_message')
+    if chat and latest and not is_edit and latest == owner_private_chat() and chat == owner_group_chat():
+        sys.stderr.write(
+            'PRIVÁT-VÁLASZ-KAPU (Patrik TG 5704: "ide reagálsz arra az üzenetemre amit a másik chatbe irtam"): '
+            'Patrik utoljára PRIVÁTBAN írt, oda válaszolj (PRIVÁT-OK nélkül is mehet), ne a csoportba.\n')
+        return 2
+    if chat and chat == owner_private_chat() and not private_window_open() and latest != chat:
         txt = str(ti.get('text') or '')
         i = txt.find('PRIVÁT-OK:')
         if i < 0 or len(txt[i + len('PRIVÁT-OK:'):].split('\n', 1)[0].strip()) < 10:
