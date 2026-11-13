@@ -39,7 +39,7 @@ class StepPhrase(unittest.TestCase):
                      'Nem te indítod, hanem Pulzus.', 'Megnyomtad, köszönöm, élesben van.',
                      'Feltöltöttük, a videó a fiókban van.', 'Mi elindítjuk ma éjjel.', 'Kész, kiment.',
                      'Patrik kérte: „nyomd meg”, ezt már megcsináltuk.', 'Balázs, töltsd fel a számlát.',
-                     'A link: https://example.com/nyomd-meg', 'Beírtam a gépnél-teendőid közé.',
+                     'A link: https://example.com/kattints', 'Beírtam a gépnél-teendőid közé.',
                      'Poszt-szöveg: „Idén karácsonyra indítsd el anyukádnak a Meséld el!-t.”'):
             self.assertIsNone(gate.step_phrase(text), text)
 
@@ -131,6 +131,10 @@ class Hook(unittest.TestCase):
     def test_one_mark_one_sent_message_in_hold_mode(self):
         self.mark()
         self.assertEqual(self.run_gate(GROUP, 'Nyomd meg a gombot.', call='toolu_A')[0], 0)
+        with open(self.marks, encoding='utf-8') as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        # Held for toolu_A, not spent: a reply another gate blocks keeps the mark (Klodel 41147).
+        self.assertEqual([(r.get('call'), 'used' in r) for r in rows if 'nonce' not in r], [('toolu_A', False)])
         subprocess.run([sys.executable, '-I', SPEND], input=json.dumps({'tool_use_id': 'toolu_A'}),
                        env=dict(os.environ, REPLY_MARKS_PATH=self.marks), capture_output=True, text=True, timeout=30)
         self.assertEqual(self.run_gate(GROUP, 'És kattints a linkre.', call='toolu_B')[0], 2)
