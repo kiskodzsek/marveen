@@ -36,7 +36,8 @@ const sha256 = (rel: string) => createHash('sha256').update(readFileSync(join(RO
 // The repo files a pinned file runs or imports, as the shapes the pinned scripts use:
 //   shell: "$HERE/<file>" (HERE = the script's dir) and "$BASE/scripts/<path>" (BASE = the repo root);
 //   python: a top-level `import x` / `from x import ...` that names a sibling x.py, and a file loaded by path as
-//   os.path.join(HERE, 'x.py') (msg_gate.py loads hiany_lint.py and vevo_nem_ir.py so under `python3 -I`).
+//   os.path.join(HERE, 'x.py') or os.path.join(HERE, '..', 'hooks', 'x.py') (msg_gate.py loads hiany_lint.py,
+//   vevo_nem_ir.py and ../hooks/time-claim-gate.py so under `python3 -I`).
 function depsOf(rel: string): string[] {
   const src = readFileSync(join(ROOT, rel), 'utf8')
   const dir = dirname(rel)
@@ -49,7 +50,10 @@ function depsOf(rel: string): string[] {
       const sib = join(dir, `${m[1] ?? m[2]}.py`)
       if (existsSync(join(ROOT, sib))) out.add(sib)
     }
-    for (const m of src.matchAll(/os\.path\.join\(HERE,\s*'([A-Za-z0-9_.-]+\.py)'\)/g)) out.add(join(dir, m[1]))
+    for (const m of src.matchAll(/os\.path\.join\(\s*HERE,\s*((?:'[A-Za-z0-9_.-]+',\s*)*)'([A-Za-z0-9_.-]+\.py)'\s*\)/g)) {
+      const parts = [...m[1].matchAll(/'([A-Za-z0-9_.-]+)'/g)].map((x) => x[1])
+      out.add(join(dir, ...parts, m[2]))
+    }
   }
   return [...out].filter((p) => existsSync(join(ROOT, p))).sort()
 }
@@ -97,7 +101,7 @@ describe('launchd script pins (LAUNCHDPIN1111)', () => {
     expect(depsOf('scripts/lib/homoglyph.py')).toContain('scripts/lib/mixed_script.py')
     // card 42b5e28a: the word lists msg_gate.py loads by path are part of its closure
     expect(depsOf('scripts/lib/msg_gate.py')).toEqual(
-      expect.arrayContaining(['scripts/lib/hiany_lint.py', 'scripts/lib/vevo_nem_ir.py']),
+      expect.arrayContaining(['scripts/lib/hiany_lint.py', 'scripts/lib/vevo_nem_ir.py', 'scripts/hooks/time-claim-gate.py']),
     )
     for (const file of pinFiles) {
       const pinned = new Set(readPins(file).map((p) => p.path))
