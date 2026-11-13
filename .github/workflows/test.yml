@@ -146,6 +146,9 @@ jobs:
       # LINKKAPU1112 (Patrik TG 17974, TG 18022 "a linket kértem"): a reply to a chat whose latest inbound
       # message asks for a link carries a URL or a "LINK-NINCS: <why>" line. Pure check(), no ledger, no network.
       - run: python3 -I scripts/hooks/link-request-reply-gate_test.py
+      # UPDATEAPPLY1113 (Klodel 39791, card 840231cf): no direct marveen-update-safe.py --apply from an agent shell,
+      # only through the approval gate. Hermetic: the commands are text only.
+      - run: python3 -I scripts/hooks/update-apply-gate_test.py
       # UPDATESAFE1113 (Klodel 39777, card 840231cf): update.sh wrapper that parks carried-over files, merges the
       # local settings.json difference back and stops before a drop. Hermetic: throw-away git repos, fake update.sh.
       - run: python3 -I scripts/__tests__/marveen-update-safe.test.py

@@ -58,6 +58,8 @@ export const KNOWN_HOOK_SCRIPTS: readonly string[] = [
   'memory-frontmatter-bash-gate.py',
   // Klodel 38401: no guessed "measured at" time in shared/*.md or a card comment.
   'time-claim-gate.py',
+  // Klodel 39791: no direct marveen-update-safe.py --apply; only through the approval gate.
+  'update-apply-gate.py',
   // The /clear continuity pair: SessionEnd capture + SessionStart replay.
   'clear-capture.py',
   'clear-replay.py',
