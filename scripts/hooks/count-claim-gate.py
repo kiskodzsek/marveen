@@ -13,7 +13,11 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     transcript_path first). Opt-in, because counts and ids are in almost every report of the fleet; another agent
     joins by adding its id here, in its own PR.
   - Only a command that sends an inter-agent message or closes one with a result (agent-msg.sh, a
-    <name>-msg.sh / msg-close.sh wrapper, /api/messages) or posts a card comment (/api/kanban/.../comments).
+    <name>-msg.sh / msg-close.sh wrapper, a POST to /api/messages, or a /api/messages/<id> call whose judged text
+    carries a "result" key) or posts a card comment (/api/kanban/.../comments).
+    READ-ONLY (Klodel 39980, measured 2026-11-13: three blocks of Kernel's own calls in one morning): a GET of
+    /api/messages/<id> or /api/messages?..., and a status-only PUT /api/messages/<id> ({"status":"done"}) carry no
+    claim to anyone; the id in their URL or in the script that loops over them is an address, not a claim.
   - Judged, each on its own (a MÉRVE: line covers the text it stands in): the command text (heredoc / -d payload) and a --data-binary @file, --data @file, -d @file or
     `< file` body when it is a regular file of at most 64 KB. A literal "\\n" (a JSON string's line break) counts
     as a line break.
@@ -44,7 +48,10 @@ import sys
 AGENTS = {
     'kernel': 'Klodel 39869: three guessed concrete values on 11-12 and 11-13 (hash, msg id, count)',
 }
-SEND_RX = re.compile(r'(?<![\w-])(?:[a-z]+-msg|msg-close)\.sh(?![\w-])|/api/messages(?![\w-])')
+SEND_RX = re.compile(r'(?<![\w-])(?:[a-z]+-msg|msg-close)\.sh(?![\w-])|/api/messages(?![\w/?-])')
+# /api/messages/<id> (or a template like /api/messages/{i}): a send only when a result is written (close + notify).
+MSG_ITEM_RX = re.compile(r'/api/messages/')
+RESULT_KEY_RX = re.compile(r'[\'"]result[\'"][ \t]*:')
 CARD_RX = re.compile(r'/api/kanban/[^\s/\'"]+/comments')
 NOUNS = (r'db|darab|komment\w*|blokk\w*|sor(?:a|t|ok\w*|ból|ban|ra)?|üzenet\w*|kártyá?\w*|fájl\w*|eset\w*|'
          r'találat\w*|hibá?\w*|oldal\w*|PR\w*|commit\w*|teszt\w*|mutáns\w*|ügynök\w*')
@@ -119,13 +126,20 @@ def verdict(payload):
         return None
     ti = payload.get('tool_input')
     cmd = ti.get('command') if isinstance(ti, dict) else None
-    if not isinstance(cmd, str) or not (SEND_RX.search(cmd) or CARD_RX.search(cmd)):
+    if not isinstance(cmd, str):
+        return None
+    send = bool(SEND_RX.search(cmd) or CARD_RX.search(cmd))
+    item = not send and bool(MSG_ITEM_RX.search(cmd))
+    if not send and not item:
         return None
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import ledger_lib
     if ledger_lib.agent_id_from_payload(payload) not in AGENTS:
         return None
-    for t in judged_texts(cmd, payload.get('cwd')):
+    texts = judged_texts(cmd, payload.get('cwd'))
+    if item and not any(RESULT_KEY_RX.search(t) for t in texts):
+        return None  # a read or a status-only close of /api/messages/<id>: nothing is claimed to anyone
+    for t in texts:
         reason = check_text(t)
         if reason:
             return reason

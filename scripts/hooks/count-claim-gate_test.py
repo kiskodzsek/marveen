@@ -128,6 +128,42 @@ def other_tools_and_garbage_pass(root):
             and run(root, None, raw=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 5}}))[0] == 0)
 
 
+GET_ONE = "curl -s -H 'Authorization: Bearer x' http://localhost:3420/api/messages/40094"
+LIST = "curl -s -H 'Authorization: Bearer x' 'http://localhost:3420/api/messages?agent=kernel&limit=60'"
+
+
+@case
+def read_only_and_status_only_message_calls_pass(root):
+    # Klodel 39980: three of Kernel's own reads / status-only closes were blocked on 11-13 because an id stood in the
+    # command. A GET, a list, a status-only PUT and a script looping over ids claim nothing to anyone.
+    script = os.path.join(root, 'close.py')
+    with open(script, 'w') as fh:
+        fh.write("for i in (40094, 40081):\n    put(f'/api/messages/{i}', {'status': 'done'})\n")
+    return (run(root, GET_ONE)[0] == 0
+            and run(root, LIST + ' # 40050 40048')[0] == 0
+            and run(root, CLOSE + '{"status":"done"}\nJSON')[0] == 0
+            and run(root, "cat > close.py <<'EOF'\nfor i in (40094, 40081):\n    put(f'/api/messages/{i}', "
+                          "{'status': 'done'})\nEOF\npython3 -I close.py")[0] == 0
+            and run(root, f'python3 -I {script}')[0] == 0)
+
+
+@case
+def NEG_a_close_with_a_result_is_still_judged(root):
+    # The narrowing must not open the close-with-result path: inline and in a payload file.
+    payload = os.path.join(root, 'res.json')
+    with open(payload, 'w') as fh:
+        fh.write('{"status":"done","notify":true,"result":"963 komment, 0 elengedett"}')
+    # Known limit, unchanged by this fix: a script FILE run with python3 is not read (only payload files are).
+    return (run(root, CLOSE + '{"status":"done","result":"963 komment, 0 elengedett"}\nJSON')[0] == 2
+            and run(root, GET_ONE.replace('curl -s', 'curl -s -X PUT') + f' --data-binary @{payload}')[0] == 2)
+
+
+@case
+def NEG_a_new_message_post_is_still_judged(root):
+    post = ("curl -s -X POST http://localhost:3420/api/messages -H 'Content-Type: application/json' "
+            "--data-binary @- <<'JSON'\n{\"from\":\"kernel\",\"to\":\"klodel\",\"content\":\"29 új blokk\"}\nJSON")
+    return run(root, post)[0] == 2
+
 def main():
     failed = 0
     for fn in CASES:
