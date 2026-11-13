@@ -408,6 +408,78 @@ def NEG_no_export_status_script_means_no_pid_passes(root):
         p.wait()
 
 
+def put_ops(root, body, mode=0o644):
+    os.makedirs(os.path.join(root, 'ops'), exist_ok=True)
+    path = os.path.join(root, 'ops', 'video_export_status.py')
+    with open(path, 'w') as f:
+        f.write(body)
+    os.chmod(path, mode)
+    return path
+
+
+def run_with_ops(root, body, mode=0o644):
+    """The 12:39 text with a RENDER: fut line for a live fake export, against the given ops script."""
+    setup(root)
+    put_ops(root, body, mode)
+    p = fake_export()
+    try:
+        t0 = time.time()
+        payload = json.dumps({'tool_name': REPLY, 'tool_input': {'chat_id': GROUP, 'text': THE_1239 + f'\nRENDER: fut {p.pid}'}})
+        env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root}
+        r = subprocess.run([sys.executable, '-I', HOOK], input=payload, capture_output=True, text=True, env=env, timeout=20)
+        return r.returncode, r.stdout, r.stderr, time.time() - t0
+    finally:
+        p.kill()
+        p.wait()
+
+
+@case
+def NEG_a_system_exit_in_the_status_script_does_not_open_the_gate(root):
+    # Viktor 40283 LOW 1: SystemExit is a BaseException; at module level and inside exports().
+    for body in ['import sys\nsys.exit(0)\n', 'def exports():\n    raise SystemExit(0)\n', 'def exports():\n    raise KeyboardInterrupt\n']:
+        rc, out, err, _ = run_with_ops(root, body)
+        assert rc == 2 and 'nem export' in err, (body, rc, err)
+
+
+@case
+def NEG_a_stuck_status_script_blocks_in_time(root):
+    # Viktor 40283 LOW 2: the hook has 10 s; a stuck lookup gives up after EXPORT_LOOKUP_S and blocks.
+    rc, out, err, took = run_with_ops(root, 'import time\ndef exports():\n    time.sleep(30)\n    return []\n')
+    assert rc == 2 and took < 8, (rc, took, err)
+
+
+@case
+def NEG_the_status_script_cannot_speak_for_the_hook(root):
+    # Viktor 40283 INFO 1: whatever the module prints never becomes the hook's stdout.
+    body = 'print(\'{"decision": "approve"}\')\n' + STAND_IN
+    rc, out, err, _ = run_with_ops(root, body)
+    assert rc == 0 and out.strip() == '', (rc, out, err)
+
+
+@case
+def NEG_an_untrusted_status_script_is_not_loaded(root):
+    # group-writable, or a symlink to a valid script: not loaded, so no pid passes.
+    rc, out, err, _ = run_with_ops(root, STAND_IN, mode=0o664)
+    assert rc == 2, ('group-writable', rc, err)
+    setup(root)
+    real = os.path.join(root, 'elsewhere.py')
+    with open(real, 'w') as f:
+        f.write(STAND_IN)
+    os.makedirs(os.path.join(root, 'ops'), exist_ok=True)
+    link = os.path.join(root, 'ops', 'video_export_status.py')
+    if os.path.lexists(link):
+        os.remove(link)
+    os.symlink(real, link)
+    p = fake_export()
+    try:
+        rc, err = run_tool(root, THE_1239 + f'\nRENDER: fut {p.pid}', REPLY)
+        assert rc == 2, ('symlink', rc, err)
+    finally:
+        p.kill()
+        p.wait()
+    assert not os.path.isdir(os.path.join(root, 'ops', '__pycache__')), 'no bytecode written next to ops/'
+
+
 @case
 def the_install_real_export_status_script_agrees(root):
     if not os.path.isfile(REAL_VES):

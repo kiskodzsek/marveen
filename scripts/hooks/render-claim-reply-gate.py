@@ -171,17 +171,56 @@ RENDER_LINE = re.compile(r'(?mi)^[ \t]*(?:[-*>][ \t]*)?render:[ \t]*(?:fut[ \t]+
 COND_HINT = "indítsd el most, a kérdés közben fusson; vagy 'RENDER: nem-kell <indok>'"
 
 
+EXPORT_LOOKUP_S = 3  # the hook itself has 10 s (.claude/settings.json); a stuck ps must not run into it
+
+
+def _export_status_path():
+    """<install>/ops/video_export_status.py, only if it is a regular file (not a symlink) owned by us and not writable
+    by group or others (ops/ is install-local and not hash-reviewed, Viktor 40283 INFO 1). None otherwise."""
+    p = os.path.join(ROOT, 'ops', 'video_export_status.py')
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return None
+    import stat as _stat
+    if not _stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o022:
+        return None
+    return p
+
+
 def running_export_pids():
     """The pids <install>/ops/video_export_status.py lists as exports right now (ops/ is install-local, not in git).
-    Empty when it is missing or fails: then only 'RENDER: nem-kell' lets the text go."""
-    try:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location('video_export_status', os.path.join(ROOT, 'ops', 'video_export_status.py'))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return {str(r[0]) for r in mod.exports()}
-    except Exception:
+    Empty -- so only 'RENDER: nem-kell' lets the text go -- when the file is missing or not trusted, when loading or
+    running it raises ANYTHING (SystemExit and KeyboardInterrupt too, Viktor 40283 LOW 1), or when it takes longer
+    than EXPORT_LOOKUP_S (LOW 2). Its stdout is swallowed: only this hook's own verdict may reach the harness."""
+    path = _export_status_path()
+    if path is None:
         return set()
+    import contextlib
+    import importlib.util
+    import io
+    import signal
+
+    class _Late(BaseException):
+        pass
+
+    def _late(_sig, _frame):
+        raise _Late()
+
+    old = signal.signal(signal.SIGALRM, _late)
+    signal.alarm(EXPORT_LOOKUP_S)
+    try:
+        sys.dont_write_bytecode = True
+        with contextlib.redirect_stdout(io.StringIO()):
+            spec = importlib.util.spec_from_file_location('video_export_status', path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return {str(r[0]) for r in mod.exports()}
+    except BaseException:
+        return set()
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 def conditional_claims(text):
