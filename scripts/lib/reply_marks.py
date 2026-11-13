@@ -1,4 +1,4 @@
-"""Reply marks: the gate markers (PRIVÁT-OK, KÉSZ-EREDMÉNY, BALÁZS-KÉRÉS, BELSŐ-ÚT-MÉRVE) kept OUT of the text the
+"""Reply marks: the gate markers (PRIVÁT-OK, KÉSZ-EREDMÉNY, BALÁZS-KÉRÉS, BELSŐ-ÚT-MÉRVE, PATRIK-LÉPÉS) kept OUT of the text the
 owner reads (Klodel 40845: "ne Patriknak látszó szövegben legyen"; Viktor 40894 conditions).
 
 An agent writes a mark with scripts/reply-mark.py right before it sends; a gate takes it when the message passes.
@@ -28,7 +28,7 @@ import secrets
 import stat
 import time
 
-KINDS = ('PRIVAT-OK', 'KESZ-EREDMENY', 'BALAZS-KERES', 'BELSO-UT-MERVE')
+KINDS = ('PRIVAT-OK', 'KESZ-EREDMENY', 'BALAZS-KERES', 'BELSO-UT-MERVE', 'PATRIK-LEPES')
 TTL_S = 180
 TAIL_BYTES = 64 * 1024
 MAX_LINE = 1024

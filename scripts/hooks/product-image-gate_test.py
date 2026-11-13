@@ -2698,7 +2698,8 @@ def NEG_marker_line_in_text_refused_private_group_edit(root):
     out = []
     for chat, tool in ((PRIV, None), (GROUP, None), (PRIV, 'mcp__plugin_telegram_telegram__edit_message')):
         for text in ('PRIVÁT-OK: Patrik privátban kérdezte\nKész.', 'KÉSZ-EREDMÉNY: a kért képek', '- BALÁZS-KÉRÉS: TG 5918',
-                     'BELSŐ-ÚT-MÉRVE: 40800', 'PRIVAT-OK: ekezet nelkul', 'priv\u200bát-ok: x'):
+                     'BELSŐ-ÚT-MÉRVE: 40800', 'PRIVAT-OK: ekezet nelkul', 'priv\u200bát-ok: x',
+                     'PATRIK-LÉPÉS: mira 41144', '- patrik-lepes: kernel 41198'):
             ti = {'chat_id': chat, 'text': text}
             env_run = run_tool(root, tool, ti, raw=True) if tool else run(root, ti, raw=True)
             if chat == GROUP:

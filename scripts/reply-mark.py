@@ -4,7 +4,8 @@
   python3 -I scripts/reply-mark.py <KIND> --chat <chat_id | privat | csoport> "<value>"
 
 KIND: PRIVAT-OK (why private) | KESZ-EREDMENY (what finished result) | BALAZS-KERES (TG <message id>) |
-BELSO-UT-MERVE (msg_id of the internal route measured). One mark = one message, 3 minutes, this agent and chat only
+BELSO-UT-MERVE (msg_id of the internal route measured) |
+PATRIK-LEPES (who measured that there is no internal route, and that msg_id: patrik-step-reply-gate.py). One mark = one message, 3 minutes, this agent and chat only
 (scripts/lib/reply_marks.py). Klodel 40845: the owner never sees these markers; Viktor 40894.
 """
 import os
@@ -17,7 +18,7 @@ import reply_marks  # noqa: E402
 import owner_chat  # noqa: E402
 
 ALIASES = {'PRIVÁT-OK': 'PRIVAT-OK', 'KÉSZ-EREDMÉNY': 'KESZ-EREDMENY', 'BALÁZS-KÉRÉS': 'BALAZS-KERES',
-           'BELSŐ-ÚT-MÉRVE': 'BELSO-UT-MERVE'}
+           'BELSŐ-ÚT-MÉRVE': 'BELSO-UT-MERVE', 'PATRIK-LÉPÉS': 'PATRIK-LEPES'}
 
 
 def agent_id():
