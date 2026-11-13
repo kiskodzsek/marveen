@@ -106,6 +106,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of link-request-reply-gate.py (run: python3 -I scripts/hooks/link-request-reply-gate_test.py); not itself a hook (#219, card 18b2002b)',
   'pr-kerdes-gate_test.py':
     'the unit test of pr-kerdes-gate.py and scripts/pr-kerdes.py (run: python3 -I scripts/hooks/pr-kerdes-gate_test.py); not itself a hook',
+  'update-apply-gate_test.py':
+    'the unit test of update-apply-gate.py (run: python3 -I scripts/hooks/update-apply-gate_test.py); not itself a hook (Klodel 39791)',
   'render_claim_lib.py':
     'shared library imported by render-claim-reply-gate.py (the store/video-export-status.json reader); not itself a hook',
   'mio-orszem-precheck.sh':
