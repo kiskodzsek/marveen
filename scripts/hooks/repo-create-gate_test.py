@@ -19,6 +19,7 @@ FAILS = []
 
 def run(payload):
     p = subprocess.run([sys.executable, '-I', GATE], input=json.dumps(payload), capture_output=True, text=True,
+                       env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'},
                        timeout=20)
     return p.returncode, p.stderr
 
@@ -76,6 +77,66 @@ expect('MCP create_repository blocks', run({'tool_name': 'mcp__github__create_re
                                             'tool_input': {'name': 'x', 'private': True}}), 2)
 expect('MCP fork_repository blocks', run({'tool_name': 'mcp__gh__fork_repository',
                                           'tool_input': {'owner': 'a', 'repo': 'b'}}), 2)
+
+# --- Viktor 40095 L1: a question is not an approval; the quote must stand in the ledger row -----------------------
+INCIDENT_Q = 'PATRIK-KERTE: TG 18152 "nyilván kell egy repo, nem????"'
+expect('NEG the incident question as the quote blocks', bash(f'gh repo create x --private  # {INCIDENT_Q}'), 2)
+
+
+def ledger_run(cmd, rows):
+    import sqlite3
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, 'claudeclaw.db')
+        con = sqlite3.connect(db)
+        con.execute('CREATE TABLE conversation_log (id INTEGER PRIMARY KEY, agent_id TEXT, chat_id TEXT, '
+                    'direction TEXT, message_id TEXT, text TEXT, created_at INTEGER)')
+        for mid, text in rows:
+            con.execute("INSERT INTO conversation_log (agent_id, chat_id, direction, message_id, text, created_at) "
+                        "VALUES ('main', '1', 'in', ?, ?, 0)", (mid, text))
+        con.commit()
+        con.close()
+        p = subprocess.run([sys.executable, '-I', GATE], input=json.dumps(
+            {'tool_name': 'Bash', 'tool_input': {'command': cmd}}), capture_output=True, text=True,
+            env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': db}, timeout=20)
+        log = os.path.join(d, 'repo-create-gate.log')
+        return p.returncode, (open(log).read() if os.path.exists(log) else '')
+
+
+OKQ = 'PATRIK-KERTE: TG 18160 "csinálj egy privát repót sajat-rendszer néven"'
+rc, _ = ledger_run(f'gh repo create x --private  # {OKQ}', [('18160', 'Csinálj  egy privát repót sajat-rendszer néven, köszi')])
+expect('ledger row holds the quote -> passes', (rc, ''), 0)
+rc, _ = ledger_run(f'gh repo create x --private  # {OKQ}', [('18160', 'nyilván kell egy repo, nem????')])
+expect('NEG ledger row exists but the quote is not in it -> blocks', (rc, ''), 2)
+rc, log = ledger_run(f'gh repo create x --private  # {OKQ}', [('99999', 'más üzenet')])
+expect('id not in the ledger -> passes, and is logged', (rc if 'not in the ledger' in log else 99, ''), 0)
+
+# --- Viktor 40095 L2: accidental paths ---------------------------------------------------------------------------
+expect('NEG GraphQL createRepository blocks',
+       bash("gh api graphql -f query='mutation{createRepository(input:{name:\"x\",visibility:PRIVATE}){repository{url}}}'"), 2)
+expect('NEG Octokit createForAuthenticatedUser blocks',
+       bash("node -e \"octokit.rest.repos.createForAuthenticatedUser({name:'x'})\""), 2)
+expect('NEG Octokit request("POST /user/repos") blocks', bash("node -e \"octokit.request('POST /user/repos', {name:'x'})\""), 2)
+expect('NEG trailing slash on the REST path blocks', bash('gh api -X POST /user/repos/ -f name=x'), 2)
+with tempfile.TemporaryDirectory() as d:
+    lst = os.path.join(d, 'mk2.py')
+    with open(lst, 'w') as fh:
+        fh.write('import subprocess\nsubprocess.run(["gh", "repo", "create", "x", "--private"])\n')
+    os.chmod(lst, 0o755)
+    expect('NEG subprocess list form in a file blocks', bash(f'python3 {lst}'), 2)
+    expect('NEG direct ./script execution blocks', bash('./mk2.py', cwd=d), 2)
+    expect('NEG npx tsx / source of a named file blocks', bash(f'npx tsx {lst}'), 2)
+
+# --- talking about it is not doing it (5 of 8 hits on 7 days of real calls) ------------------------------------------
+expect('a message that describes the gate passes',
+       bash("bash agent-msg.sh kernel viktor - <<'MSG'\nA kapu blokkolja: gh repo create, POST user/repos.\nMSG"), 0)
+expect('a hibanaplo line about the incident passes',
+       bash("cat >> shared/hibanaplo.md <<'EOF'\n- Klodel gh repo create-del nyitott repót kérdésre.\nEOF"), 0)
+expect('a commit message from a heredoc passes',
+       bash("git commit -q -F - <<'EOF'\nfeat: block gh repo create and POST user/repos\nEOF"), 0)
+expect('NEG a heredoc fed to python that creates a repo still blocks',
+       bash("python3 - <<'PY'\nimport subprocess\nsubprocess.run(['gh','repo','create','x'])\nPY"), 2)
+expect('NEG a heredoc fed to bash that creates a repo still blocks',
+       bash("bash <<'SH'\ngh repo create x --private\nSH"), 2)
 
 # --- POSITIVE: approved creations, reads and unrelated commands pass ---------------------------------------
 expect('gh repo create with PATRIK-KERTE in the command passes',
