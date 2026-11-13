@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // @ts-expect-error -- plain .mjs script, no type declarations
-import { buildRequest, credentialArgs, gitEnv, logRedirectAllowed, checkBodyPath, checkBodyText, bodyRoots, maskSecrets, frameLog, shape, splitClone, checkCloneDir, forbiddenTree, agentId, headMismatch, writerRefusal, compareRequest, behindRefusal, UsageError } from '../../scripts/gh-pr.mjs'
+import { buildRequest, credentialArgs, gitEnv, logRedirectAllowed, checkBodyPath, checkBodyText, bodyRoots, maskSecrets, frameLog, shape, splitClone, checkCloneDir, forbiddenTree, agentId, headMismatch, writerRefusal, compareRequest, behindRefusal, behindNote, UsageError } from '../../scripts/gh-pr.mjs'
 
 // A PEM block built from parts at run time: the repository's secret-gate (rightly) refuses one written out.
 const PEM_EDGE = '-'.repeat(5)
@@ -63,7 +63,7 @@ describe('gh-pr: the release writes (Pulzus 21:2x, card 54bd5c28), each bound to
     const m = req(`marveen pr merge 134 --sha ${HEAD} --method squash`)
     expect(m).toMatchObject({ method: 'PUT', path: '/repos/kiskodzsek/marveen/pulls/134/merge', kind: 'pr-merge' })
     expect(m.body).toEqual({ sha: HEAD, merge_method: 'squash' })
-    expect(m.expect).toEqual({ path: '/repos/kiskodzsek/marveen/pulls/134', sha: HEAD, state: 'open', liveBase: true, allowBehind: false })
+    expect(m.expect).toEqual({ path: '/repos/kiskodzsek/marveen/pulls/134', sha: HEAD, state: 'open', liveBase: true, allowBehind: null })
     expect(req(`marabel pr merge 1 --method merge --sha ${HEAD}`).body).toEqual({ sha: HEAD, merge_method: 'merge' })
     const c = req(`marabel pr close 1201 --sha ${HEAD}`)
     expect(c).toMatchObject({ method: 'PATCH', path: '/repos/kiskodzsek/marabel/pulls/1201', body: { state: 'closed' } })
@@ -102,15 +102,24 @@ describe('gh-pr: the release writes (Pulzus 21:2x, card 54bd5c28), each bound to
     for (const pr of [null, undefined, 'x', 1]) expect(headMismatch({ sha: HEAD, state: 'open' }, pr)).toMatch(/could not be read/)
   })
   it('R7: only a merge reads the live base; --allow-behind is a merge flag and nothing else\'s', () => {
-    expect(req(`marveen pr merge 9 --sha ${HEAD} --method squash`).expect).toMatchObject({ liveBase: true, allowBehind: false })
-    expect(req(`marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind`).expect).toMatchObject({ liveBase: true, allowBehind: true })
+    expect(req(`marveen pr merge 9 --sha ${HEAD} --method squash`).expect).toMatchObject({ liveBase: true, allowBehind: null })
+    expect(req(`marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind 2`).expect).toMatchObject({ liveBase: true, allowBehind: 2 })
+    expect(req(`marveen pr merge 9 --allow-behind 999999 --sha ${HEAD} --method squash`).expect).toMatchObject({ allowBehind: 999999 })
     for (const s of [`marveen pr review-approve 9 --sha ${HEAD}`, `marveen pr close 9 --sha ${HEAD}`, `marveen pr reopen 9 --sha ${HEAD}`])
       expect(req(s).expect.liveBase).toBeUndefined()
-    // the flag cannot be given twice, with a value, or to any other command
+    // the flag is a measured COUNT: not bare, not 0, not a number the regex does not know, not twice, not on any other command
     for (const s of [
-      `marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind --allow-behind`,
-      `marveen pr review-approve 9 --sha ${HEAD} --allow-behind`, `marveen pr close 9 --sha ${HEAD} --allow-behind`,
-      'marveen pr get 9 --allow-behind', 'marveen branch get main --allow-behind',
+      `marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind`,
+      `marveen pr merge 9 --sha ${HEAD} --allow-behind --method squash`,
+      `marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind 0`,
+      `marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind 01`,
+      `marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind 1000000`,
+      `marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind -1`,
+      `marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind 1.5`,
+      `marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind true`,
+      `marveen pr merge 9 --sha ${HEAD} --method squash --allow-behind 2 --allow-behind 2`,
+      `marveen pr review-approve 9 --sha ${HEAD} --allow-behind 2`, `marveen pr close 9 --sha ${HEAD} --allow-behind 2`,
+      'marveen pr get 9 --allow-behind 2', 'marveen branch get main --allow-behind 2',
     ]) expect({ s, refused: refused(s.split(' ')) }).toEqual({ s, refused: true })
   })
   it('R7: the live-base request is built from a validated base name and the full head, or not at all', () => {
@@ -126,10 +135,22 @@ describe('gh-pr: the release writes (Pulzus 21:2x, card 54bd5c28), each bound to
     expect(behindRefusal({ behind_by: 0, ahead_by: 3 }, 'main')).toBeNull()
     expect(behindRefusal({ behind_by: 1 }, 'main')).toMatch(/1 commit\(s\) behind main.*nobody reviewed/)
     expect(behindRefusal({ behind_by: 12 }, 'main')).toMatch(/12 commit\(s\) behind main/)
-    expect(behindRefusal({ behind_by: 1 }, 'main', true)).toBeNull()
+    // --allow-behind <N> passes only when the live count is exactly N: a bigger count (the base moved), a smaller one, or none given is refused
+    expect(behindRefusal({ behind_by: 2 }, 'main', 2)).toBeNull()
+    expect(behindRefusal({ behind_by: 3 }, 'main', 2)).toMatch(/3 commit\(s\) behind main.*--allow-behind 2 was given, the live count is 3/)
+    expect(behindRefusal({ behind_by: 1 }, 'main', 2)).toMatch(/--allow-behind 2 was given, the live count is 1/)
+    expect(behindRefusal({ behind_by: 2 }, 'main', null)).toMatch(/2 commit\(s\) behind main/)
+    expect(behindRefusal({ behind_by: 2 }, 'main')).toMatch(/2 commit\(s\) behind main/)
+    expect(behindRefusal({ behind_by: 2 }, 'main', true as never)).toMatch(/2 commit\(s\) behind main/) // a boolean is not a count
+    expect(behindRefusal({ behind_by: 0 }, 'main', 5)).toBeNull() // level is level, whatever was allowed
     // fail closed, also with --allow-behind: a missing or odd answer is not "behind by zero"
     for (const cmp of [null, undefined, 'x', 1, {}, { behind_by: '0' }, { behind_by: -1 }, { behind_by: 1.5 }, { behind_by: null }, { behind_by: NaN }])
-      for (const allow of [false, true]) expect({ cmp, allow, r: behindRefusal(cmp, 'main', allow) }).toMatchObject({ cmp, allow, r: 'the head could not be compared with the live base' })
+      for (const allow of [null, 1, 2]) expect({ cmp, allow, r: behindRefusal(cmp, 'main', allow) }).toMatchObject({ cmp, allow, r: 'the head could not be compared with the live base' })
+  })
+  it('R7: the audit note behind-allowed is written only for a behind head whose count was allowed and matched', () => {
+    expect(behindNote({ behind_by: 2 }, 2)).toBe('behind-allowed')
+    for (const [cmp, allow] of [[{ behind_by: 0 }, 2], [{ behind_by: 0 }, null], [{ behind_by: 2 }, null], [{ behind_by: 3 }, 2], [{ behind_by: 2 }, true],
+      [null, 2], [{}, 2], [{ behind_by: '2' }, 2], [{ behind_by: -2 }, -2]]) expect({ cmp, allow, r: behindNote(cmp, allow as never) }).toEqual({ cmp, allow, r: undefined })
   })
   it('R7: the live-base read sits between the head guard and the write, refuses before any write, and audits refused-behind', () => {
     const src = readFileSync(SCRIPT, 'utf-8')
@@ -143,6 +164,7 @@ describe('gh-pr: the release writes (Pulzus 21:2x, card 54bd5c28), each bound to
     expect(block).toContain('compareRequest(req.repo, pr.base?.ref, req.expect.sha)')
     expect(block).toContain("method: 'GET'")
     expect(block).toContain('behindRefusal(cmp, pr.base.ref, req.expect.allowBehind)')
+    expect(block).toContain('behindNote(cmp, req.expect.allowBehind)')
     expect(block).toMatch(/audit\(\{ \.\.\.row, status: 'refused-behind' \}\)\s*\n\s*throw new Error/)
     // a failed or unparsable compare is a null answer, never a pass
     expect(block).toMatch(/cmp = c\.ok \? JSON\.parse\(await c\.text\(\)\) : null/)

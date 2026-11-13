@@ -28,10 +28,13 @@ if ! grep -q "marveen-pre-push-dispatcher" "$DISPATCH" 2>/dev/null; then
 fi
 mkdir -p "$HOOK_DIR/pre-push.d"
 
+# printf %q: a path with a space, a quote or a $ stays ONE shell word in the stub and is never expanded there
+# (Viktor 41344 INFO 8); a plain "$GATE" between double quotes would let a `$` or a backtick in the path run.
+GATE_Q="$(printf '%q' "$GATE")"
 cat > "$STUB" <<EOF
 #!/usr/bin/env bash
 # related-tests-gate stub (scripts/install-git-related-tests-hook.sh): run the tracked gate, fail closed.
-GATE="$GATE"
+GATE=$GATE_Q
 [ -f "\$GATE" ] || { echo "BLOCKED: related-tests gate script missing: \$GATE" >&2; exit 1; }
 exec bash "\$GATE" "\$@"
 EOF

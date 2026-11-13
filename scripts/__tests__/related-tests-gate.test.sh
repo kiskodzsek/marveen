@@ -3,8 +3,9 @@
 # Run: bash scripts/__tests__/related-tests-gate.test.sh
 #
 # Hermetic: a temp bare "origin" and a temp clone that carries copies of the installers and the gate; the
-# installer writes into THAT clone's .git/hooks. `npx` is a PATH shim that records its arguments and exits with
-# the code the case wants, so no vitest runs and nothing touches the network or this checkout's hooks.
+# installer writes into THAT clone's .git/hooks. The clone's node_modules/.bin/vitest is a shim that records its
+# arguments and the GIT_* variables it sees and exits with the code the case wants, so no real vitest runs and
+# nothing touches the network or this checkout's hooks.
 #
 # Asserts: a push that changes scripts/hooks/* or .claude/settings.json runs the two corpus scans plus the tests
 # that name the changed hook, and a failing test STOPS the push (the branch never reaches origin); a push that
@@ -21,16 +22,19 @@ fail() { FAIL=$((FAIL + 1)); echo "  FAIL: $1"; }
 SRC="$(cd "$(dirname "$0")/../.." && pwd)"
 ORIGIN="$TMP/origin.git"
 CLONE="$TMP/clone"
-SHIM="$TMP/shim"
-CALLS="$TMP/npx-calls.log"
-mkdir -p "$SHIM"
-cat > "$SHIM/npx" <<'EOF'
+CALLS="$TMP/vitest-calls.log"
+ENVLOG="$TMP/vitest-env.log"
+export NPX_CALLS="$CALLS" VT_ENV="$ENVLOG"
+make_vitest() { # the shim lives in the clone's node_modules/.bin, where the gate looks for it
+  mkdir -p "$CLONE/node_modules/.bin"
+  cat > "$CLONE/node_modules/.bin/vitest" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$NPX_CALLS"
+echo "GIT_DIR=${GIT_DIR:-} GIT_INDEX_FILE=${GIT_INDEX_FILE:-} GIT_WORK_TREE=${GIT_WORK_TREE:-}" >> "$VT_ENV"
 exit "${NPX_RC:-0}"
 EOF
-chmod +x "$SHIM/npx"
-export NPX_CALLS="$CALLS"
+  chmod +x "$CLONE/node_modules/.bin/vitest"
+}
 
 git_q() { git -C "$CLONE" -c user.email=t@t -c user.name=t "$@"; }
 
@@ -45,7 +49,7 @@ echo "{}" > "$CLONE/.claude/settings.json"
 echo "base" > "$CLONE/README.md"
 git_q checkout -q -b main 2>/dev/null
 git_q add -A && git_q commit -q -m base && git_q push -q origin main 2>/dev/null
-mkdir -p "$CLONE/node_modules"; echo "node_modules/" > "$CLONE/.gitignore"; git_q add .gitignore && git_q commit -q -m ignore && git_q push -q origin main 2>/dev/null
+make_vitest; echo "node_modules/" > "$CLONE/.gitignore"; git_q add .gitignore && git_q commit -q -m ignore && git_q push -q origin main 2>/dev/null
 
 echo "== installer"
 ( cd "$TMP" && bash "$CLONE/scripts/install-git-related-tests-hook.sh" >/dev/null 2>&1 ) && pass "installer runs from another cwd" || fail "installer failed"
@@ -59,7 +63,7 @@ H1="$(shasum "$STUB" | cut -d' ' -f1)"
 [ ! -e "$SRC/.git/hooks/pre-push.d/20-related-tests-gate" ] || [ "$SRC" = "$CLONE" ] && pass "this checkout's hooks were not written by the test" || fail "test wrote into the real repo"
 
 push() { # <branch> -> exit code of git push, output in $TMP/push.out
-  PATH="$SHIM:$PATH" git -C "$CLONE" push -q origin "$1" >"$TMP/push.out" 2>&1
+  git -C "$CLONE" push -q origin "$1" >"$TMP/push.out" 2>&1
 }
 on_origin() { git -C "$ORIGIN" rev-parse -q --verify "refs/heads/$1" >/dev/null 2>&1; }
 new_branch() { git_q checkout -q main && git_q checkout -q -b "$1" && mkdir -p "$CLONE/scripts/hooks"; }
@@ -110,8 +114,58 @@ mv "$CLONE/scripts/git-hooks/related-tests-gate.sh" "$CLONE/scripts/git-hooks/re
 NPX_RC=0 push nomods && fail "gate script missing but pushed" || pass "missing gate script: the stub refuses"
 mv "$CLONE/scripts/git-hooks/related-tests-gate.sh.off" "$CLONE/scripts/git-hooks/related-tests-gate.sh"
 
+echo "== cannot check: new refusals (Viktor 41344 LOW 3, INFO 5)"
+new_branch nobin
+echo "print('b')" > "$CLONE/scripts/hooks/nobin-gate.py"; git_q add -A && git_q commit -qm "hook nobin"
+mv "$CLONE/node_modules/.bin/vitest" "$CLONE/node_modules/.bin/vitest.off"
+NPX_RC=0 push nobin && fail "node_modules without .bin/vitest but pushed" || pass "node_modules present, no .bin/vitest: refused (no npx fallback)"
+grep -q "node_modules/.bin/vitest" "$TMP/push.out" && pass "the refusal names the missing binary" || fail "refusal does not name the binary"
+mv "$CLONE/node_modules/.bin/vitest.off" "$CLONE/node_modules/.bin/vitest"
+: > "$CALLS"; new_branch untracked
+echo "print('u')" > "$CLONE/scripts/hooks/tracked-gate.py"; git_q add -A && git_q commit -qm "hook untracked"
+echo "print('forgot git add')" > "$CLONE/scripts/hooks/forgotten-gate.py"
+NPX_RC=0 push untracked && fail "untracked hook file but pushed" || pass "an untracked new hook file: refused"
+grep -q "forgotten-gate.py" "$TMP/push.out" && pass "the refusal lists the untracked file" || fail "untracked file not listed"
+[ ! -s "$CALLS" ] && pass "refused before any test ran" || fail "tests ran despite the untracked file"
+rm -f "$CLONE/scripts/hooks/forgotten-gate.py"
+NPX_RC=0 push untracked && on_origin untracked && pass "after removing it, the same branch goes" || fail "clean branch blocked: $(cat "$TMP/push.out")"
+
+echo "== a hook moved OUT of scripts/hooks still gates (--no-renames, INFO 6)"
+git_q checkout -q main
+mkdir -p "$CLONE/scripts/hooks"
+echo "print('m')" > "$CLONE/scripts/hooks/moved-gate.py"; git_q add -A && git_q commit -qm "add moved-gate" && git_q push -q origin main 2>/dev/null
+: > "$CALLS"; new_branch moved
+mkdir -p "$CLONE/scripts/elsewhere"
+git_q mv scripts/hooks/moved-gate.py scripts/elsewhere/moved-gate.py && git_q commit -qm "move hook out"
+NPX_RC=0 push moved && on_origin moved && pass "green: the move pushes" || fail "move push blocked: $(cat "$TMP/push.out")"
+[ -s "$CALLS" ] && pass "the tests ran for the move (old path seen as deleted)" || fail "a hook moved out of scripts/hooks slipped past the gate"
+: > "$CALLS"; new_branch movedred
+mkdir -p "$CLONE/scripts/elsewhere"
+git_q mv scripts/hooks/moved-gate.py scripts/elsewhere/moved-gate.py && git_q commit -qm "move hook out, red"
+NPX_RC=1 push movedred && fail "red tests but the move went" || pass "red tests stop the move"
+
+echo "== the GIT_* variables of a hook never reach vitest (INFO 7)"
+: > "$ENVLOG"; new_branch envdrop
+echo "print('e')" > "$CLONE/scripts/hooks/env-gate.py"; git_q add -A && git_q commit -qm "hook env"
+ENV_SHA="$(git -C "$CLONE" rev-parse HEAD)"
+( cd "$CLONE" && echo "refs/heads/envdrop $ENV_SHA refs/heads/envdrop 0000000000000000000000000000000000000000" \
+    | GIT_DIR="$CLONE/.git" GIT_INDEX_FILE="$CLONE/.git/index" GIT_WORK_TREE="$CLONE" NPX_RC=0 bash scripts/git-hooks/related-tests-gate.sh origin x ) >"$TMP/push.out" 2>&1 \
+  && pass "the gate ran with GIT_* set" || fail "gate failed under GIT_*: $(cat "$TMP/push.out")"
+[ -s "$ENVLOG" ] && ! grep -v '^GIT_DIR= GIT_INDEX_FILE= GIT_WORK_TREE=$' "$ENVLOG" | grep -q . && pass "vitest saw no GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE" || fail "vitest inherited a GIT_* variable: $(cat "$ENVLOG")"
+
+echo "== installer: a path with a space and a \$ stays one word (INFO 8)"
+WEIRD="$TMP/we ird \$HOME dir/repo"
+mkdir -p "$WEIRD/scripts/git-hooks"
+git init -q "$WEIRD" 2>/dev/null
+cp "$SRC/scripts/git-hooks/related-tests-gate.sh" "$WEIRD/scripts/git-hooks/"
+cp "$SRC/scripts/install-git-related-tests-hook.sh" "$SRC/scripts/install-git-guard-hook.sh" "$WEIRD/scripts/"
+( cd "$TMP" && bash "$WEIRD/scripts/install-git-related-tests-hook.sh" >/dev/null 2>&1 ) && pass "installer runs in a path with a space and a \$" || fail "installer failed in the odd path"
+WSTUB="$WEIRD/.git/hooks/pre-push.d/20-related-tests-gate"
+( cd "$WEIRD" && bash "$WSTUB" </dev/null ) >"$TMP/push.out" 2>&1 && pass "the stub finds the gate (exit 0 on an empty ref list)" || fail "stub did not reach the gate: $(cat "$TMP/push.out")"
+grep -q '^GATE=' "$WSTUB" && ! grep -q '^GATE="' "$WSTUB" && pass "the path is escaped, not double-quoted" || fail "stub still double-quotes the path: $(grep GATE= "$WSTUB")"
+
 echo "== a branch deletion passes"
-PATH="$SHIM:$PATH" git -C "$CLONE" push -q origin ":plain" >"$TMP/push.out" 2>&1 && ! on_origin plain && pass "deletion goes" || fail "deletion blocked: $(cat "$TMP/push.out")"
+git -C "$CLONE" push -q origin ":plain" >"$TMP/push.out" 2>&1 && ! on_origin plain && pass "deletion goes" || fail "deletion blocked: $(cat "$TMP/push.out")"
 
 echo ""
 echo "related-tests-gate: $PASS passed, $FAIL failed"

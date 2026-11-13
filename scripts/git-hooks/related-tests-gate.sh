@@ -12,7 +12,8 @@
 #   - hook-registration-completeness and project-settings-hook-anchor must pass (always), and
 #   - every test file that names a changed hook (by file stem) must pass.
 # FAIL-CLOSED: when the check cannot be run (the ref is not the checked-out HEAD, the tracked tree is dirty, no
-# node_modules, no merge-base, vitest missing) the push is refused, with the reason and what to do. A push that
+# node_modules/.bin/vitest, untracked files under scripts/ src/ .claude/ templates/, no merge-base) the push is
+# refused, with the reason and what to do. A push that
 # touches none of those paths passes at once and runs nothing.
 #
 # Known limits, said so nobody reads this as a wall:
@@ -52,7 +53,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     refuse "no merge-base of ${local_ref} with origin/main (git fetch origin first)."
     continue
   }
-  changed="$(git diff --name-only "$base" "$local_sha")"
+  # --no-renames: a hook moved OUT of scripts/hooks (git mv) must still show its old path (Viktor 41344 INFO 6).
+  changed="$(git diff --name-only --no-renames "$base" "$local_sha")"
 
   gated=""
   while IFS= read -r f; do
@@ -74,8 +76,17 @@ EOF
       "Commit or revert the changes, then push."
     continue
   fi
-  if [ ! -e node_modules ]; then
-    refuse "no node_modules in ${TOP}; vitest cannot run." \
+  # An untracked file is on disk for the tests but not in the commit: the forgotten `git add` of a new hook or
+  # test is exactly this defect class (Viktor 41344 INFO 5). Ignored paths (node_modules) do not show here.
+  untracked="$(git status --porcelain --untracked-files=all -- scripts src .claude templates | head -5)"
+  if [ -n "$untracked" ]; then
+    refuse "uncommitted or untracked files under scripts/ src/ .claude/ templates/; the tests would see files the push does not carry." \
+      "$untracked" "git add and commit them (or remove them), then push."
+    continue
+  fi
+  # The local vitest binary only: `npx` would try to fetch one from the public registry (Viktor 41344 LOW 3).
+  if [ ! -x node_modules/.bin/vitest ]; then
+    refuse "no node_modules/.bin/vitest in ${TOP}; the tests cannot run." \
       "bash scripts/deps-store.sh ${TOP}, then bash scripts/worktree-add.sh again, or run the tests where node_modules exists."
     continue
   fi
@@ -105,8 +116,10 @@ EOF
   # shellcheck disable=SC2086
   set -- $tests
   set +f
-  # stdin from /dev/null: this loop reads the ref list on stdin and vitest must not eat it.
-  if ! npx vitest run "$@" >&2 </dev/null; then
+  # stdin from /dev/null: this loop reads the ref list on stdin and vitest must not eat it. The GIT_* variables
+  # git sets for a hook are dropped, so a test that runs git in a temp directory cannot act on THIS repository
+  # (Viktor 41344 INFO 7).
+  if ! env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE node_modules/.bin/vitest run "$@" >&2 </dev/null; then
     refuse "the tests above failed on ${local_sha:0:8}; the push does not go." \
       "Fix them, commit, and push again (CI would go red on the same ones)."
   fi
