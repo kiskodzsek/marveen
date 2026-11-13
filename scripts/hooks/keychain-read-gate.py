@@ -30,11 +30,15 @@ Script files (card bc009036; Kernel 41497, Viktor 41502, 2026-11-13: a keychain 
 file a command runs is read and judged too:
   - which files: for an interpreter in command position (python, python3, python3.x, node, bash, sh, zsh, dash,
     ksh, ruby, perl, osascript, deno, bun, tsx, ts-node, php, swift, source, `.`, npx tsx, uv/poetry/pipenv/pdm/
-    hatch run), the first of its following words that is an existing regular file (so a flag's argument,
-    `-W ignore`, is not taken for it; after -c / -e or `-` the code is inline or on stdin; python -m mod: the files
+    hatch run), every one of its following words that is an existing regular file, its arguments included (an
+    innocent first file, `node -r ./ok.js m.js`, does not hide the script; Viktor 41756 LOW 2), up to MAX_ARGS
+    words: more words, or a command running past ARGS_WINDOW, blocks unread ('script-too-many-args', LOW 1); after
+    -c / -e or `-` the code is inline or on stdin; python -m mod: the files
     the module runs from the cwd, mod.py, mod/__init__.py, mod/__main__.py and each dotted parent); when an
     interpreter runs, also a `< file` redirect and the files of a `cat` (`cat m.py | python3`); and a path in
-    command position run directly (`./x.py`, `/abs/x.sh`, `tools/x.py`). A relative path is resolved against the
+    command position run directly (`./x.py`, `/abs/x.sh`, `tools/x.py`). For these script rules a quote is a command
+    position only where a shell -c payload opens (`bash -c "./x.sh"`), so the word after a closing quote
+    (`grep -n "x" f.py`) is not a command. A relative path is resolved against the
     payload cwd and the directory after each `cd` in order, a relative cd on top of the one before; `~`, `$HOME` and
     variables assigned in the command itself (`F=m.py; python3 $F`) are expanded (Viktor 41715 LOW). The first
     MAX_SCRIPT_BYTES of each file. Fail-closed: more than MAX_SCRIPTS files, MAX_BASES directories or MAX_TRIES
@@ -77,6 +81,13 @@ WORD = r'[^\s;&|(){}`\'"]'
 # position too, so it is not also read as a flag: 12 000 x " -exec" took 112 s that way.
 POSITION = (r'(?:^|[;&|(){}\n`\'"]|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*'
             r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|[+.]?\d[\w.]*|\w+=' + WORD + r'*)[ \t]+)*')
+# The script rules below (an interpreter, a path run directly, cat into an interpreter) take a quote as a command
+# position only where a shell -c payload opens (`bash -c "./x.sh"`, `bash -lc '...'`). With every quote a position, the
+# word after a CLOSING quote looked like a command: `grep -n "for x" scripts/hooks/keychain-read-gate.py` read the
+# gate's own source as a script it runs and blocked (measured 2026-11-14 on the #275 gate; card 7427e6f4).
+SCRIPT_POSITION = (r'(?:^|[;&|(){}\n`]|\$\(|\s-(?:exec|execdir|ok)(?=\s)|[ \t]-[A-Za-z]*c[ \t]+[\'"])[ \t]*'
+                   r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|[+.]?\d[\w.]*|\w+=' + WORD
+                   + r'*)[ \t]+)*')
 BINARY = r'(?:' + WORD + r'*/)?security'
 OPTIONS = r'(?:\s+-\S+)*'
 SECRET_SUB = r'(?:find-generic-password|find-internet-password|dump-keychain|export)'
@@ -120,12 +131,15 @@ def script_budget():
 PATH_TOKEN = r'''['"]?([^\s'";|&<>()`$]+)['"]?'''
 INTERP = (r'(?:' + WORD + r'*/)?(?:python[\d.]*|node|bash|sh|zsh|dash|ksh|ruby|perl|osascript|deno|bun|tsx|ts-node|php|swift'
           r'|source|\.|npx[ \t]+(?:tsx|ts-node)|(?:uv|poetry|pipenv|pdm|hatch)[ \t]+run(?:[ \t]+python[\d.]*)?)')
-INTERP_RX = re.compile(POSITION + INTERP + r'(?=\s|$)', re.I)
+INTERP_RX = re.compile(SCRIPT_POSITION + INTERP + r'(?=\s|$)', re.I)
 # After the interpreter: its words up to the end of that command, read without a regex (Viktor 41715 LOW a: a flag's
-# argument, `-W ignore`, `-o pipefail`, was taken for the file). The first word that is an existing regular file is
-# the script; a code flag (-c, -e, --eval, --command) or `-` ends the walk (inline code or stdin).
+# argument, `-W ignore`, `-o pipefail`, was taken for the file). Every word that is an existing regular file is judged,
+# not only the first (Viktor 41756 LOW 2: `node -r ./ok.js measure.js` hid measure.js behind ./ok.js); a code flag
+# (-c, -e, --eval, --command) or `-` ends the walk (inline code or stdin). Words past MAX_ARGS, or a command running
+# past ARGS_WINDOW, are not read, so they block ('script-too-many-args', Viktor 41756 LOW 1: 12 x -B then measure.py
+# passed). 64, not 12: with a block past it, 12 would stop ordinary `python3 x.py --a 1 --b 2 ...` calls.
 CMD_END = ';&|\n)`'
-MAX_ARGS = 12
+MAX_ARGS = 64
 ARGS_WINDOW = 4096
 MAX_TRIES = 4000  # path lookups per command; past it the gate blocks (an unread path would be a way around)
 CODE_FLAG_RX = re.compile(r'-[a-zA-Z]*[ce]|--eval(?:=.*)?|--command(?:=.*)?')
@@ -137,7 +151,7 @@ MODULE_NAME_RX = re.compile(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){0,7}')
 # The script on stdin (Viktor 41715 LOW d): `python3 < m.py`, `python3 - < m.py`, `cat m.py | python3`. Only when the
 # command runs an interpreter.
 REDIRECT_RX = re.compile(r'(?<![<\d&])<(?![<(&])[ \t]*' + PATH_TOKEN)
-CAT_RX = re.compile(POSITION + r'cat((?:[ \t]+' + WORD + r'+)+)')
+CAT_RX = re.compile(SCRIPT_POSITION + r'cat((?:[ \t]+' + WORD + r'+)+)')
 # Shell variables set in the command (Viktor 41715 LOW f: `F=m.py; python3 $F`), and every cd in order, a relative one
 # on top of the one before (LOW b: `cd sub && python3 only.py`).
 ASSIGN_RX = re.compile(r'''(?<![\w$])([A-Za-z_]\w*)=(['"]?)([^\s'";|&<>()`$]+)\2(?=\s|$|;)''')
@@ -156,7 +170,7 @@ def module_files(mod):
         base = '/'.join(parts[:i])
         out += [base + '.py', base + '/__init__.py']
     return out + ['/'.join(parts) + '/__main__.py']
-DIRECT_RX = re.compile(POSITION + r'''['"]?((?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*)['"]?(?=\s|$|[;&|)])''')
+DIRECT_RX = re.compile(SCRIPT_POSITION + r'''['"]?((?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*)['"]?(?=\s|$|[;&|)])''')
 # A literal naming the binary: 'security', "/usr/bin/security", `security` (a JS template), or a shell assignment
 # SEC=security. The assignment branch walks path segments, not \S*: `=\s*['"]?(?:\S*/)?security` ran to the end of every
 # space-free run and searched back for "/" at each "=", quadratic: 100 000 "=" took 9 s, 1 MB never returned within the
@@ -206,31 +220,45 @@ def cd_bases(text, cwd):
     return bases
 
 
+class TooManyArgs(Exception):
+    """An interpreter call with words the gate does not read (past MAX_ARGS or ARGS_WINDOW): the caller blocks."""
+
+
 def interp_groups(text):
-    """For each interpreter call: the words that may be its script, in order (the first existing file wins)."""
+    """For each interpreter call: the words that may be its script, in order (every existing file is judged).
+    Raises TooManyArgs when a call's words run past MAX_ARGS or ARGS_WINDOW and the walk did not stop before."""
     groups = []
     for m in INTERP_RX.finditer(text):
         python = 'python' in m.group(0).lower()
         rest = text[m.end():m.end() + ARGS_WINDOW]  # a window, not the rest: 6 000 calls x the rest was quadratic
         cut = min([i for i in (rest.find(ch) for ch in CMD_END) if i >= 0] or [len(rest)])
-        words = [strip_quotes(w) for w in rest[:cut].split()[:MAX_ARGS]]
+        all_words = rest[:cut].split()
+        # the window ended inside this command: what follows it is not read
+        clipped = cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text)
+        words = [strip_quotes(w) for w in all_words[:MAX_ARGS]]
         group = []
+        stopped = False
         i = 0
         while i < len(words):
             w = words[i]
             attached = MODULE_ATTACHED_RX.fullmatch(w) if python else None
             if attached:
                 groups += [[c] for c in module_files(attached.group(1))]
+                stopped = True
                 break
             if python and MODULE_FLAG_RX.fullmatch(w):
                 if i + 1 < len(words):
                     groups += [[c] for c in module_files(words[i + 1])]
+                stopped = True
                 break
             if w == '-' or CODE_FLAG_RX.fullmatch(w):
+                stopped = True
                 break
             if not w.startswith('-') and w:
                 group.append(w)
             i += 1
+        if not stopped and (len(all_words) > MAX_ARGS or clipped):
+            raise TooManyArgs()
         if group:
             groups.append(group)
     return groups
@@ -238,13 +266,16 @@ def interp_groups(text):
 
 def script_paths(cmd, cwd):
     """The script files the command runs (resolved, existing regular files), at most MAX_SCRIPTS (an eleventh file
-    or more than MAX_BASES directories returns MAX_SCRIPTS + 1 entries: the caller blocks)."""
+    or more than MAX_BASES directories returns MAX_SCRIPTS + 1 entries: the caller blocks). Raises TooManyArgs."""
     text = expand(normalise(cmd))
     groups = interp_groups(text)
     if INTERP_RX.search(text):  # the script on stdin: only when an interpreter runs
         groups += [[m.group(1)] for m in REDIRECT_RX.finditer(text)]
         for m in CAT_RX.finditer(text):
-            groups += [[strip_quotes(w)] for w in m.group(1).split()[:MAX_ARGS] if not w.startswith('-')]
+            cat_words = m.group(1).split()
+            if len(cat_words) > MAX_ARGS:
+                raise TooManyArgs()
+            groups += [[strip_quotes(w)] for w in cat_words if not w.startswith('-')]
     groups += [[m.group(1)] for m in DIRECT_RX.finditer(text)]
     bases = cd_bases(text, cwd)
     if groups and len(bases) > MAX_BASES:
@@ -256,7 +287,6 @@ def script_paths(cmd, cwd):
             c = os.path.expanduser(c)
             if c in ('-', '--'):
                 continue
-            hit = False
             for t in ([c] if os.path.isabs(c) else [os.path.join(b, c) for b in bases]):
                 tries += 1
                 if tries > MAX_TRIES:
@@ -266,12 +296,8 @@ def script_paths(cmd, cwd):
                     st = os.stat(real)
                 except OSError:
                     continue
-                if stat.S_ISREG(st.st_mode):
-                    hit = True
-                    if real not in out:
-                        out.append(real)
-            if hit:
-                break
+                if stat.S_ISREG(st.st_mode) and real not in out:
+                    out.append(real)
         if len(out) > MAX_SCRIPTS:
             break
     return out
@@ -282,7 +308,10 @@ def script_hits(cmd, cwd):
     found = []
     if INTERP_RX.search(normalise(cmd)) and literal_hit(cmd):
         found.append('script-inline')
-    paths = script_paths(cmd, cwd)
+    try:
+        paths = script_paths(cmd, cwd)
+    except TooManyArgs:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
+        return found + ['script-too-many-args']
     if len(paths) > MAX_SCRIPTS:  # not "check the first ten": an eleventh file would slip past (fail-closed)
         return found + ['script-too-many']
     budget = script_budget()
@@ -301,7 +330,7 @@ def script_hits(cmd, cwd):
 # blocks before the 10 s hook timeout, which would let the call through. Python's re checks for signals while it
 # matches (measured 2026-11-13: a quadratic search on 600 000 chars was cut at 1 s, rc 2). os._exit, so no except
 # clause can swallow it. KEYCHAIN_GATE_WATCHDOG_S can only lower it (a test seam), never to 0 (0 disarms an itimer).
-WATCHDOG_S = 8.0
+WATCHDOG_S = 6.0  # 8 s left ~1.3 s to the 10 s hook limit (Viktor 41756 INFO 3: the alarm came 0.72 s late)
 
 
 def watchdog_s():
