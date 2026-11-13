@@ -21,19 +21,47 @@ PRIV = '5040302010'  # synthetic; the hook gets it from MARVEEN_OWNER_PRIVATE_CH
 GROUP = '-1000000000001'  # synthetic group chat id (Viktor 29457 INFO-4)
 
 
-def run(root, tool_input):
+import re as _re
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib'))
+import reply_marks  # noqa: E402
+
+_MARK_LINE = _re.compile(r'(?m)^(PRIVÁT-OK|BALÁZS-KÉRÉS):[ \t]*(.*)\n?')
+_MARK_KIND = {'PRIVÁT-OK': 'PRIVAT-OK', 'BALÁZS-KÉRÉS': 'BALAZS-KERES'}
+
+
+def as_marks(root, tool_input, agent):
+    """Klodel 40845 / Viktor 40894: a marker is a reply mark in the ledger, not a line of the text. The cases below
+    were written with marker lines; this turns each into a mark for the same chat and agent, and drops the line."""
+    os.environ['REPLY_MARKS_PATH'] = os.path.join(root, 'store', 'reply-marks.jsonl')
+    ti = dict(tool_input)
+    text = ti.get('text')
+    if isinstance(text, str):
+        for kind, value in _MARK_LINE.findall(text):
+            try:
+                reply_marks.add(_MARK_KIND[kind], ti.get('chat_id'), agent, value)
+            except ValueError:
+                pass  # e.g. too short: no mark, as an unreadable marker line was no reason
+        ti['text'] = _MARK_LINE.sub('', text)
+    return ti
+
+
+def run(root, tool_input, raw=False):
     # LEDGER_DB_PATH points at a file that does not exist: the live ledger never decides a case (card 9df14a4c).
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
-           'LEDGER_DB_PATH': os.path.join(root, 'nincs-ledger.db')}
-    p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_input': tool_input}),
+           'LEDGER_DB_PATH': os.path.join(root, 'nincs-ledger.db'), 'MARVEEN_AGENT_ID': 'klodel',
+           'REPLY_MARKS_PATH': os.path.join(root, 'store', 'reply-marks.jsonl')}
+    ti = tool_input if raw else as_marks(root, tool_input, 'klodel')
+    p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_input': ti}),
                        capture_output=True, text=True, env=env, timeout=20)
     return p.returncode, p.stderr
 
 
-def run_tool(root, tool_name, tool_input):
+def run_tool(root, tool_name, tool_input, raw=False):
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
-           'LEDGER_DB_PATH': os.path.join(root, 'nincs-ledger.db')}
-    p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_name': tool_name, 'tool_input': tool_input}),
+           'LEDGER_DB_PATH': os.path.join(root, 'nincs-ledger.db'), 'MARVEEN_AGENT_ID': 'klodel',
+           'REPLY_MARKS_PATH': os.path.join(root, 'store', 'reply-marks.jsonl')}
+    ti = tool_input if raw else as_marks(root, tool_input, 'klodel')
+    p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_name': tool_name, 'tool_input': ti}),
                        capture_output=True, text=True, env=env, timeout=20)
     return p.returncode, p.stderr
 
@@ -1532,11 +1560,11 @@ def izles_not_asked_on_non_marketing(root):
     return rc == 0 and 'IZLES-REF' not in err
 
 
-def run_idea(root, tool_input):
+def run_idea(root, tool_input, raw=False):
     """run() with store/mod-state/majsztro.json at 100 % (synthetic): the idea cases carry "MAJSZTRO: helyettes-klodel",
     because a subprocess run cannot reach the queue for a "MAJSZTRO: MEHET <id>" (those are in-process, idea_majsztro_*)."""
     budget(root, 100)
-    return run(root, tool_input)
+    return run(root, tool_input, raw=raw)
 
 
 MJ = '\nMAJSZTRO: helyettes-klodel teszt, Májsztró kerete 100 %-on'
@@ -1683,6 +1711,8 @@ def idea_refused_list_missing_fails_closed(root):
     hook = os.path.join(root, 'scripts', 'hooks', 'product-image-gate.py')
     shutil.copy(HOOK, hook)
     shutil.copy(os.path.join(here, '..', 'lib', 'owner_chat.py'), os.path.join(root, 'scripts', 'lib', 'owner_chat.py'))
+    shutil.copy(os.path.join(here, '..', 'lib', 'reply_marks.py'), os.path.join(root, 'scripts', 'lib', 'reply_marks.py'))
+    shutil.copy(os.path.join(here, 'ledger_lib.py'), os.path.join(root, 'scripts', 'hooks', 'ledger_lib.py'))
     budget(root, 100)
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV}
 
@@ -1704,6 +1734,8 @@ def gate_copy(root, lint_text):
     hook = os.path.join(root, 'scripts', 'hooks', 'product-image-gate.py')
     shutil.copy(HOOK, hook)
     shutil.copy(os.path.join(here, '..', 'lib', 'owner_chat.py'), os.path.join(root, 'scripts', 'lib', 'owner_chat.py'))
+    shutil.copy(os.path.join(here, '..', 'lib', 'reply_marks.py'), os.path.join(root, 'scripts', 'lib', 'reply_marks.py'))
+    shutil.copy(os.path.join(here, 'ledger_lib.py'), os.path.join(root, 'scripts', 'hooks', 'ledger_lib.py'))
     if lint_text is not None:
         with open(os.path.join(root, 'scripts', 'uzleti-otlet-kapu-lint.py'), 'w', encoding='utf-8') as f:
             f.write(lint_text)
@@ -1737,7 +1769,8 @@ def idea_refused_direction_inside_marker_line_blocked(root):
     # Viktor 38060 L2: only the gate's own phrases are cut out; a refused direction inside a marker line still stops.
     texts = ('ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve, recepciós\nÚj ötlet.',
              'PRIVÁT-OK: telefonos asszisztens ügy, Patrik kérdezte\n' + IDEA_LINE + 'Új ötlet.')
-    hits = [run_idea(root, {'chat_id': GROUP, 'text': t})[0] for t in texts]
+    # raw: a marker line in the text is itself refused now (JELÖLŐ-KAPU, Klodel 40845), so it can never carry the idea.
+    hits = [run_idea(root, {'chat_id': GROUP, 'text': t}, raw=True)[0] for t in texts]
     ok, _ = run_idea(root, {'chat_id': GROUP, 'text': IDEA_LINE + 'Új ötlet: hűtőmágnes-bolt.'})
     # A negation in the marker line is the declaration the gate asks for (TG 17460: "nem AI-tanácsadás"): it passes.
     # In the body a negation gets no pass.
@@ -2196,11 +2229,12 @@ def ledger(root, *chats, agent='main', age_s=0):
     return db
 
 
-def run_ledger(root, db, tool_input, agent='main', tool='mcp__plugin_telegram_telegram__reply'):
+def run_ledger(root, db, tool_input, agent='main', tool='mcp__plugin_telegram_telegram__reply', raw=False, group_env=GROUP):
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
-           'MARVEEN_OWNER_GROUP_CHAT': GROUP, 'LEDGER_DB_PATH': db, 'MAIN_AGENT_ID': 'main',
-           'MARVEEN_AGENT_ID': agent}
-    p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_name': tool, 'tool_input': tool_input}),
+           'MARVEEN_OWNER_GROUP_CHAT': group_env, 'LEDGER_DB_PATH': db, 'MAIN_AGENT_ID': 'main',
+           'MARVEEN_AGENT_ID': agent, 'REPLY_MARKS_PATH': os.path.join(root, 'store', 'reply-marks.jsonl')}
+    ti = tool_input if raw else as_marks(root, tool_input, agent)
+    p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_name': tool, 'tool_input': ti}),
                        capture_output=True, text=True, env=env, timeout=20)
     return p.returncode, p.stderr
 
@@ -2217,6 +2251,18 @@ def latest_private_group_reply_blocked(root):
     db = ledger(root, GROUP, PRIV)
     rc, err = run_ledger(root, db, {'chat_id': GROUP, 'text': 'Rendben, megnézem.'})
     return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err
+
+
+@case
+def NEG_latest_private_group_reply_noncanonical_group_config_blocked(root):
+    # Viktor 40902 INFO b: a non-canonical group id in the config ("-0..." / "+...") is the same chat.
+    out = []
+    for cfg in ('-0' + GROUP[1:], ' ' + GROUP + ' '):
+        sub = tempfile.mkdtemp(dir=root)
+        db = ledger(sub, GROUP, PRIV)
+        rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Rendben, megnézem.'}, group_env=cfg)
+        out.append(rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err)
+    return all(out)
 
 
 @case
@@ -2342,7 +2388,7 @@ def NEG_balazs_keres_line_with_unknown_id_still_blocked(root):
     db = ledger(root, GROUP, PRIV)
     group_req_state(root)
     rc, err = run_ledger(root, db, {'chat_id': GROUP, 'text': 'BALÁZS-KÉRÉS: TG 9999\nRendben.'})
-    return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err and 'BALÁZS-KÉRÉS' in err
+    return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err and 'BALAZS-KERES' in err
 
 
 @case
@@ -2440,6 +2486,68 @@ def NEG_private_chat_id_forms_blocked(root):
         rc, err = run(root, {'chat_id': cid, 'text': 'PRIVÁT-OK: ' + REASON + '\nsudo ls'})
         out.append(rc == 2 and 'PARANCS-KAPU' in err)
     return all(out)
+
+
+def mark(root, kind, chat, value='Patrik privátban kérdezte, privát ügy', agent='klodel', age=0):
+    os.environ['REPLY_MARKS_PATH'] = os.path.join(root, 'store', 'reply-marks.jsonl')
+    return reply_marks.add(kind, chat, agent, value, now=time.time() - age)
+
+
+@case
+def mark_private_ok_one_message_only(root):
+    # Viktor 40894 (a): one mark = one message. The second message needs a new mark (replay refused).
+    mark(root, 'PRIVAT-OK', PRIV)
+    rc1, _ = run(root, {'chat_id': PRIV, 'text': 'Kész.'}, raw=True)
+    rc2, err2 = run(root, {'chat_id': PRIV, 'text': 'Még egy.'}, raw=True)
+    return rc1 == 0 and rc2 == 2 and 'PRIVÁT-KAPU' in err2
+
+
+@case
+def NEG_mark_wrong_chat_kind_agent_or_expired(root):
+    out = []
+    for kind, chat, agent, age in (('PRIVAT-OK', GROUP, 'klodel', 0), ('KESZ-EREDMENY', PRIV, 'klodel', 0),
+                                   ('PRIVAT-OK', PRIV, 'dave', 0), ('PRIVAT-OK', PRIV, 'klodel', 200)):
+        sub = tempfile.mkdtemp(dir=root)
+        mark(sub, kind, chat, agent=agent, age=age)
+        rc, err = run(sub, {'chat_id': PRIV, 'text': 'Kész.'}, raw=True)
+        out.append(rc == 2 and 'PRIVÁT-KAPU' in err)
+    return all(out)
+
+
+@case
+def NEG_mark_two_hooks_at_once_one_passes(root):
+    # Viktor 40894 (2): two hooks on one mark at the same time: one passes, the other is refused.
+    mark(root, 'PRIVAT-OK', PRIV)
+    env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
+           'LEDGER_DB_PATH': os.path.join(root, 'nincs-ledger.db'), 'MARVEEN_AGENT_ID': 'klodel',
+           'REPLY_MARKS_PATH': os.path.join(root, 'store', 'reply-marks.jsonl')}
+    body = json.dumps({'tool_input': {'chat_id': PRIV, 'text': 'Kész.'}})
+    ps = [subprocess.Popen([sys.executable, '-I', HOOK], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, text=True, env=env) for _ in range(2)]
+    rcs = sorted(p.communicate(body, timeout=20)[1] is not None and p.returncode for p in ps)
+    return rcs == [0, 2]
+
+
+@case
+def NEG_marker_line_in_text_refused_private_group_edit(root):
+    # Viktor 40894 (b): the marker as a line of the text is refused in the private chat, the group and edits.
+    out = []
+    for chat, tool in ((PRIV, None), (GROUP, None), (PRIV, 'mcp__plugin_telegram_telegram__edit_message')):
+        for text in ('PRIVÁT-OK: Patrik privátban kérdezte\nKész.', 'KÉSZ-EREDMÉNY: a kért képek', '- BALÁZS-KÉRÉS: TG 5918',
+                     'BELSŐ-ÚT-MÉRVE: 40800', 'PRIVAT-OK: ekezet nelkul', 'priv\u200bát-ok: x'):
+            ti = {'chat_id': chat, 'text': text}
+            env_run = run_tool(root, tool, ti, raw=True) if tool else run(root, ti, raw=True)
+            if chat == GROUP:
+                env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
+                       'MARVEEN_OWNER_GROUP_CHAT': GROUP, 'LEDGER_DB_PATH': os.path.join(root, 'nincs.db'),
+                       'MARVEEN_AGENT_ID': 'klodel'}
+                p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_input': ti}),
+                                   capture_output=True, text=True, env=env, timeout=20)
+                env_run = (p.returncode, p.stderr)
+            out.append(env_run[0] == 2 and 'JELÖLŐ-KAPU' in env_run[1])
+    # Quoted mid-sentence, it is not a marker line.
+    rc, err = run(root, {'chat_id': PRIV, 'text': 'PRIVÁT-OK: ok indok, tíz karakter felett\nA "PRIVÁT-OK:" sor kikerült.'})
+    return all(out) and 'JELÖLŐ-KAPU' not in err
 
 
 @case

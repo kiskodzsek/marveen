@@ -31,7 +31,6 @@ STORE = os.path.join(os.path.dirname(os.path.dirname(HERE)), 'store')
 
 MAX_LINES = 6
 MAX_CHARS = 600
-ESCAPE = re.compile(r'(?m)^[ \t]*KÉSZ-EREDMÉNY:[ \t]*\S')  # [ \t], not \s: an empty line must not borrow the next
 
 
 def owner_chats():
@@ -54,18 +53,19 @@ def owner_chats():
     return out
 
 
-def check(text, replies_since_inbound):
-    """Pure decision: the block message, or None."""
+def check(text, replies_since_inbound, escaped=False):
+    """Pure decision: the block message, or None. escaped: a KESZ-EREDMENY reply mark was taken for this message
+    (scripts/reply-mark.py; one mark lets ONE more message through, Viktor 40894)."""
     text = str(text or '')
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if len(lines) > MAX_LINES or len(text.strip()) > MAX_CHARS:
         return (f'VÁLASZ-KAPU (Patrik TG 18129: "miért spammels ezzel a sok szarral"): Patrik chatjébe legfeljebb '
                 f'{MAX_LINES} sor és {MAX_CHARS} karakter mehet (most {len(lines)} sor, {len(text.strip())} karakter). '
                 'Írd egy rövid sorba a lényeget; a részlet a kártyára megy.')
-    if replies_since_inbound >= 1 and not ESCAPE.search(text):
+    if replies_since_inbound >= 1 and not escaped:
         return ('VÁLASZ-KAPU (Patrik TG 18129): Patrik utolsó üzenete óta már válaszoltál ebben a chatben. '
-                'Egy Patrik-üzenetre egy válasz. Kész anyag (pl. a kért képek) mehet egy '
-                '"KÉSZ-EREDMÉNY: <mi>" sorral; minden más a kártyára.')
+                'Egy Patrik-üzenetre egy válasz. Kész anyag (pl. a kért képek) mehet, ha előtte jelölöd (a szövegbe '
+                'nem kerül): python3 -I scripts/reply-mark.py KESZ-EREDMENY --chat <chat_id> "<mi>"; minden más a kártyára.')
     return None
 
 
@@ -111,9 +111,20 @@ def main():
         n = replies_since_inbound(agent_id, chat)
     except Exception:
         n = 0  # no readable ledger: the volume rule cannot decide, the size rule still holds
-    msg = check(ti.get('text', ''), n)
+    escaped = False
+    if n >= 1:
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'lib'))
+            import reply_marks
+            escaped = reply_marks.take('KESZ-EREDMENY', chat, agent_id) is not None
+        except Exception:
+            escaped = False
+    msg = check(ti.get('text', ''), n, escaped)
     if msg:
         print(msg, file=sys.stderr)
+        return 2
+    if escaped and not reply_marks.spend_pending():
+        print('VÁLASZ-KAPU: a KESZ-EREDMENY jel közben elfogyott (egy jel = egy üzenet); jelölj újra.', file=sys.stderr)
         return 2
     return 0
 

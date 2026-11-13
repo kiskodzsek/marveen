@@ -102,6 +102,8 @@ REQ = ('KONYV', 'A5', 'PAPIR', 'SAJAT', 'KERES', 'NAGYITVA')
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # ledger_lib (owner_latest_inbound_chat)
 import owner_chat  # noqa: E402
+import reply_marks  # noqa: E402
+import ledger_lib  # noqa: E402
 
 
 def owner_private_chat():
@@ -120,17 +122,18 @@ def owner_private_chat():
 
 def owner_group_chat():
     """The owner's team group chat: MARVEEN_OWNER_GROUP_CHAT, else store/projektek.json elo_uzenet "csoport"
-    (a plain id or {"chat_id": ...}). Never hard-coded (personal data). "" when unknown."""
+    (a plain id or {"chat_id": ...}). Never hard-coded (personal data). "" when unknown. Normalised like the
+    chat it is compared with (norm_chat, Viktor 40902 INFO b)."""
     v = (os.environ.get('MARVEEN_OWNER_GROUP_CHAT') or '').strip()
     if v:
-        return v
+        return norm_chat(v)
     install = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
         with open(os.path.join(install, 'store', 'projektek.json'), encoding='utf-8') as f:
             g = (json.load(f).get('elo_uzenet') or {}).get('csoport')
         if isinstance(g, dict):
             g = g.get('chat_id')
-        return str(g).strip() if g is not None else ''
+        return norm_chat(g) if g is not None else ''
     except Exception:
         return ''
 
@@ -1209,6 +1212,8 @@ def group_allowlist(chat):
 
 
 def group_request_proof(chat, reply_to, text, now=None):
+    # text: "BALÁZS-KÉRÉS: TG <id>" built from the BALAZS-KERES reply mark (never the sent text, Klodel 40845); a
+    # mark only names the id, the proof is the plugin's inbound-senders.jsonl row below (Viktor 40894 (3)).
     """The id of a fresh group message from a non-owner allowlisted sender that this reply answers, else None."""
     if not chat:
         return None
@@ -1376,6 +1381,23 @@ LIST_MARK = re.compile(r'^(?:[-*\u2022>]|\d{1,3}[.)])[ \t]+')
 INVISIBLE = re.compile('[\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]')
 
 
+MARKER_LINE = re.compile(r'(?mi)^[ \t]*(?:[-*>][ \t]*)?(?:PRIV[AÁ]T-OK|K[EÉ]SZ-EREDM[EÉ]NY|BAL[AÁ]ZS-K[EÉ]R[EÉ]S|'
+                         r'BELS[OŐ]-[UÚ]T-M[EÉ]RVE)[ \t]*:')
+
+
+def marker_line(text):
+    """A gate marker written as a line of the text (after NFKC and invisible characters out, Viktor 40894 (b))."""
+    return bool(MARKER_LINE.search(INVISIBLE.sub('', unicodedata.normalize('NFKC', text))))
+
+
+def balazs_mark(chat, reply_to, agent):
+    """With reply_to no mark is needed (Viktor 40894 (3)); else the BALAZS-KERES mark as "BALÁZS-KÉRÉS: <value>"."""
+    if reply_to not in (None, '') or not agent:
+        return ''
+    v = reply_marks.take('BALAZS-KERES', chat, agent)
+    return f'BALÁZS-KÉRÉS: {v}' if v else ''
+
+
 def norm_chat(v):
     """A chat id as Telegram means it: a number compares as a number ("+5040", "05040" and "5040" are one chat,
     Viktor 40886 INFO 2); anything else as stripped text."""
@@ -1425,6 +1447,17 @@ def main():
     # want to see the "PRIVÁT-OK" line. An open private window (store/privat-ablak.json:
     # {"until": <unix ts>, "ok": "<reason, TG id>"}) lets private replies pass without the marker.
     chat = norm_chat(ti.get('chat_id'))
+    try:
+        agent = ledger_lib.agent_id_from_payload(data) or ''
+    except Exception:
+        agent = ''
+    if chat and chat in (owner_private_chat(), owner_group_chat()) and marker_line(str(ti.get('text') or '')):
+        sys.stderr.write(
+            'JELÖLŐ-KAPU (Klodel 40845: a jelölő ne Patriknak látszó szövegben legyen): a szövegben '
+            'PRIVÁT-OK / KÉSZ-EREDMÉNY / BALÁZS-KÉRÉS / BELSŐ-ÚT-MÉRVE sor van. Vedd ki, és jelöld előtte: '
+            'python3 -I scripts/reply-mark.py <PRIVAT-OK|KESZ-EREDMENY|BALAZS-KERES|BELSO-UT-MERVE> '
+            '--chat <privat|csoport> "<érték>" (egy jel = egy üzenet, 3 perc).\n')
+        return 2
     if chat and not owner_private_chat():
         # Viktor 40886 INFO 1: without the owner's chat id the private-chat gates (PARANCS-KAPU included) are off.
         sys.stderr.write('product-image-gate: the owner private chat id is unknown; the private-chat checks are off.\n')
@@ -1445,20 +1478,20 @@ def main():
     # (edit_message) and must keep updating while Patrik writes privately.
     is_edit = str(data.get('tool_name') or '').endswith('edit_message')
     if (chat and latest and not is_edit and latest == owner_private_chat() and chat == owner_group_chat()
-            and not group_request_proof(chat, ti.get('reply_to'), str(ti.get('text') or ''))):
+            and not group_request_proof(chat, ti.get('reply_to'), balazs_mark(chat, ti.get('reply_to'), agent))):
         sys.stderr.write(
             'PRIVÁT-VÁLASZ-KAPU (Patrik TG 5704: "ide reagálsz arra az üzenetemre amit a másik chatbe irtam"): '
             'Patrik utoljára PRIVÁTBAN írt, oda válaszolj (PRIVÁT-OK nélkül is mehet), ne a csoportba. '
-            'Ha ez Balázs (vagy más csapattag) csoport-kérésére megy: reply_to az ő üzenetére, vagy egy sor '
-            '"BALÁZS-KÉRÉS: TG <az üzenete száma>".\n')
+            'Ha ez Balázs (vagy más csapattag) csoport-kérésére megy: reply_to az ő üzenetére, vagy előtte (a szövegbe '
+            'nem kerül): python3 -I scripts/reply-mark.py BALAZS-KERES --chat csoport "TG <az üzenete száma>".\n')
         return 2
     if chat and chat == owner_private_chat() and not private_window_open() and latest != chat:
-        txt = str(ti.get('text') or '')
-        i = txt.find('PRIVÁT-OK:')
-        if i < 0 or len(txt[i + len('PRIVÁT-OK:'):].split('\n', 1)[0].strip()) < 10:
+        why = reply_marks.take('PRIVAT-OK', chat, agent) if agent else None
+        if why is None or len(why.strip()) < 10:
             sys.stderr.write(
                 'PRIVÁT-KAPU (Patrik TG 14472: "elég a marabel csapat chat"): Patrik privát chatjébe csak indokkal '
-                'mehet üzenet. Küldd a csapat-csoportba, vagy írd a szövegbe: "PRIVÁT-OK: <miért privátban>".\n')
+                'mehet üzenet. Küldd a csapat-csoportba, vagy jelöld előtte (a szövegbe nem kerül): '
+                'python3 -I scripts/reply-mark.py PRIVAT-OK --chat privat "<miért privátban, min. 10 karakter>".\n')
             return 2
     if chat:
         # Klodel 33881 (hibanapló 2026-11-09 12:1x, the third repeat; memory new-direction-start-from-market): a new
@@ -1535,4 +1568,9 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    rc = main()
+    # A reply mark is spent only when the whole hook passes; a mark spent meanwhile by a parallel hook blocks.
+    if rc == 0 and not reply_marks.spend_pending():
+        sys.stderr.write('JELÖLŐ-KAPU: a jel közben elfogyott (egy jel = egy üzenet); jelölj újra: scripts/reply-mark.py\n')
+        rc = 2
+    sys.exit(rc)
