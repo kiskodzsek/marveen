@@ -55,6 +55,14 @@ total = len(re.findall(r"""\bfrom\s*["\x27]@/components/""", src))
 # Viktor 41311 INFO 5: a dynamic import() / require() of a component is not read below: it stops the check
 for m in re.finditer(r"""\b(?:import|require)\s*\(\s*["\x27](@/components/[^"\x27]+)""", src):
     bad.append(f"{m.group(1)}: dinamikus import/require")
+# Viktor 41371 LOW 1: a template-literal or non-literal argument cannot be read either: it stops the check too
+# (a backtick literal without "@/components" and without ${...} is another module and passes)
+for m in re.finditer(r"""(?<![.\w$])(?:import|require)\s*\(\s*([^\s"\x27])""", src):
+    if m.group(1) == "`":
+        lit = src[m.end(1):src.find("`", m.end(1))]
+        if "@/components" not in lit and "${" not in lit:
+            continue
+    bad.append(f"{src[m.start():m.end()+40].splitlines()[0]}: dinamikus import/require nem olvasható argumentummal")
 seen = 0
 for m in re.finditer(r"""\bimport\s+(type\s+)?((?:(?!\bimport\b)[^;])*?)\s*from\s*["\x27](@/components/[^"\x27]+)["\x27]""", src, re.S):
     seen += 1

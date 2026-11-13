@@ -135,6 +135,7 @@ def incident_rm_variable_1113(_):
         'ls | xargs -s 100 rm -rf $S', 'ls | xargs -E x rm -rf $S', 'ls | xargs -d x rm -rf $S',
         'ls | xargs -J % rm -rf $S', 'ls | xargs -R 2 rm -rf $S',
         'ls | xargs --max-args 1 rm -rf $S', 'ls | xargs --max-procs 2 rm -rf $S', 'ls | xargs --arg-file f rm -rf $S',
+        'ls | xargs -S 255 rm -rf $S',                         # Viktor 41371 INFO 2 (BSD replsize)
     ))
 
 

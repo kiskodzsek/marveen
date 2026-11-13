@@ -53,6 +53,13 @@ printf '%s\n' 'import { useState } from "react"' 'import { DeadNoSemi } from "@/
   'import { LiveCard } from "@/components/live-card"' > "$W/src/app/app-preview/nosemi.tsx"
 printf '%s\n' 'import { LiveCard } from "@/components/live-card";' \
   'const D = dynamic(() => import("@/components/dead-dyn"));' > "$W/src/app/app-preview/dyn.tsx"
+# Viktor 41371 LOW 1: a template literal or a variable as the argument; a plain other-module template literal passes
+printf '%s\n' 'import { LiveCard } from "@/components/live-card";' \
+  'const D = dynamic(() => import(`@/components/dead-tpl`));' > "$W/src/app/app-preview/dyntpl.tsx"
+printf '%s\n' 'import { LiveCard } from "@/components/live-card";' 'const p = "@/components/dead-var";' \
+  'const D = dynamic(() => import(p));' > "$W/src/app/app-preview/dynvar.tsx"
+printf '%s\n' 'import { LiveCard } from "@/components/live-card";' \
+  'const L = await import(`lodash`); const v = cfg.import(x);' > "$W/src/app/app-preview/dynother.tsx"
 git -C "$W" add -A && git -C "$W" commit -qm init && git -C "$W" push -q origin main 2>/dev/null
 
 run() { OUT="$(env ELO_KAPU_DIR="$SB/kapu" bash "$CHK" "$@" 2>&1)"; RC=$?; }
@@ -91,6 +98,12 @@ run "$W" src/app/app-preview/nosemi.tsx
 check "an import without a semicolon after another import is read (NEM ÉLŐ DeadNoSemi)" "$(ok "$RC" = 1 -a -n "$(printf '%s\n' "$OUT" | grep '^NEM ÉLŐ  DeadNoSemi ')")" "rc=$RC $OUT"
 run "$W" src/app/app-preview/dyn.tsx
 check "a dynamic import() of a component stops the check (exit 2)" "$(ok "$RC" = 2)" "rc=$RC $OUT"
+run "$W" src/app/app-preview/dyntpl.tsx
+check "a template-literal import() of a component stops the check (exit 2)" "$(ok "$RC" = 2)" "rc=$RC $OUT"
+run "$W" src/app/app-preview/dynvar.tsx
+check "an import() of a variable stops the check (exit 2)" "$(ok "$RC" = 2)" "rc=$RC $OUT"
+run "$W" src/app/app-preview/dynother.tsx
+check "an other-module template literal and a method named import pass (exit 0, LiveCard)" "$(ok "$RC" = 0)" "rc=$RC $OUT"
 
 echo "$((DONE-FAILS))/$DONE pass"
 [ "$FAILS" -eq 0 ]
