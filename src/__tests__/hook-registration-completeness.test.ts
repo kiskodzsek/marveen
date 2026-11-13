@@ -118,6 +118,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of count-claim-gate.py (run: python3 -I scripts/hooks/count-claim-gate_test.py); not itself a hook (Klodel 39869)',
   'repo-create-gate_test.py':
     'the unit test of repo-create-gate.py (run: python3 -I scripts/hooks/repo-create-gate_test.py); not itself a hook (Klodel 40048)',
+  'summary-form-reply-gate_test.py':
+    'the unit test of summary-form-reply-gate.py (run: python3 -I scripts/hooks/summary-form-reply-gate_test.py); not itself a hook (retro 2026-11-13 R9, card dddca664)',
   'session-meta-reply-gate_test.py':
     'the unit test of session-meta-reply-gate.py (run: python3 -I scripts/hooks/session-meta-reply-gate_test.py); not itself a hook (retro 2026-11-13 R8, card 84858637)',
   'zsh-trap-gate_test.py':
@@ -174,6 +176,8 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'the PostToolUse half of the reply marks (Klodel 41147): it spends the marks that patrik-reply-volume-gate.py and product-image-gate.py held for a sent reply, and both of those are CHECKOUT_ONLY on the main agent; seeded alone it would spend marks no gate on that agent holds, a silent no-op',
   'patrik-step-reply-gate.py':
     'a step put on the owner in his own chats needs a PATRIK-LEPES mark naming who measured that no internal route exists (Klodel 41154, Patrik TG 6049): the rule is about the MAIN agent, the one that talks to Patrik; the reply marks it takes are spent by reply-marks-spend.py, itself CHECKOUT_ONLY. Seeding it fleet-wide is a separate decision',
+  'summary-form-reply-gate.py':
+    'the MAIN agent\'s summaries to the owner (retro 2026-11-13 R9, card dddca664; Patrik TG 4735): the evening decision summary and the daily result list are written and sent by the main agent only, like patrik-reply-volume-gate.py below; the gate itself passes every other agent',
   'patrik-reply-volume-gate.py':
     'the MAIN agent spammed the owner\'s chats (Patrik TG 18129; card 9df14a4c): the gate counts the main agent\'s outbound rows since the latest inbound row of the chat in conversation_log through ledger_lib, and that ledger is written only for the main channels session (ledger-capture.py is CHECKOUT_ONLY below); the gate itself passes every other agent',
   'private-topic-group-gate.py':
