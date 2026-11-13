@@ -126,6 +126,13 @@ def new_session_branch_blocked(_=None):
         'A handoff alapján folytatom a #1298-at.',
         'Dave friss kontextussal folytatja (auto-handoff).',            # replay: third-person self-report
         'Friss kontextussal viszem tovább a kóstoló-törlést.',
+        # Viktor 41396: the bare Hungarian phrase with any verb, the new-session/context branch, the other verbs
+        'Friss kontextussal nekiállok a PR-nak.',
+        'Friss kontextussal kész a PR.',
+        'New session, starting with the PR.',
+        'Handoff után dolgozom tovább.',
+        'A handoff szerint kezdem a review-t.',
+        'A context-guard leállította a munkamenetemet.',
     ))
 
 

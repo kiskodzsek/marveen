@@ -9,7 +9,8 @@ itself was fixed in src/web/context-guard-runner.ts (no "jelezz a csatornádon" 
 context-guard-resume-prompt.test.ts); this gate stops the habit for every agent that owns a Telegram bot.
 
 What blocks (exit 2, one line): a reply or an edit to the owner's private chat or the team group whose text talks about
-the agent's OWN session state: a fresh context, a handoff or the context-guard next to a first-person state verb
+the agent's OWN session state: "friss kontextus", a handoff, the context-guard or an English fresh/new context next to
+an own-state verb
 ("friss kontextussal folytatom", "auto-handoff után itt vagyok"), "my" context/session full, compacted or
 restarted ("kontextusom megtelt"), "új sessionben vagyok", "folytatom a megkezdett munkát", "újraindultam" /
 "újraindítottak", in Hungarian (accents folded: Patrik's chats are often written without them) or English.
@@ -44,13 +45,13 @@ OWN = r'(sessionom\w*|sessionjem\w*|munkamenetem\w*|kontextusom\w*|kontextusunk\
 RESTART = r'(restart\w*|ujraindul\w*|ujrainditott\w*|ujrainditas\w*|ujrainditva|megtel\w*|betel\w*|tele\b|tul nagy|' \
           r'elfogy\w*|nullaz\w*|tomorit\w*)'
 NEAR = r'\W+(?:\w+\W+){0,4}'
-# Viktor 41381 LOW 1: "handoff", "context-guard" and "fresh context" are also ordinary words (Patrik asks where the
+# Viktor 41381 LOW 1: "handoff", "context-guard" and the English "fresh context" are also ordinary words (Patrik asks where the
 # HANDOFF.md is, who wrote the context-guard rule, what "fresh context" means in prompting); they block only next to
 # the agent's own state verb (first or third person, or "restarted me"), within four words either way.
 # The replay also has the third-person self-report ("Dave friss kontextussal folytatja / megy tovább").
 FIRST = r'(vagyok|folytat\w*|indultam|ujraindultam|visszajottem|jottem vissza|dolgozom|dolgozik|kezdem|kezdtem|kezdi|' \
         r'beolvastam|viszem|megyek|megy|tovabb|i\'?m|i am|back|resum\w*|picking up|continu\w*|starting)'
-GUARD_ACT = r'(' + FIRST[1:-1] + r'|ujrainditott\w*|leallitott|megallitott|restart\w*)'
+GUARD_ACT = r'(' + FIRST[1:-1] + r'|ujrainditott\w*|leallitott\w*|megallitott\w*|restart\w*)'
 
 
 def both(a, b):
@@ -58,7 +59,8 @@ def both(a, b):
 
 
 PHRASES = [
-    ('friss kontextus', both(r'friss kontextus', FIRST)),
+    # Viktor 41396 LOW: the Hungarian phrase stays a bare block (it is the TG 665 habit, and rare in real content)
+    ('friss kontextus', r'\bfriss kontextus\w*'),
     ('fresh context', both(r'(?:fresh|new) (?:context|session)', FIRST)),
     ('handoff', both(r'(?:auto ?)?handoff', FIRST)),
     ('context-guard', both(r'context ?guard', GUARD_ACT)),
