@@ -7,6 +7,9 @@
 # majsztro, a long text or a foreign address between other agents. A broken gate (unreadable or emptied pattern
 # source) is exit 4 with zero POSTs, never a silent "clean". A missing gate file sends with a WARN.
 #
+# Retro R5 (card 858f80bc): a klodel work order on a Patrik TG is refused without a KERES-SZO-SZERINT line whose
+# quote is in that inbound TG message of a synthetic ledger, and without IGEN: TG m when the source is an idea.
+#
 # Run:  bash scripts/__tests__/agent-msg-send-gate.test.sh
 set -uo pipefail
 
@@ -38,11 +41,40 @@ STUB
 chmod +x "$BIN/curl"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/sleep"; chmod +x "$BIN/sleep"
 
+# Synthetic Telegram ledger for the request rule (rule 5): conversation_log rows (chat, message_id, direction,
+# text, created_at). Chat 111 is the private chat, -222 the group; id 500 exists in both (as measured live).
+python3 - "$SANDBOX/ledger.db" <<'PY2'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("CREATE TABLE conversation_log (id INTEGER PRIMARY KEY, agent_id TEXT, chat_id TEXT, direction TEXT, "
+            "message_id TEXT, text TEXT, ts TEXT, created_at INTEGER)")
+rows = [
+    ('111', '17858', 'in', 'közben épüljön az új csapatunk', 1000),
+    ('111', '18000', 'in', 'Csináljuk meg a receptkönyv borítóját holnapra.', 2000),
+    ('111', '18009', 'in', 'igen', 2900),
+    ('111', '18010', 'in', 'mi lenne ha csinálnánk egy AI influenszert?', 3000),
+    ('111', '18011', 'in', 'igen, mehet', 3100),
+    ('-222', '18012', 'in', 'igen', 3200),
+    ('111', '18013', 'in', 'nem jó, így ne', 3300),
+    ('111', '18014', 'in', 'ok?', 3400),
+    ('111', '500', 'in', 'a borító legyen kék', 4000),
+    ('-222', '500', 'in', 'lehetne zöld is a háttér', 4100),
+    ('111', '18020', 'out', 'készítsd el a teljes tervet most', 5000),
+    ('111', '18030', 'in', 'Lehetne egy új oldal. Csináld meg a gombot!', 6000),
+    ('111', '18040', 'in', 'Csináld meg a borítót. Lehetne kék is.', 7000),
+    ('111', '18050', 'in', 'Megcsinálod a borítót holnapra?', 8000),
+]
+con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
+                "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
+con.commit()
+PY2
+
 # run <from> <to> ; the text comes from $SANDBOX/text (STDIN mode, so 20 000 characters fit)
 run() {
   : > "$SANDBOX/bodies"
   OUT="$(env PATH="$BIN:$PATH" BODIES="$SANDBOX/bodies" MARVEEN_TOKEN_FILE="$SANDBOX/token" \
-             MARVEEN_MAJSZTRO_STATE=/nonexistent MARVEEN_HOMOGLYPH_BIN=/nonexistent ${GATE_ENV:-} \
+             MARVEEN_MAJSZTRO_STATE=/nonexistent MARVEEN_HOMOGLYPH_BIN=/nonexistent \
+             MARVEEN_MSG_GATE_LEDGER="$SANDBOX/ledger.db" ${GATE_ENV:-} \
              /bin/bash "$HELPER" "$1" "$2" - < "$SANDBOX/text" 2>"$SANDBOX/err")"
   RC=$?
   POSTS=$(wc -l < "$SANDBOX/bodies" | tr -d ' ')
@@ -295,7 +327,8 @@ ok "stop: \"Nem kell leállítani\" in the text is not a stop: sent" "$(sent)" "
 printf '{"d9bc643b": {"reason": "code only after Patrik spec OK", "keywords": ["saját rendszer"]}}' > "$SANDBOX/spec.json"
 SPEC="MARVEEN_MSG_GATE_SPEC_LOCK=$SANDBOX/spec.json"
 # negative: the 38939 release (shortened, wording kept)
-REL='Klodel -> Kernel (d9bc643b saját rendszer): Patrik TG 17858 szó szerint: „közben épüljön az új csapatunk”. Kész, ha: terv-muszaki-1111.md 6. pont 1. lépése fut a mi gépünkön: repó-váz, runner, claude-adapter. Gazda: te (mag).'
+REL='KERES-SZO-SZERINT: „közben épüljön az új csapatunk” (TG 17858)
+Klodel -> Kernel (d9bc643b saját rendszer): Patrik TG 17858 szó szerint: „közben épüljön az új csapatunk”. Kész, ha: terv-muszaki-1111.md 6. pont 1. lépése fut a mi gépünkön: repó-váz, runner, claude-adapter. Gazda: te (mag).'
 text "$REL"
 GATE_ENV="$SPEC" run klodel kernel
 ok "spec lock: the 38939 release without SPEC-OK: refused" "$(refused)" "rc=$RC posts=$POSTS"
@@ -336,6 +369,127 @@ printf '{"d9bc643b": "code only after Patrik spec OK (TG 17604, 17862)"}' > "$SA
 text 'Klodel -> Kernel (d9bc643b): indulhat a repó-váz.'
 GATE_ENV="MARVEEN_MSG_GATE_SPEC_LOCK=$SANDBOX/spec-str.json" run klodel kernel
 ok "spec lock: the plain {id: reason} form locks the id: refused" "$(refused)" "rc=$RC posts=$POSTS"
+
+# --- retro R5 (card 858f80bc): a work order on a Patrik TG carries the request verbatim, an idea needs IGEN ---
+WO='Kernel, Patrik TG 18000 kérése. Kész, ha: a borító kész, mobil és asztali képpel.'
+text "$WO"
+run klodel dave
+ok "keres: a work order on a Patrik TG without KERES-SZO-SZERINT: refused" "$(refused)" "rc=$RC posts=$POSTS"
+ok "keres: the refusal names the KERES-SZO-SZERINT line" "$(grep -q 'KERES-SZO-SZERINT' "$SANDBOX/err" && echo 0 || echo 1)"
+text "$WO
+KERES-SZO-SZERINT: \"Csináljuk meg a receptkönyv borítóját\" (TG 18000)"
+run klodel dave
+ok "keres: a verbatim quote found in TG 18000: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"csinaljuk  meg a receptkonyv boritojat\" (TG 18000)"
+run klodel dave
+ok "keres: accent- and whitespace-free quote: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "$WO
+KÉRÉS-SZÓ-SZERINT: „Csináljuk meg a receptkönyv borítóját” (TG 18000)"
+run klodel dave
+ok "keres: accented label and Hungarian quotes: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"csináljuk meg a teljes webshopot\" (TG 18000)"
+run klodel dave
+ok "keres: a quote Patrik did not write: refused" "$(refused)" "rc=$RC posts=$POSTS"
+ok "keres: the refusal never echoes the quote" "$(grep -qF 'teljes webshopot' "$SANDBOX/err" && echo 1 || echo 0)"
+text "$WO
+KERES-SZO-SZERINT: \"Csináljuk meg\" (TG 18000)"
+run klodel dave
+ok "keres: a two-word quote: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"Csináljuk meg a receptkönyv borítóját\" (TG 18999)"
+run klodel dave
+ok "keres: a TG that is not in the ledger: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"készítsd el a teljes tervet\" (TG 18020)"
+run klodel dave
+ok "keres: our own outbound message is not Patrik's words: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "$WO KERES-SZO-SZERINT: \"Csináljuk meg a receptkönyv borítóját\" (TG 18000)"
+run klodel dave
+ok "keres: KERES-SZO-SZERINT not on its own line: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# an idea (TG 17827/17829 shape): a question or conditional source needs Patrik's later yes in the same chat
+IDEA='FELADAT (Patrik TG 18010), gazda: radar
+KERES-SZO-SZERINT: "csinálnánk egy AI influenszert" (TG 18010)
+Kész, ha: terv a kártyán.'
+text "$IDEA"
+run klodel radar
+ok "keres: a conditional source without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+ok "keres: the refusal names the IGEN line" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+text "$IDEA
+IGEN: TG 18011"
+run klodel radar
+ok "keres: with IGEN: TG 18011 (later, same chat, \"igen, mehet\"): sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "$IDEA
+IGEN: TG 18012"
+run klodel radar
+ok "keres: a yes from another chat: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "$IDEA
+IGEN: TG 18009"
+run klodel radar
+ok "keres: a yes from before the idea: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "$IDEA
+IGEN: TG 18013"
+run klodel radar
+ok "keres: a negated \"nem jó\": refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "$IDEA
+IGEN: TG 18014"
+run klodel radar
+ok "keres: \"ok?\" is a question, not a yes: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# the same message_id in both chats (measured live): each quote is checked where it is found
+text "$WO
+KERES-SZO-SZERINT: \"a borító legyen kék\" (TG 500)"
+run klodel dave
+ok "keres: TG 500, the private-chat sentence (imperative): sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"zöld is a háttér\" (TG 500)"
+run klodel dave
+ok "keres: TG 500, the group sentence (\"lehetne\") without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# the source sentence is the quote's own: an idea next to an order does not taint it, and the reverse
+text "$WO
+KERES-SZO-SZERINT: \"Csináld meg a gombot\" (TG 18030)"
+run klodel dave
+ok "keres: an order after an idea sentence in the same message: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"Lehetne egy új oldal\" (TG 18030)"
+run klodel dave
+ok "keres: the idea sentence of the same message: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"Csináld meg a borítót.\" (TG 18040)"
+run klodel dave
+ok "keres: a quote ending in \".\" before an idea sentence: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"Megcsinálod a borítót holnapra\" (TG 18050)"
+run klodel dave
+ok "keres: a plain question (\"?\" only, no idea word) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# the header's TG must be the quoted one; every KERES line must hold
+text 'FELADAT (Patrik TG 18010), gazda: dave
+KERES-SZO-SZERINT: "Csináljuk meg a receptkönyv borítóját" (TG 18000)
+Kész, ha: kész.'
+run klodel dave
+ok "keres: FELADAT header TG not quoted (another TG quoted): refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"Csináljuk meg a receptkönyv borítóját\" (TG 18000)
+KERES-SZO-SZERINT: \"csináljuk meg a teljes webshopot\" (TG 18000)"
+run klodel dave
+ok "keres: one valid and one false KERES line: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# scope
+text "$WO"
+run dave kernel
+ok "keres: only klodel's work orders are gated (dave): sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'A Patrik TG 18000 szerinti borító kész, a kártya done.'
+run klodel kernel
+ok "keres: a Patrik TG without a work order: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Kész, ha: a CI zöld és a PR mergelve.'
+run klodel kernel
+ok "keres: a work order without a Patrik TG: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"Csináljuk meg a receptkönyv borítóját\" (TG 18000)"
+GATE_ENV="MARVEEN_MSG_GATE_LEDGER=$SANDBOX/nonexistent.db" run klodel dave
+ok "keres: the ledger missing when the rule fires: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+text 'Kész a riport.'
+GATE_ENV="MARVEEN_MSG_GATE_LEDGER=$SANDBOX/nonexistent.db" run klodel dave
+ok "keres: the ledger missing when the rule does not fire: sent" "$(sent)" "rc=$RC posts=$POSTS"
 
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."

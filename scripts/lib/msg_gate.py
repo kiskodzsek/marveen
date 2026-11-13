@@ -56,13 +56,41 @@ Two rules:
    "nem kell PR, de indulhat a kód" stays refused. A missing lock file means no lock; an unreadable or
    malformed one is a gate failure (exit 4), never a silent "nothing locked".
 
+5. REQUEST VERBATIM (retro 2026-11-13 R5, card 858f80bc): a request was over-read six times in a week
+   (an idea turned into a production plan, an opinion read as a stop, an unrequested change; Patrik TG
+   17827 "ki a faszom adott erre utasitast?", TG 17829 "ötleteltem cska"). A text from KERES_FROM
+   (default "klodel") that hands out work -- a "Kész, ha:" anywhere or a "FELADAT (Patrik TG n)" header --
+   and names a Patrik message ("Patrik ... TG n", same sentence, within 40 characters) is refused unless
+   it carries a line
+       KERES-SZO-SZERINT: "<Patrik's words, at least 3, contiguous>" (TG n)
+   whose quote is found, accent- and whitespace-insensitively, in an inbound Telegram message n of the
+   main agent's ledger (store/claudeclaw.db, conversation_log, direction 'in', read-only). If the text
+   has a "FELADAT (Patrik TG n)" header, that n must be one of the quoted ones. When the source sentence
+   of the quote (from the previous . ! ? or line break to the next one) is a question or conditional
+   (ends with "?", or holds an IDEA_MARK such as "lehetne", "kéne", "mi lenne", "ötlet"; the list of
+   the feladat-kiadas skill's kiadas.py), the text also needs a line
+       IGEN: TG m
+   where m is a later inbound message in the same chat holding a yes word (igen, ok, oké, mehet, jó,
+   csináld, persze, rendben, hajrá, pontosan) that is not negated and does not end a question.
+   The message_id alone is ambiguous (measured: private and group chat both hold ids 10-999), so any
+   ledger row with that id counts, but the IGEN must be in the chat where the quote was found.
+   Measured 2026-11-13 on 30 days of Klodel's messages (9495): 752 hand out work, 623 of them name a
+   Patrik TG; of 81 existing "Patrik szó szerint" quotes 51 are found verbatim in their TG (the misses
+   are 800-1500 character quotes, hence a short contiguous quote here), 0 TGs are missing from the
+   ledger; of 60 source sentences found, 14 are a question or conditional.
+   An unreadable ledger, when the rule fires, is a gate failure (exit 4), never a silent pass.
+   Known limits: a work order naming only "TG n" without "Patrik" (60 of 752) is not gated; the
+   Creatorz ban lives in the reply gate (scripts/hooks/product-image-gate.py CREATORZ_RE).
+
 Env (the suite uses them): MARVEEN_MSG_GATE_SECRET_SRC, MARVEEN_MSG_GATE_STRICT (comma list),
 MARVEEN_MSG_GATE_MAX_CHARS, MARVEEN_MSG_GATE_OWN_DOMAINS (comma list), MARVEEN_MSG_GATE_STOP_FROM
-(comma list), MARVEEN_MSG_GATE_SPEC_LOCK (path), MARVEEN_MSG_GATE_SPEC_FROM (comma list).
+(comma list), MARVEEN_MSG_GATE_SPEC_LOCK (path), MARVEEN_MSG_GATE_SPEC_FROM (comma list),
+MARVEEN_MSG_GATE_KERES_FROM (comma list), MARVEEN_MSG_GATE_LEDGER (path).
 """
 import json
 import os
 import re
+import sqlite3
 import sys
 import unicodedata
 
@@ -269,6 +297,130 @@ def spec_lock_reason(text, locks):
             'egy sort: SPEC-OK: TG <szám>.' % hit)
 
 
+# Rule 5. Matched against fold(text), like rules 3 and 4.
+DEFAULT_LEDGER = os.path.join(HERE, '..', '..', 'store', 'claudeclaw.db')
+WORK_ORDER = re.compile(_B + r'kesz,?\s+ha\s*:|' + _B + r'feladat\s*\(\s*patrik\s+tg')
+PATRIK_TG = re.compile(_B + r'patrik(?![a-z0-9])[^\n.!?]{0,40}?' + _B + r'tg\s*#?\s*\d+')
+FELADAT_TG = re.compile(_B + r'feladat\s*\(\s*patrik\s+tg\s*#?\s*(\d+)')
+KERES_LINE = re.compile(r'^[ \t]*keres-szo-szerint:[ \t]*["„“”](.+?)["“”][ \t]*\([ \t]*tg[ \t]*(\d+)[ \t]*\)[ \t]*$', re.M)
+IGEN_LINE = re.compile(r'^[ \t]*igen:[ \t]*tg[ \t]*(\d+)[ \t]*$', re.M)
+# The ötletelés-kapu marks of the feladat-kiadas skill (kiadas.py OTLET_JELEK), folded; "?" is checked apart.
+IDEA_MARKS = ('nenk', 'nank', 'hetne', 'hatna', 'elvileg', 'otlet', 'mi lenne', 'lehetne', 'kene', 'kellene',
+              'erdemes', 'vajon', 'gondolkod')
+YES_WORD = re.compile(_B + r'(?:igen|ok|oke|okes|okay|mehet|jo|csinald|csinaljuk|persze|rendben|hajra|pontosan)'
+                      r'(?![a-z0-9])')
+MIN_QUOTE_WORDS = 3
+
+
+def squash(folded):
+    return re.sub(r'\s+', ' ', folded).strip()
+
+
+def source_sentence(text, i, j):
+    """The sentence(s) of text[i:j]: from the last . ! ? or line break before i to the first one at or after the
+    last character of the span (so a span ending in "?" ends its sentence there)."""
+    a = max(text.rfind(ch, 0, i) for ch in '.!?\n') + 1
+    ends = [k for k in (text.find(ch, max(i, j - 1)) for ch in '.!?\n') if k >= 0]
+    return text[a:(min(ends) + 1 if ends else len(text))]
+
+
+def is_idea(sentence):
+    return '?' in sentence or any(m in sentence for m in IDEA_MARKS)
+
+
+def says_yes(folded):
+    """A yes word that is not negated ("nem jó") and whose sentence is not a question ("ok?")."""
+    for m in YES_WORD.finditer(folded):
+        if NEGATION.search(folded[max(0, m.start() - NEG_WINDOW):m.start()]):
+            continue
+        if '?' in source_sentence(folded, m.start(), m.end()):
+            continue
+        return True
+    return False
+
+
+def open_ledger(path):
+    """A read-only connection; the ledger is never created. Missing or unreadable: the gate fails (exit 4)."""
+    if not os.path.isfile(path):
+        die('the Telegram ledger is missing: %s' % path)
+    try:
+        con = sqlite3.connect('file:%s?mode=ro' % path, uri=True, timeout=5)
+        con.execute('SELECT chat_id, message_id, text, created_at FROM conversation_log LIMIT 1').fetchall()
+        return con
+    except sqlite3.Error as e:
+        die('the Telegram ledger is unreadable: %s (%s)' % (path, e))
+
+
+def inbound(con, tg):
+    """[(chat_id, created_at, folded text)] of the inbound ledger rows with this message_id."""
+    try:
+        rows = con.execute("SELECT chat_id, created_at, text FROM conversation_log WHERE direction='in' "
+                           "AND CAST(message_id AS TEXT)=?", (str(tg),)).fetchall()
+    except sqlite3.Error as e:
+        die('the Telegram ledger query failed (%s)' % e)
+    return [(str(c), ts or 0, squash(fold(t or ''))) for c, ts, t in rows]
+
+
+def keres_reason(text, ledger_path):
+    """None if the text is not a work order on a Patrik TG, or carries valid KERES-SZO-SZERINT (and IGEN)
+    lines; else the refusal reason (TG numbers only, never the quote)."""
+    folded = fold(text)
+    if not (WORK_ORDER.search(folded) and PATRIK_TG.search(folded)):
+        return None
+    lines = KERES_LINE.findall(folded)
+    if not lines:
+        return ('kiadás Patrik TG-üzenetére hivatkozva, de nincs benne a kérés szó szerint. Tegyél bele egy '
+                'külön sort: KERES-SZO-SZERINT: "<Patrik legalább 3 egymás utáni szava>" (TG <szám>), és ha az a '
+                'mondat kérdő vagy feltételes (ötletelés), egy IGEN: TG <szám> sort is Patrik későbbi igenjével.')
+    con = open_ledger(ledger_path)
+    try:
+        ok_tgs, problems = set(), []
+        yes_cache = {}
+        for quote, tg in lines:
+            q = squash(quote)
+            if len(q.split()) < MIN_QUOTE_WORDS:
+                problems.append('TG %s: az idézet rövidebb %d szónál' % (tg, MIN_QUOTE_WORDS))
+                continue
+            rows = inbound(con, tg)
+            if not rows:
+                problems.append('TG %s: nincs ilyen bejövő üzenet a naplóban (store/claudeclaw.db)' % tg)
+                continue
+            hit = None
+            for chat, ts, body in rows:
+                i = body.find(q)
+                if i >= 0:
+                    hit = (chat, ts, body, i)
+                    break
+            if hit is None:
+                problems.append('TG %s: az idézet nincs benne szó szerint (egybefüggő részlet kell)' % tg)
+                continue
+            chat, ts, body, i = hit
+            if is_idea(source_sentence(body, i, i + len(q))):
+                yes = False
+                for m in IGEN_LINE.findall(folded):
+                    key = (m, chat, ts)
+                    if key not in yes_cache:
+                        yes_cache[key] = any(c == chat and t2 > ts and says_yes(b) for c, t2, b in inbound(con, m))
+                    if yes_cache[key]:
+                        yes = True
+                        break
+                if not yes:
+                    problems.append('TG %s: a forrásmondat kérdő vagy feltételes (ötletelés), kell egy IGEN: TG <szám> '
+                                    'sor Patrik későbbi, ugyanabban a chatben adott igenjével ("Így értem: X. Nem '
+                                    'csinálom: Y." után)' % tg)
+                    continue
+            ok_tgs.add(tg)
+    finally:
+        con.close()
+    # Every KERES line must hold (a false one is a false claim of Patrik's words), and the header's TG is covered.
+    head = FELADAT_TG.search(folded)
+    if head and head.group(1) not in ok_tgs:
+        problems.append('a FELADAT (Patrik TG %s) fejléc TG-jére nincs érvényes KERES-SZO-SZERINT sor' % head.group(1))
+    if not problems:
+        return None
+    return 'kérés-kapu (retró R5): ' + '; '.join(problems)
+
+
 def csv_env(name, default):
     return [x.strip().lower() for x in os.environ.get(name, default).split(',') if x.strip()]
 
@@ -326,6 +478,11 @@ def main(argv):
 
     if frm.lower() in csv_env('MARVEEN_MSG_GATE_SPEC_FROM', 'klodel'):
         r = spec_lock_reason(text, load_spec_locks(os.environ.get('MARVEEN_MSG_GATE_SPEC_LOCK', DEFAULT_SPEC_LOCK)))
+        if r:
+            reasons.append(r)
+
+    if frm.lower() in csv_env('MARVEEN_MSG_GATE_KERES_FROM', 'klodel'):
+        r = keres_reason(text, os.environ.get('MARVEEN_MSG_GATE_LEDGER', DEFAULT_LEDGER))
         if r:
             reasons.append(r)
 
