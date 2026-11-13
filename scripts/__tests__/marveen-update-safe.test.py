@@ -293,6 +293,87 @@ def merge3_units(r):
     return ok1 and c2 == ['/a'] and c3 == ['/a'] and ok4
 
 
+
+# --- owner-activity hold (Klodel 40046) -----------------------------------------------------------------------------
+def ledger(r, rows):
+    """A conversation_log with (agent_id, direction, seconds_ago) rows; returns its path."""
+    import sqlite3
+    import time
+    db = os.path.join(r['tmp'], 'ledger.db')
+    con = sqlite3.connect(db)
+    con.execute('CREATE TABLE conversation_log (id INTEGER PRIMARY KEY, agent_id TEXT, chat_id TEXT, direction TEXT, '
+                'text TEXT, created_at INTEGER)')
+    now = int(time.time())
+    for agent, direction, ago in rows:
+        con.execute('INSERT INTO conversation_log (agent_id, chat_id, direction, text, created_at) VALUES (?,?,?,?,?)',
+                    (agent, '1', direction, 'x', now - ago))
+    con.commit()
+    con.close()
+    return db
+
+
+def run_env(r, extra, *args):
+    full = [sys.executable, '-I', SCRIPT, '--root', r['prod'], '--update-cmd', f'bash {r["fake"]}', *args]
+    p = subprocess.run(full, env=dict(ENV, **extra), capture_output=True, text=True, timeout=60)
+    return p.returncode, p.stdout + p.stderr
+
+
+@case
+def owner_active_holds_apply(r):
+    """NEGATIVE: the main agent got a message 2 min ago -> --apply runs nothing (exit 3, HEAD unchanged)."""
+    push_upstream(r, {'app.py': 'v2\n'})
+    db = ledger(r, [('boss', 'in', 120)])
+    before = head(r)
+    rc, out = run_env(r, {'LEDGER_DB_PATH': db, 'MAIN_AGENT_ID': 'boss'}, '--apply')
+    return (rc == 3 and 'OWNER-AKTÍV' in out and head(r) == before
+            and read(os.path.join(r['prod'], 'app.py')) == 'v1\n'
+            and not os.path.isdir(os.path.join(r['prod'], 'store', 'update-safe')))
+
+
+@case
+def owner_active_short_reason_still_holds(r):
+    """NEGATIVE: an empty or token override ('x') is not a reason."""
+    push_upstream(r, {'app.py': 'v2\n'})
+    db = ledger(r, [('boss', 'in', 30)])
+    rc, _ = run_env(r, {'LEDGER_DB_PATH': db, 'MAIN_AGENT_ID': 'boss'}, '--apply', '--owner-active-ok', 'x')
+    return rc == 3 and read(os.path.join(r['prod'], 'app.py')) == 'v1\n'
+
+
+@case
+def owner_active_override_with_reason_applies(r):
+    push_upstream(r, {'app.py': 'v2\n'})
+    db = ledger(r, [('boss', 'in', 30)])
+    rc, out = run_env(r, {'LEDGER_DB_PATH': db, 'MAIN_AGENT_ID': 'boss'}, '--apply',
+                      '--owner-active-ok', 'kiesés-javítás, Patrik mehet')
+    return rc == 0 and 'override' in out and read(os.path.join(r['prod'], 'app.py')) == 'v2\n'
+
+
+@case
+def owner_quiet_or_other_agent_applies(r):
+    """Inbound 20 min ago, an outbound 1 min ago, and another agent's fresh inbound do not hold."""
+    push_upstream(r, {'app.py': 'v2\n'})
+    db = ledger(r, [('boss', 'in', 20 * 60), ('boss', 'out', 60), ('dave', 'in', 10)])
+    rc, out = run_env(r, {'LEDGER_DB_PATH': db, 'MAIN_AGENT_ID': 'boss'}, '--apply')
+    return rc == 0 and 'OWNER-AKTIV' not in out and read(os.path.join(r['prod'], 'app.py')) == 'v2\n'
+
+
+@case
+def owner_active_check_mode_only_reports(r):
+    push_upstream(r, {'app.py': 'v2\n'})
+    db = ledger(r, [('boss', 'in', 60)])
+    rc, out = run_env(r, {'LEDGER_DB_PATH': db, 'MAIN_AGENT_ID': 'boss'})
+    return rc == 0 and 'OWNER-AKTIV' in out and 'CHECK OK' in out
+
+
+@case
+def owner_active_unreadable_ledger_fails_open(r):
+    push_upstream(r, {'app.py': 'v2\n'})
+    bad = os.path.join(r['tmp'], 'broken.db')
+    write(bad, 'not a sqlite file\n')
+    rc, _ = run_env(r, {'LEDGER_DB_PATH': bad, 'MAIN_AGENT_ID': 'boss'}, '--apply')
+    return rc == 0 and read(os.path.join(r['prod'], 'app.py')) == 'v2\n'
+
+
 def main():
     failed = 0
     for fn in CASES:
