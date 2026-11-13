@@ -326,6 +326,33 @@ def pass_not_clock_times(root):
 
 
 @case
+def block_today_time_next_to_a_dated_yesterday_time(root):
+    # Klodel 39769 (card fd941954, 2026-11-13 02:08): the yesterday date attached to the second time exempted the
+    # whole line, the today-dated future time included.
+    yday = TODAY - datetime.timedelta(days=1)
+    code, _, err = run(root['hook'], 'Bash', {'command': KANBAN + " --data-binary @- <<'JSON'\n" + json.dumps(
+        {'author': 'klodel', 'content': f'Dream Engine {TODAY:%m-%d} 02:19 mérése: a #192 benne van a fő fa '
+                                        f'HEAD-jében (258ef299, Pulzus átvezetése {yday:%m-%d} 23:26). Kész.'},
+        ensure_ascii=False) + '\nJSON'}, now='02:08')
+    h = root['hook']
+    return (code == 2 and '02:19' in err and '23:26' not in err
+            and write(root, f'mérve {yday:%m-%d} 23:26 óta, és most {TODAY:%Y-%m-%d}, 02:19', now='02:08')[0] == 2
+            and run(h, 'Bash', {'command': KANBAN + f" -d @- <<'J'\nmérve {TODAY:%m-%d} 02:19\nJ"}, now='02:08')[0] == 2)
+
+
+@case
+def pass_dated_yesterday_times_and_a_free_other_date(root):
+    yday = TODAY - datetime.timedelta(days=1)
+    return (write(root, f'Pulzus átvezetése {yday:%m-%d} 23:26, mérve {TODAY:%m-%d} 02:05', now='02:08')[0] == 0
+            and write(root, f'{yday:%m-%d} este: mérve 23:40, lefutott 23:55', now='02:08')[0] == 0
+            and write(root, f'mérve {yday:%Y-%m-%d}, 23:40 és {yday:%m-%d}T23:55', now='02:08')[0] == 0
+            # Lists and ranges that continue an earlier date stay exempt (the 32-block first draft).
+            and write(root, f'mérve: a futás {yday:%m-%d} 13:39-13:49 lefutott', now='02:08')[0] == 0
+            and write(root, f'mérve: ablak {yday:%m-%d} 21:50 -> {TODAY:%m-%d} 07:30', now='02:08')[0] == 0
+            and write(root, f'mérve 02:19, a {yday:%m-%d}T23:26-os futás után', now='02:08')[0] == 0)
+
+
+@case
 def pass_other_day_line(root):
     return (write(root, f'{TOMORROW:%Y-%m-%d} mérve 23:00')[0] == 0
             and write(root, f'{TOMORROW:%m-%d} lefutott 23:00')[0] == 0)
