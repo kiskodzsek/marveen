@@ -66,6 +66,10 @@ rows = [
     ('111', '18030', 'in', 'Lehetne egy új oldal. Csináld meg a gombot!', 6000),
     ('111', '18040', 'in', 'Csináld meg a borítót. Lehetne kék is.', 7000),
     ('111', '18050', 'in', 'Megcsinálod a borítót holnapra?', 8000),
+    ('111', '18060', 'in', 'Esetleg csináld meg a borítót.', 9000),
+    ('111', '18061', 'in', 'Szerintem a gomb legyen piros.', 9100),
+    ('111', '18062', 'in', 'Mi van, ha kékre festjük a hátteret.', 9200),
+    ('111', '18063', 'in', 'Mi van ha zöld lesz a háttér.', 9300),
 ]
 con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
                 "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
@@ -465,6 +469,37 @@ text "$WO
 KERES-SZO-SZERINT: \"Megcsinálod a borítót holnapra\" (TG 18050)"
 run klodel dave
 ok "keres: a plain question (\"?\" only, no idea word) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# Viktor 41430 INFO 4: esetleg / szerintem / mi van ha are idea marks too
+# (each quote is also sent with its IGEN, so a refusal for any other reason would show)
+for pair in '18060|Esetleg csináld meg a borítót' '18061|Szerintem a gomb legyen piros' \
+            '18062|Mi van, ha kékre festjük a hátteret' '18062|kékre festjük a hátteret' \
+            '18063|zöld lesz a háttér'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres: idea mark, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres: the refusal is the IGEN one" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# Viktor 41430 INFO 1: a ledger path with ? # % keeps mode=ro and opens the right file; the connection is read-only
+mkdir -p "$SANDBOX/a?b#c%d" && cp "$SANDBOX/ledger.db" "$SANDBOX/a?b#c%d/ledger.db"
+text "$WO
+KERES-SZO-SZERINT: \"Csináljuk meg a receptkönyv borítóját\" (TG 18000)"
+GATE_ENV="MARVEEN_MSG_GATE_LEDGER=$SANDBOX/a?b#c%d/ledger.db" run klodel dave
+ok "keres: a ledger under a path with ? # %: read, sent" "$(sent)" "rc=$RC posts=$POSTS"
+RO="$(python3 -I - "$GATE" "$SANDBOX/a?b#c%d/ledger.db" <<'PY3'
+import importlib.util, sqlite3, sys
+spec = importlib.util.spec_from_file_location('mg', sys.argv[1]); mg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mg)
+con = mg.open_ledger(sys.argv[2])
+try:
+    con.execute('CREATE TABLE w (a)')
+    print('writable')
+except sqlite3.OperationalError as e:
+    print('readonly' if 'readonly' in str(e) else 'other: %s' % e)
+PY3
+)"
+ok "keres: the gate's ledger connection refuses a write (mode=ro)" "$([ "$RO" = readonly ] && echo 0 || echo 1)" "got=$RO"
 # the header's TG must be the quoted one; every KERES line must hold
 text 'FELADAT (Patrik TG 18010), gazda: dave
 KERES-SZO-SZERINT: "Csináljuk meg a receptkönyv borítóját" (TG 18000)

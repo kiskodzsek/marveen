@@ -80,10 +80,13 @@ COUNTING_RX = re.compile(r'(?<![\w-])(?:find|wc|grep[ \t]+-[a-zA-Z]*c)(?![\w-])|
 # time / sudo / command; also /bin/ls and \ls) with a glob in its own arguments; "ls*" inside a find pattern or the
 # word ls in prose is not one (Viktor 41354 INFO 3, 41387 INFO 1). Every argument token is non-empty, so a run of
 # blanks splits one way only: the regex stays linear (Viktor 41387 LOW, CWE-1333: the empty-token form backtracked
-# exponentially, 27 blanks took 11 s, past the 10 s hook timeout).
+# exponentially, 27 blanks took 11 s, past the 10 s hook timeout). At most 64 argument tokens before the glob:
+# the prefix characters (' " ( { !) are token characters too, so a repeated "'ls " line restarted a scan to the line
+# end at every prefix (quadratic, 32 KB took 3.1 s; Viktor 41421 LOW). Not caught (the common forms are): env ls,
+# xargs ls, nohup ls, an ls in the middle of a command (echo ok ls x-*), and a glob under another word (echo x-*).
 LS_GLOB_RX = re.compile(
     r'(?:^|[`|;&({!\'"]|\$\(|(?<![\w-])(?:do|then|else|time|sudo|command)(?=[ \t]))'
-    r'[ \t]*(?:\\|/(?:[\w.-]+/)*)?ls(?:[ \t]+[^|;&`)\s]+)*[ \t]+[^|;&`)\s]*[*?\[]')
+    r'[ \t]*(?:\\|/(?:[\w.-]+/)*)?ls(?:[ \t]+[^|;&`)\s]+){0,64}[ \t]+[^|;&`)\s]*[*?\[]')
 NOUNS = (r'db|darab|komment\w*|blokk\w*|sor(?:a|t|ok\w*|ból|ban|ra)?|üzenet\w*|kártyá?\w*|fájl\w*|eset\w*|'
          r'találat\w*|hibá?\w*|oldal\w*|PR\w*|commit\w*|teszt\w*|mutáns\w*|ügynök\w*')
 COUNT_RX = re.compile(r'(?<![\w.:/#-])\d+(?:[.,]\d+)?(?:[ \t]+[\w-]+){0,2}?[ \t-]+(?:' + NOUNS + r')(?![\w])', re.I)

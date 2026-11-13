@@ -102,6 +102,7 @@ list), MARVEEN_HIANY_ROOT (the install whose shared/ is read; default this repo)
 """
 import json
 import os
+import pathlib
 import re
 import sqlite3
 import sys
@@ -318,8 +319,9 @@ FELADAT_TG = re.compile(_B + r'feladat\s*\(\s*patrik\s+tg\s*#?\s*(\d+)')
 KERES_LINE = re.compile(r'^[ \t]*keres-szo-szerint:[ \t]*["„“”](.+?)["“”][ \t]*\([ \t]*tg[ \t]*(\d+)[ \t]*\)[ \t]*$', re.M)
 IGEN_LINE = re.compile(r'^[ \t]*igen:[ \t]*tg[ \t]*(\d+)[ \t]*$', re.M)
 # The ötletelés-kapu marks of the feladat-kiadas skill (kiadas.py OTLET_JELEK), folded; "?" is checked apart.
+# Viktor 41430 INFO 4: "esetleg", "szerintem", "mi van ha" too ("Esetleg csináld meg a borítót" passed without IGEN).
 IDEA_MARKS = ('nenk', 'nank', 'hetne', 'hatna', 'elvileg', 'otlet', 'mi lenne', 'lehetne', 'kene', 'kellene',
-              'erdemes', 'vajon', 'gondolkod')
+              'erdemes', 'vajon', 'gondolkod', 'esetleg', 'szerintem', 'mi van ha', 'mi van, ha')
 YES_WORD = re.compile(_B + r'(?:igen|ok|oke|okes|okay|mehet|jo|csinald|csinaljuk|persze|rendben|hajra|pontosan)'
                       r'(?![a-z0-9])')
 MIN_QUOTE_WORDS = 3
@@ -357,7 +359,9 @@ def open_ledger(path):
     if not os.path.isfile(path):
         die('the Telegram ledger is missing: %s' % path)
     try:
-        con = sqlite3.connect('file:%s?mode=ro' % path, uri=True, timeout=5)
+        # as_uri() percent-encodes ? # %: pasted raw, a "?" in the path would end the file name and drop mode=ro
+        # (Viktor 41430 INFO 1).
+        con = sqlite3.connect(pathlib.Path(os.path.abspath(path)).as_uri() + '?mode=ro', uri=True, timeout=5)
         con.execute('SELECT chat_id, message_id, text, created_at FROM conversation_log LIMIT 1').fetchall()
         return con
     except sqlite3.Error as e:

@@ -2,9 +2,9 @@
 // for Pulzus in the self-pace gate, and the shell-wrapper hole it uncovered
 // (Kernel 2371: `bash -c "<scheduler> ..."` passed). Every refusal Viktor listed
 // has a case here; the plist checks run against real temp files.
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync, unlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync, unlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -25,6 +25,9 @@ const PLIST = join(agentsDir, 'hu.myshp.szamla.worker.plist')
 let approvedBody: Buffer
 const pulzus = { agent: 'pulzus', configDirAgent: 'pulzus', uid: UID, home }
 const L = 'launchctl'                       // spelled once, so the test source reads plainly
+
+// Card 8ae42dd0 follow-up: the mkdtemp home was never removed, so every run left a launchd-ops-* folder behind.
+afterAll(() => rmSync(home, { recursive: true, force: true }))
 
 beforeAll(() => {
   mkdirSync(agentsDir, { recursive: true })

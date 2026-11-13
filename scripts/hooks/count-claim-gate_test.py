@@ -157,7 +157,19 @@ def ls_glob_regex_stays_linear(root):
     for line in ('ls' + ' \t' * 20000 + 'x', 'ls' + ' a' * 20000 + ' b'):
         if mod.LS_GLOB_RX.search(line):
             return False
-    return time.time() - t0 < 1.0 and mod.LS_GLOB_RX.search('ls' + ' ' * 40 + 'x-*') is not None
+    if time.time() - t0 >= 1.0 or mod.LS_GLOB_RX.search('ls' + ' ' * 40 + 'x-*') is None:
+        return False
+    # Viktor 41421 LOW: a repeated prefixed "ls" (32 KB took 3.1 s with an unbounded token run).
+    t0 = time.time()
+    for pre in ("'", '"', '(', '{', '!'):
+        if mod.LS_GLOB_RX.search((pre + 'ls ') * 8000):
+            return False
+    if time.time() - t0 >= 1.0:
+        return False
+    # The bound: a glob after 64 argument tokens is still found, after 70 it is not (documented, not a hole that
+    # matters: no measuring command lists 65 names before its glob).
+    return (mod.LS_GLOB_RX.search('ls' + ' a' * 64 + ' x-*') is not None
+            and mod.LS_GLOB_RX.search('ls' + ' a' * 70 + ' x-*') is None)
 
 
 @case
