@@ -61,6 +61,8 @@ rows = [
     ('-222', '500', 'in', 'lehetne zöld is a háttér', 4100),
     ('111', '18020', 'out', 'készítsd el a teljes tervet most', 5000),
     ('111', '18030', 'in', 'Lehetne egy új oldal. Csináld meg a gombot!', 6000),
+    ('111', '18040', 'in', 'Csináld meg a borítót. Lehetne kék is.', 7000),
+    ('111', '18050', 'in', 'Megcsinálod a borítót holnapra?', 8000),
 ]
 con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
                 "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
@@ -452,6 +454,14 @@ text "$WO
 KERES-SZO-SZERINT: \"Lehetne egy új oldal\" (TG 18030)"
 run klodel dave
 ok "keres: the idea sentence of the same message: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"Csináld meg a borítót.\" (TG 18040)"
+run klodel dave
+ok "keres: a quote ending in \".\" before an idea sentence: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text "$WO
+KERES-SZO-SZERINT: \"Megcsinálod a borítót holnapra\" (TG 18050)"
+run klodel dave
+ok "keres: a plain question (\"?\" only, no idea word) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
 # the header's TG must be the quoted one; every KERES line must hold
 text 'FELADAT (Patrik TG 18010), gazda: dave
 KERES-SZO-SZERINT: "Csináljuk meg a receptkönyv borítóját" (TG 18000)
