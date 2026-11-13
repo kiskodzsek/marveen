@@ -248,6 +248,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash|mcp__.*__(create_repository|create_repository_using_template|fork_repository)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/repo-create-gate.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/repo-create-gate.py; exit 0'",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [

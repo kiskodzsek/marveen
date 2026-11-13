@@ -62,6 +62,8 @@ export const KNOWN_HOOK_SCRIPTS: readonly string[] = [
   'update-apply-gate.py',
   // Klodel 39869: a count or an id in Kernel's message / card comment needs a MÉRVE: line (opt-in per agent).
   'count-claim-gate.py',
+  // Klodel 40048: no GitHub repository is created without a PATRIK-KERTE: TG <id> "<quote>" line.
+  'repo-create-gate.py',
   // The /clear continuity pair: SessionEnd capture + SessionStart replay.
   'clear-capture.py',
   'clear-replay.py',
