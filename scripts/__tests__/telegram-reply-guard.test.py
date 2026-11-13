@@ -495,6 +495,47 @@ def main():
     check("close: a newer, unclosed inbound blocks again", run_hook(db)[0], "block")
     check("close: ... and the drain surfaces it", run_drain(db), True)
 
+    # 9. Retro R9 (card dddca664, hibanapló L218): a group message addressed to someone else by name leads with the
+    # "not for me" close; the agent's own name, a private chat and a third-person mention keep the reply directive.
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound(AGENT, GRP, "5300", "regeljek be ? Patrik", "2026-11-11T13:10:00.000Z")
+    aged(lib, "5300")
+    d, r, _ = run_hook(db)
+    check("R9: addressed to Patrik in the group blocks", d, "block")
+    check("R9: ... the directive leads with NEM-NEKEM and names Patrik", r.startswith("⚠️ NEM-NEKEM?") and "neki: Patrik" in r, True)
+    check("R9: ... it gives the exact close command", f'ledger-close.py {GRP} 5300 "nem nekem: Patrik"' in r, True)
+    check("R9: ... and does not say 'send the reply NOW'", "MOST" in r, False)
+    check("R9: the suggested close is accepted", run_close(db, GRP, "5300", "nem nekem: Patrik"), 0)
+    check("R9: ... and the guard then allows", run_hook(db)[0], None)
+    for mid, text in (("5301", "Balázs, ezt nézd meg"), ("5302", "jó így, Balázs?"), ("5303", "@patrik mehet?")):
+        db = fresh_db()
+        lib = load_lib(db)
+        lib.log_inbound(AGENT, GRP, mid, text, "2026-11-11T13:11:00.000Z")
+        aged(lib, mid)
+        d, r, _ = run_hook(db)
+        check(f"R9: vocative {text!r} -> NEM-NEKEM", (d, r.startswith("⚠️ NEM-NEKEM?")), ("block", True))
+    for mid, text in (("5310", "Patrik szerint jó ez?"), ("5311", "Ezt mondta Patrik"), ("5312", "szerintetek?"),
+                      ("5313", "kernel, pulzus miért állnak?"), ("5314", "ki vette észre a hibát? majsztro?")):
+        db = fresh_db()
+        lib = load_lib(db)
+        lib.log_inbound(AGENT, GRP, mid, text, "2026-11-11T13:12:00.000Z")
+        aged(lib, mid)
+        d, r, _ = run_hook(db)
+        check(f"R9: no vocative {text!r} -> reply directive", (d, r.startswith("⚠️ VÁLASZOLATLAN")), ("block", True))
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound(AGENT, "4242002", "6100", "Patrik, mehet?", "2026-11-11T13:13:00.000Z")
+    aged(lib, "6100")
+    d, r, _ = run_hook(db)
+    check("R9: a private chat keeps the reply directive (no close there)", (d, r.startswith("⚠️ VÁLASZOLATLAN")), ("block", True))
+    db = fresh_db()
+    lib = load_lib(db)
+    lib.log_inbound("klodel", GRP, "5320", "Klodel, Patrik szerint mehet?", "2026-11-11T13:14:00.000Z")
+    aged(lib, "5320")
+    d, r, _ = run_hook(db, extra_env={"MARVEEN_AGENT_ID": "klodel"})
+    check("R9: addressed to this agent by name -> reply directive", (d, r.startswith("⚠️ VÁLASZOLATLAN")), ("block", True))
+
     # the drain dedups a surfaced id, so the close is checked on a DB the drain has not seen yet
     db = fresh_db()
     lib = load_lib(db)

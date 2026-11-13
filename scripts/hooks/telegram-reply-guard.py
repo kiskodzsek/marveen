@@ -92,6 +92,47 @@ def _is_ack(text):
     return all(tok in _ACK_WORDS for tok in tokens)
 
 
+# Retro R9 (card dddca664; hibanapló 2026-11-11 L218, Balázs csoport TG 5277: "nem téged kérdeztelek vagy úgy
+# érzed?"): the "not for me" close exists (ledger-close.py, #180), but the directive put it last, after "send the
+# reply NOW", so a question Balázs addressed to Patrik by name still got an answer. When a group message addresses
+# someone else by name (vocative at the start "Patrik, ..." / "@patrik ...", or at the end "regeljek be ? Patrik" /
+# "..., Patrik?"), the directive leads with the close and names the addressee; the block itself stays (the agent
+# still has to decide, and a close is one command). Names are folded to ASCII lower case before matching.
+# Only the humans: in the group only the main agent reads, so a line opening with an agent's name ("kernel, pulzus
+# miért állnak?") is a question TO the main agent about them (replay over 2390 group inbounds: that was the one
+# false hit when agents were listed).
+_ADDRESSEES = {"patrik": "Patrik", "balazs": "Balázs", "eszter": "Eszter"}
+_NAME_ALT = "|".join(sorted(_ADDRESSEES, key=len, reverse=True))
+_VOCATIVE_RX = (
+    re.compile(r"^\s*@?(" + _NAME_ALT + r")\s*[,:!?]"),          # "Patrik, regeljek be?"
+    re.compile(r"^\s*@(" + _NAME_ALT + r")\b"),                  # "@patrik regeljek be?"
+    re.compile(r"[,?!]\s*(" + _NAME_ALT + r")\s*[?!.]*\s*$"),     # "regeljek be ? Patrik", "jó így, Patrik?"
+    re.compile(r"\s(" + _NAME_ALT + r")\s*\?+\s*$"),              # "mit gondolsz Patrik?"
+)
+
+
+def _fold(text):
+    import unicodedata
+    t = unicodedata.normalize("NFKD", str(text or ""))
+    return "".join(c for c in t if not unicodedata.combining(c)).lower()
+
+
+def _addressed_to_other(text, agent_id):
+    """The display name of the person or agent a message addresses by name, if that is not this agent; else None.
+    A message that also addresses this agent by name is this agent's (None)."""
+    t = _fold(text)
+    found = []
+    for rx in _VOCATIVE_RX:
+        for line in (t.splitlines() or [t]):
+            m = rx.search(line)
+            if m:
+                found.append(m.group(1))
+    own = _fold(agent_id).strip()
+    if not found or own in found:
+        return None
+    return _ADDRESSEES.get(found[0])
+
+
 _CHANNEL_PROVIDERS = ("telegram", "discord", "slack", "googlechat", "teams")
 
 # A plugin key can be named for the provider without matching the MCP tool
@@ -312,6 +353,23 @@ def main():
         channel = "CSATORNA-ÜZENET"
         how = f"ANNAK a csatornának a reply tooljával, ahonnan jött (chat_id={chat_id})"
         sees = "ő csak a csatornát látja, a transzkriptet nem"
+
+    other = None
+    try:
+        if str(chat_id).strip().startswith("-"):  # a "not for me" close is only possible in a group (ledger-close.py)
+            other = _addressed_to_other(text, agent_id)
+    except Exception:
+        other = None
+    if other:
+        reason = (
+            f"⚠️ NEM-NEKEM? A csoportüzenet név szerint nem neked szól, hanem neki: {other} (chat_id={chat_id}): \"{snippet}\"\n"
+            f"Ha tényleg neki szól, NE válaszolj (Balázs TG 5277: \"nem téged kérdeztelek\"), hanem zárd le csendben: "
+            f"python3 {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ledger-close.py')} "
+            f"{chat_id} {message_id} \"nem nekem: {other}\"\n"
+            f"Csak ha mégis neked szól, válaszolj {how}."
+        )
+        print(json.dumps({"decision": "block", "reason": reason}))
+        sys.exit(0)
 
     reason = (
         f"⚠️ VÁLASZOLATLAN {channel} (chat_id={chat_id}): \"{snippet}\"\n"
