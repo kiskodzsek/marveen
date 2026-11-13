@@ -51,7 +51,13 @@ const RECIPE_PRINTERS: Record<string, string> = {
   'scripts/hooks/memory-lookup-nudge.py':
     'on a human message it prints the search recipe; the agent runs it and picks the keyword (TG 16727)',
 }
-const isExemptPrinter = (rel: string) => rel in RECIPE_PRINTERS
+// Hooks that name the endpoint only inside a pattern they match against the agent's own
+// Bash command text (to judge what the agent is about to write); they read no memory.
+const COMMAND_MATCHERS: Record<string, string> = {
+  'scripts/hooks/time-claim-gate.py':
+    'API_WRITE_RX matches /api/memories in the command to judge a time written into a memory (Dave 39699, #216)',
+}
+const isExemptPrinter = (rel: string) => rel in RECIPE_PRINTERS || rel in COMMAND_MATCHERS
 
 // Each mention of the endpoint, with the curl command it sits in (same line), or
 // the bare line when no curl precedes it there.
@@ -127,6 +133,14 @@ describe('...and that stays true (update the scaffold sentence if one of these f
     const src = readFileSync(join(ROOT, rel), 'utf-8')
     expect(src).toMatch(/api\/memories/) // stale-exemption guard: drop the entry when this stops holding
     expect(src).not.toMatch(/urlopen|urllib|http\.client|HTTPConnection|(?:from|import)\s+http\b|httplib|socket|sqlite3|subprocess|\brequests\b|os\.system|os\.popen|os\.exec|os\.spawn|popen|__import__|importlib|asyncio|open_connection|\b(?:exec|eval|compile)\s*\(/)
+  })
+
+  // Same rule for a command matcher; re.compile is how it builds its pattern, any other
+  // compile/exec/eval is still dynamic code.
+  it.each(Object.keys(COMMAND_MATCHERS))('exempt %s only matches: no network, DB, subprocess or dynamic code on any line', (rel) => {
+    const src = readFileSync(join(ROOT, rel), 'utf-8')
+    expect(src).toMatch(/api\/memories/) // stale-exemption guard: drop the entry when this stops holding
+    expect(src).not.toMatch(/urlopen|urllib|http\.client|HTTPConnection|(?:from|import)\s+http\b|httplib|socket|sqlite3|subprocess|\brequests\b|os\.system|os\.popen|os\.exec|os\.spawn|popen|__import__|importlib|asyncio|open_connection|(?<!re\.)\b(?:exec|eval|compile)\s*\(/)
   })
 })
 
