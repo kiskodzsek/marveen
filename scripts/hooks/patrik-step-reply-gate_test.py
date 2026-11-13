@@ -5,9 +5,11 @@ import importlib.util
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,14 +52,6 @@ class StepPhrase(unittest.TestCase):
     def test_negation_applies_to_its_own_sentence_only(self):
         self.assertIsNotNone(gate.step_phrase('Ezt nem kell. Nyomd meg a gombot.'))
 
-    def test_value_check(self):
-        names = {'mira', 'kernel', 'klodel'}
-        self.assertIsNone(gate.value_problem(GOOD, names))
-        self.assertIsNone(gate.value_problem('Kernel 41198: a targeting search csak Patrik tokenjével', names))
-        self.assertIn('msg_id', gate.value_problem('mira mérte, nincs belső út', names))
-        self.assertIn('csapattag', gate.value_problem('valaki 41144: nincs belső út', names))
-        self.assertIn('msg_id', gate.value_problem('mira 123: rövid id', names))
-
 
 class Hook(unittest.TestCase):
     def setUp(self):
@@ -67,10 +61,23 @@ class Hook(unittest.TestCase):
         for n in ('mira', 'kernel', 'dave'):
             os.makedirs(os.path.join(self.agents, n))
         os.environ['REPLY_MARKS_PATH'] = self.marks
+        # The inter-agent queue (store/claudeclaw.db agent_messages), synthetic rows: the writer is "main".
+        self.db = os.path.join(self.tmp, 'claudeclaw.db')
+        con = sqlite3.connect(self.db)
+        con.execute('CREATE TABLE agent_messages (id INTEGER PRIMARY KEY, from_agent TEXT NOT NULL, to_agent TEXT NOT NULL,'
+                    ' content TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL)')
+        now = int(time.time())
+        for row in ((41144, 'mira', 'main', now - 3600), (41154, 'main', 'kernel', now - 60),
+                    (40001, 'kernel', 'main', now - 8 * 86400), (41200, 'main', 'main', now - 60)):
+            con.execute("INSERT INTO agent_messages VALUES (?, ?, ?, 'x', 'done', ?)", row)
+        con.commit()
+        con.close()
+        os.environ['LEDGER_DB_PATH'] = self.db
         reply_marks._pending.clear()
         reply_marks.bind_call(None)
 
     def tearDown(self):
+        os.environ.pop('LEDGER_DB_PATH', None)
         shutil.rmtree(self.tmp, ignore_errors=True)
         reply_marks._pending.clear()
         reply_marks.bind_call(None)
@@ -78,9 +85,12 @@ class Hook(unittest.TestCase):
     def mark(self, chat=GROUP, value=GOOD, agent='main', kind='PATRIK-LEPES'):
         reply_marks.add(kind, chat, agent, value)
 
-    def run_gate(self, chat, text, agent='main', tool=TOOL, call=None, raw=None):
+    def run_gate(self, chat, text, agent='main', tool=TOOL, call=None, raw=None, owner_env=True, root=None):
         env = dict(os.environ, MAIN_AGENT_ID='main', MARVEEN_AGENT_ID=agent, MARVEEN_OWNER_CHATS=f'{PRIV},{GROUP}',
-                   REPLY_MARKS_PATH=self.marks, MARVEEN_AGENTS_DIR=self.agents)
+                   REPLY_MARKS_PATH=self.marks, MARVEEN_AGENTS_DIR=self.agents, LEDGER_DB_PATH=self.db,
+                   CLAUDE_PROJECT_DIR=root or self.tmp)
+        if not owner_env:
+            env.pop('MARVEEN_OWNER_CHATS')
         payload = {'tool_name': tool, 'tool_input': {'chat_id': chat, 'text': text}}
         if call:
             payload['tool_use_id'] = call
@@ -113,9 +123,60 @@ class Hook(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn('csapattag', err)
 
-    def test_main_agent_id_counts_as_a_name(self):
-        self.mark(value='main 41154: Patrik telefonján a 2FA')
-        self.assertEqual(self.run_gate(GROUP, 'Lépj be a Metába.')[0], 0)
+    def test_value_is_a_reference_to_the_queue(self):
+        # Viktor 41257 LOW 2 (Klodel 41260): the msg_id is a queue row of the last 7 days with the named agent as
+        # sender or recipient, and the named agent is not the writer.
+        names = {'mira', 'kernel', 'dave', 'main'}
+        self.assertIsNone(gate.value_problem(GOOD, names, 'main'))
+        self.assertIsNone(gate.value_problem('Kernel 41154: a targeting search csak Patrik tokenjével', names, 'main'))
+        self.assertIn('msg_id', gate.value_problem('mira mérte, nincs belső út', names, 'main'))
+        self.assertIn('msg_id', gate.value_problem('mira 123: rövid id', names, 'main'))
+        self.assertIn('csapattag', gate.value_problem('valaki 41144: nincs belső út', names, 'main'))
+        self.assertIn('saját', gate.value_problem('main 41200: én mértem', names, 'main'))   # own name
+        self.assertIn('üzenetsor', gate.value_problem('dave 41144: nincs út', names, 'main'))  # dave not a party
+        self.assertIn('üzenetsor', gate.value_problem('kernel 40001: régi', names, 'main'))   # 8 days old
+        self.assertIn('üzenetsor', gate.value_problem('kernel 2026: az év', names, 'main'))    # no such row
+        self.assertIn('üzenetsor', gate.value_problem('mira 8080: port', names, 'main'))
+        os.environ['LEDGER_DB_PATH'] = os.path.join(self.tmp, 'nincs.db')
+        self.assertIn('nem olvasható', gate.value_problem(GOOD, names, 'main'))             # fail closed
+
+    def test_neg_own_name_or_unknown_msg_id_blocks_end_to_end(self):
+        self.mark(value='main 41154: én néztem meg')
+        rc, err = self.run_gate(GROUP, 'Nyomd meg a gombot.')
+        self.assertEqual(rc, 2)
+        self.assertIn('saját', err)
+        self.mark(value='kernel 2026: nincs belső út')
+        self.assertEqual(self.run_gate(GROUP, 'Nyomd meg a gombot.')[0], 2)
+        self.mark(value='kernel 41154: nincs belső út')
+        self.assertEqual(self.run_gate(GROUP, 'Nyomd meg a gombot.')[0], 0)
+
+    def projektek(self, data):
+        root = os.path.join(self.tmp, 'root')
+        os.makedirs(os.path.join(root, 'store'), exist_ok=True)
+        with open(os.path.join(root, 'store', 'projektek.json'), 'w', encoding='utf-8') as f:
+            f.write(data if isinstance(data, str) else json.dumps(data))
+        return root
+
+    def test_neg_owner_chats_from_projektek_json(self):
+        # Viktor 41257 MEDIUM: production reads store/projektek.json (no MARVEEN_OWNER_CHATS); TG 6049 was the group.
+        root = self.projektek({'elo_uzenet': {'privat': {'chat_id': int(PRIV), 'message_id': 1},
+                                              'csoport': {'chat_id': int(GROUP), 'message_id': 2}}})
+        self.assertEqual(self.run_gate(PRIV, 'Nyomd meg a gombot.', owner_env=False, root=root)[0], 2)
+        self.assertEqual(self.run_gate(GROUP, 'Nyomd meg a gombot.', owner_env=False, root=root)[0], 2)
+        self.assertEqual(self.run_gate(OTHER, 'Nyomd meg a gombot.', owner_env=False, root=root)[0], 0)
+        root = self.projektek({'elo_uzenet': {'privat': PRIV, 'csoport': GROUP}})  # bare ids
+        self.assertEqual(self.run_gate(GROUP, 'Nyomd meg a gombot.', owner_env=False, root=root)[0], 2)
+
+    def test_unknown_owner_chats_pass_and_say_so(self):
+        for data in (None, 'not json', {'elo_uzenet': None}, {'elo_uzenet': {'privat': {}}}):
+            root = self.projektek(data) if data is not None else os.path.join(self.tmp, 'ures')
+            rc, err = self.run_gate(GROUP, 'Nyomd meg a gombot.', owner_env=False, root=root)
+            self.assertEqual(rc, 0, data)
+            self.assertIn('the gate is off', err, data)
+
+    def test_main_agent_id_counts_as_a_name_for_another_writer(self):
+        reply_marks.add('PATRIK-LEPES', GROUP, 'kernel', 'main 41154: Patrik telefonján a 2FA')
+        self.assertEqual(self.run_gate(GROUP, 'Lépj be a Metába.', agent='kernel')[0], 0)
 
     def test_neg_mark_of_another_chat_kind_or_agent_blocks(self):
         self.mark(chat=PRIV)

@@ -10,8 +10,12 @@ What blocks (exit 2): a reply into one of the owner's chats (store/projektek.jso
 MARVEEN_OWNER_CHATS) whose text puts a step on the reader ("nyomd meg", "te nyomod", "kattints", "lépj be",
 "töltsd fel", "te indítod", "futtasd", "másold be", "a gépnél" ...), unless the agent took a fresh PATRIK-LEPES
 reply mark for the chat right before (scripts/reply-mark.py PATRIK-LEPES --chat <chat> "<value>"). The value must
-name who measured that there is no internal route and the msg_id of that measurement: one fleet agent's name
-(<install>/agents/<name>/, or the main agent id) and a 4-7 digit id. One mark = one message (scripts/lib/reply_marks.py).
+name who measured that there is no internal route and the msg_id of that measurement: another fleet agent's name
+(<install>/agents/<name>/, or the main agent id; not the writer's own, Viktor 41257 LOW 2) and a 4-7 digit id that is a
+row of the inter-agent queue (store/claudeclaw.db agent_messages) from the last 7 days with that agent as its sender or
+recipient: the mark is a reference, not a claim. One mark = one message (scripts/lib/reply_marks.py).
+The owner's chats unknown (no MARVEEN_OWNER_CHATS, store/projektek.json unreadable or of another shape): the gate
+passes and says so on stderr, once per call (Viktor 41257 MEDIUM).
 Passes: a negated sentence ("nem kell nyomnod", "ne töltsd fel"), past tense ("megnyomtad", "feltöltöttük": no
 trigger), a quoted text („...”: customer copy in te-form goes in quotes), a sentence addressed to Balázs (balazs-task-reply-gate.py owns that), edits
 (edit_message: the live status message lists what waits on whom by design), other chats, unreadable input.
@@ -21,14 +25,20 @@ Tests: patrik-step-reply-gate_test.py next to this file.
 import json
 import os
 import re
+import sqlite3
 import sys
+import time
 import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'lib'))
 INSTALL = os.path.dirname(os.path.dirname(HERE))
-STORE = os.path.join(INSTALL, 'store')
+# CLAUDE_PROJECT_DIR is what the hook command itself runs from ("$CLAUDE_PROJECT_DIR/scripts/hooks/..."): in
+# production the same directory as INSTALL; tests point it at a throwaway root with its own store/projektek.json.
+ROOT = os.environ.get('CLAUDE_PROJECT_DIR') or INSTALL
+STORE = os.path.join(ROOT, 'store')
+MSG_MAX_AGE_S = 7 * 86400
 
 INVISIBLE = re.compile('[­᠎​-‏‪-‮⁠-⁤﻿]')
 QUOTED = re.compile(r'„[^”\n]*”|“[^”\n]*”|"[^"\n]*"|»[^«\n]*«|«[^»\n]*»')
@@ -98,7 +108,7 @@ def step_phrase(text):
 
 def agent_names():
     names = set()
-    d = os.environ.get('MARVEEN_AGENTS_DIR') or os.path.join(INSTALL, 'agents')
+    d = os.environ.get('MARVEEN_AGENTS_DIR') or os.path.join(ROOT, 'agents')
     try:
         for n in os.listdir(d):
             if os.path.isdir(os.path.join(d, n)) and re.fullmatch(r'[a-z][a-z0-9_-]{1,30}', n):
@@ -115,15 +125,35 @@ def agent_names():
     return names
 
 
-def value_problem(value, names):
-    """Why a PATRIK-LEPES value does not name the measurement, or None."""
+def value_problem(value, names, writer='', now=None):
+    """Why a PATRIK-LEPES value does not name the measurement, or None. The value must name ANOTHER fleet agent and a
+    msg_id that is a queue row of the last 7 days with that agent as sender or recipient."""
     v = fold(value or '')
-    if not MSG_ID.search(v):
+    ids = [int(x) for x in MSG_ID.findall(v)]
+    if not ids:
         return 'nincs benne a mérés msg_id-je (4-7 jegyű szám)'
     words = set(re.findall(r'[a-z0-9_-]+', v))
-    if names and not (words & names):
-        return 'nem nevez meg csapattagot (ki mérte: ' + ', '.join(sorted(names)) + ')'
-    return None
+    named = (words & names) - {fold(writer or '')}
+    if not named:
+        return ('nem nevez meg MÁSIK csapattagot (ki mérte: ' + ', '.join(sorted(names - {fold(writer or '')}))
+                + '; a saját neved nem mérés)')
+    now = time.time() if now is None else now
+    try:
+        import ledger_lib
+        con = sqlite3.connect(f'file:{ledger_lib.db_path()}?mode=ro', uri=True, timeout=5)
+        try:
+            rows = con.execute(
+                'SELECT from_agent, to_agent, created_at FROM agent_messages WHERE id IN (%s)' % ','.join('?' * len(ids)),
+                ids).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return 'az üzenetsor nem olvasható, a msg_id nem ellenőrizhető'
+    for frm, to, at in rows:
+        if (fold(str(frm)) in named or fold(str(to)) in named) and isinstance(at, int) and 0 <= now - at <= MSG_MAX_AGE_S:
+            return None
+    return ('a msg_id (' + ', '.join(map(str, ids)) + ') nem olyan 7 napon belüli üzenet az üzenetsorban, amelynek '
+            + ' vagy '.join(sorted(named)) + ' a feladója vagy címzettje')
 
 
 def main():
@@ -140,7 +170,12 @@ def main():
     if not isinstance(ti, dict) or not ti.get('chat_id'):
         return 0
     chat = str(ti['chat_id']).strip()
-    if chat not in owner_chats():
+    chats = owner_chats()
+    if not chats:
+        print('patrik-step-reply-gate: the owner\'s chats are unknown (MARVEEN_OWNER_CHATS / store/projektek.json '
+              'elo_uzenet); the gate is off.', file=sys.stderr)
+        return 0
+    if chat not in chats:
         return 0
     phrase = step_phrase(ti.get('text', ''))
     if not phrase:
@@ -157,11 +192,11 @@ def main():
             f'(„{phrase}”). ')
     how = ('Előbb mérd meg, van-e belső út (csapattag, skill, API); ha nincs, jelöld előtte (a szövegbe nem kerül): '
            'python3 -I scripts/reply-mark.py PATRIK-LEPES --chat <privat|csoport> "<ki mérte> <msg_id>: <miért nincs '
-           'belső út>". Ha nem neki szól, írd át („mi feltöltjük”); vevőnek szóló szöveg (poszt, hirdetés) „...” közé.')
+           'belső út>" (a msg_id a csapattag 7 napon belüli üzenete az üzenetsorban). Ha nem neki szól, írd át („mi feltöltjük”); vevőnek szóló szöveg (poszt, hirdetés) „...” közé.')
     if value is None:
         print(head + how, file=sys.stderr)
         return 2
-    problem = value_problem(value, agent_names())
+    problem = value_problem(value, agent_names(), agent)
     if problem:
         print(head + f'A PATRIK-LEPES jel {problem}. ' + how, file=sys.stderr)
         return 2
