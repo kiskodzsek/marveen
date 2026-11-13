@@ -61,7 +61,10 @@ DEFLINE = re.compile(r'^\s*(?:>\s*)?(?:[-*]\s+)?\**(?:Kész, ha|Jelölés(?:ek)?
 # an item of an enumeration or a definition ("; **NINCS ADAT** = nem tudom", "vagy NINCS ADAT indokkal",
 # "`NINCS ADAT` a szokott jelentéssel"), not a value after a field ("Gyártási költség: NINCS ADAT").
 TERM_RUN = re.compile(r'[\s*`_\[\]"„”“\']+')
-TERM_PRE = re.compile(r'(?:[;,|/(.]|\bvagy|\bés|\ba)$')
+# Viktor 41484 LOW: "a" and "és" before NINCS ADAT read as a field value in a sentence ("az ár a NINCS ADAT"),
+# not as a list item, so they no longer exempt (measured: 6 of 187 real legend lines lose the exemption instead
+# of 5). The comma stays: real legends list their marks with commas, and dropping it would cost 49 of 187.
+TERM_PRE = re.compile(r'(?:[;,|/(.]|\bvagy)$')
 TERM_POST = re.compile(r'(?:[;,./()]|$|=|indokkal\b|-|jelöl|a szokott jelentéssel)')
 SRC = re.compile(r'(?i)https?://|(?<![\w@])[\w-]{1,63}\.(hu|com|org|io|eu|net|gov|de|co|app)\b|webread|websearch|'
                  r'quarantine|reader|\bGET\b|/search|\bapi\b|ads-|trends|ksh|meska|pepita|e-?mag|vatera|dm\b|'

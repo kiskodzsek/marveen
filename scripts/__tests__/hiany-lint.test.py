@@ -85,6 +85,8 @@ CASES = [
     ("41468: field value after a run of spaces", "Jelölés: ár:" + " " * 200 + "NINCS ADAT\n", 1),
     ("41468: a term item and a hidden value on one line", "Jelölés: **TIPP** = becslés, **NINCS ADAT** = nem tudom; "
      "piaci adat: NINCS ADAT.\n", 1),
+    ("41484: \"a\" before NINCS ADAT is a field value", "Jelölés: az ár a NINCS ADAT.\n", 1),
+    ("41484: \"és\" before NINCS ADAT is a field value", "Jelölés: ár és NINCS ADAT.\n", 1),
     ("41468: enumerated legend item", "Jelölés: **[mérve]** = saját GET; **[tipp]**; **NINCS ADAT**.\n", 0),
     ("41468: backticked legend items", "Jelölés: `[tipp]`, `[nem ellenőrzött]`, `NINCS ADAT` a szokott jelentéssel.\n", 0),
     ("41468: legend item with -tal", "Kész, ha: minden szám ellenőrzött (vagy NINCS ADAT-tal jelölt).\n", 0),
