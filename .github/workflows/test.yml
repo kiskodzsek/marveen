@@ -97,6 +97,8 @@ jobs:
       - run: bash scripts/__tests__/host-heartbeat.test.sh
       # WORKTREEADD1021: throwaway git repos in a temp dir, no network.
       - run: bash scripts/__tests__/worktree-add.test.sh
+      # Retro R7 (card a8354557): the push-time related-tests gate and its installer; temp bare origin + clone, npx a PATH shim, no network.
+      - run: bash scripts/__tests__/related-tests-gate.test.sh
       # Klodel 36866: curl and sleep stubbed on PATH, state file in a temp dir, no network.
       - run: bash scripts/__tests__/agent-msg-majsztro-copy.test.sh
       # Klodel 37971/37978: the business-idea gate lint (banned directions at a word start only); temp files, no network.

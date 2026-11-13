@@ -14,7 +14,7 @@
 //     pr create --title <t> --head <branch> --base <branch> --body-file <file|-> [--draft]
 //     pr edit   <n> [--title <t>] [--base <branch>] [--body-file <file|->]
 //     pr review-approve <n> --sha <40-hex head>
-//     pr merge  <n> --sha <40-hex head> --method squash|merge
+//     pr merge  <n> --sha <40-hex head> --method squash|merge [--allow-behind]
 //     pr close  <n> --sha <40-hex head>
 //     pr reopen <n> --sha <40-hex head>
 //     branch get <branch>
@@ -31,7 +31,11 @@
 // api.github.com. Each write is bound to a PR AND its exact head: `--sha` is the full 40-hex head the caller
 // examined; before the write the script reads the PR and stops if its head is another commit or its state is
 // not the one the write expects (open; closed for reopen). The merge carries the same sha to GitHub, which
-// refuses a moved head itself. No free text rides along: the approval has no review body, the merge no commit
+// refuses a moved head itself. A merge is also bound to the LIVE base (retro R7, 2026-11-13): the head must
+// not be behind the base branch as it is now (GET compare <base>...<sha>, behind_by must be 0), because a squash
+// of a behind head lands a tree nobody reviewed (bubek #8: main tree 4d7c705f against the reviewed 194bf703).
+// The base commit the PR record carries goes stale after another merge, so it is never used. `--allow-behind` lets a merge
+// through after a delta review; the audit row then carries note behind-allowed. No free text rides along: the approval has no review body, the merge no commit
 // title or message (GitHub's default), so neither is a comment channel. The writes run only as pulzus or
 // klodel (`refused-agent` otherwise; a drift control, not authentication), and the audit line names the sha.
 // The token's own rights and the branch protection still decide who can approve or merge (H9).
@@ -165,12 +169,13 @@ export function buildRequest(argv) {
       return { repo, cmd, method: 'POST', path: `${base}/pulls/${seg(n)}/reviews`, body: { commit_id: sha, event: 'APPROVE' }, kind: 'pr-review', target: n, expect: { path: `${base}/pulls/${seg(n)}`, sha, state: 'open' } }
     }
     case 'pr merge': {
-      const { opts, rest } = flags(tail, new Set(['sha', 'method']))
+      const { opts, rest } = flags(tail, new Set(['sha', 'method']), new Set(['allow-behind']))
       noExtra(rest, 1)
       const n = need(NUM, rest[0], 'PR number')
       const sha = need(HEAD_SHA, opts.sha, 'head sha (--sha, 40 hex)')
       const mergeMethod = need(/^(?:squash|merge)$/, opts.method, 'merge method (--method squash|merge)')
-      return { repo, cmd, method: 'PUT', path: `${base}/pulls/${seg(n)}/merge`, body: { sha, merge_method: mergeMethod }, kind: 'pr-merge', target: n, expect: { path: `${base}/pulls/${seg(n)}`, sha, state: 'open' } }
+      // liveBase: the entry point also reads the base branch as it is NOW and refuses a head that is behind it.
+      return { repo, cmd, method: 'PUT', path: `${base}/pulls/${seg(n)}/merge`, body: { sha, merge_method: mergeMethod }, kind: 'pr-merge', target: n, expect: { path: `${base}/pulls/${seg(n)}`, sha, state: 'open', liveBase: true, allowBehind: opts['allow-behind'] === true } }
     }
     case 'pr close': case 'pr reopen': {
       const { opts, rest } = flags(tail, new Set(['sha']))
@@ -371,6 +376,22 @@ export function headMismatch(expect, pr) {
   return null
 }
 
+// The live-base read of a merge (retro R7): the one extra request, built here from the PR's own base branch name
+// (read just before, so validated like any branch) and the examined head. Pure: no I/O. Null if a name is odd.
+export function compareRequest(repo, baseRef, sha) {
+  if (!REPOS.has(repo) || typeof baseRef !== 'string' || !BRANCH.test(baseRef) || typeof sha !== 'string' || !HEAD_SHA.test(sha)) return null
+  return { method: 'GET', path: `/repos/${OWNER}/${repo}/compare/${seg(baseRef)}...${sha}` }
+}
+
+// Is the head behind the live base? `cmp` is the compare answer for <base>...<head>. Fail closed: anything but a
+// non-negative integer in behind_by is "could not be compared". Pure: returns the reason it refuses, or null.
+export function behindRefusal(cmp, baseRef, allowBehind = false) {
+  const n = cmp && typeof cmp === 'object' ? cmp.behind_by : undefined
+  if (!Number.isInteger(n) || n < 0) return 'the head could not be compared with the live base'
+  if (n === 0 || allowBehind) return null
+  return `the PR head is ${n} commit(s) behind ${String(baseRef).slice(0, 80)}: a merge would land a tree nobody reviewed (rebase or merge the base in and re-review; --allow-behind only after a delta review)`
+}
+
 // The release writes run only as the release chain (Viktor 31739 LOW): a drift control against an accidental
 // or injected write from another agent, not authentication (the id is self-declared). The real limit stays
 // the token's scope and the branch protection. Pure: returns the reason it refuses, or null.
@@ -439,6 +460,23 @@ async function run(argv) {
     if (why) {
       audit({ ...row, status: 'refused-head' })
       throw new Error(`${why}: nothing written`)
+    }
+    if (req.expect.liveBase) {
+      // The base branch as it is NOW, not the commit the PR record carries (stale): a second GET, compare <base>...<head>.
+      const cr = compareRequest(req.repo, pr.base?.ref, req.expect.sha)
+      let cmp = null
+      if (cr) {
+        try {
+          const c = await fetch(API + cr.path, { method: 'GET', headers, redirect: 'manual' })
+          cmp = c.ok ? JSON.parse(await c.text()) : null
+        } catch { cmp = null }
+      }
+      const behind = cr ? behindRefusal(cmp, pr.base.ref, req.expect.allowBehind) : 'the PR base branch name is not usable'
+      if (behind) {
+        audit({ ...row, status: 'refused-behind' })
+        throw new Error(`${behind}: nothing written`)
+      }
+      if (req.expect.allowBehind && cmp.behind_by > 0) row.note = 'behind-allowed'
     }
   }
   if (body) headers['Content-Type'] = 'application/json'
