@@ -63,6 +63,12 @@ hj --name t -- bash -c "/Users/x/tools/hyperframes/hf render proj -o out.mp4; $R
 check "hyperframes hf render is a film export" "$(ok "$RC" = 77)" "rc=$RC"
 hj --name t -- bash -c "ffmpeg -i a.mp4 -c copy /Users/klodel/marveen/shared/marketing/x/final/v.mp4; $RAN"
 check "an mp4 written under shared/marketing/ is a film export" "$(ok "$RC" = 77)" "rc=$RC"
+hj --name t -- bash -c "ffmpeg -i a.mp4 /Users/klodel/marveen/shared/marketing/x/final/v.mov && $RAN"
+check "a .mov under shared/marketing/ is a film export (Viktor 41284 INFO 7)" "$(ok "$RC" = 77)" "rc=$RC"
+hj --name t -- bash -c "ffmpeg -i a.mp4 '/Users/klodel/marveen/shared/marketing/x/v.webm'; $RAN"
+check "a quoted .webm under shared/marketing/ is a film export" "$(ok "$RC" = 77)" "rc=$RC"
+hj --name t -- bash -c "ls /Users/klodel/marveen/shared/marketing/x/v.mp4.ok; $RAN"
+runs "a .mp4.ok sheet path is not a film export" "$(ok "$RC" = 0 -a -e "$SB/ran")" "rc=$RC $OUT"
 
 hj --name t -- bash -c "cd /x && node render.mjs /w/film frames 0.5,1.5; $RAN"
 runs "render.mjs frames (the size gate's own frames) is not an export" "$(ok "$RC" = 0 -a -e "$SB/ran")" "rc=$RC $OUT"

@@ -2747,31 +2747,49 @@ def elo_free_text_blocked(root):
 @case
 def elo_ok_without_stamp_blocked(root):
     mod, fp = elo_setup(root)
-    return 'nincs bélyeg' in (mod.elo_check(fp, 'ok') or '')
+    return 'nincs bélyeg' in (mod.elo_check(fp, 'ok BabyMomentsView') or '')
 
 
 @case
 def elo_ok_green_stamp_passes(root):
     mod, fp = elo_setup(root, ELO_GREEN)
-    return mod.elo_check(fp, 'ok') is None
+    return mod.elo_check(fp, 'ok BabyMomentsView') is None
 
 
 @case
 def elo_ok_red_stamp_blocked(root):
     mod, fp = elo_setup(root, ELO_GREEN + 'NEM ÉLŐ  BabyTellHome (csak az app-preview-ban vagy sehol)\n')
-    return 'nem zöld' in (mod.elo_check(fp, 'ok') or '')
+    return 'nem zöld' in (mod.elo_check(fp, 'ok BabyMomentsView') or '')
 
 
 @case
 def elo_ok_stamp_without_result_blocked(root):
     mod, fp = elo_setup(root, 'ÉLŐ      X <- y\n')
-    return 'nem zöld' in (mod.elo_check(fp, 'ok') or '')
+    return 'nem zöld' in (mod.elo_check(fp, 'ok BabyMomentsView') or '')
 
 
 @case
 def elo_ok_old_stamp_blocked(root):
     mod, fp = elo_setup(root, ELO_GREEN, age_s=8 * 86400)
-    return '7 napnál régebbi' in (mod.elo_check(fp, 'ok') or '')
+    return '7 napnál régebbi' in (mod.elo_check(fp, 'ok BabyMomentsView') or '')
+
+
+@case
+def elo_ok_without_components_blocked(root):
+    mod, fp = elo_setup(root, ELO_GREEN)
+    return 'komponenseit' in (mod.elo_check(fp, 'ok') or '')
+
+
+@case
+def elo_ok_component_not_in_stamp_blocked(root):
+    mod, fp = elo_setup(root, ELO_GREEN)
+    return 'BabyTellHome' in (mod.elo_check(fp, 'ok BabyMomentsView, BabyTellHome') or '')
+
+
+@case
+def elo_ok_component_list_passes(root):
+    mod, fp = elo_setup(root, ELO_GREEN + 'ÉLŐ      MomentScreen <- src/app/y/page.tsx\n')
+    return mod.elo_check(fp, 'ok BabyMomentsView,MomentScreen') is None
 
 
 @case

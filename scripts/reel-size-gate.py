@@ -11,7 +11,8 @@ Usage: python3 -I reel-size-gate.py <video.mp4 | frames-dir> [--end 24] [--skip 
   --end   the last product second (the closing title card carries no product and is not measured)
   --skip  seconds that are an intentional dip/cross-fade (the product is fading on purpose), listed one by one
   --zone  the product zone, y from..to: under the caption, above the bottom pill (v10c/v10d layout)
-Exit: 0 = every measured second keeps the size and no bottom is cut; 1 = a second fails (one line each on stderr).
+Exit: 0 = every measured second keeps the size and no bottom is cut; 1 = a second fails (one line each on stderr), or no
+second was measured at all; 2 = usage (an unknown option or a missing value).
 
 Measured per second, in the zone:
   the product = the rows with >= 6 strong-edge pixels (|dx|+|dy| of the gray image > 40; the soft bokeh stays under it),
@@ -103,7 +104,13 @@ def main():
         print(__doc__, file=sys.stderr)
         return 2
     src = a[0]
-    opt = {k: v for k, v in zip(a[1::2], a[2::2])}
+    # Viktor 41284 (2): a mistyped option (--zon) or a missing value must not fall away silently
+    rest = a[1:]
+    if len(rest) % 2 or any(k not in ('--end', '--skip', '--zone') for k in rest[0::2]):
+        print(f'REEL-SIZE-GATE: unknown option or missing value in {rest} (allowed: --end N --skip a,b --zone y1,y2)',
+              file=sys.stderr)
+        return 2
+    opt = {k: v for k, v in zip(rest[0::2], rest[1::2])}
     end = float(opt.get('--end', 1e9))
     skip = {round(float(x), 2) for x in opt.get('--skip', '').split(',') if x}
     z0, z1 = (int(x) for x in opt.get('--zone', '512,1165').split(','))
@@ -145,6 +152,12 @@ def main():
         print('REEL-SIZE-GATE: NOT OK (Patrik TG 5798: "nem vegig a jo meret", "levagott az alja"):', file=sys.stderr)
         for e in errs:
             print('  - ' + e, file=sys.stderr)
+        return 1
+    if n == 0:
+        # Viktor 41284 (2): an empty frames dir, wrong file names (only t_<sec>.png), --end 0 or every second in --skip
+        # measured nothing and still said "ok"; as a gate that is a pass without a measurement.
+        print('REEL-SIZE-GATE: NOT OK: no measurable frame (frames dir empty, names not t_<sec>.png, --end 0, or every '
+              'second in --skip)', file=sys.stderr)
         return 1
     print(f'REEL-SIZE-GATE: ok, {n} seconds measured')
     return 0

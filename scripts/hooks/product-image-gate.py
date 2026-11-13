@@ -79,7 +79,7 @@ előtte/utána/pár (or a par/pair word in the file name) needs
     ELTUNT: nincs | <what is gone> PATRIK-KERTE TG <inbound TG msg id>
 (see eltunt_check).
 Live surface (retro R4, card 686f1b5f; Lex 41089, Klodel 41172, 2026-11-13): every marketing image and video carries
-    ELO: ok | nincs-app-ui <what shows instead>
+    ELO: ok <Component,...> | nincs-app-ui <what shows instead>
 "ok" needs a green, at most 7 days old store/kep-kapu/<file>.elo from scripts/elo-felulet-check.sh --stamp (the app
 screen on it is wired into a customer route on Marabel origin/main, not only into /app-preview). See elo_check.
 Tests: product-image-gate_test.py next to this file.
@@ -352,8 +352,9 @@ def tg_inbound_exists(msg_id):
 
 
 ELO_MAX_AGE_S = 7 * 86400
-ELO_FORM = ('Alak: "ELO: ok" (app-felület látszik, és scripts/elo-felulet-check.sh --stamp <fájl> <marabel-wt> '
-            '<app-preview fájl|Komponens> zölden lefutott: store/kep-kapu/<fájl>.elo, max. 7 napos), vagy '
+ELO_FORM = ('Alak: "ELO: ok <Komponens,...>" (a képen látszó app-képernyő komponensei; a '
+            'scripts/elo-felulet-check.sh --stamp <fájl> <marabel-wt> <app-preview fájl|Komponens> zölden lefutott: '
+            'store/kep-kapu/<fájl>.elo, max. 7 napos, és minden megnevezett komponens ÉLŐ sorként benne van), vagy '
             '"ELO: nincs-app-ui <mi látszik a képen helyette>" (nincs rajta app-, telefon- vagy böngésző-képernyő).')
 
 
@@ -362,9 +363,10 @@ def elo_check(fp, val):
     surface. 2026-11-13: the Első éved r4-G Reel's phone shot was BabyTellHome, not live since Marabel #563
     (2026-10-20), marked "valódi felület" by hand; Lex 41089 caught it ("Él-e vevőnek ez a képernyő prodon ma?").
     The same day the Short v3.9 J4 phone was the app-preview editor shell (Klodel 41172).
-        ELO: ok                          -> store/kep-kapu/<file>.elo from scripts/elo-felulet-check.sh --stamp,
+        ELO: ok <Component,...>          -> store/kep-kapu/<file>.elo from scripts/elo-felulet-check.sh --stamp,
                                             "EREDMENY: ELO", no "NEM ÉLŐ" line, at most ELO_MAX_AGE_S old
-                                            (a live surface can be removed later, as #563 did)
+                                            (a live surface can be removed later, as #563 did), and every named
+                                            component an "ÉLŐ <name> <-" line in it (Viktor 41284)
         ELO: nincs-app-ui <what shows>   -> no app, phone or browser screen on it (self-attested, with a reason)
     The gate cannot see whether the picture shows an app screen; it forces the question and, for "ok", the measurement.
     None = pass, else the block reason."""
@@ -378,6 +380,10 @@ def elo_check(fp, val):
         return None
     if low.split()[0] != 'ok':
         return 'ELO sor hibás. ' + ELO_FORM
+    # Viktor 41284 (4): the line names what was measured, so the reviewer sees it and the stamp must cover it
+    named = [c for c in re.split(r'[\s,]+', v.split(None, 1)[1] if len(v.split()) > 1 else '') if c]
+    if not named or not all(re.fullmatch(r'[A-Z][A-Za-z0-9]*', c) for c in named):
+        return 'ELO: ok után sorold fel a képen látszó app-képernyő komponenseit. ' + ELO_FORM
     stamp = os.path.join(KAPU, os.path.basename(fp) + '.elo')
     try:
         st = os.stat(stamp)
@@ -391,6 +397,10 @@ def elo_check(fp, val):
         return f'ELO: a bélyeg nem zöld ({stamp}); NEM ÉLŐ felület nem mehet marketing-anyagba.'
     if time.time() - st.st_mtime > ELO_MAX_AGE_S:
         return f'ELO: a bélyeg 7 napnál régebbi ({stamp}); mérd újra, él-e még a felület.'
+    live = set(re.findall(r'(?m)^ÉLŐ\s+([A-Za-z0-9]+)\s+<-', body))
+    missing = [c for c in named if c not in live]
+    if missing:
+        return f'ELO: a bélyeg nem méri ezeket: {", ".join(missing)} ({stamp}); futtasd rájuk is az ellenőrzőt.'
     return None
 
 

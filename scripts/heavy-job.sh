@@ -87,7 +87,10 @@
 #    which goes to store/heavy-job.log. A missing flag or a failing gate refuses with exit 77 before the
 #    lock; the gates run once, on the caller side. Detection reads the command text, so a film export
 #    hidden behind a script (`bash export.sh`) is not seen: the gate is for the direct render call, which
-#    is where the fleet's export scripts start it.
+#    is where the fleet's export scripts start it. This is a discipline gate against a forgotten step, not a
+#    security boundary (Viktor 41284 INFO 9): an agent can call the renderer directly, set HEAVY_JOB_RUN or
+#    the *_GATE_BIN test overrides, waive with any 10-character reason (logged), or weaken --skip/--zone/--end;
+#    paths with spaces in --size-gate are not supported (read -a).
 #
 # Exit codes: the job's own exit code; 77 = refused by a film export gate (point 5); 75 = not started (lock busy, low memory
 # or disk, unreadable memory, until --wait ran out); 70 = stopped by the
