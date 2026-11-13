@@ -15,6 +15,7 @@ import { sendTelegramMessage } from '../telegram.js'
 import { redact } from '../tool-input-preview.js'
 import { readApprovalBotConfig, sendApprovalWithButtons, startApprovalBotPoller } from '../approval-bot.js'
 import { BILLINGO_ISSUE_CATEGORY, parseIssueRequest, renderIssueText } from '../billingo-issue-approval.js'
+import { GATE_CONFIG_CATEGORY, parseGateConfigRequest, renderGateConfigText } from '../gate-config-approval.js'
 import type { RouteContext } from './types.js'
 
 const AUTONOMY_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
@@ -162,6 +163,14 @@ export function buildOwnerApprovalText(approval: Approval, withButtons = false):
   // Patrik TG 873: the invoice request reads as a few plain lines above the
   // buttons. No category key, no approval id, no agent note: the server-
   // rendered invoice is the whole message (the dashboard still has the id).
+  // GATECONFIG1113 (Viktor 40668 C6): the server's full diff is the whole message; the agent's note is left out.
+  if (approval.category === GATE_CONFIG_CATEGORY && withButtons) {
+    return [
+      `[JÓVÁHAGYÁS KELL] Kapu-beállítás (${headerField(approval.agent_id)} kéri)`,
+      ...ownerDescriptionLines(approval),
+      `Lejárat: ${expires}`,
+    ].join('\n')
+  }
   if (approval.category === BILLINGO_ISSUE_CATEGORY && withButtons) {
     const body = ownerDescriptionLines(approval).join('\n').split('\n')
     const last = body.pop() ?? ''            // "piszkozat <id>" stays the very last, small line
@@ -179,7 +188,7 @@ export function buildOwnerApprovalText(approval: Approval, withButtons = false):
       ? `Döntés: a lenti gombokkal, vagy Dashboard -> Jóváhagyások (id: ${approval.id})`
       : `Döntés: Dashboard -> Jóváhagyások (id: ${approval.id})`,
     // TG 17304: a Billingo invoice is signed only by the approval bot's button.
-    ...(approval.category === BILLINGO_ISSUE_CATEGORY && !withButtons
+    ...((approval.category === BILLINGO_ISSUE_CATEGORY || approval.category === GATE_CONFIG_CATEGORY) && !withButtons
       ? ['FIGYELEM: a gombos üzenet nem ment ki, ez a kérés így NEM hagyható jóvá. Új kérés jön a jóváhagyó botból.']
       : []),
     ...ownerDescriptionLines(approval),
@@ -191,6 +200,12 @@ export function buildOwnerApprovalText(approval: Approval, withButtons = false):
 // agent's text is only a labelled note under it. Only a press on the approval
 // bot's button signs (approval-bot.ts); the dashboard and a text reply do not.
 function ownerDescriptionLines(approval: Approval): string[] {
+  if (approval.category === GATE_CONFIG_CATEGORY) {
+    const parsed = parseGateConfigRequest(approval.action_payload, approval.content_hash)
+    if ('error' in parsed) return ['HIBÁS KÉRÉS, NE HAGYD JÓVÁ.']
+    const rendered = renderGateConfigText(parsed.request)
+    return 'error' in rendered ? [`HIBÁS KÉRÉS, NE HAGYD JÓVÁ (${rendered.error}).`] : [rendered.text]
+  }
   if (approval.category !== BILLINGO_ISSUE_CATEGORY) return ['Leírás:', quoteOwnerDescription(approval.action_description)]
   const parsed = parseIssueRequest(approval.action_payload, approval.content_hash)
   if ('error' in parsed) return ['HIBÁS KÉRÉS, NE HAGYD JÓVÁ.']
@@ -255,7 +270,7 @@ function notifyOwner(approval: Approval): void {
         // billingo_issue, so the main bot's copy below can never be approved.
         // Say so to the requester and the main agent at once: the fix is a
         // fresh request, and nobody should wait on a press that cannot work.
-        if (approval.category === BILLINGO_ISSUE_CATEGORY) alertUnsignableFallback(approval)
+        if (approval.category === BILLINGO_ISSUE_CATEGORY || approval.category === GATE_CONFIG_CATEGORY) alertUnsignableFallback(approval)
       }
     }
     if (!TELEGRAM_BOT_TOKEN) {
@@ -484,6 +499,16 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
 
     // BILLINGOISSUE1104: a Billingo invoice request is the connector's approval_request,
     // checked and re-hashed here; a request the server cannot render is never stored.
+    // GATECONFIG1113 (Viktor 40668 C6): a gate config change is stored only if the server can render its FULL
+    // diff against the installed config; otherwise no row, so no button next to a partial or stale text.
+    if (category.trim() === GATE_CONFIG_CATEGORY) {
+      const parsed = parseGateConfigRequest(typeof action_payload === 'string' ? action_payload : null, typeof content_hash === 'string' ? content_hash : null)
+      const rendered = 'error' in parsed ? parsed : renderGateConfigText(parsed.request)
+      if ('error' in rendered) {
+        json(res, { error: `gate_config: ${rendered.error}` }, 400)
+        return true
+      }
+    }
     if (category.trim() === BILLINGO_ISSUE_CATEGORY) {
       const parsed = parseIssueRequest(typeof action_payload === 'string' ? action_payload : null, typeof content_hash === 'string' ? content_hash : null)
       if ('error' in parsed) {

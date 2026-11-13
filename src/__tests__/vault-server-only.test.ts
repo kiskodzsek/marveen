@@ -40,16 +40,16 @@ async function call(method: string, path: string, body?: unknown) {
 beforeEach(() => { setSecret.mockClear(); deleteSecret.mockClear() })
 
 describe('server-only Vault ids over HTTP', () => {
-  it.each(['billingo-issue-signing-key', 'telegram-approval-bot'])('%s is server-only', (id) => {
+  it.each(['billingo-issue-signing-key', 'gate-config-signing-key', 'telegram-approval-bot'])('%s is server-only', (id) => {
     expect(isServerOnlyVaultId(id)).toBe(true)
     expect(isServerOnlyVaultId(` ${id} `)).toBe(true)
   })
-  it.each(['billingo-issue-signing-key', 'telegram-approval-bot'])('POST /api/vault refuses %s and writes nothing', async (id) => {
+  it.each(['billingo-issue-signing-key', 'gate-config-signing-key', 'telegram-approval-bot'])('POST /api/vault refuses %s and writes nothing', async (id) => {
     const res = await call('POST', '/api/vault', { id, label: 'x', value: 'attacker-key' })
     expect(res.statusCode).toBe(403)
     expect(setSecret).not.toHaveBeenCalled()
   })
-  it.each(['billingo-issue-signing-key', 'telegram-approval-bot'])('DELETE /api/vault/%s is refused and deletes nothing', async (id) => {
+  it.each(['billingo-issue-signing-key', 'gate-config-signing-key', 'telegram-approval-bot'])('DELETE /api/vault/%s is refused and deletes nothing', async (id) => {
     const res = await call('DELETE', `/api/vault/${id}`)
     expect(res.statusCode).toBe(403)
     expect(deleteSecret).not.toHaveBeenCalled()

@@ -5762,6 +5762,17 @@ export function setApprovalIssueSignature(id: string, value: string): boolean {
   `).run(value, id).changes > 0
 }
 
+// GATECONFIG1113 (Viktor 40668): the signed gate-config envelope is stored once, and only on a gate_config row the
+// approval bot's button approved; the same column as the Billingo signature, the category keeps them apart.
+export function setApprovalGateConfigSignature(id: string, value: string): boolean {
+  return db.prepare(`
+    UPDATE approvals SET issue_signature = ?
+    WHERE id = ? AND category = 'gate_config' AND status = 'approved'
+      AND resolution_channel = 'approval_bot' AND resolved_by = 'telegram_button'
+      AND issue_signature IS NULL
+  `).run(value, id).changes > 0
+}
+
 // The CREATE path stamps the owner-notification message id onto the row
 // (APPROVALVAK821): until this existed, telegram_message_id was only writable
 // through resolveApproval, so a pending request could never carry it.
