@@ -44,6 +44,14 @@ BLOCKS (exit 2, reason on stderr):
      küldve, lezárva, rögzítve; case-insensitive, accented forms only: unaccented "mert" is the Hungarian "because")
      and that does not name another date (YYYY-MM-DD or MM-DD other than today). A future time with no
      marker on its line (a deadline: "21:00-ig kész") passes: that is the main false-positive guard.
+     Exception to "another date": a time written right after TODAY's date ("11-13 02:19", "2026-11-13, 02:19",
+     "11-13T02:19") is judged even on a line that names another day (Klodel 39769, 2026-11-13: "Dream Engine
+     11-13 <a time 11 minutes ahead> mérése ... (Pulzus átvezetése 11-12 23:26)" passed, because the yesterday
+     date exempted the whole line). Only this explicit form: making every date speak for its own time alone was
+     measured on the kanban comments since 2026-11-05 and gave 32 new blocks, mostly lists and ranges that
+     continue an earlier date ("11-04 13:39-13:49", "L0 11-05 21:50, 23:00"). The narrow form gives 8 new blocks
+     there: 5 guessed stamps ("11-06 14:33:" written at 14:29) and 3 plans; the end of a window after "->"
+     ("11-08 14:14 -> 11-09 18:00") passes, which removes one of the three.
      A deadline-shaped time passes even on a marker line: followed by -ig / -ra / -re / óráig, or preceded
      by határidő / deadline / until / by ("mérve 19:40, kész 22:00-ig").
   3. A daily-log heading time later than the current minute (SCOPE, rule 3).
@@ -125,14 +133,28 @@ def _now():
     return now
 
 
+def _date_is_other(year, mo, d, now):
+    """True / False for a real calendar date (another day / today), None for a non-date (e.g. "45-99")."""
+    mo, d = int(mo), int(d)
+    if not (1 <= mo <= 12 and 1 <= d <= 31):
+        return None
+    return (mo, d) != (now.month, now.day) or bool(year and int(year) != now.year)
+
+
 def _other_day(line, now):
-    for year, mo, d in DATE_RX.findall(line):
-        mo, d = int(mo), int(d)
-        if not (1 <= mo <= 12 and 1 <= d <= 31):
-            continue
-        if (mo, d) != (now.month, now.day) or (year and int(year) != now.year):
-            return True
-    return False
+    return any(_date_is_other(year, mo, d, now) for year, mo, d in DATE_RX.findall(line))
+
+
+# The text between a date and the time it belongs to: "11-12 23:26", "11-12, 23:26", "11-12T23:26".
+ATTACHED_GAP_RX = re.compile(r'[ \t]{1,3}|[ \t]?,[ \t]{0,2}|T')
+
+
+def _attached_date(line, start, dates):
+    """The DATE_RX match written right before the time that starts at `start`, or None."""
+    for dm in dates:
+        if dm.end() <= start and ATTACHED_GAP_RX.fullmatch(line, dm.end(), start):
+            return dm
+    return None
 
 
 def findings(text, now, known_lines=frozenset(), placeholder_only=False):
@@ -144,13 +166,22 @@ def findings(text, now, known_lines=frozenset(), placeholder_only=False):
             continue
         for m in PLACEHOLDER_RX.finditer(line):
             out.append((n, m.group(0), 'placeholder'))
-        if placeholder_only or not MARKER_RX.search(line) or _other_day(line, now):
+        if placeholder_only or not MARKER_RX.search(line):
             continue
         # Bounded work per line (Viktor 38419 LOW): at most MAX_TIMES_PER_LINE times, and the deadline word
         # is looked for only in the DEADLINE_WINDOW characters right before the time.
+        line_other = _other_day(line, now)
+        dates = [dm for _, dm in zip(range(MAX_TIMES_PER_LINE), DATE_RX.finditer(line))] if line_other else []
         for i, m in enumerate(TIME_RX.finditer(line)):
             if i >= MAX_TIMES_PER_LINE:
                 break
+            if line_other:
+                # Another day on the line: only a time written right after today's date is still judged.
+                dm = _attached_date(line, m.start(), dates)
+                if dm is None or _date_is_other(*dm.groups(), now) is not False:
+                    continue
+                if line[:dm.start()].rstrip().endswith(('->', '→')):  # a window's end: "11-08 14:14 -> 11-09 18:00"
+                    continue
             if (DEADLINE_AFTER_RX.match(line, m.end())
                     or DEADLINE_BEFORE_RX.search(line[max(0, m.start() - DEADLINE_WINDOW):m.start()])):
                 continue
