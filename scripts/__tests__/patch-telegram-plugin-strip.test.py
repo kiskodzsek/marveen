@@ -83,6 +83,13 @@ def strip(text, chat="-100", tool="reply", state=None, ages=None):
 
 def gate(text, chat="-1000000000001"):
     env = {"PATH": "/usr/bin:/bin", "CLAUDE_PROJECT_DIR": tempfile.mkdtemp(), "MARVEEN_OWNER_PRIVATE_CHAT": "5040302010"}
+    # Majsztro's budget at 100 % (synthetic), so "MAJSZTRO: helyettes-klodel" is accepted: a subprocess run cannot
+    # reach the queue for a "MAJSZTRO: MEHET <id>" (same setup as run_idea in product-image-gate_test.py).
+    ms = os.path.join(env["CLAUDE_PROJECT_DIR"], "store", "mod-state")
+    os.makedirs(ms)
+    with open(os.path.join(ms, "majsztro.json"), "w") as f:
+        json.dump({"usage": {"rateLimits": [{"kind": "five_hour", "percentUsed": 0},
+                                            {"kind": "seven_day", "percentUsed": 100}]}}, f)
     p = subprocess.run([sys.executable, "-I", GATE], input=json.dumps({"tool_input": {"chat_id": chat, "text": text}}),
                        capture_output=True, text=True, env=env, timeout=20)
     shutil.rmtree(env["CLAUDE_PROJECT_DIR"], ignore_errors=True)
@@ -182,11 +189,15 @@ with tempfile.TemporaryDirectory() as sd:
 # 3. end to end with the real gate (ÖTLET-KAPU)
 pitch = "Új ötlet: hűtőmágnes-bolt."
 line = "ÖTLET-KAPU: nem Marabel/könyv, termékpaletta ellenőrizve (6 termékkel)"
+# Since Klodel 39520 / 39550 the idea gate also wants the blind reviewer's and Majsztro's lines. The strip cuts only
+# the ÖTLET-KAPU line; ATNEZO and MAJSZTRO are not on its cut list, so they are sent as written (pinned here).
+reviewed = "ATNEZO: MEHET a1b2c3d4e5\nMAJSZTRO: helyettes-klodel teszt, Májsztró kerete 100 %-on"
 check("gate: no marker still blocks", gate(pitch) == 2)
-both = pitch + "\n" + line
+check("gate: ÖTLET-KAPU without the reviewer lines still blocks", gate(pitch + "\n" + line) == 2)
+both = pitch + "\n" + line + "\n" + reviewed
 sent, err, _, _, _ = strip(both)
-check("gate: with marker passes, and the sent text has no marker",
-      gate(both) == 0 and sent == pitch and "ÖTLET-KAPU" not in (sent or ""), repr(sent))
+check("gate: with all marker lines passes, and the sent text has no ÖTLET-KAPU line",
+      gate(both) == 0 and sent == pitch + "\n" + reviewed and "ÖTLET-KAPU" not in (sent or ""), repr(sent))
 
 # 4. the installed plugin, if any
 plugins = sorted(glob.glob(os.path.expanduser("~/.claude/plugins/cache/claude-plugins-official/telegram/*/server.ts")))

@@ -102,6 +102,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of balazs-task-reply-gate.py (run: python3 -I scripts/hooks/balazs-task-reply-gate_test.py); not itself a hook (#185)',
   'time-claim-gate_test.py':
     'the unit test of time-claim-gate.py (run: python3 -I scripts/hooks/time-claim-gate_test.py); not itself a hook (Klodel 38401)',
+  'link-request-reply-gate_test.py':
+    'the unit test of link-request-reply-gate.py (run: python3 -I scripts/hooks/link-request-reply-gate_test.py); not itself a hook (#219, card 18b2002b)',
   'pr-kerdes-gate_test.py':
     'the unit test of pr-kerdes-gate.py and scripts/pr-kerdes.py (run: python3 -I scripts/hooks/pr-kerdes-gate_test.py); not itself a hook',
   'render_claim_lib.py':
@@ -148,6 +150,8 @@ function registrationCorpus(): string {
 // every agent. Keep every reason concrete and sourced (docstring, docs, PR):
 // a "misc" entry here would re-open exactly the blind spot this split closes.
 const CHECKOUT_ONLY: Record<string, string> = {
+  'link-request-reply-gate.py':
+    'the owner asked the MAIN agent for a link (Patrik TG 17974, TG 18022; #219, card 18b2002b): the gate reads the latest inbound message of the chat from conversation_log through ledger_lib, and that ledger is written only for the main channels session (ledger-capture.py is CHECKOUT_ONLY below), so on a seeded sub-agent it would find no inbound row and pass every reply; seeding it needs a sub-agent ledger first (a separate decision)',
   'private-topic-group-gate.py':
     'the owner\'s private topics stay out of the team group (card 6dbeadad): it lets through only the owner\'s private chat with the MAIN agent (store/projektek.json elo_uzenet.privat) and gates every other chat, so on a sub-agent, whose chats are all "other", it would gate every message that names a private project',
   'email-approval-gate.py':
