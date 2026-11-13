@@ -2273,9 +2273,34 @@ def latest_private_owner_asked_group_reply_allowed(root):
     for text in ('Ok mehet ki a masik chatben posztot irj es ott megtargyaljuk', 'A MÁSIK CHATBEN írd meg',
                  'írd a csoportba, ott beszéljük meg'):
         sub = tempfile.mkdtemp(dir=root)
+        os.makedirs(os.path.join(sub, 'store'), exist_ok=True)
         db = ledger(sub, GROUP, PRIV, texts={1: text})
         rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Itt a poszt-terv, beszéljük meg.'})
         out.append(rc == 0 and 'PRIVÁT-VÁLASZ-KAPU' not in err and 'Traceback' not in err)
+    return all(out)
+
+
+@case
+def NEG_owner_asked_group_once_per_message(root):
+    # Viktor 40974 LOW (a): one private request = one group reply; the second needs a new request.
+    os.makedirs(os.path.join(root, 'store'), exist_ok=True)
+    db = ledger(root, GROUP, PRIV, texts={1: 'Ok mehet ki a masik chatben posztot irj es ott megtargyaljuk'})
+    rc1, _ = run_ledger(root, db, {'chat_id': GROUP, 'text': 'Itt a poszt-terv.'})
+    rc2, err2 = run_ledger(root, db, {'chat_id': GROUP, 'text': 'Még egy csoport-üzenet.'})
+    return rc1 == 0 and rc2 == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err2
+
+
+@case
+def NEG_owner_mentions_group_without_asking_blocked(root):
+    # Viktor 40974 LOW (measured): a negation, a question or a mere mention of the group is not a request.
+    out = []
+    for text in ('Ne írj a csoportba, itt beszéljük meg', 'nem a másik chatbe, ide válaszolj', 'mi van a csoportban?',
+                 'a csoportban küldött kép rossz', 'csoportos számla kell'):
+        sub = tempfile.mkdtemp(dir=root)
+        os.makedirs(os.path.join(sub, 'store'), exist_ok=True)
+        db = ledger(sub, GROUP, PRIV, texts={1: text})
+        rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Itt a poszt-terv.'})
+        out.append(rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err)
     return all(out)
 
 

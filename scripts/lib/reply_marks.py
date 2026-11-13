@@ -129,6 +129,30 @@ def take(kind, chat, agent, now=None):
     return None
 
 
+def reserve_once(token):
+    """A one-time permission that is not an agent's mark (e.g. the owner's own message, Viktor 40974 LOW): True when
+    `token` was never spent; it is then reserved for this hook run and spent by spend_pending() when the hook passes,
+    so it lets exactly one message through. The ledger is created (0600) if it does not exist yet. Any error = False.
+    Only the last 64 KB is read: a token spent longer ago than that is not seen (the callers' own freshness windows
+    are far shorter than the time 64 KB of marks takes)."""
+    path = ledger_path()
+    try:
+        fd = _open(path, True)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        if any(r.get('used') == token for r in _rows(fd)):
+            return False
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    if (path, token) not in _pending:
+        _pending.append((path, token))
+    return True
+
+
 def spend_pending():
     """Spend every mark this hook run took, atomically. False when one was spent by someone else in the meantime
     (two hooks at once on one mark): the caller must then block."""

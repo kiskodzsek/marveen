@@ -143,10 +143,31 @@ def owner_group_chat():
 LATEST_INBOUND_MAX_AGE_S = 30 * 60
 
 
+GROUP_WORD = re.compile(r'masik\s*chat|csoport')
+# An imperative that sends the work somewhere: írj/írd, posztolj, küldd/küldj, tedd/rakd, menj/mehet, beszéljük,
+# (meg)tárgyaljuk; matched without accents ("irj es ott megtargyaljuk").
+GROUP_VERB = re.compile(r'\b(ir[jd]\w*|posztol[jd]\w*|kuld[jd]\w*|tedd|rakd|menj\w*|mehet\w*|beszel(j|juk)\w*|\w*targyal(j|juk)\w*)\b')
+GROUP_NEGATION = re.compile(r'\b(ne|nem|sem|ne\s*ide)\b')
+
+
+def asks_for_group(text):
+    """A sentence that names the group ("másik chat", "csoport") AND tells to do something there, without a
+    negation (Viktor 40974 LOW: "ne írj a csoportba", "mi van a csoportban?", "a csoportban küldött kép rossz"
+    must not count). Accents are dropped first, so "írj" and "irj" are one word."""
+    t = unicodedata.normalize('NFKD', str(text or '')).lower()
+    t = ''.join(c for c in t if not unicodedata.combining(c))
+    for sentence in re.split(r'[.!?;\n]+', t):
+        if GROUP_WORD.search(sentence) and GROUP_VERB.search(sentence) and not GROUP_NEGATION.search(sentence):
+            return True
+    return False
+
+
 def owner_asked_group(payload):
     """Patrik privát TG 18521 (2026-11-13): "a masik chatben posztot irj es ott megtargyaljuk". True when the main
-    agent's latest inbound PRIVATE owner message itself sends the work to the group ("másik chat", "csoport").
-    Only consulted by PRIVÁT-VÁLASZ-KAPU, i.e. when that private message is the owner's latest (and fresh)."""
+    agent's latest inbound PRIVATE owner message itself sends the work to the group (asks_for_group), once per
+    such message: the message's row id is a one-time permission in the reply-marks ledger, spent when the hook
+    passes (Viktor 40974 LOW (a)). Only consulted by PRIVÁT-VÁLASZ-KAPU, i.e. when that private message is the
+    owner's latest (and fresh)."""
     priv = owner_private_chat()
     if not priv:
         return False
@@ -158,12 +179,13 @@ def owner_asked_group(payload):
         con = sqlite3.connect(f'file:{ledger_lib.db_path()}?mode=ro', uri=True, timeout=5)  # never create a ledger
         try:
             row = con.execute(
-                "SELECT text FROM conversation_log WHERE agent_id=? AND direction='in' AND chat_id=?"
+                "SELECT id, text FROM conversation_log WHERE agent_id=? AND direction='in' AND chat_id=?"
                 " ORDER BY id DESC LIMIT 1", (str(agent), priv)).fetchone()
         finally:
             con.close()
-        t = unicodedata.normalize('NFC', str((row or [''])[0] or '')).lower()
-        return bool(re.search(r'm[aá]sik\s*chat|csoport', t))
+        if not row or not asks_for_group(row[1]):
+            return False
+        return reply_marks.reserve_once(f'OWNER-ASKED-GROUP:{agent}:{int(row[0])}')
     except Exception:
         return False
 
