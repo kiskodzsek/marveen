@@ -502,7 +502,9 @@ def hiany_reason(text):
         spec = importlib.util.spec_from_file_location('_hiany_lint', os.path.join(HERE, 'hiany_lint.py'))
         lint = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(lint)
-    except Exception as e:  # a missing or broken lint is a gate failure, never a silent pass
+    except BaseException as e:  # a missing or broken lint is a gate failure, never a silent pass
+        # (BaseException: a hook file that calls sys.exit while it loads raised SystemExit past Exception and
+        # turned every rule off, the secret rule too; Viktor 41626 LOW)
         die('scripts/lib/hiany_lint.py does not load (%s)' % e.__class__.__name__)
     shared = os.path.join(lint.root(), 'shared')
     bad = []
@@ -537,7 +539,9 @@ def vni_reason(text):
         spec = importlib.util.spec_from_file_location('_vevo_nem_ir', os.path.join(HERE, 'vevo_nem_ir.py'))
         vni = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(vni)
-    except Exception as e:  # a missing or broken word list is a gate failure, never a silent pass
+    except BaseException as e:  # a missing or broken word list is a gate failure, never a silent pass
+        # (BaseException: a hook file that calls sys.exit while it loads raised SystemExit past Exception and
+        # turned every rule off, the secret rule too; Viktor 41626 LOW)
         die('scripts/lib/vevo_nem_ir.py does not load (%s)' % e.__class__.__name__)
     if not vni.is_material(text):
         return None
@@ -556,7 +560,9 @@ def time_reason(text):
         spec.loader.exec_module(tc)
         now = tc._now()
         found = tc.findings(text, now, placeholder_only=True) + tc.send_findings(text, now)
-    except Exception as e:  # a missing or broken rule file is a gate failure, never a silent pass
+    except BaseException as e:  # a missing or broken rule file is a gate failure, never a silent pass
+        # (BaseException: a hook file that calls sys.exit while it loads raised SystemExit past Exception and
+        # turned every rule off, the secret rule too; Viktor 41626 LOW)
         die('scripts/hooks/time-claim-gate.py does not load (%s)' % e.__class__.__name__)
     if not found:
         return None

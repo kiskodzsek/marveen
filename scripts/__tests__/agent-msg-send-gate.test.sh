@@ -688,6 +688,28 @@ text 'Kész, a teszt zöld.'
 GATE_ENV="MARVEEN_MSG_GATE_BIN=$SANDBOX/alone/lib/msg_gate.py MARVEEN_MSG_GATE_SECRET_SRC=$ROOT/src/security/secret-gate.ts" run kernel pulzus
 ok "time: scripts/hooks/time-claim-gate.py missing: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
 ok "time: the exit-4 reason names the hook file" "$(grep -q 'time-claim-gate.py does not load' "$SANDBOX/err" && echo 0 || echo 1)"
+# Viktor 41626 LOW: a loaded file that exits while it loads (SystemExit is not an Exception) is exit 4 too, not a
+# send with every rule off; a secret shape proves the other rules were not skipped either
+mkdir -p "$SANDBOX/exits/lib" "$SANDBOX/exits/hooks"; cp "$GATE" "$SANDBOX/exits/lib/msg_gate.py"
+printf 'import sys\nsys.exit(0)\n' > "$SANDBOX/exits/hooks/time-claim-gate.py"
+EXITS="MARVEEN_MSG_GATE_BIN=$SANDBOX/exits/lib/msg_gate.py MARVEEN_MSG_GATE_SECRET_SRC=$ROOT/src/security/secret-gate.ts"
+text 'Kész, a teszt zöld.'
+GATE_ENV="$EXITS" run kernel pulzus
+ok "time: the hook file calls sys.exit(0) while it loads: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+ok "time: the exit-4 reason names SystemExit" "$(grep -q 'SystemExit' "$SANDBOX/err" && echo 0 || echo 1)"
+text "a kulcs: $STRIPE kész"
+GATE_ENV="$EXITS" run kernel pulzus
+ok "time: a secret shape with an exiting hook file: no POST" "$([ "$POSTS" = "0" ] && [ "$RC" != "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+# the same for the two other files the gate loads (rule 6 hiany_lint.py, rule 7 vevo_nem_ir.py)
+cp "$ROOT/scripts/hooks/time-claim-gate.py" "$SANDBOX/exits/hooks/time-claim-gate.py"
+printf 'import sys\nsys.exit(0)\n' > "$SANDBOX/exits/lib/vevo_nem_ir.py"
+text 'Reel koncepció: anya mesél.'
+GATE_ENV="$EXITS" run majsztro dave
+ok "vni: the word list calls sys.exit(0) while it loads: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+printf 'import sys\nsys.exit(0)\n' > "$SANDBOX/exits/lib/hiany_lint.py"
+text 'KÉSZ: shared/k/good.md'
+GATE_ENV="$EXITS $HROOT" run radar klodel
+ok "hiany: the lint calls sys.exit(0) while it loads: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
 
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."
