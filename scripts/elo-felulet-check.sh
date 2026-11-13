@@ -11,6 +11,8 @@
 # removes an older stamp of that asset.
 # Imports: every form from @/components (multi-line, default, single quote); a namespace import or a count mismatch
 # stops the check with exit 2 (Viktor 41284). "Customer route" = anything under src/app except src/app/app-preview.
+# Scope (Viktor 41311 INFO 6): only the @/components layer is followed; @/app and local ./x-preview imports of an
+# app-preview file are not, so name the components visible on the image as arguments too: that list is the cover.
 #
 # Why: 2026-11-13, Első éved r4-G Reel: the phone shot showed BabyTellHome ("Fotót adok hozzá"), not live since
 # Marabel #563 (2026-10-20); Lex 41089 caught it before the ad launch ("Él-e vevőnek ez a képernyő prodon ma?").
@@ -50,8 +52,11 @@ src = re.sub(r"/\*.*?\*/", " ", src, flags=re.S)
 src = re.sub(r"(?m)^\s*//.*$", " ", src)
 names, bad = [], []
 total = len(re.findall(r"""\bfrom\s*["\x27]@/components/""", src))
+# Viktor 41311 INFO 5: a dynamic import() / require() of a component is not read below: it stops the check
+for m in re.finditer(r"""\b(?:import|require)\s*\(\s*["\x27](@/components/[^"\x27]+)""", src):
+    bad.append(f"{m.group(1)}: dinamikus import/require")
 seen = 0
-for m in re.finditer(r"""\bimport\s+(type\s+)?([^;]*?)\s*from\s*["\x27](@/components/[^"\x27]+)["\x27]""", src, re.S):
+for m in re.finditer(r"""\bimport\s+(type\s+)?((?:(?!\bimport\b)[^;])*?)\s*from\s*["\x27](@/components/[^"\x27]+)["\x27]""", src, re.S):
     seen += 1
     if m.group(1):
         continue  # import type: no runtime component

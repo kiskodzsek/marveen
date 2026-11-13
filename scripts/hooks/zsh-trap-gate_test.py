@@ -130,7 +130,13 @@ def incident_rm_variable_1113(_):
         'echo a | xargs rm -rf $S',                             # Kernel 41291
         'find . -name x | xargs -I {} -n 1 rm -rf $S/{}',
         'ls | xargs -0 rm -r "$D"',
+        # Viktor 41322 INFO 5/6: every value-taking xargs option, short and long
+        'ls | xargs -P 4 rm -rf $S', 'ls | xargs -a f rm -rf $S', 'ls | xargs -L 1 rm -rf $S',
+        'ls | xargs -s 100 rm -rf $S', 'ls | xargs -E x rm -rf $S', 'ls | xargs -d x rm -rf $S',
+        'ls | xargs -J % rm -rf $S', 'ls | xargs -R 2 rm -rf $S',
+        'ls | xargs --max-args 1 rm -rf $S', 'ls | xargs --max-procs 2 rm -rf $S', 'ls | xargs --arg-file f rm -rf $S',
     ))
+
 
 
 @case

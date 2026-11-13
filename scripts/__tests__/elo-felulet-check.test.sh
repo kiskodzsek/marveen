@@ -48,6 +48,11 @@ cat > "$W/src/app/app-preview/ns.tsx" <<'EOF'
 import { LiveCard } from "@/components/live-card";
 import * as Dead from "@/components/dead";
 EOF
+# Viktor 41311 INFO 5: no semicolons (the clause must not swallow the next import) and a dynamic import
+printf '%s\n' 'import { useState } from "react"' 'import { DeadNoSemi } from "@/components/dead-nosemi"' \
+  'import { LiveCard } from "@/components/live-card"' > "$W/src/app/app-preview/nosemi.tsx"
+printf '%s\n' 'import { LiveCard } from "@/components/live-card";' \
+  'const D = dynamic(() => import("@/components/dead-dyn"));' > "$W/src/app/app-preview/dyn.tsx"
 git -C "$W" add -A && git -C "$W" commit -qm init && git -C "$W" push -q origin main 2>/dev/null
 
 run() { OUT="$(env ELO_KAPU_DIR="$SB/kapu" bash "$CHK" "$@" 2>&1)"; RC=$?; }
@@ -80,6 +85,12 @@ run --stamp reel.mp4 "$W" LiveCard
 git -C "$W" remote set-url origin "$SB/no-such-origin.git"
 run --stamp reel.mp4 "$W" LiveCard
 check "a failed fetch stops the check (exit 2) and removes the stamp" "$(ok "$RC" = 2 -a ! -e "$SB/kapu/reel.mp4.elo")" "rc=$RC $OUT"
+
+git -C "$W" remote set-url origin "$SB/origin.git"
+run "$W" src/app/app-preview/nosemi.tsx
+check "an import without a semicolon after another import is read (NEM ÉLŐ DeadNoSemi)" "$(ok "$RC" = 1 -a -n "$(printf '%s\n' "$OUT" | grep '^NEM ÉLŐ  DeadNoSemi ')")" "rc=$RC $OUT"
+run "$W" src/app/app-preview/dyn.tsx
+check "a dynamic import() of a component stops the check (exit 2)" "$(ok "$RC" = 2)" "rc=$RC $OUT"
 
 echo "$((DONE-FAILS))/$DONE pass"
 [ "$FAILS" -eq 0 ]
