@@ -255,6 +255,67 @@ def generation_output_reads_fal_gen_blender_and_ffmpeg(root):
     assert is_generation('node fal-gen.mjs run job.json') and not is_generation('node render.mjs /w export /w/a.mp4')
 
 
+# --- Ready-time claims (Klodel 40023, Patrik TG 5709): an estimate passed on as a ready time --------------------------
+THE_1105 = 'A képek becslés szerint (Dave szerint) 11:45-12:00 körül lesznek készek.'  # 11-13 11:05, word for word in spirit
+GOOD_MERVE = '\nMÉRVE: 2 perc/darab (out/papas.mp4, mtime 11:43)'
+
+
+def run_tool(root, text, tool, chat=GROUP):
+    payload = json.dumps({'tool_name': tool, 'tool_input': {'chat_id': chat, 'text': text}})
+    return run(root, text, chat=chat, raw=payload)
+
+
+@case
+def NEG_the_1105_estimate_is_blocked_without_a_merve_line(root):
+    setup(root)
+    rc, err = run_tool(root, THE_1105, 'mcp__plugin_telegram_telegram__reply')
+    assert rc == 2 and 'KÉSZ-IDŐPONT-KAPU' in err and "szólok, ha kész" in err, (rc, err)
+
+
+@case
+def NEG_every_ready_time_shape_blocks_in_both_owner_chats(root):
+    setup(root)
+    for text in ['A papás videó 11:45-re kész.', 'Dave becslése szerint a render 12:00 körül kész lesz.',
+                 'A képek kb. 2 óra múlva készek.', 'A render 20 perc múlva elkészül.',
+                 'Az export Dave becslése szerint kb. 10 perc, amint kész, küldöm.']:
+        for chat in (GROUP, PRIV):
+            rc, err = run_tool(root, text, 'mcp__plugin_telegram_telegram__reply', chat=chat)
+            assert rc == 2 and 'KÉSZ-IDŐPONT-KAPU' in err, (text, chat, rc, err)
+
+
+@case
+def NEG_a_merve_line_without_a_source_or_duration_still_blocks(root):
+    setup(root)
+    for line in ['\nMÉRVE: 2 perc/darab', '\nMÉRVE: (out/papas.mp4)', '\nMÉRVE: Dave szerint']:
+        rc, err = run_tool(root, 'A papás videó 11:45-re kész.' + line, 'mcp__plugin_telegram_telegram__reply')
+        assert rc == 2, (line, rc, err)
+
+
+@case
+def a_measured_piece_time_lets_the_ready_time_go(root):
+    setup(root)
+    for text in ['A papás videó 11:45-re kész.' + GOOD_MERVE, THE_1105 + '\nMÉRVE: 40 mp/kép (out/kepek/, mtime 11:02)']:
+        rc, err = run_tool(root, text, 'mcp__plugin_telegram_telegram__reply')
+        assert rc == 0, (text, rc, err)
+
+
+@case
+def past_tense_stamps_and_other_work_are_not_ready_time_claims(root):
+    setup(root)
+    for text in ['A videó kész, itt van.', 'A videó 14:17-re elkészült.', 'A videó 12:00-ra kész volt.', 'Holnap 10:00-kor megbeszéljük a videót.',
+                 'A számla 12:00-ra kész.', '21:38, MÉRVE: Dave: az adatbázis rész kész.',
+                 'Mágnes 13:30-ra kéthetes tervet készít, az első 6 videóval.']:
+        rc, err = run_tool(root, text, 'mcp__plugin_telegram_telegram__reply')
+        assert rc == 0, (text, rc, err)
+
+
+@case
+def the_ready_time_rule_skips_edit_message_and_foreign_chats(root):
+    setup(root)
+    assert run_tool(root, THE_1105, 'mcp__plugin_telegram_telegram__edit_message')[0] == 0
+    assert run_tool(root, THE_1105, 'mcp__plugin_telegram_telegram__reply', chat=OTHER)[0] == 0
+
+
 def main():
     failed = 0
     for fn in CASES:
