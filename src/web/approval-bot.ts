@@ -34,8 +34,9 @@ import { join } from 'node:path'
 import { STORE_DIR } from '../config.js'
 import { readEnvFile } from '../env.js'
 import { logger } from '../logger.js'
-import { getApproval, resolveApprovalByBot, setApprovalBotMessage, setApprovalIssueSignature, type Approval } from '../db.js'
+import { getApproval, resolveApprovalByBot, setApprovalBotMessage, setApprovalGateConfigSignature, setApprovalIssueSignature, type Approval } from '../db.js'
 import { BILLINGO_ISSUE_CATEGORY, readIssueSigningKey, signIssueApproval } from './billingo-issue-approval.js'
+import { GATE_CONFIG_CATEGORY, readGateConfigSigningKey, signGateConfigApproval, writeGateConfigEnvelope } from './gate-config-approval.js'
 import { getSecret } from './vault.js'
 import { markIfTestRun } from '../test-run-marker.js'
 
@@ -257,6 +258,8 @@ export interface HandlerDeps {
   resolve?: typeof resolveApprovalByBot
   /** BILLINGOISSUE1104: signs an approved billingo_issue row after the press; true when stored. */
   signIssue?: (approval: Approval) => boolean
+  /** GATECONFIG1113: signs an approved gate_config row after the press and hands it to the gate's inbox. */
+  signGateConfig?: (approval: Approval) => boolean
   now?: () => number
 }
 
@@ -268,6 +271,23 @@ export function signAndStoreIssueApproval(approval: Approval): boolean {
     return false
   }
   return setApprovalIssueSignature(approval.id, signed.value)
+}
+
+/** GATECONFIG1113 (Viktor 40668): signed at the press, here and nowhere else; stored, then written to the inbox. */
+export function signAndSubmitGateConfigApproval(approval: Approval): boolean {
+  const signed = signGateConfigApproval(approval, readGateConfigSigningKey())
+  if ('error' in signed) {
+    logger.warn({ approvalId: approval.id, reason: signed.error }, 'gate config approval NOT signed')
+    return false
+  }
+  if (!setApprovalGateConfigSignature(approval.id, signed.envelope)) return false
+  try {
+    writeGateConfigEnvelope(signed.gate, approval.id, signed.envelope)
+  } catch (err) {
+    logger.warn({ approvalId: approval.id, code: (err as NodeJS.ErrnoException)?.code }, 'gate config envelope NOT written to the inbox')
+    return false
+  }
+  return true
 }
 
 const notOwnerCount = { n: 0, windowStart: 0 }
@@ -335,6 +355,11 @@ export async function handleCallback(cq: CallbackQuery, cfg: ApprovalBotConfig, 
         let signed = false
         try { signed = (deps.signIssue ?? signAndStoreIssueApproval)(fresh) } catch { signed = false }
         if (!signed) deps.alert('⚠️ Jóváhagyó bot: a Billingo-számla jóváhagyását nem sikerült aláírni, így a számla NEM állítható ki. Szólj Kernelnek.')
+      }
+      if (fresh && fresh.category === GATE_CONFIG_CATEGORY && fresh.status === 'approved') {
+        let submitted = false
+        try { submitted = (deps.signGateConfig ?? signAndSubmitGateConfigApproval)(fresh) } catch { submitted = false }
+        if (!submitted) deps.alert('⚠️ Jóváhagyó bot: a kapu-beállítás jóváhagyását nem sikerült aláírni vagy átadni, így a beállítás NEM változik. Szólj Kernelnek.')
       }
       if (fresh) deps.onResolved(fresh)
       logger.info({ approvalId: outcome.approval.id, status: outcome.status }, 'approval resolved by the approval bot')
