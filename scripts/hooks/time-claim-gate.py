@@ -34,6 +34,17 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     "## 16:58" at 16:48). Only a command that names /api/daily-log, and only the start of the content value:
     a deadline in the body is not judged, and a message that names the endpoint and quotes a heading is not a
     log write. A heading line that names another date (MM-DD, YYYY-MM-DD) passes.
+  - Rule 4, card comments only (Dave 39858, 2026-11-13): the comment's own opening time, at the START of a
+    payload's "content" value (after at most 30 characters with no digit, e.g. an author name: "Kernel 08:48",
+    "Klodel (13:12, date)", "2026-11-13 08:46 - ..."), must not be later than the current minute, with or without
+    a marker word. Dave's "2026-11-13 08:46 - #1289 ..." went in at 08:44 because its line has no marker word, so
+    rule 2 never looked at it. Measured read-only on store/claudeclaw.db kanban_comments since 2026-11-11: 962
+    comments, 49 opened with a time later than their own created_at minute, 26 of them with no marker word.
+    Old vs new verdict on those comments, each at its own created_at minute (963 by then): 156 -> 185 blocks,
+    29 new, 0 released; all 29 are opening stamps later than the comment's own creation ("Klodel 03:14: kész"
+    written at 03:12), none a plan or a deadline.
+    Passes: a date other than today right before the time; a time followed by a suffix ("23:50-es", "08:00-kor"),
+    a deadline (-ig, -ra, -re, óráig) or a plan word (után, előtt, terv...): "Indulás 08:00 után", "## 23:59 terv".
   <repo-root> is two levels above this file (scripts/hooks/ -> root), so it works in a worktree too.
 
 BLOCKS (exit 2, reason on stderr):
@@ -55,6 +66,7 @@ BLOCKS (exit 2, reason on stderr):
      A deadline-shaped time passes even on a marker line: followed by -ig / -ra / -re / óráig, or preceded
      by határidő / deadline / until / by ("mérve 19:40, kész 22:00-ig").
   3. A daily-log heading time later than the current minute (SCOPE, rule 3).
+  4. A card comment's opening time later than the current minute (SCOPE, rule 4).
 Known gaps: a time written after midnight about the previous evening without a date on the line is read as
 future (the block text says to add the date); a shell write whose target is a variable ("> $F"), a relative
 path after a relative cd, or a file written by an interpreter (python3 open(..., 'a')) is not seen; only the
@@ -112,6 +124,13 @@ API_WRITE_RX = re.compile(r'(?<![\w-])(?:[a-z]+-msg|msg-close)\.sh(?![\w-])|/api
 # newline, a JSON escape or the closing quote) is captured for the other-day check.
 DAILY_LOG = '/api/daily-log'
 HEADING_RX = re.compile(r'"content"\s*:\s*"\s*#{1,6}[ \t]*([01]?\d|2[0-3]):([0-5]\d)(?![\d:])([^"\n\\]{0,200})')
+# Rule 4: the opening time of a card comment's "content" value. Group 1: the no-digit prefix (an author name);
+# groups 2-4: an optional date written right before the time; 5-6: the time.
+COMMENT_HEAD_RX = re.compile(
+    r'"content"\s*:\s*"([^"\n\\\d]{0,30}?)(?:(?:(\d{4})-)?(\d{2})-(\d{2})(?:[ \t]{1,3}|[ \t]?,[ \t]{0,2}|T))?'
+    r'([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?!:\d)')
+# Right after the time: a suffix ("23:50-es", "08:00-kor") or a plan word; the time is not the comment's stamp.
+COMMENT_HEAD_NOT_STAMP_RX = re.compile(r'-[^\W\d_]|[ \t]+(?:után|előtt|terv\w*)(?!\w)', re.I)
 STDIN_FILE_RX = re.compile(r'(?<![<\d])<[ \t]*[\'"]?([^\s\'";|&<>()]+)')
 DATA_FILE_RX = re.compile(r'(?<![\w-])(?:--data-binary|--data|-d)(?:\s+|=)?[\'"]?@([^\s\'";|&<>()]+)')
 # Shell writes (Radar 39251). ">>f", "> 'f'", ">| f"; "2>&1" has no path and does not match. tee takes every
@@ -259,22 +278,39 @@ def _shell_shared_md_targets(cmd, cwd):
     return out
 
 
+def comment_head_findings(text, now):
+    """[(line_no, token, 'card-head')] for a card comment's opening time later than the current minute (rule 4)."""
+    out = []
+    limit = now.hour * 60 + now.minute + SLACK_MIN
+    for m in COMMENT_HEAD_RX.finditer(text):
+        if len(out) >= MAX_TIMES_PER_LINE:
+            break
+        if m.group(3) and _date_is_other(m.group(2), m.group(3), m.group(4), now) is not False:
+            continue
+        if (COMMENT_HEAD_NOT_STAMP_RX.match(text, m.end()) or DEADLINE_AFTER_RX.match(text, m.end())
+                or DEADLINE_BEFORE_RX.search(m.group(1))):
+            continue
+        if int(m.group(5)) * 60 + int(m.group(6)) > limit:
+            out.append((text.count('\n', 0, m.start()) + 1, f'{m.group(5)}:{m.group(6)}', 'card-head'))
+    return out
+
+
 def judged_texts(tool_name, ti, cwd):
-    """[(label, text, known_lines, placeholder_only, daily_log)] to judge; [] when the call is out of scope."""
+    """[(label, text, known_lines, placeholder_only, daily_log, card)] to judge; [] when the call is out of scope."""
     if tool_name in ('Write', 'Edit', 'MultiEdit'):
         path = ti.get('file_path')
         if not _is_shared_md(path):
             return []
         if tool_name == 'Write':
             content = ti.get('content')
-            return [('', content, _existing_lines(path), False, False)] if isinstance(content, str) else []
+            return [('', content, _existing_lines(path), False, False, False)] if isinstance(content, str) else []
         edits = [ti] if tool_name == 'Edit' else ti.get('edits')
         out = []
         for e in edits if isinstance(edits, list) else []:
             if isinstance(e, dict) and isinstance(e.get('new_string'), str):
                 old = e.get('old_string')
                 out.append(('', e['new_string'], frozenset(old.splitlines()) if isinstance(old, str) else frozenset(),
-                            False, False))
+                            False, False, False))
         return out
     if tool_name == 'Bash':
         cmd = ti.get('command')
@@ -285,14 +321,14 @@ def judged_texts(tool_name, ti, cwd):
             targets = _shell_shared_md_targets(cmd, cwd)
             if not targets:
                 return []
-            return [('command ', cmd, frozenset().union(*(_existing_lines(t) for t in targets)), False, False)]
+            return [('command ', cmd, frozenset().union(*(_existing_lines(t) for t in targets)), False, False, False)]
         refs = DATA_FILE_RX.findall(cmd)
         if not card:
             # A message body can come from a file on stdin: agent-msg.sh kernel klodel - < body.txt
             refs += STDIN_FILE_RX.findall(cmd)[:MAX_SHELL_TARGETS]
         po = not card  # message / memory / daily log: placeholder rule only
         hd = not card and DAILY_LOG in cmd  # rule 3: the daily-log heading
-        out = [('command ', cmd, frozenset(), po, hd)]
+        out = [('command ', cmd, frozenset(), po, hd, card)]
         for ref in refs:
             path = os.path.expanduser(ref)
             if not os.path.isabs(path):
@@ -301,7 +337,7 @@ def judged_texts(tool_name, ti, cwd):
                 path = os.path.join(cwd, path)
             body = _read_small(path)
             if body is not None:
-                out.append(('@file ', body, frozenset(), po, hd))
+                out.append(('@file ', body, frozenset(), po, hd, card))
         return out
     return []
 
@@ -312,16 +348,21 @@ def verdict(payload):
         return None
     now = _now()
     hits = []
-    for label, text, known, po, hd in judged_texts(payload.get('tool_name'), ti, payload.get('cwd')):
-        hits += [(label, n, tok, kind) for n, tok, kind in findings(text, now, known, po)]
+    for label, text, known, po, hd, card in judged_texts(payload.get('tool_name'), ti, payload.get('cwd')):
+        found = findings(text, now, known, po)
+        hits += [(label, n, tok, kind) for n, tok, kind in found]
         if hd:
             hits += [(label, n, tok, kind) for n, tok, kind in heading_findings(text, now)]
+        if card:
+            seen = {(n, tok) for n, tok, _ in found}
+            hits += [(label, n, tok, kind) for n, tok, kind in comment_head_findings(text, now) if (n, tok) not in seen]
     if not hits:
         return None
     parts = []
     for label, n, tok, kind in hits[:3]:
         what = ('helykitöltő idő / placeholder time' if kind == 'placeholder'
                 else f'jövőbeli naplófejléc / future daily-log heading (now {now:%H:%M})' if kind == 'heading'
+                else f'jövőbeli komment-időbélyeg / future comment stamp (now {now:%H:%M})' if kind == 'card-head'
                 else f'jövőbeli mért idő / future measured time (now {now:%H:%M})')
         parts.append(f'{label}line {n}: "{tok}" = {what}')
     return ('IDO-KAPU / TIME-CLAIM-GATE: ' + '; '.join(parts) + '. '

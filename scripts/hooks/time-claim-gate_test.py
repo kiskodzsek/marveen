@@ -162,6 +162,58 @@ def heading_rule_is_daily_log_only(root):
                     now='19:25')[0] == 0)
 
 
+# ---- card-comment opening stamp (Dave 39858): rule 4 ----
+
+CARD = KANBAN + " --data-binary @- <<'JSON'\n"
+
+
+def card_json(content):
+    return CARD + json.dumps({'author': 'dave', 'content': content}, ensure_ascii=False) + '\nJSON'
+
+
+@case
+def block_card_comment_future_stamp_without_marker(root):
+    # Dave 20196, the case that went in at 08:44: no marker word on the line, so rule 2 never judged it.
+    h = root['hook']
+    code, out, err = run(h, 'Bash', {'command': card_json(f'{TODAY:%Y-%m-%d} 08:46 - #1289 új fej 1302c5e52 (docs-only)')},
+                         now='08:44')
+    body = os.path.join(root['dir'], 'c.json')
+    with open(body, 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'author': 'kernel', 'content': '12:25 (5) DataForSEO: források'}))
+    return (code == 2 and '08:46' in err and 'comment stamp' in err and out == ''
+            and run(h, 'Bash', {'command': card_json('Kernel 08:48 lap kész')}, now='08:47')[0] == 2
+            and run(h, 'Bash', {'command': card_json(f'Magnes {TODAY:%m-%d}, 10:15 - kész')}, now='10:12')[0] == 2
+            and run(h, 'Bash', {'command': card_json('Klodel (13:12, date): összesítő')}, now='13:06')[0] == 2
+            and run(h, 'Bash', {'command': card_json('08:46: kész a lap')}, now='08:44')[0] == 2
+            and run(h, 'Bash', {'command': KANBAN + ' --data-binary @' + body}, now='12:07')[0] == 2)
+
+
+@case
+def allow_card_comment_stamp_now_past_other_day_plan_or_body(root):
+    h = root['hook']
+    return all(run(h, 'Bash', {'command': card_json(c)}, now='08:44')[0] == 0 for c in (
+        f'{TODAY:%Y-%m-%d} 08:44 - kész',
+        'Kernel 08:30 (date): kész',
+        f'{YESTERDAY:%m-%d} 23:40 - éjjeli kör',
+        'Indulás 09:00 után (Klodel: éjjel nem)',
+        'VÁR: Pulzus -- a 23:50-es export nem érkezett meg',
+        '## 23:59 terv',
+        '22:00-ig kész a PR',
+        '22:00 óráig kész a PR',
+        'PR #1290 kész, 23:00 deploy',
+        'Határidő 17:30: kész / mi akadt el',
+        'Kész a lap.\n23:59-kor jön a következő kör',
+        'PR #1289 zöld, a köteg 23:00 után megy'))
+
+
+@case
+def comment_stamp_rule_is_card_only(root):
+    # A message, a memory or a daily-log body that opens with a later time is not a card comment (rule 1 only there).
+    h = root['hook']
+    return all(run(h, 'Bash', {'command': API + ep + " --data-binary @- <<'JSON'\n{\"content\":\"Kernel 23:59 terv nélkül\"}\nJSON"},
+                   now='08:44')[0] == 0 for ep in ('messages', 'memories', 'daily-log'))
+
+
 @case
 def unrelated_msg_words_are_out_of_scope(root):
     h = root['hook']
