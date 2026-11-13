@@ -51,6 +51,12 @@ git_q checkout -q -b main 2>/dev/null
 git_q add -A && git_q commit -q -m base && git_q push -q origin main 2>/dev/null
 make_vitest; echo "node_modules/" > "$CLONE/.gitignore"; git_q add .gitignore && git_q commit -q -m ignore && git_q push -q origin main 2>/dev/null
 
+# The real checkout's stub (if the installer ran there on purpose) must come out of this test exactly as it went in:
+# a fingerprint, not "does not exist" (that failed on every machine where the installer had legitimately run).
+# --git-common-dir also covers a linked worktree, where $SRC/.git is a file.
+REAL_HOOKS="$(cd "$SRC" && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd)/hooks/pre-push.d"
+real_stub_fp() { if [ -e "$REAL_HOOKS/20-related-tests-gate" ]; then shasum "$REAL_HOOKS/20-related-tests-gate" | cut -d' ' -f1; else echo absent; fi; }
+REAL_STUB_BEFORE="$(real_stub_fp)"
 echo "== installer"
 ( cd "$TMP" && bash "$CLONE/scripts/install-git-related-tests-hook.sh" >/dev/null 2>&1 ) && pass "installer runs from another cwd" || fail "installer failed"
 STUB="$CLONE/.git/hooks/pre-push.d/20-related-tests-gate"
@@ -60,7 +66,7 @@ grep -q "$CLONE/scripts/git-hooks/related-tests-gate.sh" "$STUB" && pass "stub p
 H1="$(shasum "$STUB" | cut -d' ' -f1)"
 ( cd "$TMP" && bash "$CLONE/scripts/install-git-related-tests-hook.sh" >/dev/null 2>&1 )
 [ "$H1" = "$(shasum "$STUB" | cut -d' ' -f1)" ] && pass "second run is a no-op (identical stub)" || fail "not idempotent"
-[ ! -e "$SRC/.git/hooks/pre-push.d/20-related-tests-gate" ] || [ "$SRC" = "$CLONE" ] && pass "this checkout's hooks were not written by the test" || fail "test wrote into the real repo"
+[ "$(real_stub_fp)" = "$REAL_STUB_BEFORE" ] && pass "this checkout's hooks were not touched by the test" || fail "test wrote into the real repo"
 
 push() { # <branch> -> exit code of git push, output in $TMP/push.out
   git -C "$CLONE" push -q origin "$1" >"$TMP/push.out" 2>&1
