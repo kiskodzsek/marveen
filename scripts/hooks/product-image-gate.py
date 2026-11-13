@@ -122,17 +122,18 @@ def owner_private_chat():
 
 def owner_group_chat():
     """The owner's team group chat: MARVEEN_OWNER_GROUP_CHAT, else store/projektek.json elo_uzenet "csoport"
-    (a plain id or {"chat_id": ...}). Never hard-coded (personal data). "" when unknown."""
+    (a plain id or {"chat_id": ...}). Never hard-coded (personal data). "" when unknown. Normalised like the
+    chat it is compared with (norm_chat, Viktor 40902 INFO b)."""
     v = (os.environ.get('MARVEEN_OWNER_GROUP_CHAT') or '').strip()
     if v:
-        return v
+        return norm_chat(v)
     install = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
         with open(os.path.join(install, 'store', 'projektek.json'), encoding='utf-8') as f:
             g = (json.load(f).get('elo_uzenet') or {}).get('csoport')
         if isinstance(g, dict):
             g = g.get('chat_id')
-        return str(g).strip() if g is not None else ''
+        return norm_chat(g) if g is not None else ''
     except Exception:
         return ''
 

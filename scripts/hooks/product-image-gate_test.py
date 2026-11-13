@@ -2229,9 +2229,9 @@ def ledger(root, *chats, agent='main', age_s=0):
     return db
 
 
-def run_ledger(root, db, tool_input, agent='main', tool='mcp__plugin_telegram_telegram__reply', raw=False):
+def run_ledger(root, db, tool_input, agent='main', tool='mcp__plugin_telegram_telegram__reply', raw=False, group_env=GROUP):
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
-           'MARVEEN_OWNER_GROUP_CHAT': GROUP, 'LEDGER_DB_PATH': db, 'MAIN_AGENT_ID': 'main',
+           'MARVEEN_OWNER_GROUP_CHAT': group_env, 'LEDGER_DB_PATH': db, 'MAIN_AGENT_ID': 'main',
            'MARVEEN_AGENT_ID': agent, 'REPLY_MARKS_PATH': os.path.join(root, 'store', 'reply-marks.jsonl')}
     ti = tool_input if raw else as_marks(root, tool_input, agent)
     p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_name': tool, 'tool_input': ti}),
@@ -2251,6 +2251,18 @@ def latest_private_group_reply_blocked(root):
     db = ledger(root, GROUP, PRIV)
     rc, err = run_ledger(root, db, {'chat_id': GROUP, 'text': 'Rendben, megnézem.'})
     return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err
+
+
+@case
+def NEG_latest_private_group_reply_noncanonical_group_config_blocked(root):
+    # Viktor 40902 INFO b: a non-canonical group id in the config ("-0..." / "+...") is the same chat.
+    out = []
+    for cfg in ('-0' + GROUP[1:], ' ' + GROUP + ' '):
+        sub = tempfile.mkdtemp(dir=root)
+        db = ledger(sub, GROUP, PRIV)
+        rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Rendben, megnézem.'}, group_env=cfg)
+        out.append(rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err)
+    return all(out)
 
 
 @case
