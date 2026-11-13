@@ -64,6 +64,8 @@ export const KNOWN_HOOK_SCRIPTS: readonly string[] = [
   'count-claim-gate.py',
   // Klodel 40048: no GitHub repository is created without a PATRIK-KERTE: TG <id> "<quote>" line.
   'repo-create-gate.py',
+  // Retro 2026-11-13 R6 (card cf287c2c): the zsh traps (word splitting, $V:s modifier, =-expansion) and rm -r on a variable.
+  'zsh-trap-gate.py',
   // The /clear continuity pair: SessionEnd capture + SessionStart replay.
   'clear-capture.py',
   'clear-replay.py',

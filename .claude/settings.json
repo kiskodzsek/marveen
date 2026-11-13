@@ -81,7 +81,8 @@
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/memory-frontmatter-bash-gate.py\"", "timeout": 10 } ] },
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/keychain-read-gate.py\"", "timeout": 10 } ] },
       { "matcher": "Write|Edit|MultiEdit|Bash", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/time-claim-gate.py\"", "timeout": 10 } ] },
-      { "matcher": "Bash|mcp__.*__(create_repository|create_repository_using_template|fork_repository)", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/repo-create-gate.py\"", "timeout": 10 } ] }
+      { "matcher": "Bash|mcp__.*__(create_repository|create_repository_using_template|fork_repository)", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/repo-create-gate.py\"", "timeout": 10 } ] },
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/zsh-trap-gate.py\"", "timeout": 10 } ] }
     ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/hooks/telegram-reply-guard.py\"", "timeout": 10 } ] },
