@@ -11,7 +11,10 @@ chat or the team group whose text claims a render is in progress ("renderel", "e
 minin / MacBookon / gépen", and their plain inflections), unless
   1. ops/video_export_status.py ran at most MAX_AGE_S ago (its store/video-export-status.json, render_claim_lib), and
   2. an output it listed was written at most MAX_AGE_S ago, measured now (a file's mtime; a frames directory's newest
-     entry); when the text names a video file (x.mp4), that file must be one of those fresh outputs.
+     entry), OR -- for a render.mjs export, which writes its file only at the end (Klodel 40352: v10c had no file
+     13:17-13:28) -- the export's process tree (node + Chrome children) uses at least LIVE_CPU %CPU now
+     (render_claim_lib.live_export_outputs, one ps snapshot); when the text names a video file (x.mp4), that file
+     must be one of those fresh outputs.
 A claim about the MacBook is always blocked: this machine cannot measure it (ask Dave for the measured file and time).
 Drawing / generation claims (Klodel 35719, the third case: 10:27, Patrik TG 4424, "a papás új rajzai most a háttérben
 készülnek" while the order only waited in Dave's queue): "a háttérben készül(nek)", "rajzol(ja|ják|ódnak)",
@@ -53,7 +56,7 @@ import time
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from render_claim_lib import newest_write, read_stamp, running_generation_outputs  # noqa: E402
+from render_claim_lib import live_export_outputs, newest_write, read_stamp, running_generation_outputs  # noqa: E402
 
 ROOT = os.environ.get('CLAUDE_PROJECT_DIR', '/Users/klodel/marveen')
 STORE = os.path.join(ROOT, 'store')
@@ -293,9 +296,16 @@ def render_problem(text, now):
     if ran is None or now - ran > MAX_AGE_S:
         return f'render-állapot mérés nélkül (ops/video_export_status.py {MAX_AGE_S // 60} percen belül nem futott)'
     fresh = set()
+    live = None
     for o in outputs:
         w = newest_write(o)
         if w is not None and now - w <= MAX_AGE_S:
+            fresh.add(os.path.basename(os.path.normpath(o)))
+            continue
+        # a render.mjs export writes its file only at the end: its busy process tree is the live signal (Klodel 40352)
+        if live is None:
+            live = set(live_export_outputs())
+        if os.path.normpath(o) in live:
             fresh.add(os.path.basename(os.path.normpath(o)))
     named = {m.group(1) for m in VIDEO.finditer(str(text))}
     if named:

@@ -156,6 +156,76 @@ def processes():
     return rows
 
 
+# --- A render.mjs export writes its file only at the END (Klodel 40352, 2026-11-13 14:12) ---------------------------
+# The v10c export ran 13:17-13:28 with no output file (export log), so "the output was written in the last 2 minutes"
+# was false for the whole run, and a true "fut" claim and the live status edit were blocked. For a render.mjs export the
+# live signal is the export's process tree (node + its Chrome for Testing children) using CPU now, summed %CPU from one
+# ps snapshot (measured 14:13 on the v10d run: node 10.9 + Chrome 67.9 + renderer 55.5 + GPU 1.3). A stuck export
+# decays toward 0 % CPU and stays blocked. ffmpeg / Blender write as they go: their mtime rule is unchanged.
+LIVE_CPU = 10.0
+
+
+def _ps_tree_rows():
+    """[(pid, ppid, stat, pcpu, command)] from one ps snapshot; [] when ps cannot be run."""
+    ps = ps_path()
+    if not ps:
+        return []
+    try:
+        out = subprocess.run([ps, '-axo', 'pid=,ppid=,stat=,pcpu=,command='], capture_output=True, text=True,
+                             timeout=5).stdout
+    except Exception:
+        return []
+    rows = []
+    for line in out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) < 5:
+            continue
+        try:
+            rows.append((parts[0], parts[1], parts[2], float(parts[3].replace(',', '.')), parts[4]))
+        except ValueError:
+            continue
+    return rows
+
+
+def is_render_export(cmd):
+    """node ... <x>render.mjs ... export ... <out>: the executable is node and a render.mjs argument comes before
+    'export' (Viktor 40367 LOW: a bare substring let 'grep render.mjs export x.mp4' count). A bash -c / caffeinate
+    wrapper does not match; its node child does."""
+    args = cmd.split()
+    if not args or os.path.basename(args[0]) != 'node' or 'export' not in args:
+        return False
+    i = args.index('export')
+    return any(a.endswith('render.mjs') for a in args[1:i]) and output_of(cmd) is not None
+
+
+def live_export_outputs(rows=None, min_cpu=LIVE_CPU):
+    """The absolute outputs of the running render.mjs exports whose process tree uses at least min_cpu %CPU now."""
+    rows = _ps_tree_rows() if rows is None else rows
+    kids = {}
+    cpu = {}
+    for pid, ppid, _stat, pcpu, _cmd in rows:
+        kids.setdefault(ppid, []).append(pid)
+        cpu[pid] = pcpu
+    outs = []
+    for pid, _ppid, stat, _pcpu, cmd in rows:
+        if stat.startswith(('T', 'Z')) or not is_render_export(cmd):
+            continue
+        total, todo, seen = 0.0, [pid], set()
+        while todo:
+            p = todo.pop()
+            if p in seen:
+                continue
+            seen.add(p)
+            total += cpu.get(p, 0.0)
+            todo.extend(kids.get(p, []))
+        if total < min_cpu:
+            continue
+        o = output_of_process(pid, cmd)
+        if o:
+            outs.append(os.path.normpath(o))
+    return outs
+
+
 def _absolute(path, cwd):
     if not path:
         return None

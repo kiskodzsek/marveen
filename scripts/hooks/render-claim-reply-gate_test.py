@@ -114,6 +114,96 @@ def a_named_file_must_be_one_of_the_fresh_outputs(root):
     assert rc == 2 and 'nagyi.mp4' in err, (rc, err)
 
 
+def fake_render_export(out, busy):
+    """A ps row 'node render.mjs <dir> export <out>' (exec -a). busy: a CPU-burning loop (the Chrome render of a live
+    export); else sleep (a stuck export at ~0 % CPU). Started ~1.5 s before use so ps shows its %CPU."""
+    # The ps row must END with <out>: bash runs a script stored AT <out>, aged 10 minutes, so the mtime rule cannot
+    # pass it and only the live-CPU rule decides. (python3 -c re-execs itself and loses the exec -a name.)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, 'w') as f:
+        f.write('while :; do :; done\n' if busy else 'sleep 30\n')
+    old = time.time() - 600
+    os.utime(out, (old, old))
+    p = subprocess.Popen(['/bin/bash', '-c', 'exec -a "node render.mjs /w/film export" /bin/bash %s' % out])
+    time.sleep(1.5)
+    return p
+
+
+@case
+def a_busy_render_export_without_its_file_yet_is_rendering(root):
+    # Klodel 40352: render.mjs writes the mp4 only at the end (v10c: no file 13:17-13:28); the busy tree is the signal.
+    setup(root)
+    out = os.path.join(root, 'out', 'v10d.mp4')
+    write_stamp(root, [out])
+    p = fake_render_export(out, busy=True)
+    try:
+        for text in ['Fut a render, v10d.mp4 most készül.', 'a film most renderel a minin']:
+            rc, err = run(root, text)
+            assert rc == 0, (text, rc, err)
+    finally:
+        p.kill()
+        p.wait()
+
+
+@case
+def NEG_an_idle_render_export_without_its_file_is_not_rendering(root):
+    setup(root)
+    out = os.path.join(root, 'out', 'v10d.mp4')
+    write_stamp(root, [out])
+    p = fake_render_export(out, busy=False)
+    try:
+        rc, err = run(root, 'Fut a render, v10d.mp4 most készül.')
+        assert rc == 2 and 'v10d.mp4' in err, (rc, err)
+    finally:
+        p.kill()
+        p.wait()
+
+
+@case
+def NEG_a_busy_export_of_another_file_does_not_cover_this_one(root):
+    setup(root)
+    out = os.path.join(root, 'out', 'v10d.mp4')
+    write_stamp(root, [out, os.path.join(root, 'out', 'papas.mp4')])
+    p = fake_render_export(out, busy=True)
+    try:
+        assert run(root, 'v10d.mp4 renderel')[0] == 0
+        rc, err = run(root, 'papas.mp4 renderel')
+        assert rc == 2 and 'papas.mp4' in err, (rc, err)
+    finally:
+        p.kill()
+        p.wait()
+
+
+@case
+def NEG_a_busy_export_still_needs_a_fresh_measurement(root):
+    setup(root)
+    out = os.path.join(root, 'out', 'v10d.mp4')
+    write_stamp(root, [out], now=time.time() - 3 * 60)
+    p = fake_render_export(out, busy=True)
+    try:
+        rc, err = run(root, 'renderel a film')
+        assert rc == 2 and 'mérés nélkül' in err, (rc, err)
+    finally:
+        p.kill()
+        p.wait()
+
+
+@case
+def the_live_cpu_is_summed_over_the_export_process_tree(root):
+    # one ps snapshot: node itself is nearly idle, its Chrome child and grandchild do the work (the v10d shape, 14:13)
+    exp = 'node render.mjs /w/film export /w/out/a.mp4'
+    rows = [('10', '1', 'S', 2.0, exp), ('11', '10', 'S', 40.0, 'Chrome for Testing'),
+            ('12', '11', 'S', 30.0, 'Chrome renderer'), ('20', '1', 'S', 2.0, 'node render.mjs /w/film export /w/out/b.mp4'),
+            ('30', '1', 'T', 99.0, 'node render.mjs /w/film export /w/out/c.mp4'),
+            ('40', '1', 'S', 90.0, 'node render.mjs /w/film frames'),
+            ('50', '1', 'S', 90.0, 'grep render.mjs export /w/out/d.mp4'),
+            ('60', '1', 'S', 90.0, 'bash -c cd /w && node render.mjs /w/film export /w/out/e.mp4'),
+            ('70', '1', 'S', 90.0, 'node other.js render.mjs.bak export /w/out/f.mp4'),
+            ('80', '1', 'S', 90.0, '/opt/homebrew/bin/node /w/render.mjs /w/film export /w/out/g.mp4')]
+    # Viktor 40367 LOW: only a node process with a render.mjs argument before 'export' is an export
+    assert GATE.live_export_outputs(rows) == ['/w/out/a.mp4', '/w/out/g.mp4'], GATE.live_export_outputs(rows)
+
+
 @case
 def a_frames_directory_counts_by_its_newest_entry(root):
     setup(root)
