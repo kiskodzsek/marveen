@@ -107,7 +107,21 @@ describe('resumePrompt closing line is agent-dependent', () => {
     expect(p).toContain('transzkript')
     expect(p).toContain(CONSTRAINT)
   })
-  it('sub-agent: channel notice stays (their channel is the inter-agent queue)', () => {
-    expect(resumePrompt('samu', '/x/HANDOFF.md', true)).toContain('jelezz a csatornádon')
-  })
+  // Dave 40654 / Klodel 40657: a sub-agent with its own Telegram bot sent the
+  // restart notice to the owner (Patrik, Dave's chat TG 666). No variant may
+  // ask any agent to announce the restart anywhere.
+  for (const [label, name] of [['sub-agent', 'samu'], ['sub-agent with own bot', 'dave']] as const) {
+    for (const [variant, had, stale] of [
+      ['no handoff', false, null], ['fresh handoff', true, null], ['stale handoff', true, 42], ['unmeasured', true, 'unknown'],
+    ] as const) {
+      it(`${label}, ${variant}: transcript line only, no channel notice`, () => {
+        const p = resumePrompt(name, '/x/HANDOFF.md', had, stale)
+        expect(p).not.toContain('jelezz a csatornádon')
+        expect(p).not.toMatch(/jelezz[^.]*friss kontextus/i)
+        expect(p).toContain('transzkript-sorban')
+        expect(p).toContain('session-meta NEM mehet ki')
+        expect(p).toContain(CONSTRAINT)
+      })
+    }
+  }
 })
