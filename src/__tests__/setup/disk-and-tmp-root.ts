@@ -11,7 +11,7 @@
 //      reads it, so every mkdtemp(tmpdir()) of the suite lands under it.
 //   3. After the run the root is removed whatever it holds. Leftovers are reported with the first names; with
 //      MARVEEN_TEST_TMP_STRICT=1 (set in CI once the suite is clean) a leftover turns the run red.
-import { mkdtempSync, readdirSync, rmSync, statfsSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readdirSync, rmSync, statfsSync, type Dirent } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -44,6 +44,26 @@ export function leftoverProblem(root: string, names: string[]): string | null {
     '. A teszt takarítson maga után (afterEach/afterAll rmSync). / Tests left entries in the per-run temp root.'
 }
 
+// Make every directory under r readable and writable for us (a test may leave a chmod 000 folder), without
+// following symlinks (a symlinked directory is a Dirent that is not a directory).
+function unlockTree(r: string): void {
+  try { chmodSync(r, 0o700) } catch { return }
+  let entries: Dirent[] = []
+  try { entries = readdirSync(r, { withFileTypes: true }) } catch { return }
+  for (const e of entries) if (e.isDirectory()) unlockTree(join(r, e.name))
+}
+
+// Removes the run root. rmSync's force only swallows ENOENT: an unreadable folder throws EACCES (Viktor 41392 LOW),
+// so on a failure the tree is unlocked and the removal tried once more. Returns null, or what could not be removed.
+export function removeRoot(r: string): string | null {
+  try { rmSync(r, { recursive: true, force: true }); return null } catch { /* unlock and retry below */ }
+  unlockTree(r)
+  try { rmSync(r, { recursive: true, force: true }); return null } catch (e) {
+    return `TMP-GYOKER: a ${r} nem törölhető (${(e as NodeJS.ErrnoException).code ?? 'hiba'}); töröld kézzel. ` +
+      '/ The per-run temp root could not be removed.'
+  }
+}
+
 let root: string | null = null
 let originalTmp: string | undefined
 
@@ -59,13 +79,14 @@ export default function setup(): () => void {
   return function teardown(): void {
     if (!root) return
     const r = root
-    let names: string[] = []
-    try { names = readdirSync(r) } catch { names = [] }
-    rmSync(r, { recursive: true, force: true })
+    // TMPDIR and the module state are restored first, so a failed removal cannot leave them pointing at the root.
     root = null
     if (originalTmp === undefined) delete process.env.TMPDIR
     else process.env.TMPDIR = originalTmp
-    const msg = leftoverProblem(r, names)
+    let names: string[] = []
+    try { names = readdirSync(r) } catch { names = [] }
+    const stuck = removeRoot(r)
+    const msg = [leftoverProblem(r, names), stuck].filter(Boolean).join(' ')
     if (!msg) return
     if (process.env.MARVEEN_TEST_TMP_STRICT === '1') throw new Error(msg)
     console.warn(msg)

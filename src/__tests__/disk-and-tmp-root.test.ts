@@ -1,8 +1,9 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import setup, {
-  diskProblem, leftoverProblem, minFreeGib, freeGib, MIN_FREE_GIB_DEFAULT,
+  diskProblem, leftoverProblem, minFreeGib, freeGib, removeRoot, MIN_FREE_GIB_DEFAULT,
 } from './setup/disk-and-tmp-root.js'
 
 // Card 8ae42dd0 (retro 2026-11-13): the run stops below the disk floor, and every run's temp files live under one
@@ -84,6 +85,38 @@ describe('per-run temp root', () => {
     writeFileSync(join(root, 'left'), 'x')
     expect(() => teardown()).toThrow(/TMP-MARADEK/)
     expect(existsSync(root)).toBe(false)
+  })
+
+  it('an unreadable (chmod 000) leftover folder is still removed, not red without STRICT, TMPDIR restored (Viktor 41392)', () => {
+    process.env.MARVEEN_TEST_MIN_FREE_GIB = '0'
+    const before = process.env.TMPDIR
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const teardown = setup()
+    const root = process.env.TMPDIR as string
+    mkdirSync(join(root, 'locked', 'inner'), { recursive: true })
+    writeFileSync(join(root, 'locked', 'inner', 'f'), 'x')
+    chmodSync(join(root, 'locked'), 0o000)
+    expect(() => teardown()).not.toThrow()
+    expect(existsSync(root)).toBe(false)
+    expect(process.env.TMPDIR).toBe(before)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0][0])).toContain('locked')
+  })
+
+  it('a root that cannot be removed is reported by name, and TMPDIR is restored before', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'mvt-rm-'))
+    const r = join(parent, 'root')
+    mkdirSync(r)
+    chmodSync(parent, 0o500)
+    try {
+      const msg = removeRoot(r)
+      expect(msg).toContain('TMP-GYOKER')
+      expect(msg).toContain(r)
+    } finally {
+      chmodSync(parent, 0o700)
+      rmSync(parent, { recursive: true, force: true })
+    }
+    expect(removeRoot(join(parent, 'gone'))).toBeNull()
   })
 
   it('the leftover text lists at most ten names and the count', () => {
