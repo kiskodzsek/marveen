@@ -1353,6 +1353,31 @@ def itthon_mert_check(text):
         return need + f' (lint: {bad[0][:160]})'
     return None
 
+# Patrik privát TG 18455 (2026-11-13): "Nem vagyok hajlando ujabb parancsokat futtatni mit kepzeltek ti". Text to the
+# owner's PRIVATE chat never carries a shell command for him to run: no sudo, no command chain, no checksum line, no
+# shell path, no pipe into a shell. A step that needs root goes a root-free way, or it is dropped (Klodel 40845).
+COMMAND_PATTERNS = (
+    (re.compile(r'\bsudo\b'), 'sudo'),
+    (re.compile(r'&&|\|\|'), '&& / ||'),
+    (re.compile(r'\bshasum\b|\bsha256sum\b'), 'shasum'),
+    (re.compile(r'/bin/(?:ba|z|da|k)?sh\b|/usr/bin/env\s'), '/bin/bash'),
+    (re.compile(r'\|\s*(?:sudo\s+)?(?:ba|z)?sh\b'), '| bash'),
+    (re.compile(r'\b(?:launchctl|chmod|chown|defaults\s+write|xattr|spctl|csrutil)\b'), 'rendszerparancs'),
+    (re.compile(r'\bcurl\s+-|\bwget\s'), 'curl/wget'),
+    (re.compile(r'(?m)^[ \t]*[$%][ \t]+\S'), 'parancssor-prompt'),
+    # Lower case only: a sentence starting "Node 22 kell" is not a command line.
+    (re.compile(r'(?m)^[ \t]*(?:cd|export|npm|npx|node|python3?|brew|git|bash|zsh|sh|install)[ \t]+[-./~$\w]'), 'parancssor'),
+)
+
+
+def command_check(text):
+    """A shell command in a text to the owner's private chat: the first match as a short name, else None."""
+    for rx, name in COMMAND_PATTERNS:
+        if rx.search(text):
+            return name
+    return None
+
+
 def main():
     if sys.argv[1:2] == ['--ocr']:
         return warm_ocr(sys.argv[2:])
@@ -1368,6 +1393,14 @@ def main():
     # want to see the "PRIVÁT-OK" line. An open private window (store/privat-ablak.json:
     # {"until": <unix ts>, "ok": "<reason, TG id>"}) lets private replies pass without the marker.
     chat = str(ti.get('chat_id') or '').strip()
+    if chat and chat == owner_private_chat():
+        cmd = command_check(str(ti.get('text') or ''))
+        if cmd:
+            sys.stderr.write(
+                f'PARANCS-KAPU (Patrik TG 18455: "Nem vagyok hajlando ujabb parancsokat futtatni"): a Patriknak menő '
+                f'szövegben parancs van ({cmd}). Patriknak soha nincs futtatandó parancs: root nélküli út, vagy a lépés '
+                f'elmarad; a parancs a csapaton belül marad.\n')
+            return 2
     # Patrik csoport TG 5704 (card 9df14a4c, Klodel 40009): "most meg ide reagálsz arra az üzenetemre amit a
     # másik chatbe irtam". The marker rule above sent the answer to a PRIVATE message into the group. Where the
     # owner wrote last decides: his latest message came in the private chat -> the reply goes there without the
@@ -1410,6 +1443,11 @@ def main():
             sys.stderr.write(im + '\n')
             return 2
     files = ti.get('files') or []
+    # Patrik privát TG 18439/18448/18453 (2026-11-13): "lehet h szar mindegyik ... miert kell konyorognom h elem
+    # tedd oket", "Akkor azt a kaput nagyon gyorsan kiiktatni". Media sent to the owner's PRIVATE chat is not
+    # held by the media checks: he reviews it himself. Group and every other chat keep the full check.
+    if chat and chat == owner_private_chat():
+        return 0
     errs = [e for e in (check(f) for f in files if f.lower().endswith(MEDIA)) if e]
     # Patrik TG 2314 (2026-11-06): "hol a szöveg? ne légy már geci tedd ide" -- a finished marketing video goes
     # WITH its caption written into the message itself, not "next to it in a file". The first caption body line
