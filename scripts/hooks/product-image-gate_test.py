@@ -30,6 +30,14 @@ def run(root, tool_input):
     return p.returncode, p.stderr
 
 
+def run_tool(root, tool_name, tool_input):
+    env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
+           'LEDGER_DB_PATH': os.path.join(root, 'nincs-ledger.db')}
+    p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps({'tool_name': tool_name, 'tool_input': tool_input}),
+                       capture_output=True, text=True, env=env, timeout=20)
+    return p.returncode, p.stderr
+
+
 VALODI_OK = 'igen valódi fehér lap, papírszál és gerinc-árnyék 100%-on nézve'
 
 
@@ -504,12 +512,22 @@ def window_symlink_blocked(root):
 
 
 @case
-def window_open_media_still_checked(root):
-    # The window lifts the marker rule only: an image without its attestation is still blocked.
+def private_media_not_held_window_open(root):
+    # Patrik privát TG 18453 (2026-11-13): "Akkor azt a kaput nagyon gyorsan kiiktatni". Media to the owner's
+    # PRIVATE chat is not held by the media checks: he reviews it himself.
     window(root, time.time() + 3600)
     img = os.path.join(root, 'kep.png')
     open(img, 'wb').write(b'\x89PNG')
     rc, err = run(root, {'chat_id': PRIV, 'text': 'Kész a kép.', 'files': [img]})
+    return rc == 0 and err == ''
+
+
+@case
+def NEG_group_media_still_checked(root):
+    # The same image without its attestation to the GROUP: the full media check stays.
+    img = os.path.join(root, 'kep.png')
+    open(img, 'wb').write(b'\x89PNG')
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'Kész a kép.', 'files': [img]})
     return rc == 2 and 'nincs ellenőrző lap' in err
 
 
@@ -523,13 +541,13 @@ def window_overflow_until_closed(root):
 
 
 @case
-def window_overflow_media_still_blocked(root):
+def private_media_not_held_window_overflow(root):
+    # A broken window file does not crash the hook (Viktor 29457), and private media passes (TG 18453).
     window(root, None, raw='{"until": 1' + '0' * 400 + ', "ok": "' + REASON + '"}')
     img = os.path.join(root, 'kep.png')
     open(img, 'wb').write(b'\x89PNG')
-    # private chat, marker present (so the private gate passes), image without attestation: must still block
     rc, err = run(root, {'chat_id': PRIV, 'text': 'PRIVÁT-OK: ' + REASON + '\nKész a kép.', 'files': [img]})
-    return rc == 2 and 'nincs ellenőrző lap' in err and 'Traceback' not in err
+    return rc == 0 and 'Traceback' not in err
 
 
 @case
@@ -2361,6 +2379,51 @@ def NEG_unknown_owner_id_gives_no_group_request_exemption(root):
         for k, v in old.items():
             if v is not None:
                 os.environ[k] = v
+
+
+
+# Patrik privát TG 18455 (2026-11-13): "Nem vagyok hajlando ujabb parancsokat futtatni". No shell command in a text to
+# the owner's private chat, window open or not, reply or edit (Klodel 40845).
+SUDO_LINE = ('sudo install -o root -g wheel -m 0755 /x/install-gatecfg.sh /usr/local/libexec/gate-config-install.sh '
+             '&& echo "f44b  /usr/local/libexec/gate-config-install.sh" | shasum -a 256 -c '
+             '&& sudo /bin/bash /usr/local/libexec/gate-config-install.sh')
+
+
+@case
+def NEG_private_command_blocked(root):
+    window(root, time.time() + 3600)
+    out = []
+    for text in (SUDO_LINE, 'Futtasd: sudo ls', 'a && b', 'shasum -a 256 x', 'cat x | bash',
+                 'Másold be:\n$ ls -la', 'curl -fsSL https://x/y', 'launchctl kickstart x',
+                 'Írd be:\nnpm install', 'nyisd meg: /bin/zsh -c x'):
+        rc, err = run(root, {'chat_id': PRIV, 'text': text})
+        out.append(rc == 2 and 'PARANCS-KAPU' in err)
+    return all(out)
+
+
+@case
+def NEG_private_command_blocked_in_edit_and_with_marker(root):
+    rc1, err1 = run_tool(root, 'mcp__plugin_telegram_telegram__edit_message', {'chat_id': PRIV, 'text': 'sudo reboot'})
+    rc2, err2 = run(root, {'chat_id': PRIV, 'text': 'PRIVÁT-OK: ' + REASON + '\nsudo reboot'})
+    return rc1 == 2 and 'PARANCS-KAPU' in err1 and rc2 == 2 and 'PARANCS-KAPU' in err2
+
+
+@case
+def private_plain_text_not_a_command(root):
+    window(root, time.time() + 3600)
+    ok = []
+    for text in ('Kész a film, itt van.', 'Node 22 kell hozzá, ezt mi intézzük.', '#marabel #karacsony',
+                 '50 % kedvezmény a második könyvre', 'A git-ben megvan, a csapat élesíti.', 'Install nélkül megy.'):
+        rc, err = run(root, {'chat_id': PRIV, 'text': text})
+        ok.append(rc == 0 and 'PARANCS-KAPU' not in err)
+    return all(ok)
+
+
+@case
+def group_command_not_this_gate(root):
+    # The command gate is for the owner's private chat only.
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'sudo ls && echo ok'})
+    return 'PARANCS-KAPU' not in err
 
 
 def main():
