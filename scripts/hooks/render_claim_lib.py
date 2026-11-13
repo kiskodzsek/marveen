@@ -188,8 +188,14 @@ def _ps_tree_rows():
 
 
 def is_render_export(cmd):
+    """node ... <x>render.mjs ... export ... <out>: the executable is node and a render.mjs argument comes before
+    'export' (Viktor 40367 LOW: a bare substring let 'grep render.mjs export x.mp4' count). A bash -c / caffeinate
+    wrapper does not match; its node child does."""
     args = cmd.split()
-    return 'render.mjs' in cmd and 'export' in args and output_of(cmd) is not None
+    if not args or os.path.basename(args[0]) != 'node' or 'export' not in args:
+        return False
+    i = args.index('export')
+    return any(a.endswith('render.mjs') for a in args[1:i]) and output_of(cmd) is not None
 
 
 def live_export_outputs(rows=None, min_cpu=LIVE_CPU):

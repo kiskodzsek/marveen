@@ -195,8 +195,13 @@ def the_live_cpu_is_summed_over_the_export_process_tree(root):
     rows = [('10', '1', 'S', 2.0, exp), ('11', '10', 'S', 40.0, 'Chrome for Testing'),
             ('12', '11', 'S', 30.0, 'Chrome renderer'), ('20', '1', 'S', 2.0, 'node render.mjs /w/film export /w/out/b.mp4'),
             ('30', '1', 'T', 99.0, 'node render.mjs /w/film export /w/out/c.mp4'),
-            ('40', '1', 'S', 90.0, 'node render.mjs /w/film frames')]
-    assert GATE.live_export_outputs(rows) == ['/w/out/a.mp4'], GATE.live_export_outputs(rows)
+            ('40', '1', 'S', 90.0, 'node render.mjs /w/film frames'),
+            ('50', '1', 'S', 90.0, 'grep render.mjs export /w/out/d.mp4'),
+            ('60', '1', 'S', 90.0, 'bash -c cd /w && node render.mjs /w/film export /w/out/e.mp4'),
+            ('70', '1', 'S', 90.0, 'node other.js render.mjs.bak export /w/out/f.mp4'),
+            ('80', '1', 'S', 90.0, '/opt/homebrew/bin/node /w/render.mjs /w/film export /w/out/g.mp4')]
+    # Viktor 40367 LOW: only a node process with a render.mjs argument before 'export' is an export
+    assert GATE.live_export_outputs(rows) == ['/w/out/a.mp4', '/w/out/g.mp4'], GATE.live_export_outputs(rows)
 
 
 @case
