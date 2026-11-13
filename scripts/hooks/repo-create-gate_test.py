@@ -138,6 +138,59 @@ expect('NEG a heredoc fed to python that creates a repo still blocks',
 expect('NEG a heredoc fed to bash that creates a repo still blocks',
        bash("bash <<'SH'\ngh repo create x --private\nSH"), 2)
 
+# --- Viktor 40174 MEDIUM: the heredoc body is dropped only for a known non-executing sink -------------------------------
+expect('NEG cat heredoc piped to bash blocks', bash("cat <<'EOF' | bash\ngh repo create x --private\nEOF"), 2)
+expect('NEG sh -c "$(cat heredoc)" blocks', bash("sh -c \"$(cat <<'EOF'\ngh repo create x --private\nEOF\n)\""), 2)
+expect('NEG tee mk.sh heredoc then bash mk.sh blocks',
+       bash("tee mk.sh <<'EOF'\ngh repo create x --private\nEOF\nbash mk.sh"), 2)
+expect('NEG cat > notes.md heredoc then ./mk.sh blocks',
+       bash("cat > notes.md <<'EOF'\ngh repo create x --private\nEOF\n./mk.sh"), 2)
+expect('NEG gh api graphql --input - heredoc blocks',
+       bash("gh api graphql --input - <<'EOF'\n{\"query\":\"mutation{createRepository(input:{name:\\\"x\\\"}){repository{url}}}\"}\nEOF"), 2)
+expect('NEG cat > mk.sh (not a text sink) blocks', bash("cat > mk.sh <<'EOF'\ngh repo create x --private\nEOF"), 2)
+expect('agent-msg.sh heredoc about the gate passes',
+       bash("bash /Users/klodel/marveen/scripts/agent-msg.sh kernel viktor - <<'MSG'\nA kapu a gh repo create-et blokkolja.\nMSG"), 0)
+expect('curl to /api/messages heredoc about the gate passes',
+       bash("curl -s -X POST http://localhost:3420/api/messages --data-binary @- <<'JSON'\n"
+            "{\"content\":\"gh repo create blokkolva\"}\nJSON"), 0)
+expect('cd && cat >> notes.md heredoc about the gate passes (real 11-13 hibanaplo call)',
+       bash("cd /x && cat >> shared/hibanaplo.md <<'EOF'\n- nyilván kell egy repo, gh repo create\nEOF"), 0)
+expect('git add && git commit -F - heredoc passes (real 11-13 commit)',
+       bash("git add -A x && git commit -q -F - <<'EOF'\nfeat: gh repo create needs Patrik\nEOF"), 0)
+expect('NEG cd && cat heredoc | bash still blocks', bash("cd /x && cat <<'EOF' | bash\ngh repo create x\nEOF"), 2)
+expect('NEG cat > notes.md heredoc && bash after the opener blocks',
+       bash("cat > notes.md <<'EOF' && bash -c 'true'\ngh repo create x\nEOF"), 2)
+expect('curl /api/messages heredoc with a closed $(cat token) header passes (real 11-13 Viktor call)',
+       bash("curl -s -X PUT http://localhost:3420/api/messages/1 -H \"Authorization: Bearer $(cat t)\" "
+            "--data-binary @- <<'JSON'\n{\"result\":\"gh repo create blokkolva\"}\nJSON"), 0)
+with tempfile.TemporaryDirectory() as d:
+    note = os.path.join(d, 'msg.txt')
+    with open(note, 'w') as fh:
+        fh.write('A kapu a gh repo create-et és a POST user/repos-t blokkolja.\n')
+    expect('a message file fed to agent-msg.sh is not read as a run (real 11-13 Viktor call)',
+           bash(f'bash /Users/klodel/marveen/scripts/agent-msg.sh kernel viktor - < {note}'), 0)
+    expect('NEG the same file fed to bash still blocks', bash(f'bash < {note}'), 2)
+    expect('NEG the same file as a curl payload to user/repos still blocks',
+           bash(f'curl -s -X POST https://api.github.com/user/repos --data-binary @{note}'), 2)
+expect('cat > report.md heredoc about the gate passes',
+       bash("cat > reports/x.md <<'EOF'\nThe gate blocks gh repo create.\nEOF"), 0)
+expect('grep for the phrase with "." as a path does not read every file',
+       bash('diff . scripts/hooks/x.py; echo done'), 0)
+with tempfile.TemporaryDirectory() as d:
+    absf = os.path.join(d, 'mk3.py')
+    with open(absf, 'w') as fh:
+        fh.write('import subprocess\nsubprocess.run(["gh", "repo", "create", "x"])\n')
+    os.chmod(absf, 0o755)
+    expect('NEG an absolute-path script at command start blocks', bash(absf), 2)
+
+# --- Viktor 40174 LOW: a quote cut before the question mark is still a question ------------------------------------
+QQ = 'PATRIK-KERTE: TG 18152 "nyilván kell egy repo"'
+rc, _ = ledger_run(f'gh repo create x --private  # {QQ}', [('18152', 'nyilván kell egy repo, nem????')])
+expect('NEG quote cut before "?" in a question row blocks', (rc, ''), 2)
+QS = 'PATRIK-KERTE: TG 18153 "csinálj egy repót sajat néven"'
+rc, _ = ledger_run(f'gh repo create x --private  # {QS}', [('18153', 'Csinálj egy repót sajat néven. Utána mi jön?')])
+expect('a statement followed by a separate question passes', (rc, ''), 0)
+
 # --- POSITIVE: approved creations, reads and unrelated commands pass ---------------------------------------
 expect('gh repo create with PATRIK-KERTE in the command passes',
        bash(f'gh repo create x --private  # {OK_LINE}'), 0)

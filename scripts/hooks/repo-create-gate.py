@@ -61,8 +61,11 @@ WRITE_RX = re.compile(
 MCP_CREATE_RX = re.compile(r'(?:^|__)(?:create_repository(?:_using_template)?|fork_repository)$')
 APPROVAL_RX = re.compile(r'PATRIK-KERTE:[ \t]*TG[ \t]*#?(\d{2,})[ \t]+["„“]([^"”\n]+)["”]')
 SCRIPT_RX = re.compile(r'(?<![\w./-])(?:python3?|node|bash|sh|zsh|deno|bun|ruby|tsx|ts-node|npx(?:[ \t]+(?:tsx|ts-node))?'
-                       r'|source|\.)(?:[ \t]+-[\w-]+)*[ \t]+[\'"]?([^\s\'";|&<>()]+)')
-DIRECT_RX = re.compile(r'(?:^|[;&|(\n][ \t]*)[\'"]?(\.{1,2}/[^\s\'";|&<>()]+)')
+                       r'|source)(?:[ \t]+-[\w-]+)*[ \t]+[\'"]?([^\s\'";|&<>()]+)'
+                       # "." (source) only at a command start: `diff . x` is not a run (Viktor 40174 INFO)
+                       r'|(?:^|[;&|(\n])[ \t]*\.[ \t]+[\'"]?([^\s\'";|&<>()]+)')
+# ./x, ../x and an absolute /x at a command start (Viktor 40174 INFO: /abs/mk.py was not judged)
+DIRECT_RX = re.compile(r'(?:^|[;&|(\n][ \t]*)[\'"]?(\.{0,2}/[^\s\'";|&<>()]+)')
 DATA_FILE_RX = re.compile(r'(?<![\w-])(?:--data-binary|--data|-d)(?:\s+|=)?[\'"]?@([^\s\'";|&<>()]+)')
 INPUT_FILE_RX = re.compile(r'(?<![\w-])--input(?:\s+|=)[\'"]?([^\s\'";|&<>()]+)')
 STDIN_FILE_RX = re.compile(r'(?<![<\d])<[ \t]*[\'"]?([^\s\'";|&<>()]+)')
@@ -72,21 +75,53 @@ MAX_FILES = 20
 
 
 HEREDOC_RX = re.compile(r'<<-?[ \t]*([\'"]?)(\w+)\1[^\n]*\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)', re.S)
-INTERPRETER_RX = re.compile(r'(?:^|[\s;&|(/])(?:python3?|node|bash|sh|zsh|deno|bun|ruby|tsx|ts-node|osascript|perl)'
-                            r'(?:[ \t]+-[\w-]*)*[ \t]*(?:-[ \t]*)?$')
+# A heredoc body is dropped ONLY when it goes into a known sink that does not execute it (Viktor 40174 MEDIUM: the
+# earlier denylist of interpreter heads let `cat <<EOF | bash`, `sh -c "$(cat <<EOF ...)"` and `tee mk.sh <<EOF;
+# bash mk.sh` through): a message wrapper, a commit message, a dashboard curl, or a text/data file.
+MSG_SH = r'(?:[\w-]*-msg|msg-close)\.sh'
+SINK_RX = re.compile(r'(?:^|[\s;&(/])' + MSG_SH + r'(?![\w.-])'
+                     r'|(?<![\w-])git[ \t]+commit\b[^\n]*?(?<![\w-])-F[ \t]*-(?![\w-])'
+                     r'|(?<![\w-])curl\b[^\n]*/api/(?:messages|kanban)\b'
+                     r'|(?<![\w-])(?:cat[ \t]*>{1,2}|tee(?:[ \t]+-a)?)[ \t]*[\'"]?[^\s\'";|&<>()]+'
+                     r'\.(?:md|txt|json|jsonl|log)[\'"]?[ \t]*$')
+OPENER_RISK_RX = re.compile(r'\||\$\(|`|&&|;')
+MSG_SH_RX = re.compile(MSG_SH + r'$')
 
 
 def executed_text(cmd):
-    """The command with the bodies of heredocs that are NOT fed to an interpreter removed: a message, a log line or a
-    commit message that talks about creating a repository (cat > f, agent-msg.sh, git commit -F -) is not a creation
-    (measured: 5 of 8 hits on 7 days of real calls were such texts). A heredoc fed to python/node/sh is kept. The
-    file a `cat > f.py <<EOF` writes is judged when it is run (SCRIPT_RX)."""
+    """The command with the bodies of heredocs that go into a known non-executing sink removed (SINK_RX): a message,
+    a commit message or a notes file that talks about creating a repository is not a creation (measured: 5 of 8 hits
+    on 7 days of real calls were such texts). Every other heredoc body is kept and judged. Nothing is dropped when the
+    opener line pipes or substitutes (|, $(, `, &&, ;), or when the command runs any script other than a message
+    wrapper (a file written by this very command does not exist yet when the hook reads it)."""
+    bodies = list(HEREDOC_RX.finditer(cmd))
+    if not bodies:
+        return cmd
+    outside, pos = [], 0
+    for m in bodies:
+        outside.append(cmd[pos:m.start()])
+        pos = m.end()
+    outside.append(cmd[pos:])
+    outside = '\n'.join(outside)
+    runs = [a or b for a, b in SCRIPT_RX.findall(outside)] + DIRECT_RX.findall(outside)
+    if any(not MSG_SH_RX.search(r) for r in runs if r and not r.startswith('-')):
+        return cmd
     out, pos = [], 0
-    for m in HEREDOC_RX.finditer(cmd):
+    for m in bodies:
         line_start = cmd.rfind('\n', 0, m.start()) + 1
         head = cmd[line_start:m.start()].rstrip()
+        nl = cmd.find('\n', m.start())
+        opener_rest = cmd[m.start():nl if nl != -1 else len(cmd)]
         out.append(cmd[pos:m.start()])
-        out.append(m.group(0) if INTERPRETER_RX.search(head) else '<<' + m.group(2) + '\n' + m.group(2))
+        # Only the sink's own segment counts: a `cd x &&` or `date;` before it is a separate command. A pipe or a
+        # substitution in that segment, or anything chained after the opener, keeps the body.
+        last = re.split(r'&&|\|\||;', head)[-1]
+        # an UNCLOSED $( or ` before the opener wraps the heredoc (sh -c "$(cat <<EOF"); a closed one, like a
+        # -H "Authorization: Bearer $(cat token)" header, does not
+        wrapped = last.count('$(') > last.count(')') or last.count('`') % 2 == 1
+        safe = (SINK_RX.search(last) and not wrapped and '|' not in last
+                and not OPENER_RISK_RX.search(opener_rest))
+        out.append('<<' + m.group(2) + '\n' + m.group(2) if safe else m.group(0))
         pos = m.end()
     out.append(cmd[pos:])
     return ''.join(out)
@@ -143,9 +178,14 @@ def has_approval(texts):
                 continue  # too short, or a question (the incident: "nyilván kell egy repo, nem????")
             found, text = _ledger_text(tg_id)
             if found:
-                if _fold(quote) in _fold(text):
-                    return True
-                continue  # the id is Patrik's message, but he did not write these words
+                ft, fq = _fold(text), _fold(quote)
+                i = ft.find(fq)
+                if i < 0:
+                    continue  # the id is Patrik's message, but he did not write these words
+                ends = [c for c in ft[i + len(fq):] if c in '.!?']
+                if (ends[0] if ends else ft.rstrip()[-1:]) == '?':
+                    continue  # the quoted sentence is a question in Patrik's message (Viktor 40174 LOW)
+                return True
             _audit(f'PATRIK-KERTE TG {tg_id}: not in the ledger, accepted on the line alone')
             return True
     return False
@@ -178,8 +218,16 @@ def referenced_files(cmd, cwd):
     out = []
     # Viktor 40095 L2c: the file an EXECUTING form names (interpreter, npx/tsx/ts-node, source, ".", "./x") plus
     # payload files. Not every named file: `git add` / `cat` / `grep` of this gate's own source would then block.
-    refs = (SCRIPT_RX.findall(cmd) + DIRECT_RX.findall(cmd) + DATA_FILE_RX.findall(cmd) + INPUT_FILE_RX.findall(cmd)
-            + STDIN_FILE_RX.findall(cmd))[:MAX_FILES]
+    # Collected from the command WITHOUT the sink heredoc bodies: prose inside a message ("python3 -I, ...") must not
+    # fill the MAX_FILES budget and push a real reference out. A payload fed to a message wrapper or to a dashboard
+    # curl (/api/messages, /api/kanban) is a message, not a run, and is not read.
+    text = executed_text(cmd)
+    refs = [a or b for a, b in SCRIPT_RX.findall(text)] + DIRECT_RX.findall(text) + INPUT_FILE_RX.findall(text)
+    for seg in re.split(r'&&|\|\||;|\n', text):
+        if re.search(MSG_SH + r'(?![\w.-])', seg) or re.search(r'(?<![\w-])curl\b.*/api/(?:messages|kanban)\b', seg):
+            continue
+        refs += DATA_FILE_RX.findall(seg) + STDIN_FILE_RX.findall(seg)
+    refs = refs[:MAX_FILES]
     for ref in refs:
         if ref.startswith('-'):
             continue
