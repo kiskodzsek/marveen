@@ -110,10 +110,10 @@ def owner_private_chat():
     personal data and stays out of the repo. "" when unknown: then no reply counts as private."""
     v = (os.environ.get('MARVEEN_OWNER_PRIVATE_CHAT') or '').strip()
     if v:
-        return v
+        return norm_chat(v)
     install = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
-        return str(owner_chat.resolve_owner_chat_id(os.path.join(install, '.env')) or '')
+        return norm_chat(owner_chat.resolve_owner_chat_id(os.path.join(install, '.env')))
     except Exception:
         return ''
 
@@ -1376,6 +1376,16 @@ LIST_MARK = re.compile(r'^(?:[-*\u2022>]|\d{1,3}[.)])[ \t]+')
 INVISIBLE = re.compile('[\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]')
 
 
+def norm_chat(v):
+    """A chat id as Telegram means it: a number compares as a number ("+5040", "05040" and "5040" are one chat,
+    Viktor 40886 INFO 2); anything else as stripped text."""
+    t = str(v or '').strip()
+    try:
+        return str(int(t))
+    except ValueError:
+        return t
+
+
 def command_check(text):
     """A shell command in a text to the owner's private chat: the first match as a short name, else None.
     Normalised first (NFKC, invisible characters out), so "su<zero-width>do" and full-width letters do not pass.
@@ -1390,8 +1400,13 @@ def command_check(text):
         for rx, name in COMMAND_PATTERNS:
             if rx.search(p):
                 return name
-        if not HU_ACCENT.search(p) and COMMAND_LINE.match(p.strip('`').strip()):
-            return 'parancssor'
+        line = p.strip('`').strip()
+        if COMMAND_LINE.match(line):
+            # Viktor 40886 LOW: an accented letter makes it a sentence only when no argument is a path, a flag or a
+            # variable ("cd ~/Letöltések", "git commit -m javítás" are commands; "git push megtörtént" is not).
+            args = line.split()[1:]
+            if not HU_ACCENT.search(line) or any(a[:1] in '-~/$' or '/' in a for a in args):
+                return 'parancssor'
     return None
 
 
@@ -1409,7 +1424,10 @@ def main():
     # Patrik privát TG 14479/14496 (2026-11-06): non-Marabel topics go to the private chat, and he does not
     # want to see the "PRIVÁT-OK" line. An open private window (store/privat-ablak.json:
     # {"until": <unix ts>, "ok": "<reason, TG id>"}) lets private replies pass without the marker.
-    chat = str(ti.get('chat_id') or '').strip()
+    chat = norm_chat(ti.get('chat_id'))
+    if chat and not owner_private_chat():
+        # Viktor 40886 INFO 1: without the owner's chat id the private-chat gates (PARANCS-KAPU included) are off.
+        sys.stderr.write('product-image-gate: the owner private chat id is unknown; the private-chat checks are off.\n')
     if chat and chat == owner_private_chat():
         cmd = command_check(str(ti.get('text') or ''))
         if cmd:

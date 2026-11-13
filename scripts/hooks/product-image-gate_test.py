@@ -2423,6 +2423,26 @@ def NEG_private_command_viktor_40870_shapes_blocked(root):
 
 
 @case
+def NEG_private_command_accented_path_blocked(root):
+    # Viktor 40886 LOW: an accented folder name does not make a command line a sentence.
+    out = []
+    for text in ('cd ~/Letöltések', 'rm -rf ~/Letöltések/x', 'open ~/Letöltések/x.pkg', 'git commit -m "javítás"'):
+        rc, err = run(root, {'chat_id': PRIV, 'text': 'PRIVÁT-OK: ' + REASON + '\n' + text})
+        out.append(rc == 2 and 'PARANCS-KAPU' in err)
+    return all(out)
+
+
+@case
+def NEG_private_chat_id_forms_blocked(root):
+    # Viktor 40886 INFO 2: "+id", "0id" and an integer id are the same private chat.
+    out = []
+    for cid in ('+' + PRIV, '0' + PRIV, int(PRIV)):
+        rc, err = run(root, {'chat_id': cid, 'text': 'PRIVÁT-OK: ' + REASON + '\nsudo ls'})
+        out.append(rc == 2 and 'PARANCS-KAPU' in err)
+    return all(out)
+
+
+@case
 def private_plain_text_not_a_command(root):
     window(root, time.time() + 3600)
     ok = []
