@@ -89,7 +89,38 @@ def only_opted_in_agents_and_only_sends(root):
             and run(root, MSG + '29 új blokk\nMSG', agent='klodel')[0] == 0
             and run(root, 'echo "29 új blokk, msg 39836"')[0] == 0
             and run(root, 'git commit -m "29 new blocks (39861)"')[0] == 0
-            and run(root, "curl -s -X POST http://localhost:3420/api/daily-log -d '{\"content\":\"29 blokk\"}'")[0] == 0)
+            and run(root, 'curl -s -H "Authorization: Bearer x" "http://localhost:3420/api/daily-log?agent=kernel"')[0] == 0)
+
+
+@case
+def daily_log_write_is_judged(root):
+    # Retro R1 (card 028205dd): the daily log is a report too; a write to it is judged, a read is not.
+    log = "curl -s -X POST http://localhost:3420/api/daily-log -d '{\"content\":\"%s\"}'"
+    return (run(root, log % '29 blokk')[0] == 2
+            and run(root, log % '29 blokk\\nMÉRVE: `sqlite3 x.db count(*)`')[0] == 0
+            and run(root, "curl -s -X POST http://localhost:3420/api/daily-log --data-binary @- <<'J'\n"
+                          '{"content":"## {{NOW}} -- 29 blokk"}\nJ')[0] == 2)
+
+
+@case
+def zero_claim_needs_a_counting_measurement(root):
+    # Kernel's retro input (b), hibanapló 2026-11-13 18:04: "0 maradék" went to Viktor under a MÉRVE line whose
+    # `ls -d x-* | wc -l` had stopped on a zsh glob with no match; 48 folders were left.
+    blocked = [
+        '0 db t1-* maradék\nMÉRVE: `ls -d $T/t1-* | wc -l`',          # the incident: ls with a glob
+        'nincs maradék\nMÉRVE: /tmp/x megnézve',                       # a source, but nothing counted
+        'Egy mappa sem maradt.\nMÉRVE: agents/kernel/tools/README.md:5',
+        '0 találat\nMÉRVE: `ls /tmp/a?`',
+    ]
+    passed = [
+        '0 db t1-* maradék\nMÉRVE: `find /tmp -maxdepth 1 -name \'t1-*\' | wc -l`',
+        'nincs maradék\nMÉRVE: `sqlite3 x.db "select count(*) from t"`',
+        '0 találat\nMÉRVE: `grep -c foo /tmp/x.log`',
+        '10 db kész\nMÉRVE: /tmp/x.log',                               # not a zero: the old rule only
+        'kész, 0 hiba nélkül? nem: a teszt zöld\nMÉRVE: `npm test` kimenete',  # "0 hiba" is not a zero-count noun
+    ]
+    return (all(run(root, MSG + t + '\nMSG')[0] == 2 for t in blocked)
+            and all(run(root, MSG + t + '\nMSG')[0] == 0 for t in passed))
 
 
 @case
