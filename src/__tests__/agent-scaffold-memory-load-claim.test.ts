@@ -56,6 +56,8 @@ const RECIPE_PRINTERS: Record<string, string> = {
 const COMMAND_MATCHERS: Record<string, string> = {
   'scripts/hooks/time-claim-gate.py':
     'API_WRITE_RX matches /api/memories in the command to judge a time written into a memory (Dave 39699, #216)',
+  'scripts/hooks/service-memory-reply-gate.py':
+    'reads the session transcript for Bash commands naming /api/memories (did the agent search the memory this round, Klodel 40111, #241) and prints a search recipe on a block; it reads no memory itself',
 }
 const isExemptPrinter = (rel: string) => rel in RECIPE_PRINTERS || rel in COMMAND_MATCHERS
 

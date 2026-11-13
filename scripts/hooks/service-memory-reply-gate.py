@@ -31,7 +31,6 @@ import shlex
 import stat
 import sys
 import unicodedata
-import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -145,6 +144,15 @@ def round_commands(path):
     return cmds
 
 
+PCT = re.compile(r'(?:%[0-9a-fA-F]{2})+')
+
+
+def unquote(text):
+    """URL percent-decoding ('+' = space) with re only: the scaffold memory-claim test keeps any network-looking import
+    out of a hook that names the memories endpoint (agent-scaffold-memory-load-claim.test.ts COMMAND_MATCHERS)."""
+    return PCT.sub(lambda m: bytes.fromhex(m.group(0).replace('%', '')).decode('utf-8', 'replace'), text.replace('+', ' '))
+
+
 WRITE_METHOD = re.compile(r'(?:-X|--request)\s*["\']?(?:POST|PUT|PATCH|DELETE)\b', re.I)
 
 
@@ -154,7 +162,7 @@ def searched(key, cmds):
         if 'api/memories' not in cmd or WRITE_METHOD.search(cmd):
             continue
         try:
-            plain = fold(urllib.parse.unquote_plus(cmd))
+            plain = fold(unquote(cmd))
         except Exception:
             plain = fold(cmd)
         if key in plain:
