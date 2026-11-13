@@ -124,7 +124,10 @@ def take(kind, chat, agent, now=None):
                 and isinstance(r.get('ts'), int) and 0 <= now - r['ts'] <= TTL_S
                 and isinstance(r.get('nonce'), str) and r['nonce'] not in used
                 and isinstance(r.get('value'), str)):
-            _pending.append((path, r['nonce']))
+            # Once per run: a second take of the same mark must not make spend_pending see it as spent by
+            # someone else (Viktor 40933 INFO 5).
+            if (path, r['nonce']) not in _pending:
+                _pending.append((path, r['nonce']))
             return r['value']
     return None
 
