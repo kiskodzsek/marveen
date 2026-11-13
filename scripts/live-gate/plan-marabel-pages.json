@@ -165,6 +165,34 @@
      "check": "loaded"
     }
    ]
+  },
+  {
+   "name": "page-adatkezeles",
+   "steps": [
+    {
+     "goto": "/adatkezeles"
+    },
+    {
+     "check": "loaded"
+    }
+   ]
   }
- ]
+ ],
+ "allow_by_path": {
+  "/adatkezeles": [
+   "lastExternalReferrer",
+   "lastExternalReferrerTime",
+   "multiFbc",
+   "marabel_checkout_continue",
+   "marabel_consent",
+   "marabel_guest_session",
+   "marabel_guest_verification",
+   "marabel_paid_order",
+   "marabel_sid",
+   "marabel_step_reg",
+   "marabel_step_trial",
+   "marabel_voucher_redeem"
+  ]
+ },
+ "_allow_comment": "allow_by_path: exact cookie/storage names listed on the /adatkezeles notice, allowed ONLY on that path (never global). A new name or the same name on another page stays RED."
 }

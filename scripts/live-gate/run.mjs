@@ -8,6 +8,9 @@
 //   { "fill": ["<selector>", "<value>"] }     fill a field (use obviously fake values; never a real customer's)
 //   { "wait": 800 }                           ms
 //   { "check": "label" }                      checkpoint: screenshot + internal-name filter
+// Plan-level "allow_by_path": { "/adatkezeles": ["marabel_sid", ...] } lets ONE page show exact identifier names
+// (the privacy notice lists cookie names on purpose). Exact names only, matched on the URL path of the checkpoint;
+// nothing global: the same name on another page, or a new name on that page, is still RED.
 // Any step with "submits": true (it creates an account, order, payment, sends a form) is REFUSED unless
 // --allow-submit is given; that flag is Patrik's explicit "mehet", never a default (CLAUDE.md: no real
 // registration/payment/form submission on production without it). A goto/click that is only a wizard "next"
@@ -16,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Gate, VIEWS, verdict, safe } from './gate.mjs';
+import { Gate, VIEWS, verdict, safe, normalizeAllow } from './gate.mjs';
 
 const args = process.argv.slice(2);
 const arg = (k, d) => (args.includes(k) ? args[args.indexOf(k) + 1] : d);
@@ -32,6 +35,15 @@ const OUT = arg('--out', path.join(path.dirname(fileURLToPath(import.meta.url)),
 for (const fl of plan.flows || []) for (const st of fl.steps || []) {
   if (st.submits && !ALLOW_SUBMIT) { console.error(`REFUSED: flow "${fl.name}" has a submitting step (${JSON.stringify(st)}); needs --allow-submit (Patrik's mehet)`); process.exit(2); }
 }
+
+const ALLOW_BY_PATH = {};
+try {
+  for (const [p, names] of Object.entries(plan.allow_by_path || {})) {
+    if (!p.startsWith('/')) throw new Error(`allow_by_path key must be a path starting with /: ${p}`);
+    ALLOW_BY_PATH[p] = normalizeAllow(names);
+  }
+} catch (e) { console.error(`REFUSED: ${e.message}`); process.exit(2); }
+const allowFor = (page) => ALLOW_BY_PATH[new URL(page.url()).pathname] || [];
 
 const { chromium } = await import(PW);
 const exe = process.env.HOME + '/Library/Caches/ms-playwright/chromium_headless_shell-' + (process.env.CHROMIUM_REV || '1248') + '/chrome-headless-shell-mac-arm64/chrome-headless-shell';
@@ -50,7 +62,7 @@ for (const fl of plan.flows || []) {
         else if (st.click) { await page.click(st.click, { timeout: 8000 }); await page.waitForTimeout(600); status = 200; }
         else if (st.fill) { await page.fill(st.fill[0], st.fill[1], { timeout: 8000 }); }
         else if (st.wait) { await page.waitForTimeout(st.wait); }
-        else if (st.check) { await gate.checkpoint(page, st.check, { status }); }
+        else if (st.check) { await gate.checkpoint(page, st.check, { status, allow: allowFor(page) }); }
       } catch (e) {
         // a step that cannot be performed is a finding: the gate must not pass over a form it could not walk
         gate.findings.push({ flow: fl.name, view, step: JSON.stringify(st).slice(0, 80), rule: 'step_failed', why: 'step could not be performed', token: String(e.message).split('\n')[0].slice(0, 120), where: 'runner', context: '' });
