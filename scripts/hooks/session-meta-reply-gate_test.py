@@ -67,6 +67,7 @@ def session_meta_forms_blocked(_=None):
     return all(blocks(t) for t in (
         'A context-guard újraindított, de minden megvan.',
         'Auto-handoff után itt vagyok.',
+        'A handoff után itt vagyok, a PR áll.',
         'A kontextusom megtelt, ezért újraindultam.',
         'Új session-ben vagyok, a kártyák rendben.',
         'A sessionom restart után tiszta.',
@@ -107,7 +108,41 @@ def real_content_passes(_=None):
         'Klodel él és dolgozik: 20:54-kor újraindult (context restart), azóta rendben megy.',
         'Ma 10:10-kor újraindult az egész flotta, az ágensek üzenetsorában van nála 2 nyitott.',
         'Ezért nem segített az újraindítás sem: az új session ugyanúgy elhasalt.',
+        # Viktor 41381 LOW 1: the words alone, in answers to Patrik's own questions
+        'A feladat handoffja Dave-nek megtörtént, kártya frissítve.',
+        'Patrik, a handoff.md-t kérted? Ott van a shared mappában.',
+        'A context-guard szabályt a kernel írta, nem én.',
+        'A fresh context módszer a promptolásban azt jelenti, hogy tiszta lappal indul a modell.',
     ))
+
+
+@case
+def new_session_branch_blocked(_=None):
+    # Viktor 41381 INFO 3: the "folytatom" and "indultam" ends of the new-session pattern
+    return all(blocks(t) for t in (
+        'Új sessionben folytatom a PR-t.',
+        'Uj munkamenetben indultam, minden rendben.',
+        'Folytatom friss kontextussal.',
+        'A handoff alapján folytatom a #1298-at.',
+        'Dave friss kontextussal folytatja (auto-handoff).',            # replay: third-person self-report
+        'Friss kontextussal viszem tovább a kóstoló-törlést.',
+    ))
+
+
+@case
+def internal_error_fails_open_and_logs(_=None):
+    # Viktor 41381 INFO 3: an exception inside main() is allowed (rc 0) and written to the hook error log
+    log = os.path.join(tempfile.mkdtemp(), 'hook-errors.log')
+    e = dict(os.environ, MARVEEN_OWNER_CHATS=OWNER, HOOK_ERRLOG_PATH=log, CLAUDE_PROJECT_DIR=tempfile.mkdtemp())
+    code = ('import runpy, unicodedata, sys; sys.path.insert(0, %r); '
+            'unicodedata.normalize = lambda *a: 1 / 0; runpy.run_path(%r, run_name="__main__")' % (HERE, GATE))
+    data = json.dumps({'tool_name': 'mcp__plugin_telegram_telegram__reply',
+                       'tool_input': {'chat_id': OWNER, 'text': 'Friss kontextussal folytatom.'}})
+    r = subprocess.run([sys.executable, '-I', '-c', code], input=data, capture_output=True, text=True, env=e)
+    logged = os.path.exists(log) and 'session-meta-reply-gate' in open(log, encoding='utf-8').read()
+    if r.returncode != 0 or not logged:
+        print(f'  rc {r.returncode}, logged {logged}, {r.stderr[:160]}')
+    return r.returncode == 0 and logged
 
 
 @case
