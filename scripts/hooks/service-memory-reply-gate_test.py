@@ -178,6 +178,39 @@ def the_store_file_name_passes_after_its_search():
 
 
 @case
+def NEG_a_store_line_with_shell_syntax_never_reaches_the_recipe():
+    # Viktor 40315 LOW: such a line is skipped, so it neither gates nor lands in the "run this" recipe
+    bad = 'x"; touch /tmp/pwn-svc; echo "'
+    rc, err = run([channel()], 'Szöveg: ' + bad + ' és a Higgsfield.', extra=bad + '\n')
+    return rc == 2 and 'touch' not in err and 'q=higgsfield' in err
+
+
+@case
+def a_one_letter_store_line_does_not_gate_every_reply():
+    return run([channel()], 'Ez a válasz, a videó kész.', extra='a\nab\n')[0] == 0
+
+
+@case
+def a_transcript_path_that_is_not_a_regular_file_is_allowed():
+    # Viktor 40315 INFO 1. A FIFO with no writer and /dev/zero (seekable, endless): without the regular-file check
+    # the read hangs, so each path runs in a child with a timeout; a hang counts as a failure.
+    with tempfile.TemporaryDirectory() as d:
+        fifo = os.path.join(d, 'fifo.jsonl')
+        os.mkfifo(fifo)
+        code = ('import importlib.util,sys;s=importlib.util.spec_from_file_location("g",sys.argv[1]);'
+                'g=importlib.util.module_from_spec(s);s.loader.exec_module(g);print(g.round_commands(sys.argv[2]))')
+        for path in (d, fifo, '/dev/zero'):
+            try:
+                r = subprocess.run([sys.executable, '-I', '-c', code, GATE, path], capture_output=True, text=True,
+                                   timeout=5)
+            except subprocess.TimeoutExpired:
+                return False
+            if r.stdout.strip() != 'None':
+                return False
+        return True
+
+
+@case
 def a_malformed_payload_is_allowed():
     r = subprocess.run([sys.executable, '-I', GATE], input='nem json', capture_output=True, text=True, timeout=10)
     return r.returncode == 0

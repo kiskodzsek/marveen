@@ -7,7 +7,8 @@ Viktor 11-12: the MCP gate). Patrik TG 5750 "van előfizetésunk már ... és mc
 elveszett?". The memory-lookup-nudge hook only reminds; this time the reminder was stepped over.
 
 What blocks (exit 2, one line ending with the search recipe): a main-agent `reply` whose text names a known service
-or tool (SERVICES below, plus one folded name per line in store/ismert-szolgaltatasok.txt), when in the current round
+or tool (SERVICES below, plus one folded name per line in store/ismert-szolgaltatasok.txt: 3-41 characters of a-z, 0-9, space, ".", "_", "-";
+other lines are skipped), when in the current round
 no Bash command searched the dashboard memory for that name, i.e. no command text that holds "api/memories" AND the
 name (URL-decoded, accents folded, case-insensitive; e.g. `curl -s -G ... --data-urlencode "q=Higgsfield" .../api/
 memories`). One search per name per round is enough; several names need several searches (one command may hold more).
@@ -26,6 +27,8 @@ Tests: service-memory-reply-gate_test.py next to this file.
 import json
 import os
 import re
+import shlex
+import stat
 import sys
 import unicodedata
 import urllib.parse
@@ -35,6 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.environ.get('CLAUDE_PROJECT_DIR', '/Users/klodel/marveen')
 EXTRA_FILE = os.path.join(ROOT, 'store', 'ismert-szolgaltatasok.txt')
 TAIL_BYTES = 8 * 1024 * 1024
+EXTRA_NAME = re.compile(r'^[a-z0-9][a-z0-9 ._-]{2,40}$')  # Viktor 40315 LOW: no quotes, no 1-2 letter names
 ZERO_WIDTH = dict.fromkeys(map(ord, '​‌‍⁠﻿­'))
 
 # (key searched for in the memory command, pattern on the folded reply text). Prefix patterns cover the Hungarian
@@ -70,7 +74,7 @@ def services():
         with open(EXTRA_FILE, encoding='utf-8') as f:
             for line in f:
                 name = fold(line.strip())
-                if name and not name.startswith('#') and name not in {k for k, _ in out}:
+                if EXTRA_NAME.match(name) and name not in {k for k, _ in out}:
                     out.append((name, re.compile(r'\b' + re.escape(name))))
     except OSError:
         pass
@@ -104,7 +108,12 @@ def _texts(entry):
 def round_commands(path):
     """The Bash command texts since the last round start, or None when the transcript cannot be read."""
     try:
-        with open(path, 'rb') as f:
+        # Viktor 40315 INFO 1: only a regular file. O_NONBLOCK: a FIFO would block a plain open() before any check.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        with os.fdopen(fd, 'rb') as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             f.seek(max(0, size - TAIL_BYTES))
@@ -189,8 +198,8 @@ def main():
     sys.stderr.write(
         'MEMÓRIA-KAPU (Klodel 40111, TG 5750/5753): a válasz ismert szolgáltatást említ (%s), de ebben a körben nem '
         'kerestél rá a memóriában. Előbb Bash-ban: curl -s -G -D /tmp/mem-fejlec.txt -H "Authorization: Bearer '
-        '$(cat %s/store/.dashboard-token)" --data-urlencode "q=%s" "http://localhost:3420/api/memories" '
-        '(nevenként egy keresés), utána küldd.\n' % (', '.join(gone), ROOT, first))
+        '$(cat %s/store/.dashboard-token)" --data-urlencode %s "http://localhost:3420/api/memories" '
+        '(nevenként egy keresés), utána küldd.\n' % (', '.join(gone), ROOT, shlex.quote('q=' + first)))
     return 2
 
 
