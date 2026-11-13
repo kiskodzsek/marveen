@@ -100,6 +100,10 @@ def bash_in(cmd, cwd):
     return run(json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}, 'cwd': cwd}))
 
 
+# The assignment forms of the binary literal the rule must keep after the ReDoS fix (Viktor 41715); BIN is replaced.
+LIT_FORMS = ["SEC = '/usr/bin/BIN'", 'SEC=BIN', 'SEC = "BIN"', 'X = ~/bin/BIN\nSEC = X', 'X=/usr/local/bin/BIN\nSEC = X']
+
+
 def script_cases():
     """Card bc009036 (Kernel 41497, Viktor 41502): the file a command runs is judged too. Every script is written to
     a temp dir at run time from fragments; nothing is executed, the gate only reads the files."""
@@ -131,6 +135,15 @@ def script_cases():
         # the binary name is case-insensitive on APFS, the subcommand is not
         w('upper.py', "import subprocess\nsubprocess.run(['" + S.upper() + "', 'find-generic-password', '-s', 'x'])\n")
         os.makedirs(os.path.join(d, 'adir'))
+        w('worker.mjs', "// the worker authenticates from the file; a `-p` run does not\n"
+                        "execFileSync('/usr/bin/" + S + "', ['delete-generic-password', '-s', 'x']);\n")
+        os.makedirs(os.path.join(d, 'sub2'))
+        with open(os.path.join(d, 'sub2', 'only.py'), 'w', encoding='utf-8') as f:
+            f.write("import subprocess\nsubprocess.run(['" + S + "', 'find-generic-password', '-s', 'x'])\n")
+        w('tmpl.mjs', "import { execSync } from 'node:child_process';\nconst B = `/usr/bin/" + S + "`;\n"
+                      "execSync(`${B} find-generic-password -s x`);\n")
+        for i, form in enumerate(LIT_FORMS):
+            w('lit%d.py' % i, form.replace('BIN', S) + "\nrun([SEC, 'dump-keychain'])\n")
         os.makedirs(os.path.join(d, 'initpkg'))
         with open(os.path.join(d, 'initpkg', '__init__.py'), 'w', encoding='utf-8') as f:
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'find-generic-password', '-s', 'x'])\n")
@@ -171,6 +184,24 @@ def script_cases():
             ('python3 -mmeasure --x', d),
             ('python3 -mmeasure arg1', d),
             ('python3 -m initpkg.clean', d),  # -m a.b imports a/__init__.py first
+            # Viktor 41715 LOW: a flag's argument is not the file, relative cd, stdin, source, variables, uv run
+            ('python3 -W ignore measure.py', d),
+            ('python3 -X dev measure.py', d),
+            ('bash -o pipefail dump.sh', d),
+            ('cd sub2 && python3 only.py', d),
+            ('(cd sub2; python3 only.py)', d),
+            ('cd ' + d + ' && cd sub2 && python3 only.py', None),
+            ('python3 < measure.py', d),
+            ('python3 - < measure.py', d),
+            ('cat measure.py | python3', d),
+            ('source ./dump.sh', d),
+            ('. ./dump.sh', d),
+            ('F=measure.py; python3 $F', d),
+            ('F="measure.py"; python3 "${F}"', d),
+            ('uv run measure.py', d),
+            ('uv run python measure.py', d),
+            ('node tmpl.mjs', d),  # the binary in a JS template literal
+        ] + [('python3 lit%d.py' % i, d) for i in range(len(LIT_FORMS))] + [
             ('ls; python3 "measure.py"', d),
             ('python3 -c "import subprocess; subprocess.run([\'' + S + '\', \'dump-keychain\'])"', d),
             ("python3 - <<'PY'\nimport subprocess\nsubprocess.run(['" + S + "', 'find-generic-password'])\nPY", d),
@@ -188,6 +219,10 @@ def script_cases():
             ('python3 -m sub', d),  # sub/ has no __init__ or __main__ with a read; deep.py is not run by -m sub
             ('node -m measure', d),  # -m is python's; node has no module flag that runs ./measure.py
             ('node -e measure.py', d),  # -e: the text is code (an expression), the file is not run
+            ('python3 list.py measure.py', d),  # the first existing file is the script, the rest are its arguments
+            ('cd sub2 && cat only.py', d),  # no interpreter: reading a file is not running it
+            ('python3 word.py < notes.py', d),
+            ('node worker.mjs', d),  # agent-worker.ts shape: a non-read subcommand, `-p` only in a comment
             ('python3 -c "print(1)"', d),
             ('cat measure.py', d),
             ('grep -n find-generic-password measure.py', d),
@@ -262,7 +297,47 @@ def script_cases():
                                env={'PATH': '/usr/bin:/bin', 'KEYCHAIN_GATE_SCRIPT_BUDGET_S': val})
             if p.stdout.strip() != want:
                 fails.append(f'script: budget seam {val!r} -> {p.stdout.strip()!r}, want {want}')
-        return fails, len(block) + len(allow) + 8
+        # more directories than MAX_BASES (32) before a script: blocks instead of leaving the rest unresolved
+        code, err = bash_in('cd a && ' * 40 + 'python3 list.py', d)
+        if code != 2 or 'script-too-many' not in err:
+            fails.append(f'script: 40 cd before a script should block (got {code})')
+        code, _ = bash_in('cd a && ' * 40 + 'ls', d)
+        if code != 0:
+            fails.append(f'script: 40 cd without a script should pass (got {code})')
+        # ~ is the home directory (Viktor 41715 LOW c)
+        code, _ = bash_env('python3 ~/measure.py', None, {'HOME': d})
+        if code != 2:
+            fails.append(f'script: python3 ~/measure.py should block (got {code})')
+        # Viktor 41715 MEDIUM: the quadratic assignment branch. Padding in the command or in the file must not carry
+        # the gate past the hook limit; each case is decided in under 2 s, and a read behind the padding still blocks.
+        w('eq.py', '=' * (1024 * 1024))
+        w('eqs.py', '=/' * (512 * 1024))
+        w('min.js', 'a=b;c=d;' * (300 * 1024 // 8))
+        w('big.py', '=' * 200000 + '\n' + open(os.path.join(d, 'measure.py'), encoding='utf-8').read())
+        timed = [
+            ('python3 x ' + '=/' * 50000, 0),
+            ('python3 x ' + '=' * 100000, 0),
+            ('python3 x ' + '=/' * 60000 + ' ; ' + S + ' dump-keychain', 2),
+            ('python3 eq.py', 0), ('python3 eqs.py', 0), ('node min.js', 0), ('python3 big.py', 2),
+        ]
+        for cmd, want in timed:
+            t = _t.monotonic()
+            code, err = bash_in(cmd, d)
+            took = _t.monotonic() - t
+            if code != want or took > 2:
+                fails.append(f'script: padding case {cmd[:24]!r}: want rc {want} under 2 s, got {code} in {took:.1f} s')
+        # the watchdog: a slow scan is cut and blocks (not the hook timeout that would let it through)
+        w('nl.sh', '\n' * (1024 * 1024))
+        code, err = bash_env('bash nl.sh', d, {'KEYCHAIN_GATE_WATCHDOG_S': '0.01'})
+        if code != 2 or 'watchdog' not in err:
+            fails.append(f'script: watchdog 0.01 s on a 1 MB scan should block (got {code})')
+        probe = probe.replace('script_budget', 'watchdog_s')
+        for val, want in [('999', '8.0'), ('2', '2.0'), ('0', '0.001'), ('-1', '0.001'), ('nan', '8.0'), ('x', '8.0')]:
+            p = subprocess.run([sys.executable, '-I', '-c', probe, HOOK], capture_output=True, text=True, timeout=20,
+                               env={'PATH': '/usr/bin:/bin', 'KEYCHAIN_GATE_WATCHDOG_S': val})
+            if p.stdout.strip() != want:
+                fails.append(f'script: watchdog seam {val!r} -> {p.stdout.strip()!r}, want {want}')
+        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2
 
 
 def main():
