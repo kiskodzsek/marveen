@@ -113,12 +113,16 @@ def zero_claim_needs_a_counting_measurement(root):
         'nincs maradék\nMÉRVE: /tmp/x megnézve',                       # a source, but nothing counted
         'Egy mappa sem maradt.\nMÉRVE: agents/kernel/tools/README.md:5',
         '0 találat\nMÉRVE: `ls /tmp/a?`',
+        '0 db\nMÉRVE: `cd /x && ls -d t1-* | wc -l`',                  # ls after &&
+        '0 db\nMÉRVE: `echo $(ls x-* | wc -l)`',                       # ls in $(...)
     ]
     passed = [
         '0 db t1-* maradék\nMÉRVE: `find /tmp -maxdepth 1 -name \'t1-*\' | wc -l`',
         'nincs maradék\nMÉRVE: `sqlite3 x.db "select count(*) from t"`',
         '0 találat\nMÉRVE: `grep -c foo /tmp/x.log`',
         '10 db kész\nMÉRVE: /tmp/x.log',                               # not a zero: the old rule only
+        "0 db\nMÉRVE: `find /x -name 'ls*' | wc -l`",                # ls inside a find pattern (Viktor 41354)
+        '0 db\nMÉRVE: `find /x -type d | wc -l` (nem ls, mert [zsh])',  # the word ls in prose
         'kész, 0 hiba nélkül? nem: a teszt zöld\nMÉRVE: `npm test` kimenete',  # "0 hiba" is not a zero-count noun
     ]
     return (all(run(root, MSG + t + '\nMSG')[0] == 2 for t in blocked)

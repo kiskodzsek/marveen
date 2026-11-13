@@ -83,6 +83,15 @@ describe('the write paths fill {{NOW}} at the server', () => {
     expect(stampedNow(stored, before, after)).toBe(true)
   })
 
+  it('PUT status failed fills the result as well', async () => {
+    const msg = createAgentMessage(MAIN_AGENT_ID, 'dex', 'Delegated task 3')
+    await call(tryHandleMessages, 'PUT', `/api/messages/${msg.id}`, { status: 'failed', result: 'elakadt {{NOW}}' })
+    const row = getAgentMessage(msg.id)!
+    expect(row.status).toBe('failed')
+    expect(row.result).not.toContain(NOW_TOKEN)
+    expect(row.result).toMatch(/^elakadt \d{2}:\d{2}$/)
+  })
+
   it('PUT with notify: the ack carries the filled result too', async () => {
     const msg = createAgentMessage(MAIN_AGENT_ID, 'dex', 'Delegated task 2')
     await call(tryHandleMessages, 'PUT', `/api/messages/${msg.id}`, { status: 'done', result: 'ack {{NOW}}', notify: true })

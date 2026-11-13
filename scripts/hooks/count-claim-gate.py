@@ -76,7 +76,9 @@ ZERO_RX = re.compile(
     r'|(?<!\w)nincs(?:[ \t]+több)?[ \t]+(?:maradék|maradvány|találat)\w*'
     r'|(?<!\w)egy(?:[ \t]+\w+)?[ \t]+sem[ \t]+maradt(?!\w)', re.I)
 COUNTING_RX = re.compile(r'(?<![\w-])(?:find|wc|grep[ \t]+-[a-zA-Z]*c)(?![\w-])|count\(', re.I)
-LS_GLOB_RX = re.compile(r'(?<![\w-])ls(?![\w-])[^|;&\n]*[*?\[]')
+# ls as a COMMAND (at the start, after a backtick, $(, |, ; or &) with a glob in its own arguments; "ls*" inside a
+# find pattern or the word ls in prose is not one (Viktor 41354 INFO 3).
+LS_GLOB_RX = re.compile(r'(?:^|[`|;&(]|\$\()[ \t]*ls(?:[ \t]+[^|;&`)\s]*)*?[ \t]+[^|;&`)\s]*[*?\[]')
 NOUNS = (r'db|darab|komment\w*|blokk\w*|sor(?:a|t|ok\w*|ból|ban|ra)?|üzenet\w*|kártyá?\w*|fájl\w*|eset\w*|'
          r'találat\w*|hibá?\w*|oldal\w*|PR\w*|commit\w*|teszt\w*|mutáns\w*|ügynök\w*')
 COUNT_RX = re.compile(r'(?<![\w.:/#-])\d+(?:[.,]\d+)?(?:[ \t]+[\w-]+){0,2}?[ \t-]+(?:' + NOUNS + r')(?![\w])', re.I)
