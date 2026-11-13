@@ -56,6 +56,7 @@ CASES = [
      "  - Meska: 0;\n  - Pepita: 0;\n  - eMAG: 0;\n", 1),
     ("absence + site probe with a hit (itthon kapható)", "Itthon nincs ilyen.\nITTHON-MERT: ez a fájl\n"
      + GOOD + "  - site:alza.hu „fa térkép”: 7 találat.\n", 1),
+    ("absence + ITTHON-MERT: ez a fájl, but no ITTHON block", "Itthon nincs ilyen.\nITTHON-MERT: ez a fájl\n", 1),
     ("absence + ITTHON-MERT to a missing file", "Hazai bolt nem árulja.\nITTHON-MERT: shared/nincs-ilyen.md\n", 1),
     ("no absence claim", "A Pepitán 76 találat van, itthon is kapható.\n", 0),
     ("absence only in a code block (example)", "```\nitthon nincs ilyen\n```\n", 0),

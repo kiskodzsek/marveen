@@ -527,6 +527,10 @@ ok "hiany: a delivered file that does not exist: refused" "$(refused)" "rc=$RC p
 text 'KÉSZ: shared/../../etc/x.md'
 GATE_ENV="$HROOT" run radar klodel
 ok "hiany: a path that leaves shared/: refused" "$(refused)" "rc=$RC posts=$POSTS"
+printf 'Semmi hiány.\n' > "$HR/outside.md"
+text 'KÉSZ: shared/../outside.md'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a clean, existing file outside shared/ (via ..): refused" "$(refused)" "rc=$RC posts=$POSTS"
 text 'KÉSZ: shared/k/bad.md'
 GATE_ENV="$HROOT" run kernel klodel
 ok "hiany: only radar's deliveries are linted (kernel): sent" "$(sent)" "rc=$RC posts=$POSTS"
