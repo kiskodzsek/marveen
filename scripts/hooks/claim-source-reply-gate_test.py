@@ -56,6 +56,8 @@ BLOCK = [
     ('Be van állítva a keret.', 'képesség'),
     ('Mira be tudja állítani a hirdetést.', 'képesség'),
     ('API-n ki tudunk posztolni.', 'képesség'),
+    ('Képesek vagyunk rá.', 'képesség'),
+    ('Feltölteni tudjuk mi is.', 'képesség'),
 ]
 PASS_NO_CLAIM = [
     'Kész van már a papás?',                                   # a question
@@ -77,6 +79,7 @@ PASS_NO_CLAIM = [
     'Lehet, hogy holnap.',                                     # "maybe", no infinitive
     'Pulzus megnézi, működik-e a próba.',                      # indirect question
     'Megmutatom, hogyan működik.',                             # explaining how
+    'Holnap reggel mire működik a feltöltés, szólok.',         # "mire" mid-clause: not yet a fact
     'A filmet lejátszva fel tudod hozzá mondani.',             # an instruction to the reader, not our capability
     'Nagyi, én is tudok kalácsot sütni!',                      # customer copy, first person singular
 ]
