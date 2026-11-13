@@ -149,7 +149,7 @@ def send_path_file_payload_is_json_decoded(root):
     # A json.dumps body file: the marker's e-acute is a \u escape and the line break a literal \n (mutation M13).
     body = os.path.join(root['dir'], 'close-body.json')
     with open(body, 'w', encoding='utf-8') as fh:
-        fh.write(json.dumps({'status': 'done', 'result': 'kész\nMérve 15:39: a letöltés lefutott'}))
+        fh.write(json.dumps({'status': 'done', 'result': 'kész\nMérve 15:39: a letöltés kész'}))
     with open(body, encoding='utf-8') as fh:
         raw = fh.read()
     return ('\\u00e9' in raw and '\\n' in raw
