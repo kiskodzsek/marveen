@@ -119,6 +119,12 @@ API_ERROR_TEXT = ("⚠️ Erre most nem tudtam válaszolni, mert a Claude-szolg�
                   "(nem a gépen van a gond, újraindítás nem segít), kérlek, pár perc múlva írd újra.")
 API_ERROR_RX = re.compile(r"(?:^|\s)API Error:\s*\d{3}\b|Please run /login", re.I)
 DEDUP_SEC = 10 * 60
+# TGAPIERR1113 b (Dave 40050, Patrik TG 658/660): on an API error Claude Code ends the turn WITHOUT the Stop hook
+# (measured 2026-11-13 11:15-11:19: five 403 rows in b8999041, no "[enforce]" line in debug.log), so the
+# placeholder sat until the 15-min backstop while Patrik saw only "Dolgozom rajta" and restarted the session twice,
+# which cannot help an API-side error. A round whose LAST assistant row is an API error fires after this many
+# seconds with the one-sentence line above. Env: TELEGRAM_WATCHDOG_API_ERROR_SEC.
+DEFAULT_API_ERROR_SEC = 30
 DEDUP_FILE = "sent-dedup.state"  # NOT *.json: the marker scan globs *.json
 
 
@@ -258,6 +264,7 @@ class _Acc:
         self.results = set()      # tool_use_ids that have a tool_result
         self.reply_ids = set()    # tool_use_ids of Telegram reply calls
         self.last_tool_use = None  # (id, is_reply) of the most recent tool_use
+        self.api_error_last = False  # the most recent assistant row is Claude Code's API-error chrome
 
     def feed(self, ev):
         msg = ev.get("message") or {}
@@ -266,7 +273,10 @@ class _Acc:
         is_assistant = ev.get("type") == "assistant" or role == "assistant"
         if is_assistant and is_api_error_event(ev, _plain_text(content)):
             self.text = API_ERROR_TEXT  # TGAPIERR1113: never the raw chrome; a later real text overrides
+            self.api_error_last = True
             return
+        if is_assistant:
+            self.api_error_last = False
         if isinstance(content, list):
             for b in content:
                 if not isinstance(b, dict):
@@ -298,7 +308,10 @@ class _Acc:
 
 
 def read_transcript(transcript_path, turn_start=None):
-    """Return (last_assistant_text, reply_is_hung, reply_delivered).
+    """Return (last_assistant_text, reply_is_hung, reply_delivered, api_error_last).
+
+    api_error_last (TGAPIERR1113 b): the round's most recent assistant row is Claude Code's API-error chrome
+    (the turn died on an API error; last_assistant_text is then API_ERROR_TEXT).
 
     last_assistant_text: the agent's final user-facing answer (last non-empty
     assistant text block) -- the same source the Stop hook's fallback uses.
@@ -341,9 +354,9 @@ def read_transcript(transcript_path, turn_start=None):
             scoped.feed(ev)
     if turn_start is not None and have_ts_prompt:
         if not anchor_seen:
-            return "", False, False
-        return scoped.text, scoped.reply_hung(), scoped.reply_delivered()
-    return whole.text, whole.reply_hung(), False
+            return "", False, False, False
+        return scoped.text, scoped.reply_hung(), scoped.reply_delivered(), scoped.api_error_last
+    return whole.text, whole.reply_hung(), False, whole.api_error_last
 
 
 def log(progress_dir, msg):
@@ -421,6 +434,7 @@ def handle_dir(progress_dir):
             pass
     tok = None
     up_sec = wedged_up_sec()
+    api_err_sec = _env_int("TELEGRAM_WATCHDOG_API_ERROR_SEC", DEFAULT_API_ERROR_SEC)
     max_age = stale_sec()
     # TGAPIERR1113: one delivery per chat -- key = chat + the text that would go out (answer or the error line).
     dedup = _dedup_load(progress_dir, now)
@@ -472,7 +486,7 @@ def handle_dir(progress_dir):
             if p.get("transcript_path"):
                 transcript_path = p["transcript_path"]
                 break
-        answer, reply_hung, reply_delivered = read_transcript(
+        answer, reply_hung, reply_delivered, api_error_last = read_transcript(
             transcript_path, turn_start=now - age)
 
         # Fire decision.
@@ -482,6 +496,9 @@ def handle_dir(progress_dir):
         elif reply_hung and age > up_sec:
             fire = True
             reason = "reply-hung"
+        elif api_error_last and age > api_err_sec:
+            fire = True
+            reason = "api-error"
         elif age > WEDGED_SEC:
             fire = True
             reason = "wedged-backstop"

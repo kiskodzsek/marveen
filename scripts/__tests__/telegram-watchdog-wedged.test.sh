@@ -330,6 +330,29 @@ assert_eq "one send" "1" "$(count sendMessage)"
 assert_eq "the real answer is delivered" "yes" "$(body_has "VALODI_UTANA_VALASZ")"
 assert_eq "not the error line" "no" "$(body_has "Claude-szolg")"
 
+echo ""
+echo "(o) Round died on an API error (no Stop hook): fires within a minute, not at the 15-min backstop"
+PO="$(make_api_case wo flag 60 "P")"
+run_wd 1 900
+assert_eq "fires at 60s (api-error path)" "1" "$(count sendMessage)"
+assert_eq "the Hungarian line, not the chrome" "yes" "$(body_has "Claude-szolg")"
+assert_eq "state file removed" "no" "$(pend_exists "$PO")"
+
+echo ""
+echo "(p) NEGATIVE: an API error only 10s old is left alone (Claude Code may still be retrying)"
+PP="$(make_api_case wp flag 10 "P")"
+run_wd 1 900
+assert_eq "no send yet" "0" "$(count sendMessage)"
+assert_eq "placeholder kept" "yes" "$(pend_exists "$PP")"
+
+echo ""
+echo "(q) NEGATIVE: API error followed by a real answer is NOT an api-error round"
+PQ="$(make_api_case wq recovered 60 "P")"
+run_wd 1 900
+assert_eq "no early send (normal 15-min backstop applies)" "0" "$(count sendMessage)"
+assert_eq "placeholder kept" "yes" "$(pend_exists "$PQ")"
+rm -rf "$TMP/root/agents/wp" "$TMP/root/agents/wq"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=============================="
