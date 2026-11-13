@@ -316,6 +316,200 @@ def the_ready_time_rule_skips_edit_message_and_foreign_chats(root):
     assert run_tool(root, THE_1105, 'mcp__plugin_telegram_telegram__reply', chat=OTHER)[0] == 0
 
 
+# Conditional video work (Klodel 40261, TG 5790/5793). The 12:39 reply (conversation_log 14979), shortened only where
+# it does not matter: the reel is done, a question to Patrik, and the export parked on his answer.
+THE_1239 = ('A Meséld el! reel kész, az ugrást kijavítottuk. Egy kérdés, mielőtt a végleges megy: Cseréljük? '
+            'Közben a marabel.hu felirat nagyobb lesz. A te igened után 12 perc, és küldöm.')
+REPLY = 'mcp__plugin_telegram_telegram__reply'
+
+
+@case
+def NEG_the_1239_reply_is_blocked_in_both_owner_chats(root):
+    setup(root)
+    for chat in (GROUP, PRIV):
+        rc, err = run_tool(root, THE_1239, REPLY, chat=chat)
+        assert rc == 2 and 'FELTÉTELES-RENDER-KAPU' in err and 'kérdés közben fusson' in err, (chat, rc, err)
+
+
+@case
+def NEG_other_answer_conditions_on_video_work_block(root):
+    setup(root)
+    for text in ['A jeleneteket előbb neked küldöm, és csak a te jóváhagyásod után áll össze belőle a film.',
+                 'Ha mehet, indul a render, kb. 10 perc.', 'A videó az igenedre vár: ha rábólintasz, küldöm.']:
+        rc, err = run_tool(root, text, REPLY)
+        assert rc == 2 and 'FELTÉTELES-RENDER-KAPU' in err, (text, rc, err)
+
+
+@case
+def NEG_a_render_line_with_a_pid_that_is_not_an_export_blocks(root):
+    setup(root)
+    rc, err = run_tool(root, THE_1239 + '\nRENDER: fut 1', REPLY)  # pid 1 is launchd/init, never an export
+    assert rc == 2 and 'nem export' in err, (rc, err)
+
+
+@case
+def NEG_a_nem_kell_line_needs_a_reason(root):
+    setup(root)
+    rc, err = run_tool(root, THE_1239 + '\nRENDER: nem-kell kész', REPLY)
+    assert rc == 2, (rc, err)
+
+
+@case
+def a_reasoned_nem_kell_line_lets_it_go(root):
+    setup(root)
+    rc, err = run_tool(root, THE_1239 + '\nRENDER: nem-kell a film kész, csak a feltöltés vár a válaszra', REPLY)
+    assert rc == 0, (rc, err)
+
+
+# ops/ is install-local (gitignored), so the test puts a stand-in there with the same contract: exports() -> rows whose
+# first field is the pid. The last case below runs the install's real script when this machine has it.
+STAND_IN = '''import subprocess
+def exports():
+    out = subprocess.run(['ps', '-axo', 'pid=,command='], capture_output=True, text=True).stdout
+    return [(ln.split(None, 1)[0], '', '', '') for ln in out.splitlines()
+            if 'render.mjs' in ln and ' export ' in ln + ' ' and ln.split(None, 1)[1].startswith('node ')]
+'''
+REAL_VES = '/Users/klodel/marveen/ops/video_export_status.py'
+
+
+def fake_export():
+    # "node render.mjs film export out.mp4" in ps, via exec -a: what ops/video_export_status.py counts as an export.
+    p = subprocess.Popen(['/bin/bash', '-c', 'exec -a "node render.mjs film export out.mp4" sleep 30'])
+    time.sleep(0.3)
+    return p
+
+
+@case
+def a_running_export_pid_measured_now_lets_it_go(root):
+    setup(root)
+    os.makedirs(os.path.join(root, 'ops'))
+    with open(os.path.join(root, 'ops', 'video_export_status.py'), 'w') as f:
+        f.write(STAND_IN)
+    p = fake_export()
+    try:
+        rc, err = run_tool(root, THE_1239 + f'\nRENDER: fut {p.pid}', REPLY)
+        assert rc == 0, (rc, err)
+    finally:
+        p.kill()
+        p.wait()
+    rc, err = run_tool(root, THE_1239 + f'\nRENDER: fut {p.pid}', REPLY)
+    assert rc == 2 and 'nem export' in err, ('the same pid after the export ended', rc, err)
+
+
+@case
+def NEG_no_export_status_script_means_no_pid_passes(root):
+    setup(root)  # no ops/ at all: fail closed
+    p = fake_export()
+    try:
+        rc, err = run_tool(root, THE_1239 + f'\nRENDER: fut {p.pid}', REPLY)
+        assert rc == 2, (rc, err)
+    finally:
+        p.kill()
+        p.wait()
+
+
+def put_ops(root, body, mode=0o644):
+    os.makedirs(os.path.join(root, 'ops'), exist_ok=True)
+    path = os.path.join(root, 'ops', 'video_export_status.py')
+    with open(path, 'w') as f:
+        f.write(body)
+    os.chmod(path, mode)
+    return path
+
+
+def run_with_ops(root, body, mode=0o644):
+    """The 12:39 text with a RENDER: fut line for a live fake export, against the given ops script."""
+    setup(root)
+    put_ops(root, body, mode)
+    p = fake_export()
+    try:
+        t0 = time.time()
+        payload = json.dumps({'tool_name': REPLY, 'tool_input': {'chat_id': GROUP, 'text': THE_1239 + f'\nRENDER: fut {p.pid}'}})
+        env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root}
+        r = subprocess.run([sys.executable, '-I', HOOK], input=payload, capture_output=True, text=True, env=env, timeout=20)
+        return r.returncode, r.stdout, r.stderr, time.time() - t0
+    finally:
+        p.kill()
+        p.wait()
+
+
+@case
+def NEG_a_system_exit_in_the_status_script_does_not_open_the_gate(root):
+    # Viktor 40283 LOW 1: SystemExit is a BaseException; at module level and inside exports().
+    for body in ['import sys\nsys.exit(0)\n', 'def exports():\n    raise SystemExit(0)\n', 'def exports():\n    raise KeyboardInterrupt\n']:
+        rc, out, err, _ = run_with_ops(root, body)
+        assert rc == 2 and 'nem export' in err, (body, rc, err)
+
+
+@case
+def NEG_a_stuck_status_script_blocks_in_time(root):
+    # Viktor 40283 LOW 2: the hook has 10 s; a stuck lookup gives up after EXPORT_LOOKUP_S and blocks.
+    rc, out, err, took = run_with_ops(root, 'import time\ndef exports():\n    time.sleep(30)\n    return []\n')
+    assert rc == 2 and took < 8, (rc, took, err)
+
+
+@case
+def NEG_the_status_script_cannot_speak_for_the_hook(root):
+    # Viktor 40283 INFO 1: whatever the module prints never becomes the hook's stdout.
+    body = 'print(\'{"decision": "approve"}\')\n' + STAND_IN
+    rc, out, err, _ = run_with_ops(root, body)
+    assert rc == 0 and out.strip() == '', (rc, out, err)
+
+
+@case
+def NEG_an_untrusted_status_script_is_not_loaded(root):
+    # group-writable, or a symlink to a valid script: not loaded, so no pid passes.
+    rc, out, err, _ = run_with_ops(root, STAND_IN, mode=0o664)
+    assert rc == 2, ('group-writable', rc, err)
+    setup(root)
+    real = os.path.join(root, 'elsewhere.py')
+    with open(real, 'w') as f:
+        f.write(STAND_IN)
+    os.makedirs(os.path.join(root, 'ops'), exist_ok=True)
+    link = os.path.join(root, 'ops', 'video_export_status.py')
+    if os.path.lexists(link):
+        os.remove(link)
+    os.symlink(real, link)
+    p = fake_export()
+    try:
+        rc, err = run_tool(root, THE_1239 + f'\nRENDER: fut {p.pid}', REPLY)
+        assert rc == 2, ('symlink', rc, err)
+    finally:
+        p.kill()
+        p.wait()
+    assert not os.path.isdir(os.path.join(root, 'ops', '__pycache__')), 'no bytecode written next to ops/'
+
+
+@case
+def the_install_real_export_status_script_agrees(root):
+    if not os.path.isfile(REAL_VES):
+        print('     (skip: no install ops/video_export_status.py on this machine)')
+        return
+    setup(root)
+    os.makedirs(os.path.join(root, 'ops'))
+    with open(REAL_VES) as src, open(os.path.join(root, 'ops', 'video_export_status.py'), 'w') as dst:
+        dst.write(src.read())
+    p = fake_export()
+    try:
+        rc, err = run_tool(root, THE_1239 + f'\nRENDER: fut {p.pid}', REPLY)
+        assert rc == 0, (rc, err)
+    finally:
+        p.kill()
+        p.wait()
+
+
+@case
+def questions_finished_work_and_other_conditions_pass(root):
+    setup(root)
+    for text in ['A reel kész, itt van.', 'Tetszik a videó? A zene maradhat?', 'Ha mehet, küldöm a számlát.',
+                 'A film kész. Ha mehet, Mira feltölti?', 'Lex szerint a szöveg rendben van, cseréljük?']:
+        rc, err = run_tool(root, text, REPLY)
+        assert rc == 0 or 'FELTÉTELES-RENDER-KAPU' not in err, (text, rc, err)
+    # the edit of the live status card and foreign chats are not gated by this rule
+    assert run_tool(root, THE_1239, 'mcp__plugin_telegram_telegram__edit_message')[0] == 0
+    assert run_tool(root, THE_1239, REPLY, chat=OTHER)[0] == 0
+
+
 def main():
     failed = 0
     for fn in CASES:
