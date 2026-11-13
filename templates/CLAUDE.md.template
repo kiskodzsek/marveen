@@ -113,7 +113,7 @@ Napi napló (append-only):
 curl -s -X POST http://localhost:{{WEB_PORT}}/api/daily-log \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $(cat store/.dashboard-token)" \
-  -d '{"agent_id":"{{MAIN_AGENT_ID}}","content":"## HH:MM -- Téma\nMi történt, mi lett az eredmény"}'
+  -d '{"agent_id":"{{MAIN_AGENT_ID}}","content":"## {{NOW}} -- Téma\nMi történt, mi lett az eredmény"}'
 ```
 
 Keresés (mielőtt válaszolsz, nézd meg van-e releváns emlék):
