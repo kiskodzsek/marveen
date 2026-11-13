@@ -70,6 +70,10 @@ CASES = [
      "## Források (2026-11-13)\n- **N1:** README: a táblában nincs.\n- **N2:** adtargeting.io: HTTP 404.\n", 0),
     ("NINCS ADAT because nobody searched", "Gyártási költség: NINCS ADAT (árajánlatot nem kértünk).\n", 1),
     ("NINCS ADAT, log entry without a result", "Ár: NINCS ADAT (K1)\n\n## Keresés-napló\n- K1: árgép.hu, 2026-11-13\n", 1),
+    ("Radar 41442: a copied brief line is not a claim", "Kész, ha: minden szám forrással vagy NINCS ADAT indokkal.\n", 0),
+    ("Radar 41442: a legend line is not a claim", "- **Jelölések:** `[file]` = a lap szövege, NINCS ADAT = nem találtuk.\n", 0),
+    ("Radar 41442: a backticked NINCS ADAT in a table cell is still a claim", "| 3 | ár | `NINCS ADAT` |\n", 1),
+    ("Radar 41442: \"Kész, ha\" mid-line does not exempt", "A brief szerint Kész, ha: ár vagy NINCS ADAT.\n", 1),
     ("NINCS ADAT, log entry without a date", "Ár: NINCS ADAT (K1)\n\n## Keresés-napló\n"
      "- K1: arukereso.hu „babakocsi”: 403\n", 1),
 ]
