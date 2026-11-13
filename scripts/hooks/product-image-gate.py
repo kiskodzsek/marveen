@@ -1429,7 +1429,7 @@ INVISIBLE = re.compile('[\u00ad\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufe
 
 
 MARKER_LINE = re.compile(r'(?mi)^[ \t]*(?:[-*>][ \t]*)?(?:PRIV[AÁ]T-OK|K[EÉ]SZ-EREDM[EÉ]NY|BAL[AÁ]ZS-K[EÉ]R[EÉ]S|'
-                         r'BELS[OŐ]-[UÚ]T-M[EÉ]RVE)[ \t]*:')
+                         r'BELS[OŐ]-[UÚ]T-M[EÉ]RVE|PATRIK-L[EÉ]P[EÉ]S)[ \t]*:')
 
 
 def marker_line(text):
@@ -1502,8 +1502,8 @@ def main():
     if chat and chat in (owner_private_chat(), owner_group_chat()) and marker_line(str(ti.get('text') or '')):
         sys.stderr.write(
             'JELÖLŐ-KAPU (Klodel 40845: a jelölő ne Patriknak látszó szövegben legyen): a szövegben '
-            'PRIVÁT-OK / KÉSZ-EREDMÉNY / BALÁZS-KÉRÉS / BELSŐ-ÚT-MÉRVE sor van. Vedd ki, és jelöld előtte: '
-            'python3 -I scripts/reply-mark.py <PRIVAT-OK|KESZ-EREDMENY|BALAZS-KERES|BELSO-UT-MERVE> '
+            'PRIVÁT-OK / KÉSZ-EREDMÉNY / BALÁZS-KÉRÉS / BELSŐ-ÚT-MÉRVE / PATRIK-LÉPÉS sor van. Vedd ki, és jelöld előtte: '
+            'python3 -I scripts/reply-mark.py <PRIVAT-OK|KESZ-EREDMENY|BALAZS-KERES|BELSO-UT-MERVE|PATRIK-LEPES> '
             '--chat <privat|csoport> "<érték>" (egy jel = egy üzenet, 3 perc).\n')
         return 2
     if chat and not owner_private_chat():
