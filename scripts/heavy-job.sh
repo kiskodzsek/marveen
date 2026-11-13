@@ -73,7 +73,23 @@
 # freezes the fleet: a heavy job is optional work, and starting it blind is
 # exactly what caused the panic.
 #
-# Exit codes: the job's own exit code; 75 = not started (lock busy, low memory
+# 5. FILM EXPORT GATES (retro R4, card 686f1b5f; Klodel 41236). A film export may start only after the
+#    film gate and the size gate, whichever script starts it: on 2026-11-13 the Meséld el! v10 export ran
+#    from a new script without ops/film_export_gate.py (Patrik TG 3735: "ezek a hibák ... előbb ki kellett
+#    vna derüljenek.. nem render és export után"), and the v10c went out small and cut at the bottom (Patrik
+#    csoport TG 5798: "7-8 masodperc utan emgint kicsi minden levagott az alba"). A command is a film export
+#    when its text (every argument, also inside `bash -c "..."`) has `render.mjs` with an `export` word, a
+#    `hyperframes`/`hf` `render`, or a .mp4/.mov/.webm path under shared/marketing/. Then both are required:
+#      --film-gate "<stills dir>|<glob>"    ops/film_export_gate.py on the stills (fresh .ok, MAJSZTRO: MEHET)
+#      --size-gate "<frames dir> [args]"    scripts/reel-size-gate.py on one rendered frame per second
+#                                           (args: --end N --skip a,b --zone y1,y2)
+#    or, for either, "nincs: <reason, >= 10 chars>" (not a marketing film, not a 9:16 product reel, ...),
+#    which goes to store/heavy-job.log. A missing flag or a failing gate refuses with exit 77 before the
+#    lock; the gates run once, on the caller side. Detection reads the command text, so a film export
+#    hidden behind a script (`bash export.sh`) is not seen: the gate is for the direct render call, which
+#    is where the fleet's export scripts start it.
+#
+# Exit codes: the job's own exit code; 77 = refused by a film export gate (point 5); 75 = not started (lock busy, low memory
 # or disk, unreadable memory, until --wait ran out); 70 = stopped by the
 # watchdog; 64 = usage error.
 #
@@ -112,8 +128,9 @@ RUNS="$STORE/heavy-jobs"
 DETACH="${HEAVY_JOB_DETACH:-}"
 [[ -n "$DETACH" ]] || { [[ "${CLAUDECODE:-}" == "1" ]] && DETACH=1 || DETACH=0; }
 MAX_RUN=0
+FILM_GATE=""; SIZE_GATE=""
 NAME="job"; MIN_FREE=40; KILL_BELOW=25; MIN_DISK_GB=5; KILL_DISK_GB=3; WAIT=600; IGNORE_HOST_DISK=0; IGNORE_HOST_SWAP=0; ALLOW_VM=0; VM_MAX_SWAP_PCT=80; VM_MIN_DISK_GB=10
-usage() { echo "usage: heavy-job.sh [--attached|--detach] [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--kill-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm] [--vm-max-swap-pct PCT] [--vm-min-disk-gb GB] [--max-run SEC] -- cmd [args...]   |   heavy-job.sh --stop NAME" >&2; exit 64; }
+usage() { echo "usage: heavy-job.sh [--attached|--detach] [--name N] [--min-free PCT] [--kill-below PCT] [--min-disk-gb GB] [--kill-disk-gb GB] [--wait SEC] [--ignore-host-disk] [--ignore-host-swap] [--allow-vm] [--vm-max-swap-pct PCT] [--vm-min-disk-gb GB] [--max-run SEC] [--film-gate SPEC] [--size-gate SPEC] -- cmd [args...]   |   heavy-job.sh --stop NAME" >&2; exit 64; }
 num() { [[ "${1:-}" =~ ^[0-9]+$ ]] || usage; }
 # Viktor 34439 L2: a run's supervisor is alive only if the pid file's pid still runs heavy-job.sh AND started
 # at the recorded time (a SIGKILLed supervisor leaves its pid file; macOS reuses pids).
@@ -160,6 +177,8 @@ while [[ $# -gt 0 ]]; do
     --vm-max-swap-pct) [[ "${2:-}" =~ ^[0-9]+$ ]] || usage; VM_MAX_SWAP_PCT="$2"; shift 2 ;;
     --vm-min-disk-gb)  [[ "${2:-}" =~ ^[0-9]+$ ]] || usage; VM_MIN_DISK_GB="$2"; shift 2 ;;
     --max-run)     [[ $# -ge 2 ]] || usage; num "$2"; MAX_RUN="$2"; shift 2 ;;
+    --film-gate)   [[ $# -ge 2 ]] || usage; FILM_GATE="$2"; shift 2 ;;
+    --size-gate)   [[ $# -ge 2 ]] || usage; SIZE_GATE="$2"; shift 2 ;;
     --) shift; break ;;
     *) usage ;;
   esac
@@ -170,6 +189,42 @@ NAME="$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-40)"
 
 mkdir -p "$STORE" 2>/dev/null
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [$NAME pid=$$] $*" >>"$LOG" 2>/dev/null; echo "heavy-job: $*" >&2; }
+
+# --- point 5: film export gates, once, on the caller side (the detached supervisor re-runs with RUN_DIR set) ---
+FILM_GATE_BIN="${HEAVY_JOB_FILM_GATE_BIN:-$HERE/../ops/film_export_gate.py}"
+SIZE_GATE_BIN="${HEAVY_JOB_SIZE_GATE_BIN:-$HERE/reel-size-gate.py}"
+is_film_export() { # the whole command text
+  local t="$*"
+  [[ "$t" =~ render\.mjs ]] && [[ "$t" =~ (^|[[:space:]])export([[:space:]]|$) ]] && return 0
+  [[ "$t" =~ (hyperframes|(^|[/[:space:]])hf)[[:space:]]+([^[:space:]]+[[:space:]]+)*render([[:space:]]|$) ]] && return 0
+  [[ "$t" =~ shared/marketing/[^[:space:]\"\']*\.(mp4|mov|webm)([^[:alnum:]_.]|$) ]] && return 0
+  return 1
+}
+gate_waived() { # <flag> <spec>: 0 if "nincs: <reason>" with a real reason (logged), 1 if not a waiver
+  local r
+  [[ "$2" =~ ^nincs: ]] || return 1
+  r="${2#nincs:}"; r="${r#"${r%%[![:space:]]*}"}"
+  (( ${#r} >= 10 )) || { log "REFUSED film export: $1 \"nincs:\" needs a reason of at least 10 characters"; exit 77; }
+  log "film export: $1 waived: $r"
+  return 0
+}
+if [[ -z "$RUN_DIR" ]] && is_film_export "$@"; then
+  [[ -n "$FILM_GATE" && -n "$SIZE_GATE" ]] || {
+    log "REFUSED film export without gates: give --film-gate \"<stills dir>|<glob>\" and --size-gate \"<frames dir> [--end N --skip a,b --zone y1,y2]\" (or \"nincs: <reason>\"); Patrik TG 3735, csoport TG 5798"
+    exit 77; }
+  if ! gate_waived --film-gate "$FILM_GATE"; then
+    [[ "$FILM_GATE" == *"|"* ]] || { log "REFUSED film export: --film-gate must be \"<stills dir>|<glob>\""; exit 77; }
+    [[ -f "$FILM_GATE_BIN" ]] || { log "REFUSED film export: film gate not found ($FILM_GATE_BIN)"; exit 77; }
+    python3 -I "$FILM_GATE_BIN" "${FILM_GATE%%|*}" "${FILM_GATE#*|}" || { log "REFUSED film export: the film gate failed (${FILM_GATE%%|*})"; exit 77; }
+  fi
+  if ! gate_waived --size-gate "$SIZE_GATE"; then
+    read -r -a size_args <<<"$SIZE_GATE"
+    [[ -d "${size_args[0]}" ]] || { log "REFUSED film export: --size-gate frames dir not found (${size_args[0]})"; exit 77; }
+    [[ -f "$SIZE_GATE_BIN" ]] || { log "REFUSED film export: size gate not found ($SIZE_GATE_BIN)"; exit 77; }
+    python3 -I "$SIZE_GATE_BIN" "${size_args[@]}" || { log "REFUSED film export: the size gate failed (${size_args[0]})"; exit 77; }
+  fi
+  log "film export gates passed"
+fi
 
 # --- point 4: the caller side of a detached run. Everything below this block runs in the supervisor. ---
 if (( DETACH )) && [[ -z "$RUN_DIR" ]]; then
