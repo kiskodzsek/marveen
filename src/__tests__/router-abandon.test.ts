@@ -9,7 +9,7 @@
 // were silently discarded in the incident that exposed this.
 //
 // Fix: abandon ONLY when the session is ABSENT for the full window.
-// shouldAbandon(sessionExists, ageMs, windowMs) is the pure decision
+// shouldAbandon(sessionExists, ageMs, windowMs, observedAbsentMs) is the pure decision
 // function extracted from the loop body; the contract tests pin it.
 
 import { describe, it, expect } from 'vitest'
@@ -22,26 +22,26 @@ describe('shouldAbandon: abandon only when session is absent past the window', (
     // The core invariant: a session that is alive (even if busy for days)
     // must NEVER be abandoned. This was the bug -- the old code abandoned
     // at 1h without checking existence first.
-    expect(shouldAbandon(true, WINDOW_MS + 1, WINDOW_MS)).toBe(false)
-    expect(shouldAbandon(true, WINDOW_MS * 10, WINDOW_MS)).toBe(false)
-    expect(shouldAbandon(true, 0, WINDOW_MS)).toBe(false)
+    expect(shouldAbandon(true, WINDOW_MS + 1, WINDOW_MS, WINDOW_MS + 1)).toBe(false)
+    expect(shouldAbandon(true, WINDOW_MS * 10, WINDOW_MS, WINDOW_MS * 10)).toBe(false)
+    expect(shouldAbandon(true, 0, WINDOW_MS, 0)).toBe(false)
   })
 
   it('returns false when session is absent but within the window', () => {
     // Session is gone but not yet past the retry window -- keep retrying.
-    expect(shouldAbandon(false, WINDOW_MS - 1, WINDOW_MS)).toBe(false)
-    expect(shouldAbandon(false, 0, WINDOW_MS)).toBe(false)
+    expect(shouldAbandon(false, WINDOW_MS - 1, WINDOW_MS, WINDOW_MS - 1)).toBe(false)
+    expect(shouldAbandon(false, 0, WINDOW_MS, 0)).toBe(false)
   })
 
   it('returns true when session is absent AND past the window', () => {
     // Only case where abandon is justified: session is truly gone AND the
     // full retry window has elapsed with no delivery.
-    expect(shouldAbandon(false, WINDOW_MS + 1, WINDOW_MS)).toBe(true)
-    expect(shouldAbandon(false, WINDOW_MS * 2, WINDOW_MS)).toBe(true)
+    expect(shouldAbandon(false, WINDOW_MS + 1, WINDOW_MS, WINDOW_MS + 1)).toBe(true)
+    expect(shouldAbandon(false, WINDOW_MS * 2, WINDOW_MS, WINDOW_MS * 2)).toBe(true)
   })
 
   it('returns false at the exact window boundary (strict greater-than)', () => {
     // Boundary: ageMs === windowMs is NOT yet abandoned (strict >).
-    expect(shouldAbandon(false, WINDOW_MS, WINDOW_MS)).toBe(false)
+    expect(shouldAbandon(false, WINDOW_MS, WINDOW_MS, WINDOW_MS)).toBe(false)
   })
 })
