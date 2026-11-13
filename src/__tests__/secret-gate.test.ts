@@ -113,6 +113,20 @@ describe('detector 2: content', () => {
     expect(runGate([f('docs/c.md', 'a sbp_ prefix onmagaban semmit nem jelent')]).ok).toBe(true);
   });
 
+  it('catches a healthchecks.io check ping URL, the host-heartbeat credential (card 8fbd8b7b)', () => {
+    // Built by concatenation, like every fixture here: the literal never stands in this file.
+    const host = 'hc-ping' + '.com';
+    const uuid = ['1a2b3c4d', '5e6f', '7a8b', '9c0d', '1e2f3a4b5c6d'].join('-');
+    // (1) The curlrc line, the only place it should ever live.
+    expect(runGate([f('docs/a.md', `url = "https://${host}/${uuid}"`)]).ok).toBe(false);
+    // (2) Upper-case hex, bare, without the scheme.
+    expect(runGate([f('scripts/x.sh', `${host}/${uuid.toUpperCase()}`)]).ok).toBe(false);
+    // (3) NEGATIVE CONTROL: the host alone, or with a placeholder, is not a finding.
+    expect(runGate([f('docs/b.md', `pings https://${host}/<uuid> every minute`)]).ok).toBe(true);
+    // (4) NEGATIVE CONTROL: a UUID without the ping host is not this credential.
+    expect(runGate([f('docs/c.md', `incident ${uuid}`)]).ok).toBe(true);
+  });
+
   it('does NOT fire on the placeholders this repo is full of (measured 2026-08-18)', () => {
     // 64 tracked files contain `Bearer ${token}`; 25 contain `sk_` inside words
     // like task_name and skipIfBusy. A gate that flags these gets bypassed.

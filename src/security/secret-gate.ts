@@ -117,6 +117,9 @@ export const SECRET_PATTERNS: { name: string; pattern: RegExp }[] = [
   // tetel ott van, megnyugtatobb, mint egy ures lista -- ezert kerult ide, kozvetlenul
   // a masik Supabase-minta melle.
   { name: 'Supabase personal access token', pattern: /\bsbp_[0-9a-f]{40}\b/ },
+  // A healthchecks.io check ping URL (card 8fbd8b7b, Viktor 40253): the UUID is the only credential, and whoever
+  // holds it can send "alive" and silence the host-down alarm. It lives in a 0600 curlrc, never in the repo.
+  { name: 'healthchecks.io check ping URL', pattern: /hc-ping\.com\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i },
 ];
 
 /**

@@ -92,6 +92,9 @@ jobs:
       - run: bash scripts/__tests__/morning-timer-park.test.sh
       - run: bash scripts/__tests__/userbot-arming-gate.test.sh
       - run: bash scripts/__tests__/supabase-q-token-hiding.test.sh
+      # HOSTBEAT1113 (card 8fbd8b7b): the host-heartbeat ping + installer, hermetic (curl, pbpaste, pbcopy
+      # stubbed on PATH, HOME in a temp dir); the plist checks skip off macOS.
+      - run: bash scripts/__tests__/host-heartbeat.test.sh
       # WORKTREEADD1021: throwaway git repos in a temp dir, no network.
       - run: bash scripts/__tests__/worktree-add.test.sh
       # Klodel 36866: curl and sleep stubbed on PATH, state file in a temp dir, no network.
