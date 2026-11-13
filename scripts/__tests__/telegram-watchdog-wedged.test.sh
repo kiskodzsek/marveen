@@ -259,6 +259,78 @@ assert_eq "falls back to generic error" "1" "$(count editMessageText)"
 assert_eq "state file removed" "no" "$(pend_exists "$PJ")"
 
 # ---------------------------------------------------------------------------
+# TGAPIERR1113 (Klodel 40067, Patrik TG 18218): the API-error chrome is never
+# delivered, and one chat gets one message however many placeholders pend.
+# ---------------------------------------------------------------------------
+# layout = flag     -> round ends in an isApiErrorMessage:true row (CC 2.1.32x)
+#          noflag   -> same text, no flag (older format)
+#          recovered-> API error, then a real assistant text in the same round
+make_api_case() { # name layout age_seconds chats(comma list, one placeholder each)
+    local name="$1" layout="$2" age="$3" chats="$4"
+    local pdir="$TMP/root/agents/$name/.claude/channels/telegram/progress"
+    local sdir="$TMP/root/agents/$name/.claude/channels/telegram"
+    mkdir -p "$pdir"
+    printf 'TELEGRAM_BOT_TOKEN=TESTTOKEN\n' > "$sdir/.env"
+    local tr="$sdir/transcript.jsonl"
+    python3 - "$tr" "$layout" "$age" "$chats" "$pdir/SID.json" <<'PY2'
+import datetime, json, os, sys, time
+tr, layout, age, chats, marker = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4].split(","), sys.argv[5]
+now = time.time()
+iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+err = "Please run /login · API Error: 403 Attention Required! | Cloudflare"
+ev = [{"type": "user", "timestamp": iso(now - age), "message": {"role": "user", "content": "patrik kerdese"}}]
+row = {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": err}]}}
+if layout != "noflag":
+    row["isApiErrorMessage"] = True
+ev.append(row)
+if layout == "recovered":
+    ev.append({"type": "assistant", "message": {"role": "assistant",
+               "content": [{"type": "text", "text": "VALODI_UTANA_VALASZ"}]}})
+with open(tr, "w") as f:
+    for e in ev:
+        f.write(json.dumps(e) + "\n")
+pend = [{"chat_id": c, "message_id": 700 + i, "transcript_path": tr} for i, c in enumerate(chats)]
+with open(marker, "w") as f:
+    json.dump(pend, f)
+os.utime(marker, (now - age,) * 2)
+PY2
+    echo "$pdir"
+}
+
+echo ""
+echo "(k) 11:34 replay: 4+2 placeholders, round ended in an API error -> one Hungarian line per chat"
+PK="$(make_api_case wk flag 1000 "P,P,P,P,G,G")"
+run_wd 1 1
+assert_eq "one send per chat (2 chats), not one per placeholder" "2" "$(count sendMessage)"
+assert_eq "raw API-error chrome NOT sent" "no" "$(body_has "API Error")"
+assert_eq "no /login text sent" "no" "$(body_has "Please run")"
+assert_eq "the one-sentence Hungarian line is sent" "yes" "$(body_has "Claude-szolg")"
+assert_eq "all six placeholders removed" "6" "$(count deleteMessage)"
+assert_eq "state file removed" "no" "$(pend_exists "$PK")"
+
+echo ""
+echo "(l) Cross-run dedup: the same line to the same chat within 10 min is not repeated"
+PL="$(make_api_case wk flag 1000 "P")"   # same agent dir -> same dedup state
+run_wd 1 1
+assert_eq "no second send to the same chat" "0" "$(count sendMessage)"
+assert_eq "its placeholder is still removed" "1" "$(count deleteMessage)"
+
+echo ""
+echo "(m) Older format (no isApiErrorMessage flag): the chrome line is still not sent"
+PM="$(make_api_case wm noflag 1000 "P")"
+run_wd 1 1
+assert_eq "one send" "1" "$(count sendMessage)"
+assert_eq "raw chrome NOT sent" "no" "$(body_has "API Error")"
+
+echo ""
+echo "(n) API error, then a real answer in the same round: the real answer wins"
+PN="$(make_api_case wn recovered 1000 "P")"
+run_wd 1 1
+assert_eq "one send" "1" "$(count sendMessage)"
+assert_eq "the real answer is delivered" "yes" "$(body_has "VALODI_UTANA_VALASZ")"
+assert_eq "not the error line" "no" "$(body_has "Claude-szolg")"
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=============================="
 TOTAL=$((PASS + FAIL))

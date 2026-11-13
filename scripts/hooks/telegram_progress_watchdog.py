@@ -44,7 +44,7 @@ Standalone: scans every agent's per-agent telegram state dir. No marveen src
 dependency; only Python stdlib + the `tmux` binary. Bot API base is overridable
 via TELEGRAM_API_BASE (tests point it at a local stub).
 """
-import datetime, os, glob, json, time, subprocess, urllib.request
+import datetime, hashlib, os, glob, json, re, time, subprocess, urllib.request
 
 # State dirs to scan: per-agent dirs under the fleet, plus the default dir.
 #
@@ -105,6 +105,31 @@ TURN_ANCHOR_SLACK_SEC = 120
 DEFAULT_WEDGED_UP_SEC = 180
 ERROR_TEXT = ("⚠️ Valami elakadt, és erre nem érkezett válasz. "
               "Lehet, hogy újra kell indítani az ügynököt, vagy próbáld újra kicsit később.")
+
+# TGAPIERR1113 (Klodel 40067, Patrik TG 18218, 2026-11-13): Claude Code writes its OWN error chrome into the
+# transcript as an assistant row ("Please run /login · API Error: 403 Attention Required! | Cloudflare", flagged
+# isApiErrorMessage:true). It is not the agent's answer, but the last-assistant-text scrape took it as one: at
+# 11:34:25 the wedged-backstop delivered it six times (once per pending placeholder of the dead session
+# b8999041), four of them into Patrik's private chat, and the second dead session's marker added a generic error.
+# Two fixes: (1) an API-error row never becomes the answer -- it maps to ONE Hungarian sentence (API_ERROR_TEXT),
+# and a later real assistant text in the same round still wins; (2) one delivery per chat: within a run, the first
+# placeholder of a chat carries the text, the rest are only deleted; across runs the same text to the same chat
+# is not repeated within DEDUP_SEC (progress/sent-dedup.state).
+API_ERROR_TEXT = ("⚠️ Erre most nem tudtam válaszolni, mert a Claude-szolgáltatás hibát adott "
+                  "(nem a gépen van a gond, újraindítás nem segít), kérlek, pár perc múlva írd újra.")
+API_ERROR_RX = re.compile(r"(?:^|\s)API Error:\s*\d{3}\b|Please run /login", re.I)
+DEDUP_SEC = 10 * 60
+DEDUP_FILE = "sent-dedup.state"  # NOT *.json: the marker scan globs *.json
+
+
+def is_api_error_event(ev, text=""):
+    """True for Claude Code's own error row: the isApiErrorMessage flag, or (older format without the flag) an
+    assistant text that is nothing but the API-error chrome. A real answer that merely MENTIONS an API error
+    is longer than the chrome line and is not matched by the length guard."""
+    if ev.get("isApiErrorMessage") is True:
+        return True
+    t = (text or "").strip()
+    return bool(t) and len(t) <= 200 and "\n" not in t and bool(API_ERROR_RX.search(t))
 
 
 def _env_int(name, default):
@@ -218,6 +243,14 @@ def _is_user_prompt(ev):
     return False
 
 
+def _plain_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join((b.get("text") or "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
 class _Acc:
     """Accumulator for one scan window of the transcript."""
     def __init__(self):
@@ -231,6 +264,9 @@ class _Acc:
         role = msg.get("role") or ev.get("role")
         content = msg.get("content", ev.get("content"))
         is_assistant = ev.get("type") == "assistant" or role == "assistant"
+        if is_assistant and is_api_error_event(ev, _plain_text(content)):
+            self.text = API_ERROR_TEXT  # TGAPIERR1113: never the raw chrome; a later real text overrides
+            return
         if isinstance(content, list):
             for b in content:
                 if not isinstance(b, dict):
@@ -318,6 +354,35 @@ def log(progress_dir, msg):
         pass
 
 
+def _dedup_load(progress_dir, now):
+    try:
+        d = json.load(open(os.path.join(progress_dir, DEDUP_FILE)))
+        return {k: v for k, v in d.items() if isinstance(v, (int, float)) and now - v < DEDUP_SEC}
+    except Exception:
+        return {}
+
+
+def _dedup_save(progress_dir, d):
+    try:
+        with open(os.path.join(progress_dir, DEDUP_FILE), "w") as f:
+            json.dump(d, f)
+    except Exception:
+        pass
+
+
+def _dedup_key(chat_id, text):
+    return f"{chat_id}:" + hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def drop_placeholder(tok, chat_id, message_id, progress_dir):
+    """A duplicate of a delivery already made to this chat: only remove the placeholder."""
+    try:
+        api(tok, "deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+    except Exception as e:
+        log(progress_dir, f"placeholder delete failed (mid={message_id}): {e}")
+    return "dedup-deleted"
+
+
 def deliver(tok, chat_id, message_id, answer, progress_dir):
     """Deliver the real answer if we have one (sendMessage + drop the
     placeholder), else rewrite the placeholder into a generic error. Returns a
@@ -357,6 +422,9 @@ def handle_dir(progress_dir):
     tok = None
     up_sec = wedged_up_sec()
     max_age = stale_sec()
+    # TGAPIERR1113: one delivery per chat -- key = chat + the text that would go out (answer or the error line).
+    dedup = _dedup_load(progress_dir, now)
+    dedup_dirty = False
     for path in glob.glob(os.path.join(progress_dir, "*.json")):
         try:
             age = now - os.path.getmtime(path)
@@ -366,7 +434,7 @@ def handle_dir(progress_dir):
             pend = json.load(open(path))
         except Exception:
             pend = []
-        if not pend:
+        if not pend or not isinstance(pend, list):
             continue
 
         # UPPER age bound (TGORPHAN908): a marker this old marks a DEAD round.
@@ -453,8 +521,16 @@ def handle_dir(progress_dir):
 
         modes = []
         for p in pend:
-            modes.append(deliver(tok, p.get("chat_id"), p.get("message_id"),
-                                 answer, progress_dir))
+            cid = p.get("chat_id")
+            key = _dedup_key(cid, answer or ERROR_TEXT)
+            if key in dedup:
+                modes.append(drop_placeholder(tok, cid, p.get("message_id"), progress_dir))
+                continue
+            mode = deliver(tok, cid, p.get("message_id"), answer, progress_dir)
+            modes.append(mode)
+            if mode in ("real-answer", "generic-error"):
+                dedup[key] = now
+                dedup_dirty = True
         try:
             os.remove(path)
         except Exception:
@@ -462,6 +538,8 @@ def handle_dir(progress_dir):
         log(progress_dir, f"orphan handled ({reason}): {os.path.basename(path)} "
                           f"agent_up={agent_up} age={int(age)}s "
                           f"delivered={','.join(modes)}")
+    if dedup_dirty:
+        _dedup_save(progress_dir, dedup)
 
 
 def main():

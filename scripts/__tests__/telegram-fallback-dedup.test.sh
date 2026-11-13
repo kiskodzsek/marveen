@@ -170,6 +170,24 @@ assert_eq "helper exits 2 when Bot API is unreachable" "2" "$RC_D"
 assert_eq "failed send does NOT clear the placeholder" "yes" "$(pend_has_chat "$SD_D")"
 
 # ---------------------------------------------------------------------------
+# (e) TGAPIERR1113: the round ended in Claude Code's API-error chrome, three
+#     placeholders in one chat -> ONE Hungarian line, never the raw error
+# ---------------------------------------------------------------------------
+echo ""
+echo "(e) API-error chrome is not delivered; one send per chat"
+SD_E="$TMP/e"; make_state "$SD_E"
+printf '[{"chat_id": "%s", "message_id": 601}, {"chat_id": "%s", "message_id": 602}, {"chat_id": "%s", "message_id": 603}]\n' \
+    "$CHAT" "$CHAT" "$CHAT" > "$SD_E/progress/$SID.json"
+printf '%s\n' '{"type":"assistant","isApiErrorMessage":true,"message":{"role":"assistant","content":[{"type":"text","text":"Please run /login · API Error: 403 Attention Required! | Cloudflare"}]}}' \
+    > "$SD_E/transcript.jsonl"
+: > "$REQLOG"
+run_stop "$SD_E" true >/dev/null
+assert_eq "one send for three placeholders in one chat" "1" "$(count sendMessage)"
+assert_eq "raw API-error chrome NOT sent" "0" "$(grep -c 'API Error' "$REQLOG")"
+assert_eq "the Hungarian line is sent" "1" "$(grep -c 'Claude-szolg' "$REQLOG")"
+assert_eq "all three placeholders deleted" "3" "$(count deleteMessage)"
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "============================="
 TOTAL=$((PASS + FAIL))
