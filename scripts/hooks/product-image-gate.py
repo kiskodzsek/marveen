@@ -134,9 +134,15 @@ def owner_group_chat():
         return ''
 
 
-def owner_latest_inbound_chat(payload):
+# Viktor 40081 L2: "where the owner wrote last" is about the conversation going on now. An inbound older than this
+# no longer opens the private chat without the PRIVÁT-OK marker, and no longer closes the group.
+LATEST_INBOUND_MAX_AGE_S = 30 * 60
+
+
+def owner_latest_inbound_chat(payload, now=None):
     """Which of the owner's two chats (private / group) the MAIN agent's latest inbound message came in
-    (store/claudeclaw.db conversation_log, by row id). None for another agent, or when unknown."""
+    (store/claudeclaw.db conversation_log, by row id), if it came at most LATEST_INBOUND_MAX_AGE_S ago. None for
+    another agent, for an older message, or when unknown."""
     priv, group = owner_private_chat(), owner_group_chat()
     if not priv or not group:
         return None
@@ -148,11 +154,18 @@ def owner_latest_inbound_chat(payload):
         con = sqlite3.connect(f'file:{ledger_lib.db_path()}?mode=ro', uri=True, timeout=5)  # never create a ledger
         try:
             row = con.execute(
-                "SELECT chat_id FROM conversation_log WHERE agent_id=? AND direction='in' AND chat_id IN (?, ?)"
+                "SELECT chat_id, created_at FROM conversation_log WHERE agent_id=? AND direction='in' AND chat_id IN (?, ?)"
                 " ORDER BY id DESC LIMIT 1", (str(agent), priv, group)).fetchone()
         finally:
             con.close()
-        return str(row[0]) if row else None
+        if not row:
+            return None
+        now = time.time() if now is None else now
+        try:
+            fresh = now - float(row[1]) <= LATEST_INBOUND_MAX_AGE_S
+        except (TypeError, ValueError):
+            fresh = False
+        return str(row[0]) if fresh else None
     except Exception:
         return None
 
@@ -1322,7 +1335,10 @@ def main():
     # owner wrote last decides: his latest message came in the private chat -> the reply goes there without the
     # PRIVÁT-OK line, and not to the group.
     latest = owner_latest_inbound_chat(data) if chat else None
-    if chat and latest and latest == owner_private_chat() and chat == owner_group_chat():
+    # Viktor 40081 L1: only a REPLY is redirected; the live status message in the group is edited in place
+    # (edit_message) and must keep updating while Patrik writes privately.
+    is_edit = str(data.get('tool_name') or '').endswith('edit_message')
+    if chat and latest and not is_edit and latest == owner_private_chat() and chat == owner_group_chat():
         sys.stderr.write(
             'PRIVÁT-VÁLASZ-KAPU (Patrik TG 5704: "ide reagálsz arra az üzenetemre amit a másik chatbe irtam"): '
             'Patrik utoljára PRIVÁTBAN írt, oda válaszolj (PRIVÁT-OK nélkül is mehet), ne a csoportba.\n')
