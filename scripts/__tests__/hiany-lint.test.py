@@ -74,6 +74,20 @@ CASES = [
     ("Radar 41442: a legend line is not a claim", "- **Jelölések:** `[file]` = a lap szövege, NINCS ADAT = nem találtuk.\n", 0),
     ("Radar 41442: a backticked NINCS ADAT in a table cell is still a claim", "| 3 | ár | `NINCS ADAT` |\n", 1),
     ("Radar 41442: \"Kész, ha\" mid-line does not exempt", "A brief szerint Kész, ha: ár vagy NINCS ADAT.\n", 1),
+    # Viktor 41468 LOW 1: the prefix exempts a term use only, not a value hidden behind it.
+    ("41468: legend prefix + field value", "Jelölés: Gyártási költség: NINCS ADAT\n", 1),
+    ("41468: bold legend prefix + field value", "- **Jelölések:** Gyártási költség: NINCS ADAT\n", 1),
+    ("41468: quoted brief prefix + claim", "> Kész, ha: Gyártási költség NINCS ADAT\n", 1),
+    ("41468: brief prefix + unsearched claim", "Kész, ha: az ár NINCS ADAT (nem kerestem)\n", 1),
+    ("41468: legend prefix + backticked table cell", "Jelölés: | ár | `NINCS ADAT` |\n", 1),
+    ("41468: legend prefix, claim in a later sentence", "Jelölés: lásd lent. Az ár NINCS ADAT.\n", 1),
+    ("41468: field value dressed as a definition", "Jelölés: ár: NINCS ADAT = nem kerestem\n", 1),
+    ("41468: field value after a run of spaces", "Jelölés: ár:" + " " * 200 + "NINCS ADAT\n", 1),
+    ("41468: a term item and a hidden value on one line", "Jelölés: **TIPP** = becslés, **NINCS ADAT** = nem tudom; "
+     "piaci adat: NINCS ADAT.\n", 1),
+    ("41468: enumerated legend item", "Jelölés: **[mérve]** = saját GET; **[tipp]**; **NINCS ADAT**.\n", 0),
+    ("41468: backticked legend items", "Jelölés: `[tipp]`, `[nem ellenőrzött]`, `NINCS ADAT` a szokott jelentéssel.\n", 0),
+    ("41468: legend item with -tal", "Kész, ha: minden szám ellenőrzött (vagy NINCS ADAT-tal jelölt).\n", 0),
     ("NINCS ADAT, log entry without a date", "Ár: NINCS ADAT (K1)\n\n## Keresés-napló\n"
      "- K1: arukereso.hu „babakocsi”: 403\n", 1),
 ]
@@ -104,6 +118,9 @@ import time
 t0 = time.time()
 lint.check_nincs(['NINCS ADAT ' + 'A1-' * 350000])
 check("a 1 MB hyphenated NINCS ADAT line finishes within 2 s", time.time() - t0 < 2.0, True)
+t0 = time.time()
+lint.check_nincs(['Jelölés: ' + '; **NINCS ADAT**' * 60000])
+check("41468: a 1 MB legend line of NINCS ADAT items finishes within 2 s", time.time() - t0 < 2.0, True)
 
 # No copied patterns: the lint uses the reply gate's and the idea lint's objects.
 repo = os.path.realpath(os.path.join(HERE, '..', '..'))

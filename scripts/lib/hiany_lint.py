@@ -57,6 +57,12 @@ NINCS = re.compile(r'NINCS ADAT')
 # Radar 41442: a brief line ("Kész, ha:") or a legend ("Jelölés(ek):") at the line start names NINCS ADAT as a term,
 # not as a claim; a backticked `NINCS ADAT` in a table cell stays a claim (formatting alone must not pass).
 DEFLINE = re.compile(r'^\s*(?:>\s*)?(?:[-*]\s+)?\**(?:Kész, ha|Jelölés(?:ek)?)\**\s*:')
+# Viktor 41468 LOW 1: the prefix alone no longer exempts the whole line. Every NINCS ADAT on it must be a term use:
+# an item of an enumeration or a definition ("; **NINCS ADAT** = nem tudom", "vagy NINCS ADAT indokkal",
+# "`NINCS ADAT` a szokott jelentéssel"), not a value after a field ("Gyártási költség: NINCS ADAT").
+TERM_RUN = re.compile(r'[\s*`_\[\]"„”“\']+')
+TERM_PRE = re.compile(r'(?:[;,|/(.]|\bvagy|\bés|\ba)$')
+TERM_POST = re.compile(r'(?:[;,./()]|$|=|indokkal\b|-|jelöl|a szokott jelentéssel)')
 SRC = re.compile(r'(?i)https?://|(?<![\w@])[\w-]{1,63}\.(hu|com|org|io|eu|net|gov|de|co|app)\b|webread|websearch|'
                  r'quarantine|reader|\bGET\b|/search|\bapi\b|ads-|trends|ksh|meska|pepita|e-?mag|vatera|dm\b|'
                  r'google|meta|apify|curl|grep')
@@ -150,11 +156,27 @@ def tokens(ln):
     return out
 
 
+def term_line(ln):
+    """A brief or legend line on which every NINCS ADAT is a term use (Viktor 41468 LOW 1)."""
+    d = DEFLINE.match(ln)
+    if not d:
+        return False
+    # Formatting and whitespace runs collapse to one space first, so a bounded window sees the nearest word or
+    # separator (a long run of spaces must not hide "Gyártási költség:"), and no item costs a slice to the line end.
+    body = TERM_RUN.sub(' ', ln[d.end():])
+    for m in NINCS.finditer(body):
+        pre = body[max(0, m.start() - 40):m.start()].strip()
+        post = body[m.end():m.end() + 40].lstrip()
+        if (pre and not TERM_PRE.search(pre)) or not TERM_POST.match(post):
+            return False
+    return True
+
+
 def check_nincs(lines):
     entries = log_entries(lines)
     out = []
     for i, ln in enumerate(lines):
-        if not NINCS.search(ln) or DEFLINE.match(ln):
+        if not NINCS.search(ln) or term_line(ln):
             continue
         if SRC.search(ln) and RES.search(ln):
             continue
