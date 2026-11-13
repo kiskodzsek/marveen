@@ -31,6 +31,22 @@ export function loadKnown(file = path.join(HERE, 'internal-names.txt')) {
   try { return parseKnown(fs.readFileSync(file, 'utf8')); } catch { return []; }
 }
 
+// Per-page exceptions (Klodel 40328, Pulzus 11-13): a page that legitimately names identifiers (the privacy notice
+// lists the cookie / storage names on purpose) may allow EXACT names for that checkpoint only. Never a global ALLOW:
+// the same name on any other page, or a new name on the same page, stays RED. Only identifier-shaped rules can be
+// allowed; templates, dev words, error markers and HTTP status never can.
+export const ALLOWABLE_RULES = new Set(['snake_case', 'SCREAMING_CASE', 'camelCase', 'i18n_key', 'kebab_key', 'known_internal']);
+const ALLOW_NAME = /^[A-Za-z0-9_.-]+$/;
+
+export function normalizeAllow(list) {
+  if (list == null) return [];
+  if (!Array.isArray(list)) throw new Error('allow must be an array of exact names');
+  for (const n of list) {
+    if (typeof n !== 'string' || !ALLOW_NAME.test(n)) throw new Error(`allow entry not an exact name: ${JSON.stringify(n)}`);
+  }
+  return [...new Set(list)];
+}
+
 export function safe(s) { return String(s).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'x'; }
 
 export class Gate {
@@ -43,7 +59,10 @@ export class Gate {
   }
 
   // Pure part, testable without a browser: text + attrs -> findings.
-  evaluate(label, { text, attrs = [], status = 200 }) {
+  // allow: exact identifier names this page may show (see ALLOWABLE_RULES); suppressed findings are counted in
+  // `suppressed` (returned on the array) so the verdict can show what was let through.
+  evaluate(label, { text, attrs = [], status = 200, allow = [] }) {
+    const allowSet = new Set(normalizeAllow(allow));
     const f = [];
     if (status >= 400 || status === 0) f.push({ rule: 'http_status', why: 'page did not load', token: String(status), where: 'navigation', context: '' });
     for (const re of ERROR_MARKERS) {
@@ -51,10 +70,17 @@ export class Gate {
       if (m) f.push({ rule: 'error_marker', why: 'error text visible to the customer', token: m[0], where: 'innerText', context: '' });
     }
     f.push(...scanText(text, 'innerText', this.known), ...scanAttrs(attrs, this.known));
-    return f.map((x) => ({ flow: this.flow, view: this.view, step: label, ...x }));
+    const suppressed = [];
+    const kept = f.filter((x) => {
+      if (allowSet.has(x.token) && ALLOWABLE_RULES.has(x.rule)) { suppressed.push(x.token); return false; }
+      return true;
+    });
+    const out = kept.map((x) => ({ flow: this.flow, view: this.view, step: label, ...x }));
+    out.suppressed = suppressed;
+    return out;
   }
 
-  async checkpoint(page, label, { status = 200 } = {}) {
+  async checkpoint(page, label, { status = 200, allow = [] } = {}) {
     this.n += 1;
     const idx = String(this.n).padStart(2, '0');
     // A customer opens the FAQ: closed <details> hide their text from innerText, so open them first
@@ -73,11 +99,11 @@ export class Gate {
       for (const o of document.querySelectorAll('select option')) { const v = (o.textContent || '').trim(); if (v) out.push({ attr: 'option', value: v }); }
       return out;
     });
-    const findings = this.evaluate(label, { text, attrs, status });
+    const findings = this.evaluate(label, { text, attrs, status, allow });
     const img = path.join(this.outDir, `${safe(this.flow)}-${idx}-${safe(label)}-${this.view}.png`);
     await page.screenshot({ path: img, fullPage: true });
     this.images.push(img); this.findings.push(...findings);
-    this.steps.push({ n: this.n, label, url: page.url(), status, text_chars: (text || '').length, findings: findings.length, image: img });
+    this.steps.push({ n: this.n, label, url: page.url(), status, text_chars: (text || '').length, findings: findings.length, allowed: [...new Set(findings.suppressed)], image: img });
     return findings;
   }
 

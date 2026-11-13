@@ -18,6 +18,18 @@ node scripts/live-gate/run.mjs --plan scripts/live-gate/plan-marabel-pages.json 
 ```
 Then Read every image in `<dir>`. The plan lists pages and pre-login entry steps (read-only).
 
+## Per-page allow (`allow_by_path`)
+A page that legitimately LISTS identifier-shaped names (the /adatkezeles cookie and storage notice names `marabel_sid`, `multiFbc`, ...) would be RED for ever. The plan may carry an `allow_by_path` object:
+```json
+"allow_by_path": { "/adatkezeles": ["marabel_sid", "multiFbc"] }
+```
+- Key: a path starting with `/`, matched against `new URL(page.url()).pathname` at the checkpoint. Any other key: exit 2 (REFUSED).
+- Value: an array of EXACT names (`^[A-Za-z0-9_.-]+$`). No wildcard, no space, no non-array: exit 2.
+- Never global: the same name on another page stays RED; a NEW name on the allowed page stays RED.
+- Only the identifier-shaped rules can be allowed (snake_case, SCREAMING_CASE, camelCase, i18n key, kebab key, known internal name). Templates, English developer words, error text and HTTP status can NEVER be allowed.
+- What was let through is listed in `gate-result.json` (`steps[].allowed`, `findings.suppressed`): allowing is visible, not silent.
+- Adding a name is weakening the gate: it needs a reviewer (Viktor) and the name must be on the page's own notice.
+
 ## Flows behind login, or that submit
 `run.mjs` refuses any step marked `"submits": true` without `--allow-submit` (Patrik's explicit "mehet": no real registration, payment or form submission on production otherwise). For trial / order forms, a flow script imports the same filter:
 ```js
