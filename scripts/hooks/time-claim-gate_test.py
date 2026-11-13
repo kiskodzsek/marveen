@@ -94,8 +94,9 @@ def block_message_body_from_data_file_and_stdin_file(root):
 
 
 @case
-def allow_message_future_time_rule_two_is_off(root):
-    # 346 "future" hits in a week of real messages were plans, deadlines and reset times: allowed in a message.
+def allow_message_far_future_time_is_a_plan(root):
+    # 346 "future" hits in a week of real messages were plans, deadlines and reset times: allowed in a message
+    # when more than SEND_WINDOW_MIN minutes ahead or on a plan line (rule 5 judges only the near future).
     h = root['hook']
     return all(run(h, 'Bash', {'command': MSG + t + '\nTXT'}, now='18:14')[0] == 0 for t in (
         'Mért: a keret 100 %, nullázás 23:36.',
@@ -115,6 +116,49 @@ def allow_message_reads_and_clean_sends(root):
 def card_comment_keeps_the_future_rule(root):
     # The message scope is narrower; a card comment is judged by both rules as before.
     return run(root['hook'], 'Bash', {'command': KANBAN + " -d @- <<'J'\nmérve 18:30\nJ"}, now='18:14')[0] == 2
+
+
+
+# ---- the send path (retro R1, card 028205dd): rule 5, a measured time a few minutes ahead ----
+
+def _close(result):
+    return {'command': API + "messages/77 -X PUT --data-binary @- <<'JSON'\n" + json.dumps({'status': 'done', 'result': result})
+            + "\nJSON"}
+
+
+@case
+def block_send_path_near_future_measured_time(root):
+    # Measured (read only, 7 days before 11-13): Viktor 40555 "merve 15:37 date" stored at 15:35, Mira's results
+    # "a kártyán rögzítve (12:35)" closed at 12:22, Radar's "## 21:25" log written at 21:17.
+    h = root['hook']
+    body = os.path.join(root['dir'], 'send-body.txt')
+    with open(body, 'w', encoding='utf-8') as fh:
+        fh.write('Pulzus: élesben, mérve 15:36.\n')
+    code, _, err = run(h, 'Bash', {'command': MSG + 'Viktor -> Klodel (merve 15:37 date): HASH-OK\nTXT'}, now='15:35')
+    return (code == 2 and '15:37' in err and '{{NOW}}' in err
+            and run(h, 'Bash', {'command': 'bash tools/msg-close.sh "kész, mérve 15:39" 123'}, now='15:35')[0] == 2
+            and run(h, 'Bash', _close('Mérve (15:39): a letöltés kész'), now='15:35')[0] == 2
+            and run(h, 'Bash', {'command': LOG + '{"content":"## {{NOW}} -- x\\nlefutott 15:40"}\nJSON'}, now='15:35')[0] == 2
+            and run(h, 'Bash', {'command': 'bash scripts/agent-msg.sh pulzus klodel - < ' + body}, now='15:35')[0] == 2
+            and run(h, 'Bash', {'command': MSG + 'mérve 15:50\nTXT'}, now='15:35')[0] == 2)  # the window's edge
+
+
+@case
+def allow_send_path_now_plans_estimates_and_far_times(root):
+    h = root['hook']
+    return (all(run(h, 'Bash', {'command': MSG + t + '\nTXT'}, now='15:35')[0] == 0 for t in (
+                'mérve 15:35 date',                      # the current minute
+                'mérve {{NOW}} date',                    # the server fills it in
+                'mérve 15:51',                           # past the window: a plan, not a guessed stamp
+                'mérve 15:20, kész kb. 15:40',           # an estimate
+                'mérve 15:20, a végén ~15:40',
+                'lefutott; újra 15:40-kor',              # a suffix
+                'a keret elfogyott (mért), nullázás 15:40',  # a plan line
+                'lefutott 15:40:00Z',                    # a UTC stamp
+                'mért, de nem 15:40, hanem most',        # a correction
+                'mérve 15:30, kész 15:45-ig'))           # a deadline
+            and run(h, 'Bash', {'command': API + "memories --data-binary @- <<'JSON'\n{\"content\":\"mérve 15:37\"}\nJSON"},
+                    now='15:35')[0] == 0)                # a memory is not the send path
 
 
 # ---- daily-log heading (Dave 39739): rule 3 ----
@@ -138,14 +182,26 @@ def block_daily_log_future_heading(root):
 
 
 @case
-def allow_daily_log_heading_now_past_other_day_or_body_deadline(root):
+def allow_daily_log_heading_now_token_other_day_or_body_deadline(root):
     h = root['hook']
     return all(run(h, 'Bash', {'command': LOG + c + '\nJSON'}, now='16:48')[0] == 0 for c in (
-        '{"content":"## 16:48 -- kész"}',
-        '{"content":"## 16:40 -- PR kész\\nPulzus 23:00-ig élesíti"}',
+        '{"content":"## {{NOW}} -- kész"}',
+        '{"content":"## {{NOW}} -- PR kész\\nPulzus 23:00-ig élesíti"}',
         '{"content":"## 23:40 (' + f'{YESTERDAY:%m-%d}' + ') -- éjjeli kör"}',
         '{"content":"Napi összegzés\\n## 23:59 terv"}'))
 
+
+
+@case
+def block_daily_log_typed_heading_of_today(root):
+    # Retro R1: the heading time is written only by the {{NOW}} substitution; a typed time of today is blocked even
+    # when it is not ahead (rule 6), and the message names the token.
+    h = root['hook']
+    code, _, err = run(h, 'Bash', {'command': LOG + '{"content":"## 16:40 -- PR kész"}\nJSON'}, now='16:48')
+    return (code == 2 and '16:40' in err and '## {{NOW}}' in err
+            and run(h, 'Bash', {'command': LOG + '{"content":"## 16:48 -- kész"}\nJSON'}, now='16:48')[0] == 2
+            and run(h, 'Bash', {'command': LOG + '{"agent_id":"x", "content": "### 9:05 -- reggel"}\nJSON'},
+                    now='16:48')[0] == 2)
 
 @case
 def heading_rule_is_daily_log_only(root):
