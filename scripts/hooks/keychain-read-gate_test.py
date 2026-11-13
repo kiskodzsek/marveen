@@ -128,6 +128,7 @@ def script_cases():
         w('export.py', "import subprocess\nsubprocess.run(['" + S + "', 'export', '-o', 'x.p12'])\n")
         w('list.py', "import subprocess\nsubprocess.run(['" + S + "', 'list-keychains'])\n")
         w('notes.py', "# the gate blocks find-generic-password in a shell\nprint('ok')\n")
+        w('ok.js', "console.log('ok');\n")
         w('word.py', "print('the " + S + " team writes find-generic-password docs')\n")
         # a UI string table (web/lang/en.js): a capitalised label and button are not a subcommand
         w('labels.js', "module.exports = {\n  'settings.module." + S + "': '" + S.capitalize() + "',\n"
@@ -140,6 +141,9 @@ def script_cases():
         os.makedirs(os.path.join(d, 'sub2'))
         with open(os.path.join(d, 'sub2', 'only.py'), 'w', encoding='utf-8') as f:
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'find-generic-password', '-s', 'x'])\n")
+        with open(os.path.join(d, 'sub2', 'twin.py'), 'w', encoding='utf-8') as f:
+            f.write("import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
+        w('twin.py', 'print(1)\n')
         w('tmpl.mjs', "import { execSync } from 'node:child_process';\nconst B = `/usr/bin/" + S + "`;\n"
                       "execSync(`${B} find-generic-password -s x`);\n")
         for i, form in enumerate(LIT_FORMS):
@@ -201,6 +205,16 @@ def script_cases():
             ('uv run measure.py', d),
             ('uv run python measure.py', d),
             ('node tmpl.mjs', d),  # the binary in a JS template literal
+            # Viktor 41756 LOW 2: every existing file is judged, an innocent first file does not hide the script
+            ('node -r ./ok.js read.mjs', d),
+            ('node --require ./ok.js read.mjs', d),
+            ('python3 -W ./notes.py measure.py', d),
+            ('python3 list.py measure.py', d),  # was allowed ("the rest are its arguments"); an argument is read too
+            ('cd sub2 && python3 twin.py', d),  # a clean ./twin.py in the cwd does not hide sub2/twin.py
+            # a shell -c payload: its opening quote is a command position for the script rules
+            ('bash -c "./dump.sh"', d),
+            ("bash -lc 'sub/deep.py --x'", d),
+            ('sh -c "python3 measure.py"', d),
         ] + [('python3 lit%d.py' % i, d) for i in range(len(LIT_FORMS))] + [
             ('ls; python3 "measure.py"', d),
             ('python3 -c "import subprocess; subprocess.run([\'' + S + '\', \'dump-keychain\'])"', d),
@@ -219,7 +233,16 @@ def script_cases():
             ('python3 -m sub', d),  # sub/ has no __init__ or __main__ with a read; deep.py is not run by -m sub
             ('node -m measure', d),  # -m is python's; node has no module flag that runs ./measure.py
             ('node -e measure.py', d),  # -e: the text is code (an expression), the file is not run
-            ('python3 list.py measure.py', d),  # the first existing file is the script, the rest are its arguments
+            ('node -r ./ok.js list.py', d),  # two clean files
+            # the word after a CLOSING quote is not a command: grep on a keychain-reading file passes (the #275 gate
+            # blocked `grep -n "for x" scripts/hooks/keychain-read-gate.py`, 2026-11-14)
+            ('grep -n "for x" sub/deep.py', d),
+            ('grep -n "do" -A 18 sub/deep.py', d),
+            ("sed -n '1,5p' sub/deep.py", d),
+            ('grep -n "x" "sub/deep.py"', d),
+            ('echo "run" python3 measure.py', d),
+            ('python3 list.py ' + ' '.join(f'a{i}' for i in range(62)), d),  # 63 words: inside MAX_ARGS (64)
+            ('python3 -c pass ' + 'a ' * 100, d),  # the walk stops at -c: the rest is not a script's words
             ('cd sub2 && cat only.py', d),  # no interpreter: reading a file is not running it
             ('python3 word.py < notes.py', d),
             ('node worker.mjs', d),  # agent-worker.ts shape: a non-read subcommand, `-p` only in a comment
@@ -314,9 +337,11 @@ def script_cases():
         w('eqs.py', '=/' * (512 * 1024))
         w('min.js', 'a=b;c=d;' * (300 * 1024 // 8))
         w('big.py', '=' * 200000 + '\n' + open(os.path.join(d, 'measure.py'), encoding='utf-8').read())
+        # (the clean padding sits behind `; echo`: as python3's own word it would run past ARGS_WINDOW and block)
         timed = [
-            ('python3 x ' + '=/' * 50000, 0),
-            ('python3 x ' + '=' * 100000, 0),
+            ('python3 x ; echo ' + '=/' * 50000, 0),
+            ('python3 x ; echo ' + '=' * 100000, 0),
+            ('python3 x ' + '=/' * 50000, 2),
             ('python3 x ' + '=/' * 60000 + ' ; ' + S + ' dump-keychain', 2),
             ('python3 eq.py', 0), ('python3 eqs.py', 0), ('node min.js', 0), ('python3 big.py', 2),
         ]
@@ -332,12 +357,45 @@ def script_cases():
         if code != 2 or 'watchdog' not in err:
             fails.append(f'script: watchdog 0.01 s on a 1 MB scan should block (got {code})')
         probe = probe.replace('script_budget', 'watchdog_s')
-        for val, want in [('999', '8.0'), ('2', '2.0'), ('0', '0.001'), ('-1', '0.001'), ('nan', '8.0'), ('x', '8.0')]:
+        for val, want in [('999', '6.0'), ('2', '2.0'), ('0', '0.001'), ('-1', '0.001'), ('nan', '6.0'), ('x', '6.0')]:
             p = subprocess.run([sys.executable, '-I', '-c', probe, HOOK], capture_output=True, text=True, timeout=20,
                                env={'PATH': '/usr/bin:/bin', 'KEYCHAIN_GATE_WATCHDOG_S': val})
             if p.stdout.strip() != want:
                 fails.append(f'script: watchdog seam {val!r} -> {p.stdout.strip()!r}, want {want}')
-        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2
+        # Viktor 41756 INFO 4 (w5): the watchdog leaves with os._exit, which no except clause can catch (sys.exit's
+        # SystemExit could be swallowed)
+        probe_w = ('import importlib.util as u,sys; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
+                   ' s.loader.exec_module(m)\ntry:\n    m.on_watchdog(14, None)\nexcept BaseException:\n    print("caught")')
+        p = subprocess.run([sys.executable, '-I', '-c', probe_w, HOOK], capture_output=True, text=True, timeout=20,
+                           env={'PATH': '/usr/bin:/bin'})
+        if p.returncode != 2 or 'caught' in p.stdout:
+            fails.append(f'script: the watchdog exit must not be catchable (rc {p.returncode}, {p.stdout.strip()!r})')
+        # Viktor 41756 LOW 1: words past MAX_ARGS (64), or a command past ARGS_WINDOW, block instead of going unread
+        too_many = [
+            ('python3 ' + '-B ' * 64 + 'measure.py', d),
+            ('python3 ' + '-B ' * 12 + 'measure.py ' + 'a ' * 60, d),
+            ('python3 ' + 'A' * 5000 + ' measure.py', d),
+            ('python3 list.py ' + ' '.join(f'a{i}' for i in range(64)), d),
+            ('cat ' + 'x ' * 70 + 'measure.py | python3', d),
+        ]
+        for cmd, cwd in too_many:
+            code, err = bash_in(cmd, cwd)
+            if code != 2 or 'script-too-many-args' not in err:
+                fails.append(f'script: past MAX_ARGS/ARGS_WINDOW should block (got {code}): {cmd[:60]!r}')
+        # Viktor 41756 INFO 4 (s1): past MAX_TRIES (4000) path lookups the gate blocks. 31 directories x 3 calls x
+        # 60 missing words = 5580 lookups, no file found anywhere.
+        code, err = bash_in('cd a && ' * 30 + ' ; '.join('python3 ' + ' '.join(f'm{j}' for j in range(60))
+                                                          for _ in range(3)), d)
+        if code != 2 or 'script-too-many' not in err:
+            fails.append(f'script: past MAX_TRIES lookups should block (got {code})')
+        # Viktor 41756 INFO 4 (s11): the per-call window keeps many calls linear (the rest of the text per call
+        # was quadratic)
+        t = _t.monotonic()
+        code, _ = bash_in('python3 x;' * 30000, d)
+        took = _t.monotonic() - t
+        if took > 2:
+            fails.append(f'script: 30 000 interpreter calls took {took:.1f} s (want under 2 s)')
+        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2
 
 
 def main():
@@ -368,7 +426,8 @@ def main():
                 '\n' * 30000 + fix('s3curity') + ' dump-keychain',
                 # python -m parsing: long flag runs after an interpreter
                 'python3' + ' -u' * 20000, ('python3 -m' + ' -x=a' * 10000), 'python3 -mx;' * 6000]:
-        want = 2 if fix('s3curity') in cmd else 0
+        # 20 000 x " -u": past MAX_ARGS, so it blocks unread (Viktor 41756 LOW 1); the case still checks the time
+        want = 2 if fix('s3curity') in cmd or cmd.startswith('python3 -u -u') else 0
         try:
             p = subprocess.run([sys.executable, '-I', HOOK], capture_output=True, text=True, timeout=5,
                                input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}),
