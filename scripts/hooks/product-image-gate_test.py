@@ -2260,6 +2260,109 @@ def no_ledger_keeps_marker_rule(root):
     return rc == 2 and 'PRIVÁT-KAPU' in err and not os.path.exists(os.path.join(root, 'nincs.db'))
 
 
+# Klodel 40686 (Balázs csoport TG 5918 waited): Patrik writes privately about another topic, and the answer to
+# Balázs's own group request must still go to the group. Proof: reply_to, or a "BALÁZS-KÉRÉS: TG <id>" line, names a
+# fresh group message of an allowlisted non-owner sender in inbound-senders.jsonl. Synthetic ids throughout.
+OTHER = '7000000001'  # synthetic third person, not on the allowlist
+
+
+def group_req_state(root, mid='5918', user=BALAZS, chat=GROUP, age_s=60, allow=(PRIV, BALAZS)):
+    import time
+    d = os.path.join(root, '.claude', 'channels', 'telegram')
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, 'access.json'), 'w', encoding='utf-8') as f:
+        json.dump({'groups': {GROUP: {'requireMention': False, 'allowFrom': list(allow)}}}, f)
+    with open(os.path.join(d, 'inbound-senders.jsonl'), 'w', encoding='utf-8') as f:
+        f.write(json.dumps({'chat_id': chat, 'message_id': mid, 'user_id': user,
+                            'at': int((time.time() - age_s) * 1000)}) + '\n')
+
+
+@case
+def group_reply_to_balazs_request_passes_while_latest_is_private(root):
+    db = ledger(root, GROUP, PRIV)
+    group_req_state(root)
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'reply_to': '5918', 'text': 'Kész a látványterv.'})
+    return rc == 0 and 'PRIVÁT-VÁLASZ-KAPU' not in err and 'Traceback' not in err
+
+
+@case
+def group_reply_with_balazs_keres_line_passes_while_latest_is_private(root):
+    db = ledger(root, GROUP, PRIV)
+    group_req_state(root)
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'text': 'BALÁZS-KÉRÉS: TG 5918\nKész a látványterv.'})
+    return rc == 0 and 'PRIVÁT-VÁLASZ-KAPU' not in err and 'Traceback' not in err
+
+
+@case
+def NEG_group_reply_to_patrik_private_message_still_blocked(root):
+    # the reply_to is Patrik's PRIVATE message (another chat): no group record, the gate holds
+    db = ledger(root, GROUP, PRIV)
+    group_req_state(root, mid='18364', user=PRIV, chat=PRIV)
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'reply_to': '18364', 'text': 'Rendben, megnézem.'})
+    return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err
+
+
+@case
+def NEG_group_reply_to_patrik_own_group_message_still_blocked(root):
+    # Patrik is on the allowlist, but he is the owner: his group message is not a teammate's request
+    db = ledger(root, GROUP, PRIV)
+    group_req_state(root, mid='5917', user=PRIV)
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'reply_to': '5917', 'text': 'BALÁZS-KÉRÉS: TG 5917\nRendben.'})
+    return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err
+
+
+@case
+def NEG_group_request_from_non_allowlisted_sender_still_blocked(root):
+    db = ledger(root, GROUP, PRIV)
+    group_req_state(root, mid='5920', user=OTHER)
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'reply_to': '5920', 'text': 'Rendben.'})
+    return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err
+
+
+@case
+def NEG_balazs_keres_line_with_unknown_id_still_blocked(root):
+    db = ledger(root, GROUP, PRIV)
+    group_req_state(root)
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'text': 'BALÁZS-KÉRÉS: TG 9999\nRendben.'})
+    return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err and 'BALÁZS-KÉRÉS' in err
+
+
+@case
+def NEG_stale_balazs_request_older_than_a_day_still_blocked(root):
+    db = ledger(root, GROUP, PRIV)
+    group_req_state(root, age_s=25 * 3600)
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'reply_to': '5918', 'text': 'Rendben.'})
+    return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err
+
+
+@case
+def NEG_group_reply_without_any_pointer_still_blocked(root):
+    db = ledger(root, GROUP, PRIV)
+    group_req_state(root)
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'text': 'Kész a látványterv.'})
+    return rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err
+
+
+@case
+def NEG_unknown_owner_id_gives_no_group_request_exemption(root):
+    # MARVEEN_OWNER_PRIVATE_CHAT unset and no .env: the owner cannot be told apart, so no exemption (fail closed)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('pig_under_test', HOOK)
+    g = importlib.util.module_from_spec(spec)
+    old = {k: os.environ.pop(k, None) for k in ('MARVEEN_OWNER_PRIVATE_CHAT', 'TELEGRAM_STATE_DIR')}
+    try:
+        spec.loader.exec_module(g)
+        g.owner_private_chat = lambda: ''
+        os.environ['TELEGRAM_STATE_DIR'] = os.path.join(root, '.claude', 'channels', 'telegram')
+        group_req_state(root)
+        return g.group_request_proof(GROUP, '5918', '') is None
+    finally:
+        os.environ.pop('TELEGRAM_STATE_DIR', None)
+        for k, v in old.items():
+            if v is not None:
+                os.environ[k] = v
+
+
 def main():
     bad = 0
     for fn in CASES:

@@ -1189,6 +1189,52 @@ def balazs_named_it(chat, reply_to):
                for r in _jsonl_rows('inbound-evidence.jsonl'))
 
 
+# Klodel 40686 (Balázs csoport TG 5918 waited): the PRIVÁT-VÁLASZ-KAPU held a group reply that answers Balázs's own
+# group request only because Patrik's latest message came in privately (about another topic). A group reply is the
+# answer to a teammate's group request when it points at that request: its reply_to, or a "BALÁZS-KÉRÉS: TG <id>" line,
+# is a group message from an allowlisted sender who is NOT the owner, recorded by the plugin in inbound-senders.jsonl
+# (same evidence as the Creatorz exemption), at most GROUP_REQUEST_MAX_AGE_S old. No record = no exemption.
+GROUP_REQUEST_RE = re.compile(r'BAL[AÁ]ZS-K[EÉ]R[EÉ]S:\s*TG\s*(\d{1,12})\b')
+GROUP_REQUEST_MAX_AGE_S = 24 * 3600
+
+
+def group_allowlist(chat):
+    """The plugin's allowFrom list for <chat> (access.json groups.<chat>.allowFrom), as strings; empty when unknown."""
+    try:
+        with open(os.path.join(channel_state_dir(), 'access.json'), encoding='utf-8') as f:
+            g = (json.load(f).get('groups') or {}).get(chat) or {}
+        return {str(x).strip() for x in (g.get('allowFrom') or []) if str(x).strip()}
+    except Exception:
+        return set()
+
+
+def group_request_proof(chat, reply_to, text, now=None):
+    """The id of a fresh group message from a non-owner allowlisted sender that this reply answers, else None."""
+    if not chat:
+        return None
+    owner = owner_private_chat()
+    if not owner:
+        return None  # without the owner's id his own group message could pass as a teammate's: fail closed
+    allowed = (group_allowlist(chat) | {BALAZS_USER_ID}) - {owner, ''}
+    ids = set(GROUP_REQUEST_RE.findall(ZERO_WIDTH_RE.sub('', unicodedata.normalize('NFKC', text or ''))))
+    if reply_to not in (None, ''):
+        ids.add(str(reply_to).strip())
+    if not ids:
+        return None
+    now_ms = (time.time() if now is None else now) * 1000
+    for r in _jsonl_rows('inbound-senders.jsonl'):
+        mid, user = str(r.get('message_id')), str(r.get('user_id'))
+        if str(r.get('chat_id')) != chat or mid not in ids or user not in allowed or user == owner:
+            continue
+        try:
+            fresh = 0 <= now_ms - float(r.get('at')) <= GROUP_REQUEST_MAX_AGE_S * 1000
+        except (TypeError, ValueError):
+            fresh = False
+        if fresh:
+            return mid
+    return None
+
+
 def creatorz_check(chat, text, reply_to):
     if not creatorz_text(text):
         return None
@@ -1330,10 +1376,13 @@ def main():
     # Viktor 40081 L1: only a REPLY is redirected; the live status message in the group is edited in place
     # (edit_message) and must keep updating while Patrik writes privately.
     is_edit = str(data.get('tool_name') or '').endswith('edit_message')
-    if chat and latest and not is_edit and latest == owner_private_chat() and chat == owner_group_chat():
+    if (chat and latest and not is_edit and latest == owner_private_chat() and chat == owner_group_chat()
+            and not group_request_proof(chat, ti.get('reply_to'), str(ti.get('text') or ''))):
         sys.stderr.write(
             'PRIVÁT-VÁLASZ-KAPU (Patrik TG 5704: "ide reagálsz arra az üzenetemre amit a másik chatbe irtam"): '
-            'Patrik utoljára PRIVÁTBAN írt, oda válaszolj (PRIVÁT-OK nélkül is mehet), ne a csoportba.\n')
+            'Patrik utoljára PRIVÁTBAN írt, oda válaszolj (PRIVÁT-OK nélkül is mehet), ne a csoportba. '
+            'Ha ez Balázs (vagy más csapattag) csoport-kérésére megy: reply_to az ő üzenetére, vagy egy sor '
+            '"BALÁZS-KÉRÉS: TG <az üzenete száma>".\n')
         return 2
     if chat and chat == owner_private_chat() and not private_window_open() and latest != chat:
         txt = str(ti.get('text') or '')
