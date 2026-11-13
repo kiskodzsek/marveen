@@ -2855,6 +2855,83 @@ def elo_not_asked_on_non_marketing(root):
     return rc == 0 and 'ELO' not in err
 
 
+# Card 42b5e28a (Patrik TG 18398, 18401, 18412): the .ok sheet names no pen, glue, handwriting, writing in the book,
+# journaling or another (empty) baby journal, also not as a contrast, marketing or not.
+@case
+def vni_pen_in_hely_blocked(root):
+    img = book_fixture(root, KEPES_OK, extra=('MEGJ: mellette egy toll fekszik',))
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'vevő-nem-ír' in err and 'toll' in err
+
+
+@case
+def vni_contrast_blocked(root):
+    img = book_fixture(root, KEPES_OK, extra=('MEGJ: itt nem kell kézzel írni, se képet beragasztani',))
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'kézírás / kézzel ír' in err and 'ragasztó / ragasztás' in err
+
+
+@case
+def vni_journaling_and_empty_journal_blocked(root):
+    img = book_fixture(root, KEPES_OK, extra=('MEGJ: anya naplóz, mellette egy üres babanapló',))
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'naplóz / naplót vezet' in err and 'más (üres) babanapló' in err
+
+
+@case
+def vni_zero_width_split_blocked(root):
+    img = book_fixture(root, KEPES_OK, extra=('MEGJ: anya nap\u200blóz',))
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'naplóz / naplót vezet' in err
+
+
+@case
+def vni_tilos_line_allowed(root):
+    img = book_fixture(root, KEPES_OK, extra=('TILOS: toll, ragasztó, kézírás, naplóz, üres babanapló',))
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 0
+
+
+@case
+def vni_patrik_quote_on_tg_line_allowed(root):
+    img = book_fixture(root, KEPES_OK, extra=('MEGJ: Patrik TG 18395 "a könyv ahogy naplóz anya benne"',))
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 0
+
+
+@case
+def vni_quote_without_tg_still_blocked(root):
+    img = book_fixture(root, KEPES_OK, extra=('MEGJ: "anya naplóz benne"',))
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 2 and 'vevő-nem-ír' in err
+
+
+@case
+def vni_narrowed_forms_allowed(root):
+    img = book_fixture(root, KEPES_OK, extra=('MEGJ: Pamacs tollazata puha, ragasztott kötés, a babanapló kulcsszó, '
+                                              'naplózva a ledgerben',))
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 0
+
+
+@case
+def vni_word_list_not_loading_blocks(root):
+    # a missing or broken scripts/lib/vevo_nem_ir.py is a block, never a pass (fail-closed)
+    mod = gate_module()
+    ok = os.path.join(root, 'x.ok')
+    open(ok, 'w', encoding='utf-8').write('MEGJ: tiszta lap\n')
+    saved = sys.modules.get('vevo_nem_ir', 0)
+    sys.modules['vevo_nem_ir'] = None  # the import inside the check raises ImportError
+    try:
+        r = mod.vevo_nem_ir_check(ok) or ''
+    finally:
+        if saved == 0:
+            sys.modules.pop('vevo_nem_ir', None)
+        else:
+            sys.modules['vevo_nem_ir'] = saved
+    return 'nem futott le (ModuleNotFoundError)' in r
+
+
 def main():
     bad = 0
     for fn in CASES:

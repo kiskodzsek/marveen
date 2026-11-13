@@ -82,6 +82,11 @@ Live surface (retro R4, card 686f1b5f; Lex 41089, Klodel 41172, 2026-11-13): eve
     ELO: ok <Component,...> | nincs-app-ui <what shows instead>
 "ok" needs a green, at most 7 days old store/kep-kapu/<file>.elo from scripts/elo-felulet-check.sh --stamp (the app
 screen on it is wired into a customer route on Marabel origin/main, not only into /app-preview). See elo_check.
+The buyer does not write (card 42b5e28a; Patrik TG 18398, 18401, 18412, 2026-11-13: "nem ragasztgatunk képet nem
+irogat kézzel"): the .ok sheet of every file, marketing or not, names no pen, glue, handwriting, writing in the book,
+journaling or another (empty) baby journal, also not as a contrast. Patrik's words quoted on a "TG n" line and a
+"TILOS:" line are not checked; the list is scripts/lib/vevo_nem_ir.py, it failing to load blocks. See
+vevo_nem_ir_check.
 Tests: product-image-gate_test.py next to this file.
 Exit 0 = allow, exit 2 = block (stderr to the model).
 """
@@ -801,6 +806,19 @@ def eltunt_check(fp, d):
     return None
 
 
+def vevo_nem_ir_check(ok):
+    """Card 42b5e28a (Patrik TG 18398, 18401, 18412): the .ok sheet of any image or video names no pen, glue,
+    handwriting, writing in the book, journaling or another (empty) baby journal, also not as a contrast. The word
+    list is scripts/lib/vevo_nem_ir.py; it failing to load blocks (exit 1 of a traceback would pass)."""
+    try:
+        import vevo_nem_ir
+        with open(ok, encoding='utf-8') as f:
+            labels = vevo_nem_ir.found(f.read())
+    except Exception as e:
+        return f'a vevő-nem-ír ellenőrzés nem futott le ({e.__class__.__name__}).'
+    return vevo_nem_ir.reason(labels, 'az .ok lapban:') if labels else None
+
+
 def check(fp):
     base = os.path.basename(fp)
     ok = os.path.join(KAPU, base + '.ok')
@@ -819,6 +837,9 @@ def check(fp):
     miss = [k for k in REQ if not d.get(k)]
     if miss:
         return f'{base}: hiányzó mezők: {", ".join(miss)}.'
+    vn = vevo_nem_ir_check(ok)
+    if vn:
+        return f'{base}: {vn}'
     el = eltunt_check(fp, d)
     if el:
         return f'{base}: {el}'
