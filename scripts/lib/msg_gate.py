@@ -82,10 +82,23 @@ Two rules:
    Known limits: a work order naming only "TG n" without "Patrik" (60 of 752) is not gated; the
    Creatorz ban lives in the reply gate (scripts/hooks/product-image-gate.py CREATORZ_RE).
 
+6. ABSENCE CLAIMS IN A DELIVERED FILE (retro 2026-11-13 R10, card 1f943050; Radar 41254, 41293): Radar wrote "itthon
+   nincs" and a bare "NINCS ADAT" into delivered research twice (hibanapló 11-11 L232; Balázs TG 5579). A text from
+   HIANY_FROM (default "radar") is refused when a shared/**.md file it DELIVERS fails scripts/lib/hiany_lint.py
+   (R10a: an absence claim at home needs ITTHON-MERT and measured Meska / Pepita / eMAG + the 4-domain site probe;
+   R10b: every NINCS ADAT needs a search log). Delivered = the path stands on a line with a delivery word (kész,
+   leadva, leadás, leadom, elkészült; not right after ne / nem / még nem / nincs); a mere mention of another file
+   (a colleague's report, parked work) is not linted (Radar 41293). A named file outside <root>/shared, or missing,
+   is refused too; the lint failing to load is exit 4.
+   Measured 2026-11-13 on 30 days of Radar's messages (704): 226 deliver a shared file, 162 files; of the 4 files
+   delivered after the R10 rule (11-13 12:00) 3 fail today, 2 of them on a real gap. The lint's verdict equals
+   Radar's original script on all 1909 shared/**.md files (393 fail in both, outputs identical).
+
 Env (the suite uses them): MARVEEN_MSG_GATE_SECRET_SRC, MARVEEN_MSG_GATE_STRICT (comma list),
 MARVEEN_MSG_GATE_MAX_CHARS, MARVEEN_MSG_GATE_OWN_DOMAINS (comma list), MARVEEN_MSG_GATE_STOP_FROM
 (comma list), MARVEEN_MSG_GATE_SPEC_LOCK (path), MARVEEN_MSG_GATE_SPEC_FROM (comma list),
-MARVEEN_MSG_GATE_KERES_FROM (comma list), MARVEEN_MSG_GATE_LEDGER (path).
+MARVEEN_MSG_GATE_KERES_FROM (comma list), MARVEEN_MSG_GATE_LEDGER (path), MARVEEN_MSG_GATE_HIANY_FROM (comma
+list), MARVEEN_HIANY_ROOT (the install whose shared/ is read; default this repo).
 """
 import json
 import os
@@ -421,6 +434,60 @@ def keres_reason(text, ledger_path):
     return 'kérés-kapu (retró R5): ' + '; '.join(problems)
 
 
+# Rule 6. The delivery word is matched on fold(line); the path on the raw line.
+DELIVER = re.compile(_B + r'(?:kesz|leadva|leadas|leadom|elkeszult)(?![a-z0-9])')
+NOT_YET = re.compile(_B + r'(?:ne|nem|meg\s+nem|nincs)\s+$')
+SHARED_MD = re.compile(r'(?<![\w.-])(shared/[^\s`\'"()<>,;|]+?\.md)(?![\w-])')
+MAX_FINDINGS = 3
+
+
+def delivered_files(text):
+    """shared/**.md paths that stand on a line with a non-negated delivery word, in order, once each."""
+    out = []
+    for ln in text.splitlines():
+        f = fold(ln)
+        if not any(not NOT_YET.search(f[max(0, m.start() - 12):m.start()]) for m in DELIVER.finditer(f)):
+            continue
+        for p in SHARED_MD.findall(ln):
+            if p not in out:
+                out.append(p)
+    return out
+
+
+def hiany_reason(text):
+    """None if no delivered shared file fails the absence-claim lint, else the refusal reason."""
+    files = delivered_files(text)
+    if not files:
+        return None
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('_hiany_lint', os.path.join(HERE, 'hiany_lint.py'))
+        lint = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lint)
+    except Exception as e:  # a missing or broken lint is a gate failure, never a silent pass
+        die('scripts/lib/hiany_lint.py does not load (%s)' % e.__class__.__name__)
+    shared = os.path.join(lint.root(), 'shared')
+    bad = []
+    for rel in files:
+        path = os.path.realpath(os.path.join(lint.root(), rel))
+        if not path.startswith(shared + os.sep):
+            bad.append('%s: a shared/ mappán kívülre mutat' % rel)
+            continue
+        try:
+            findings = lint.lint(path)
+        except OSError as e:
+            bad.append('%s: nem olvasható (%s)' % (rel, e.__class__.__name__))
+            continue
+        if findings:
+            more = ' (+%d további)' % (len(findings) - MAX_FINDINGS) if len(findings) > MAX_FINDINGS else ''
+            bad.append('%s: %s%s' % (rel, ' | '.join(x[:200] for x in findings[:MAX_FINDINGS]), more))
+    if not bad:
+        return None
+    return ('hiány-kapu (retró R10): a leadott fájl nem megy át a hiány-linten (python3 -I scripts/lib/hiany_lint.py '
+            '<fájl>). Itthoni hiányhoz ITTHON-MERT sor és mért Meska / Pepita / eMAG + site-próba, minden NINCS ADAT '
+            'mellé forrás + eredmény vagy napló-hivatkozás kell. ' + '; '.join(bad))
+
+
 def csv_env(name, default):
     return [x.strip().lower() for x in os.environ.get(name, default).split(',') if x.strip()]
 
@@ -483,6 +550,11 @@ def main(argv):
 
     if frm.lower() in csv_env('MARVEEN_MSG_GATE_KERES_FROM', 'klodel'):
         r = keres_reason(text, os.environ.get('MARVEEN_MSG_GATE_LEDGER', DEFAULT_LEDGER))
+        if r:
+            reasons.append(r)
+
+    if frm.lower() in csv_env('MARVEEN_MSG_GATE_HIANY_FROM', 'radar'):
+        r = hiany_reason(text)
         if r:
             reasons.append(r)
 
