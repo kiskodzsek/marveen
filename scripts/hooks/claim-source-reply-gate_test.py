@@ -47,6 +47,17 @@ BLOCK = [
     ('A fal-keret 25 $ maradt.', '$/EUR'),
     ('Ma 12 db próba indult.', 'db'),
     ('A pontos számok 15 percen belül jönnek.', 'perc múlva'),
+    # retro R2 (card 8639a3bb): a capability told as a fact; the first is the TG 6035 reply, word for word in part
+    ('Igen, pont ezt a posztot ki tudjuk emelni: Mira a Marabel hirdetési fiókjában a meglévő posztra épít hirdetést.',
+     'képesség'),
+    ('Kiemelhetjük a posztot.', 'képesség'),
+    ('A feltöltés működik.', 'képesség'),
+    ('Meg lehet oldani holnapra.', 'képesség'),
+    ('Be van állítva a keret.', 'képesség'),
+    ('Mira be tudja állítani a hirdetést.', 'képesség'),
+    ('API-n ki tudunk posztolni.', 'képesség'),
+    ('Képesek vagyunk rá.', 'képesség'),
+    ('Feltölteni tudjuk mi is.', 'képesség'),
 ]
 PASS_NO_CLAIM = [
     'Kész van már a papás?',                                   # a question
@@ -61,6 +72,16 @@ PASS_NO_CLAIM = [
     'Patrik azt írta: «kész van már a film?»',                 # quoted
     'Írd át „élesben fut” helyett erre.',                       # quoted
     'Dave indítja a renderelést, utána szólok.',               # plan, no state word
+    'Tudjuk, hogy ma késik.',                                  # "tud" = know, no infinitive
+    'Nem tudjuk kiemelni, mert a profil posztja.',             # negated capability
+    'Ki tudjuk emelni?',                                       # a question
+    'Ha működik, szólok.',                                     # conditional
+    'Lehet, hogy holnap.',                                     # "maybe", no infinitive
+    'Pulzus megnézi, működik-e a próba.',                      # indirect question
+    'Megmutatom, hogyan működik.',                             # explaining how
+    'Holnap reggel mire működik a feltöltés, szólok.',         # "mire" mid-clause: not yet a fact
+    'A filmet lejátszva fel tudod hozzá mondani.',             # an instruction to the reader, not our capability
+    'Nagyi, én is tudok kalácsot sütni!',                      # customer copy, first person singular
 ]
 PASS_WITH_SOURCE = [
     'Kész a papás film. FORRÁS: agents/dave/work/papa-film-1110/out/tt/papa.mp4',
@@ -75,7 +96,11 @@ PASS_WITH_SOURCE = [
     'Élesben a main ef54015c commiton.',
     'Kint van, TG 4477 szerint mehetett.',
     'A konverzió 3 % (becslés (Szigma szerint), a heti adatból).',
+    'Ki tudjuk emelni, Mira 41144 szerint.',
 ]
+# A capability may go out as a labelled guess; a state claim may not (retro R2).
+CAP_HEDGED = ['Ki tudjuk emelni (tipp, nem mértem).', 'Ezt tudjuk kinyerni belőle (a megvalósíthatóság tipp).',
+              'Szerintem meg lehet oldani, de nem ellenőriztem.']
 
 # Site state (hibanapló 2026-11-10 12:06, Patrik TG 4564; Klodel 36285): only with a MEASUREMENT.
 SITE_BLOCK = [
@@ -126,6 +151,12 @@ for text in PASS_NO_CLAIM:
     ok(f'no claim: {text!r}', gate.claims(text) == [], gate.claims(text))
 for text in PASS_WITH_SOURCE:
     ok(f'claim with source: {text!r}', gate.claims(text) != [] and gate.has_source(text, []), (gate.claims(text), text))
+for text in CAP_HEDGED:
+    ok(f'capability as a labelled guess passes: {text!r}', 'képesség' in gate.claims(text)
+       and gate.unsourced(text, []) == [], (gate.claims(text), gate.unsourced(text, [])))
+ok('a guess label does not clear a state claim', gate.unsourced('Kész a film (tipp).', []) == ['kész'],
+   gate.unsourced('Kész a film (tipp).', []))
+ok('"tippet" is no label', gate.unsourced('Ki tudjuk emelni, kérek tippet.', []) == ['képesség'])
 ok('an attached file is the source', gate.has_source('Kész a papás film.', ['/x/papa.mp4']))
 ok('"mert" (because) is not "mérte"', not gate.has_source('Kész, mert Dave megcsinálta.', []))
 ok('"szerintem" is not an attribution', not gate.has_source('Szerintem kész van.', []))
@@ -174,6 +205,11 @@ rc, _ = run('111', 'A marabel.hu leállt (mérve: HTTP 503, 14:58).')
 ok('hook: site state with a measurement -> passes', rc == 0)
 rc, _ = run('-222', 'A mySHP részleg alvó, Kernel viszi.')
 ok('hook: the department label -> passes', rc == 0)
+rc, err = run('-222', 'Igen, pont ezt a posztot ki tudjuk emelni: Mira a meglévő posztra épít hirdetést.')
+ok('hook: the TG 6035 reply -> exit 2, names the capability rule', rc == 2 and 'képesség' in err and 'tipp' in err,
+   f'rc={rc} {err}')
+rc, _ = run('-222', 'Ki tudjuk emelni: Mira mérte, msg 41144.')
+ok('hook: capability with a source -> passes', rc == 0)
 rc, _ = run('-222', 'Szia, mikor jó a hívás?')
 ok('hook: no claim -> passes', rc == 0)
 r = subprocess.run([sys.executable, '-I', GATE], input='not json', capture_output=True, text=True,

@@ -9,7 +9,8 @@ render-claim gate stopped one verb, this one asks the same of every state claim:
 What blocks (exit 2, one line naming what was found): a reply or an edit to the owner's private chat or the team group
 whose text makes a CLAIM and carries no SOURCE.
   CLAIM, in a sentence that is not a question: a state word (kész / elkészült / készen, beállítottam / beállítva,
-  élesben / élesítve / élesítettem, fut / futnak, kint van, kiment) that is not negated or conditional just before
+  élesben / élesítve / élesítettem, fut / futnak, kint van, kiment), or a CAPABILITY ("ki tudjuk emelni",
+  "kiemelhetjük", "képesek vagyunk", "meg lehet oldani", "működik", "be van állítva"; retro R2, TG 6035), that is not negated or conditional just before
   ("nincs kész", "még nem fut", "ha kész", "amint kész") nor future ("kész lesz"), or a number with a unit (%, Ft / forint / HUF, $ / USD / EUR / €, db, "N perc múlva").
   SOURCE, anywhere in the message: a "FORRÁS:" line, "mérve" / "mérés:" / "X mérte" / "mértem", "<X> szerint",
   "<X> jelzése", "forrással", "becslés (... szerint)", msg_id / msg 123,
@@ -60,6 +61,17 @@ STATE = [
     ('fut', NEG + r'\b(fut|futnak)\b'),
     ('kint van', NEG + r'\bkint van(nak)?\b'),
     ('kiment', NEG + r'\bkiment(ek)?\b'),
+    # A capability told as a fact (retro R2, card 8639a3bb; hibanapló 2026-11-13 18:36, TG 6035: "Igen, pont ezt a
+    # posztot ki tudjuk emelni" went out unmeasured): "tud" with an infinitive ("ki tudjuk emelni", "feltölteni
+    # tudjuk"), the -hat/-het form ("kiemelhetjük"), "képesek vagyunk", "lehet" with an infinitive ("meg lehet
+    # oldani"), "működik", "be van állítva".
+    ('képesség', NEG + r'(?<!\bhogyan )(\btud(juk|om|unk|ja|jak|nak)\s+(\w+\s+){0,2}?\w{2,}ni\b'
+                 r'|\b\w{2,}ni\s+tud(juk|om|unk|nak|ja)\b'
+                 r'|\b\w{3,}(hatjuk|hetjuk|hatom|hetem|hatunk|hetunk)\b'
+                 r'|\bkepes(ek)?\s+(vagyunk|vagyok)\b'
+                 r'|\blehet\s+(\w+\s+)?\w{2,}ni\b'
+                 r'|\bmukod(ik|nek|ott|ottek)\b(?!-e\b)'
+                 r'|\bbe van(nak)? allitva\b)' + FUT),
 ]
 NUM = r'\d[\d  .,]*'
 NUMBERS = [
@@ -149,13 +161,24 @@ def has_measurement(text, files):
     return any(rx.search(plain) for rx in MEASURED)
 
 
+CAP_LABEL = 'képesség'
+# A capability may also go out as a labelled guess (CLAUDE.md "Tények és találgatás": a tipp is marked as one in the
+# same sentence): "tipp", "[tipp]", "nem ellenőriztem", "nem mértem". Only for the capability label: a state claim
+# ("kész", "fut") still needs a source (replay 2026-11-13: "100 kép ..., ezt tudjuk kinyerni belőle (a
+# megvalósíthatóság tipp, próbaképsoron mérjük)" was a correct sentence).
+HEDGE = re.compile(r'\btipp\b|\bnem ellenoriztem\b|\bnem mertem\b|\bnem mert\b')
+
+
 def unsourced(text, files):
-    """The claim labels that lack what they need: a source in general, a measurement for a site's state."""
+    """The claim labels that lack what they need: a source in general (a capability: a source or a labelled guess),
+    a measurement for a site's state."""
     found = claims(text)
     out = []
-    general = [l for l in found if l != SITE_LABEL]
+    general = [l for l in found if l not in (SITE_LABEL, CAP_LABEL)]
     if general and not has_source(text, files):
         out += general
+    if CAP_LABEL in found and not has_source(text, files) and not HEDGE.search(norm(text)):
+        out.append(CAP_LABEL)
     if SITE_LABEL in found and not has_measurement(text, files):
         out.append(SITE_LABEL)
     return out
@@ -213,7 +236,9 @@ def main():
         'tudod: "FORRÁS: <fájl / msg_id / parancs>", "mérve: ...", TG-szám, PR-szám, fájlút vagy link. Ha nem mérted, '
         'ne állítsd: "Dave indítja", "becslés (X szerint)".'
         + (' Oldal/termék állapota (alszik, leállt) CSAK mérve: "mérve: HTTP 200, 15:02" vagy Pulzus mérése; a '
-           'szervezeti címke ("mySHP: alvó" részleg) nem az oldal állapota.' if SITE_LABEL in found else '') + '\n')
+           'szervezeti címke ("mySHP: alvó" részleg) nem az oldal állapota.' if SITE_LABEL in found else '')
+        + (' Képesség ("ki tudjuk", "működik", "be van állítva", retró R2, TG 6035): előbb mérd meg (ki, msg_id), '
+           'vagy jelöld tippnek ugyanabban a mondatban ("tipp, nem mértem").' if CAP_LABEL in found else '') + '\n')
     return 2
 
 
