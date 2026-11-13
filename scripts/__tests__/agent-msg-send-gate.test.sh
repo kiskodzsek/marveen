@@ -17,6 +17,10 @@
 # the book, journaling or an empty journal is refused, also as a contrast; a TILOS: line and Patrik's quote on a TG
 # line pass; the word list missing is exit 4.
 #
+# Rule 8 (card fc1d5065, Viktor 40687): the text itself, as sent, every sender: a placeholder time or a measured time
+# 1-15 minutes ahead of the clock (the time-claim-gate's send-path rules, loaded from scripts/hooks/) is refused;
+# the hook file missing is exit 4 for every sender. The clock is pinned with TIME_CLAIM_GATE_NOW.
+#
 # Run:  bash scripts/__tests__/agent-msg-send-gate.test.sh
 set -uo pipefail
 
@@ -32,6 +36,8 @@ ok() { N=$((N+1)); if [ "$2" = "0" ]; then echo "PASS  $1"; else echo "FAIL  $1$
 
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/msggate.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT
+# a gate copied into $SANDBOX/<dir>/ loads rule 8 from $SANDBOX/hooks/, as the repo's lib/ loads it from hooks/
+mkdir -p "$SANDBOX/hooks"; cp "$ROOT/scripts/hooks/time-claim-gate.py" "$SANDBOX/hooks/"
 BIN="$SANDBOX/bin"; mkdir -p "$BIN"
 printf 'test-token\n' > "$SANDBOX/token"
 
@@ -642,6 +648,68 @@ GATE_ENV="MARVEEN_MSG_GATE_BIN=$SANDBOX/gate-vni/msg_gate.py MARVEEN_MSG_GATE_SE
 ok "vni: the word list missing when the rule fires: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
 GATE_ENV="MARVEEN_MSG_GATE_BIN=$SANDBOX/gate-vni/msg_gate.py MARVEEN_MSG_GATE_SECRET_SRC=$ROOT/src/security/secret-gate.ts" run kernel dave
 ok "vni: the word list missing, the rule does not fire (kernel): sent" "$(sent)" "rc=$RC posts=$POSTS"
+
+# --- rule 8 (card fc1d5065): a measured time in the text itself, judged at the send ---
+NOW8="TIME_CLAIM_GATE_NOW=14:20"
+printf 'Kész, a teszt zöld.\nmérve 14:25 date\n' > "$SANDBOX/text"
+GATE_ENV="$NOW8" run dave klodel
+ok "time: a measured time 5 minutes ahead: refused" "$(refused)" "rc=$RC posts=$POSTS"
+ok "time: the refusal names the line, the token and the clock" "$(grep -q '2. sor 14:25' "$SANDBOX/err" && grep -q 'most 14:20' "$SANDBOX/err" && grep -q '{{NOW}}' "$SANDBOX/err" && echo 0 || echo 1)"
+GATE_ENV="$NOW8" run kernel pulzus
+ok "time: every sender and recipient (kernel -> pulzus): refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Kész, mérve 14:20 date.'
+GATE_ENV="$NOW8" run dave klodel
+ok "time: the current minute: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Kész, mérve 14:05 date.'
+GATE_ENV="$NOW8" run dave klodel
+ok "time: a past measured time: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Kész, mérve 14:40 date.'
+GATE_ENV="$NOW8" run dave klodel
+ok "time: 20 minutes ahead (outside the 15-minute send window): sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Mérve date, határidő 14:30-ig kész.'
+GATE_ENV="$NOW8" run dave klodel
+ok "time: a deadline (-ig) on a marker line: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Kész, a teszt zöld 14:25-kor fut újra.'
+GATE_ENV="$NOW8" run dave klodel
+ok "time: a future time with no measurement word: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Kész, mérve {{NOW}} date.'
+GATE_ENV="$NOW8" run dave klodel
+ok "time: the {{NOW}} token: sent" "$(sent)" "rc=$RC posts=$POSTS"
+python3 -c 'import sys; sys.stdout.write("Mérve 14:" + "2x" + ", a futás kész.")' > "$SANDBOX/text"
+GATE_ENV="$NOW8" run dave klodel
+ok "time: a placeholder time: refused" "$(refused)" "rc=$RC posts=$POSTS"
+python3 -c 'import sys; sys.stdout.write("mérve 14:25 date")' | env PATH="$BIN:$PATH" BODIES="$SANDBOX/bodies" MARVEEN_TOKEN_FILE="$SANDBOX/token" \
+  MARVEEN_MAJSZTRO_STATE=/nonexistent MARVEEN_HOMOGLYPH_BIN=/nonexistent MARVEEN_MSG_GATE_LEDGER="$SANDBOX/ledger.db" \
+  TIME_CLAIM_GATE_NOW=14:20 /bin/bash "$HELPER" dave klodel - >/dev/null 2>"$SANDBOX/err"; RC=$?
+ok "time: a text piped in on stdin (what the PreToolUse hook does not see): refused" "$([ "$RC" = "3" ] && echo 0 || echo 1)" "rc=$RC"
+# the hook file missing next to the gate: exit 4 for every sender, nothing sent (never a silent pass)
+mkdir -p "$SANDBOX/alone/lib"; cp "$GATE" "$SANDBOX/alone/lib/msg_gate.py"
+text 'Kész, a teszt zöld.'
+GATE_ENV="MARVEEN_MSG_GATE_BIN=$SANDBOX/alone/lib/msg_gate.py MARVEEN_MSG_GATE_SECRET_SRC=$ROOT/src/security/secret-gate.ts" run kernel pulzus
+ok "time: scripts/hooks/time-claim-gate.py missing: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+ok "time: the exit-4 reason names the hook file" "$(grep -q 'time-claim-gate.py does not load' "$SANDBOX/err" && echo 0 || echo 1)"
+# Viktor 41626 LOW: a loaded file that exits while it loads (SystemExit is not an Exception) is exit 4 too, not a
+# send with every rule off; a secret shape proves the other rules were not skipped either
+mkdir -p "$SANDBOX/exits/lib" "$SANDBOX/exits/hooks"; cp "$GATE" "$SANDBOX/exits/lib/msg_gate.py"
+printf 'import sys\nsys.exit(0)\n' > "$SANDBOX/exits/hooks/time-claim-gate.py"
+EXITS="MARVEEN_MSG_GATE_BIN=$SANDBOX/exits/lib/msg_gate.py MARVEEN_MSG_GATE_SECRET_SRC=$ROOT/src/security/secret-gate.ts"
+text 'Kész, a teszt zöld.'
+GATE_ENV="$EXITS" run kernel pulzus
+ok "time: the hook file calls sys.exit(0) while it loads: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+ok "time: the exit-4 reason names SystemExit" "$(grep -q 'SystemExit' "$SANDBOX/err" && echo 0 || echo 1)"
+text "a kulcs: $STRIPE kész"
+GATE_ENV="$EXITS" run kernel pulzus
+ok "time: a secret shape with an exiting hook file: no POST" "$([ "$POSTS" = "0" ] && [ "$RC" != "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+# the same for the two other files the gate loads (rule 6 hiany_lint.py, rule 7 vevo_nem_ir.py)
+cp "$ROOT/scripts/hooks/time-claim-gate.py" "$SANDBOX/exits/hooks/time-claim-gate.py"
+printf 'import sys\nsys.exit(0)\n' > "$SANDBOX/exits/lib/vevo_nem_ir.py"
+text 'Reel koncepció: anya mesél.'
+GATE_ENV="$EXITS" run majsztro dave
+ok "vni: the word list calls sys.exit(0) while it loads: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+printf 'import sys\nsys.exit(0)\n' > "$SANDBOX/exits/lib/hiany_lint.py"
+text 'KÉSZ: shared/k/good.md'
+GATE_ENV="$EXITS $HROOT" run radar klodel
+ok "hiany: the lint calls sys.exit(0) while it loads: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
 
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."

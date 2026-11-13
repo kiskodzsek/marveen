@@ -6,7 +6,7 @@
 Exit 0: send. Exit 3: refused, the reasons are on stderr (names and counts only, never the matched
 text). Any other exit: the gate itself failed, which is not a verdict on the text.
 
-Two rules:
+Rules:
 
 1. Secret shapes, every sender and recipient. The patterns are NOT copied here: they are read at
    run time from SECRET_PATTERNS in src/security/secret-gate.ts, the list the commit gate and the
@@ -111,12 +111,26 @@ Two rules:
    such as "kézzel beírt státuszsor" (3), a feather "toll" (1), a handwriting-like font (1); they pass reworded or
    on a TILOS: line.
 
+8. A MEASURED TIME IN THE TEXT ITSELF (card fc1d5065; Viktor 40687, the second occurrence on 2026-11-13: a
+   measured time one minute ahead went out in a message file written with the Write tool and sent on stdin). The
+   PreToolUse time-claim-gate judges the command text, an @file payload and a "< file" redirect, but not a text
+   piped in ("cat f | <sender> -") or built by a program. Here the text is judged as it is sent, every sender and
+   recipient, against the clock at the send: the time-claim-gate's send-path rules are LOADED from
+   scripts/hooks/time-claim-gate.py, not copied (its rule 1: a placeholder time, HH:Mx or HH:xx; its rule 5: a
+   measured time 1-15 minutes after the current minute, with that rule's deadline, plan, estimate and UTC
+   exceptions). The fix the refusal names: {{NOW}}, which the dashboard fills in with its own minute, or `date`
+   right before the send. The file failing to load is exit 4. TIME_CLAIM_GATE_NOW (HH:MM) is that gate's test
+   seam and works here too.
+   Replayed 2026-11-13 on 7 days of agent_messages (9854 rows, each at its own created_at minute): 313 would have
+   been refused (245 placeholders, 71 times ahead of the clock); since the hook's rule 5 went live (#263, 11-13
+   21:05) 144 messages, 0 hits.
+
 Env (the suite uses them): MARVEEN_MSG_GATE_SECRET_SRC, MARVEEN_MSG_GATE_STRICT (comma list),
 MARVEEN_MSG_GATE_MAX_CHARS, MARVEEN_MSG_GATE_OWN_DOMAINS (comma list), MARVEEN_MSG_GATE_STOP_FROM
 (comma list), MARVEEN_MSG_GATE_SPEC_LOCK (path), MARVEEN_MSG_GATE_SPEC_FROM (comma list),
 MARVEEN_MSG_GATE_KERES_FROM (comma list), MARVEEN_MSG_GATE_LEDGER (path), MARVEEN_MSG_GATE_HIANY_FROM (comma
 list), MARVEEN_HIANY_ROOT (the install whose shared/ is read; default this repo), MARVEEN_MSG_GATE_VNI_FROM,
-MARVEEN_MSG_GATE_VNI_TO (comma lists).
+MARVEEN_MSG_GATE_VNI_TO (comma lists), TIME_CLAIM_GATE_NOW (HH:MM, rule 8).
 """
 import json
 import os
@@ -488,7 +502,9 @@ def hiany_reason(text):
         spec = importlib.util.spec_from_file_location('_hiany_lint', os.path.join(HERE, 'hiany_lint.py'))
         lint = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(lint)
-    except Exception as e:  # a missing or broken lint is a gate failure, never a silent pass
+    except BaseException as e:  # a missing or broken lint is a gate failure, never a silent pass
+        # (BaseException: a hook file that calls sys.exit while it loads raised SystemExit past Exception and
+        # turned every rule off, the secret rule too; Viktor 41626 LOW)
         die('scripts/lib/hiany_lint.py does not load (%s)' % e.__class__.__name__)
     shared = os.path.join(lint.root(), 'shared')
     bad = []
@@ -523,12 +539,37 @@ def vni_reason(text):
         spec = importlib.util.spec_from_file_location('_vevo_nem_ir', os.path.join(HERE, 'vevo_nem_ir.py'))
         vni = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(vni)
-    except Exception as e:  # a missing or broken word list is a gate failure, never a silent pass
+    except BaseException as e:  # a missing or broken word list is a gate failure, never a silent pass
+        # (BaseException: a hook file that calls sys.exit while it loads raised SystemExit past Exception and
+        # turned every rule off, the secret rule too; Viktor 41626 LOW)
         die('scripts/lib/vevo_nem_ir.py does not load (%s)' % e.__class__.__name__)
     if not vni.is_material(text):
         return None
     labels = vni.found(text)
     return vni.reason(labels, 'a brief Marabel-anyagról szól, és benne van:') if labels else None
+
+
+def time_reason(text):
+    """Rule 8: None, or the refusal reason when the text holds a placeholder time or a measured time ahead of the
+    clock (the time-claim-gate's send-path rules, loaded from the hook file)."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            '_time_claim_gate', os.path.join(HERE, '..', 'hooks', 'time-claim-gate.py'))
+        tc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tc)
+        now = tc._now()
+        found = tc.findings(text, now, placeholder_only=True) + tc.send_findings(text, now)
+    except BaseException as e:  # a missing or broken rule file is a gate failure, never a silent pass
+        # (BaseException: a hook file that calls sys.exit while it loads raised SystemExit past Exception and
+        # turned every rule off, the secret rule too; Viktor 41626 LOW)
+        die('scripts/hooks/time-claim-gate.py does not load (%s)' % e.__class__.__name__)
+    if not found:
+        return None
+    shown = ', '.join('%d. sor %s' % (n, tok) for n, tok, _ in found[:5])
+    return ('idő-kapu (Viktor 40687, kártya fc1d5065): a szövegben %s, most %02d:%02d. Helykitöltő idő (óó:px) és '
+            'az óránál későbbi mért idő nem mehet ki: írd {{NOW}}-t (a dashboard a beírás percére cseréli), vagy '
+            'futtasd a date-et közvetlenül a küldés előtt.' % (shown, now.hour, now.minute))
 
 
 def main(argv):
@@ -602,6 +643,10 @@ def main(argv):
         r = vni_reason(text)
         if r:
             reasons.append(r)
+
+    r = time_reason(text)
+    if r:
+        reasons.append(r)
 
     if reasons:
         for r in reasons:
