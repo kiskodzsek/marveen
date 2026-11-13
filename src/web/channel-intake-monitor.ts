@@ -201,17 +201,46 @@ export function resetIntakeObservations(): void {
 }
 
 /**
- * The main agent's channel lives under the global ~/.claude install; every
+ * Where an agent's Telegram channel .env can live, most likely first.
+ *
+ * The main agent's channel is $INSTALL_DIR/.claude/channels/telegram -- that is
+ * the TELEGRAM_STATE_DIR scripts/channels.sh exports for the main session
+ * (MAIN_CHAN_DIR, channels.sh:1167). This monitor used to look ONLY under
+ * homedir()/.claude/channels/telegram; on an install whose main channel lives in
+ * the install dir that file does not exist, readTelegramToken returned null and
+ * the main agent was silently never probed. Measured 2026-11-13 (card 6a9c1cc0,
+ * Klodel kanban 20225): the main bot was deaf 07:20-10:38 and this monitor said
+ * nothing. The home path stays as the fallback for older installs. Every
  * sub-agent has its own copy under its agent dir (mirrors telegram.ts).
  */
-export function channelEnvPathFor(agentName: string): string {
-  const root = agentName === MAIN_AGENT_ID ? homedir() : agentDir(agentName)
-  return join(root, '.claude', 'channels', 'telegram', '.env')
+export function channelEnvPathCandidates(agentName: string, projectRoot: string): string[] {
+  if (agentName !== MAIN_AGENT_ID) return [join(agentDir(agentName), '.claude', 'channels', 'telegram', '.env')]
+  return [...new Set([
+    join(projectRoot, '.claude', 'channels', 'telegram', '.env'),
+    join(homedir(), '.claude', 'channels', 'telegram', '.env'),
+  ])]
 }
 
-function readTelegramToken(agentName: string): string | null {
-  const envPath = channelEnvPathFor(agentName)
-  if (!existsSync(envPath)) return null
+/** The first existing candidate, or the most likely one when none exists. */
+export function channelEnvPathFor(agentName: string, projectRoot: string, exists: (p: string) => boolean = existsSync): string {
+  const candidates = channelEnvPathCandidates(agentName, projectRoot)
+  return candidates.find(exists) ?? candidates[0]
+}
+
+// The main agent ALWAYS has a channel: a missing token there is a monitor blind
+// spot, not "this agent has no channel". Said once per process, not per tick.
+let mainTokenMissingLogged = false
+
+function readTelegramToken(agentName: string, projectRoot: string): string | null {
+  const envPath = channelEnvPathFor(agentName, projectRoot)
+  if (!existsSync(envPath)) {
+    if (agentName === MAIN_AGENT_ID && !mainTokenMissingLogged) {
+      mainTokenMissingLogged = true
+      logger.warn({ candidates: channelEnvPathCandidates(agentName, projectRoot) },
+        'channel-intake-monitor: no Telegram .env found for the MAIN agent -- its intake is NOT monitored')
+    }
+    return null
+  }
   try {
     const match = readFileSync(envPath, 'utf-8').match(/^\s*TELEGRAM_BOT_TOKEN=(.+)$/m)
     return match?.[1]?.trim() || null
@@ -262,7 +291,7 @@ async function probeIntake(token: string): Promise<IntakeProbe> {
 }
 
 async function checkAgentIntake(agentName: string, projectRoot: string): Promise<void> {
-  const token = readTelegramToken(agentName)
+  const token = readTelegramToken(agentName, projectRoot)
   if (!token) return
 
   const probe = await probeIntake(token)

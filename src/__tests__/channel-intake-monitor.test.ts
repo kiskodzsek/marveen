@@ -11,7 +11,11 @@
 // agent with nothing to do is legitimately silent for days.
 
 import { describe, it, expect } from 'vitest'
+import { homedir } from 'node:os'
+import { MAIN_AGENT_ID } from '../config.js'
 import {
+  channelEnvPathCandidates,
+  channelEnvPathFor,
   parseIntakeProbe,
   decideIntakeVerdict,
   type IntakeProbe,
@@ -190,5 +194,36 @@ describe('decideIntakeVerdict', () => {
     })
     expect(d.verdict).toBe('unknown-inbound')
     expect(d.alert).toBe(false)
+  })
+})
+
+// Card 6a9c1cc0 (Klodel kanban 20225): the main bot was deaf 07:20-10:38 on
+// 2026-11-13 and this monitor never probed it -- it looked for the main token
+// under homedir()/.claude/channels/telegram, while channels.sh runs the main
+// session with TELEGRAM_STATE_DIR=$INSTALL_DIR/.claude/channels/telegram.
+describe('channelEnvPathFor: the main agent is probed with the token its session uses', () => {
+  const ROOT = '/opt/marveen-install'
+  const installEnv = `${ROOT}/.claude/channels/telegram/.env`
+  const homeEnv = `${homedir()}/.claude/channels/telegram/.env`
+
+  it('prefers the install-dir channel (channels.sh MAIN_CHAN_DIR) for the main agent', () => {
+    expect(channelEnvPathCandidates(MAIN_AGENT_ID, ROOT)[0]).toBe(installEnv)
+    expect(channelEnvPathFor(MAIN_AGENT_ID, ROOT, p => p === installEnv)).toBe(installEnv)
+  })
+
+  it('NEGATIVE: with only the install-dir .env present it does NOT pick the missing home path (the 11-13 blind spot)', () => {
+    expect(channelEnvPathFor(MAIN_AGENT_ID, ROOT, p => p === installEnv)).not.toBe(homeEnv)
+  })
+
+  it('falls back to the home channel on an older install', () => {
+    expect(channelEnvPathFor(MAIN_AGENT_ID, ROOT, p => p === homeEnv)).toBe(homeEnv)
+  })
+
+  it('NEGATIVE: a sub-agent never reads the main install or home channel', () => {
+    const c = channelEnvPathCandidates('subagent-x', ROOT)
+    expect(c).toHaveLength(1)
+    expect(c[0]).not.toBe(installEnv)
+    expect(c[0]).not.toBe(homeEnv)
+    expect(c[0].endsWith('/subagent-x/.claude/channels/telegram/.env')).toBe(true)
   })
 })
