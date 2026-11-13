@@ -29,6 +29,16 @@ surface) whose text gives a ready time for render / image / video work, "HH:MM k
 i.e. a number with a time unit, and in parentheses a path, a file name or "mtime". Without it the block ends
 "mérd meg a darabidőt; ha nincs mérés: 'szólok, ha kész'".
 
+Conditional video work (Klodel 40261, hibanapló 2026-11-13 13:16, Patrik csoport TG 5790/5793 "jojjon mar a video" /
+"Ezert alltatok egesz eddig"): at 12:39 the reply "... Cseréljük? ... A te igened után 12 perc, és küldöm." asked
+Patrik a question about the reel and parked the v10c export on his answer until 13:15. A REPLY whose text names video
+work (render, export, film, videó, reel, klip, mp4, animáció) AND, in one sentence, ties a delivery or a start to the
+owner's answer ("igened után ... küldöm", "ha mehet, indul", "jóváhagyásod után áll össze") passes only with a line
+    RENDER: fut <pid>            the pid is an export ops/video_export_status.py lists right now (measured at send)
+    RENDER: nem-kell <indok>     at least 10 characters why no render has to run (e.g. a question about a finished film)
+i.e. the render runs while the question waits, or the text says why it does not have to. Else the block ends
+"indítsd el most, a kérdés közben fusson; vagy 'RENDER: nem-kell <indok>'".
+
 Matching: NFKC, zero-width characters dropped, accents folded, case-insensitive, whole words. Which chats are gated:
 as mea-culpa-reply-gate.py (store/projektek.json elo_uzenet privat / csoport, or MARVEEN_OWNER_CHATS; none known =
 every chat). A malformed payload is allowed (nothing to read).
@@ -147,6 +157,59 @@ def has_merve(text):
     return False
 
 
+# Conditional video work (Klodel 40261). Context: video words only, not images (a drawing has its own rule above).
+COND_CONTEXT = re.compile(r'\b(?:render\w*|export\w*|video\w*|film\w*|reel\w*|klip\w*|mp4|animaci\w*)\b')
+# A condition on the owner's answer that a delivery or a start waits for, in ONE sentence ("A te igened után 12 perc,
+# és küldöm."). A bare question is not enough: replayed on 7 days of real owner-chat replies (2026-11-06..13, 2303
+# texts), "video word + any '?'" hit 78, nearly all unrelated; this shape hits 6, the 12:39 one among them.
+COND_WAIT = re.compile(r'\b(?:igened(?:re)? utan|igenedre|ha mehet|ha oke|ha okes|ha igen|ha jovahagyod|jovahagyasod utan|'
+                       r'jovahagyas(?:od)? utan|ha rabolintasz|rabolintasod utan|valaszod utan|dontesed utan|amint ramondod|'
+                       r'ha ramondod)\b')
+COND_DELIVER = re.compile(r'\b(?:kuldom|kuldjuk|megy|indul\w*|inditom|inditjuk|exportal\w*|renderel\w*|keszul\w*|'
+                          r'keszitem|kesz|all ossze|osszeall\w*)\b')
+RENDER_LINE = re.compile(r'(?mi)^[ \t]*(?:[-*>][ \t]*)?render:[ \t]*(?:fut[ \t]+(?P<pid>\d+)\b|nem-kell[ \t]+(?P<why>[^\n]*))')
+COND_HINT = "indítsd el most, a kérdés közben fusson; vagy 'RENDER: nem-kell <indok>'"
+
+
+def running_export_pids():
+    """The pids <install>/ops/video_export_status.py lists as exports right now (ops/ is install-local, not in git).
+    Empty when it is missing or fails: then only 'RENDER: nem-kell' lets the text go."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('video_export_status', os.path.join(ROOT, 'ops', 'video_export_status.py'))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return {str(r[0]) for r in mod.exports()}
+    except Exception:
+        return set()
+
+
+def conditional_claims(text):
+    if not COND_CONTEXT.search(norm(text)):
+        return False
+    for sentence in SENTENCE_SPLIT.split(str(text)):
+        plain = norm(sentence)
+        if COND_WAIT.search(plain) and COND_DELIVER.search(plain):
+            return True
+    return False
+
+
+def conditional_problem(text, pids=None):
+    """None when the text may go, else (reason, hint). pids: the running export pids (measured when None)."""
+    if not conditional_claims(text):
+        return None
+    for m in RENDER_LINE.finditer(str(text)):
+        if m.group('why') is not None and len(m.group('why').strip()) >= 10:
+            return None
+        if m.group('pid'):
+            live = running_export_pids() if pids is None else pids
+            if m.group('pid') in live:
+                return None
+            return (f'RENDER: fut {m.group("pid")}, de a video_export_status szerint ez a pid most nem export', COND_HINT)
+    return ('videó-munka Patrik válaszára vár ("igened után ... küldöm"), és nincs mért "RENDER: fut <pid>" sor '
+            '(TG 5793: "Ezert alltatok egesz eddig")', COND_HINT)
+
+
 def ready_problem(text):
     """None when the text may go, else (reason, hint)."""
     if not ready_claims(text) or has_merve(text):
@@ -229,6 +292,11 @@ def main():
         if got:
             why, hint = got
             sys.stderr.write(f'KÉSZ-IDŐPONT-KAPU (Klodel 40023, TG 5709): {why} - {hint}\n')
+            return 2
+        got = conditional_problem(text)
+        if got:
+            why, hint = got
+            sys.stderr.write(f'FELTÉTELES-RENDER-KAPU (Klodel 40261, TG 5790/5793): {why} - {hint}\n')
             return 2
     return 0
 
