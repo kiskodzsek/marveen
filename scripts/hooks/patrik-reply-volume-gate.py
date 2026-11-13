@@ -55,7 +55,8 @@ def owner_chats():
 
 def check(text, replies_since_inbound, escaped=False):
     """Pure decision: the block message, or None. escaped: a KESZ-EREDMENY reply mark was taken for this message
-    (scripts/reply-mark.py; one mark lets ONE more message through, Viktor 40894)."""
+    (scripts/reply-mark.py; one mark lets ONE more message through, Viktor 40894; it is spent only when the reply
+    is sent, so a reply another gate blocks keeps it, Klodel 41147)."""
     text = str(text or '')
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if len(lines) > MAX_LINES or len(text.strip()) > MAX_CHARS:
@@ -116,6 +117,7 @@ def main():
         try:
             sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'lib'))
             import reply_marks
+            reply_marks.bind_call(payload)  # held for this call, spent by reply-marks-spend.py once sent (41147)
             escaped = reply_marks.take('KESZ-EREDMENY', chat, agent_id) is not None
         except Exception:
             escaped = False

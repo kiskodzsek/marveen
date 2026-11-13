@@ -43,6 +43,7 @@ const EXPECTED: Record<string, string[]> = {
   ],
   PostToolUse: [
     'ledger-outbound.py', 'tool-log-capture.py',
+    'reply-marks-spend.py', // Klodel 41147: a reply mark is spent only once the reply is sent (Telegram reply/edit_message)
     'telegram_progress_reply_clear.py', 'slack_progress_reply_clear.py',
     'telegram-react-ack.py', // Klodel 34050: a reaction acknowledges a group message (card f6aabc6e)
     'skill-usage-capture.py', 'memory-frontmatter-bash-gate.py',
