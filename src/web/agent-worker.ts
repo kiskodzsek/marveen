@@ -542,6 +542,12 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     if (!fromCustomProvider) workerModel = launchableInstallDefaultSync('worker')
   }
 
+  // WORKERAUTOUPD1113: no in-place auto-update from a worker (same reason as
+  // agent-process.ts autoUpdaterEnv). The flag used to come only from the tmux
+  // global env, which channels.sh sets late (channels.sh:1323, after its network
+  // wait). Measured 2026-11-13: both workers started at 10:08:11 without it, and
+  // the shared install moved 2.1.322 -> 2.1.323 at 10:40:28 with no fleet decision
+  // (card 8fbd8b7b, Klodel 39979).
   const claudeLaunchBin = tryResolveFromPath('claude') ?? 'claude'
   const launch =
     (hasFleetOauthToken() ? `export CLAUDE_CODE_OAUTH_TOKEN="$(cat ${shArg(FLEET_OAUTH_TOKEN_PATH)})"; ` : '') +
@@ -549,6 +555,7 @@ function startWorkerSessionFor(ctx: WorkerCtx): void {
     `export CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false; ` +
     // CHANSPARE925: no Agent view (Left would background the worker into the daemon).
     `export CLAUDE_CODE_DISABLE_AGENT_VIEW=1; ` +
+    `export DISABLE_AUTOUPDATER=1; ` +
     // ROOTRESPAWN1001: IS_SANDBOX=1 on a root host (see root-sandbox-env.ts).
     `${ROOT_SANDBOX_ENV}; ` +
     customEnvPrefix +
