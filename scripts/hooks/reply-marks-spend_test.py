@@ -169,6 +169,36 @@ class SpendAfterSend(Base):
         self.assertIsNone(reply_marks._call['id'])
 
 
+class LibRaces(Base):
+    def bind(self, call):
+        reply_marks.bind_call({'tool_use_id': call, 'transcript_path': self.transcript})
+
+    def test_take_skips_a_mark_held_by_a_running_call_and_takes_the_older_free_one(self):
+        old = self.mark(age=10)
+        self.mark()
+        self.assertEqual(self.pre('toolu_A'), 0)  # holds the newest mark
+        self.bind('toolu_B')
+        self.assertIsNotNone(reply_marks.take('KESZ-EREDMENY', GROUP, 'main'))
+        self.assertEqual(reply_marks._pending[0][1], old)
+
+    def test_neg_two_runs_take_before_either_holds_only_the_first_passes(self):
+        # Viktor 40933 INFO 1 in hold mode: both runs take the mark before either writes its hold.
+        self.mark()
+        self.bind('toolu_A')
+        self.assertIsNotNone(reply_marks.take('KESZ-EREDMENY', GROUP, 'main'))
+        run_a = list(reply_marks._pending)
+        reply_marks._pending.clear()
+        self.bind('toolu_B')
+        self.assertIsNotNone(reply_marks.take('KESZ-EREDMENY', GROUP, 'main'))
+        run_b = list(reply_marks._pending)
+        self.bind('toolu_A')
+        reply_marks._pending[:] = run_a
+        self.assertTrue(reply_marks.spend_pending())
+        self.bind('toolu_B')
+        reply_marks._pending[:] = run_b
+        self.assertFalse(reply_marks.spend_pending())
+
+
 class SpendHook(Base):
     def test_spends_only_the_holds_of_its_call(self):
         self.mark()
@@ -206,6 +236,14 @@ class ReserveOnce(Base):
         self.assertTrue(reply_marks.spend_pending())
         self.assertEqual(reply_marks.spend_held('toolu_B'), 1)
         reply_marks.bind_call({'tool_use_id': 'toolu_C', 'transcript_path': self.transcript})
+        self.assertFalse(reply_marks.reserve_once(token))
+
+    def test_neg_owner_permission_held_by_a_running_call_is_not_reserved_again(self):
+        token = 'OWNER-ASKED-GROUP:main:8'
+        reply_marks.bind_call({'tool_use_id': 'toolu_A', 'transcript_path': self.transcript})
+        self.assertTrue(reply_marks.reserve_once(token))
+        self.assertTrue(reply_marks.spend_pending())
+        reply_marks.bind_call({'tool_use_id': 'toolu_B', 'transcript_path': self.transcript})
         self.assertFalse(reply_marks.reserve_once(token))
 
 
