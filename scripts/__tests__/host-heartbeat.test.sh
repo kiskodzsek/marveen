@@ -64,8 +64,8 @@ good_conf; reset_run 0
 bash "$PING"; rc=$?
 check "success: exit 0" "$([ $rc = 0 ]; echo $?)"
 check "T1: the URL/UUID is not in curl's argv" "$(! grep -q "$U" "$ARGV"; echo $?)"
-check "T1: curl gets -K <conf>, --proto =https, -m 10, --retry 2" \
-  "$(grep -qx -- '-K' "$ARGV" && grep -qx -- "$CONF" "$ARGV" && grep -qx -- '=https' "$ARGV" && grep -qx -- '10' "$ARGV" && grep -qx -- '--retry' "$ARGV"; echo $?)"
+check "T1: curl gets -K <conf>, --proto =https, --tlsv1.2, -m 10, --retry 2" \
+  "$(grep -qx -- '-K' "$ARGV" && grep -qx -- "$CONF" "$ARGV" && grep -qx -- '=https' "$ARGV" && grep -qx -- '--tlsv1.2' "$ARGV" && grep -qx -- '10' "$ARGV" && grep -qx -- '--retry' "$ARGV"; echo $?)"
 check "T1: no -v, -L, -w, --trace in argv" "$(! grep -Eqx -- '-v|-L|-w|--verbose|--location|--write-out|--trace|--trace-ascii' "$ARGV"; echo $?)"
 check "T2: success writes no log" "$([ ! -e "$LOG" ]; echo $?)"
 
@@ -106,6 +106,20 @@ check "T3: the file is a symlink -> no curl call" "$(! called && [ $rc = 1 ]; ec
 good_conf; printf 'proxy = "http://127.0.0.1:9"\n' >> "$CONF"; reset_run 0
 bash "$PING"; rc=$?
 check "T3: an extra curl option in the file -> no curl call" "$(! called && [ $rc = 1 ]; echo $?)"
+
+# Viktor 40263 LOW: a second line WITHOUT a trailing newline keeps wc -l at 1, and curl still reads it.
+for shape in url-then-proxy proxy-then-url url-then-output url-no-newline; do
+  good_conf; reset_run 0
+  case "$shape" in
+    url-then-proxy)  printf 'url = "%s"\nproxy = "http://127.0.0.1:9"' "$URL" > "$CONF" ;;
+    proxy-then-url)  printf 'proxy = "http://127.0.0.1:9"\nurl = "%s"' "$URL" > "$CONF" ;;
+    url-then-output) printf 'url = "%s"\noutput = "/tmp/x"' "$URL" > "$CONF" ;;
+    url-no-newline)  printf 'url = "%s"' "$URL" > "$CONF" ;;
+  esac
+  chmod 600 "$CONF"
+  bash "$PING"; rc=$?
+  check "T3: $shape (no trailing newline) -> no curl call" "$(! called && [ $rc = 1 ]; echo $?)"
+done
 
 good_conf; printf 'url = "https://%s/%s/%s"\n' "$HOST" "abcdefghijklmnopqrstuv" "mini" > "$CONF"; chmod 600 "$CONF"; reset_run 0
 bash "$PING"; rc=$?

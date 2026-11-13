@@ -65,12 +65,14 @@ if [ ! -f "$CONF" ] || [ -L "$CONF" ] || [ "$(owner_mode "$CONF")" != "$me 600" 
   log_failure "config file missing or not ours with mode 600; no ping"
   exit 1
 fi
-if [ "$(wc -l < "$CONF" | tr -d ' ')" != "1" ] || ! grep -Eq "$URL_LINE_RE" "$CONF"; then
+# Exactly one line WITH its newline: wc -l counts newlines, grep -c '' counts lines, so a second line without a
+# trailing newline (wc -l = 1, curl still reads it) fails the second test (Viktor 40263 LOW).
+if [ "$(wc -l < "$CONF" | tr -d ' ')" != "1" ] || [ "$(grep -c '' "$CONF")" != "1" ] || ! grep -Eq "$URL_LINE_RE" "$CONF"; then
   log_failure "config file is not exactly one hc-ping.com check URL line; no ping"
   exit 1
 fi
 
-if err=$(curl -fsS -m 10 --retry 2 --proto =https -K "$CONF" -o /dev/null 2>&1); then
+if err=$(curl -fsS -m 10 --retry 2 --proto =https --tlsv1.2 -K "$CONF" -o /dev/null 2>&1); then
   rm -f "$STAMP"
   exit 0
 fi
