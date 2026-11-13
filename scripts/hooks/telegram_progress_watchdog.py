@@ -114,7 +114,9 @@ ERROR_TEXT = ("⚠️ Valami elakadt, és erre nem érkezett válasz. "
 # Two fixes: (1) an API-error row never becomes the answer -- it maps to ONE Hungarian sentence (API_ERROR_TEXT),
 # and a later real assistant text in the same round still wins; (2) one delivery per chat: within a run, the first
 # placeholder of a chat carries the text, the rest are only deleted; across runs the same text to the same chat
-# is not repeated within DEDUP_SEC (progress/sent-dedup.state).
+# is not repeated within DEDUP_SEC (progress/sent-dedup.state) -- but ONLY for a round that started at or before
+# that delivery (Viktor 40106 L1): a question asked AFTER the line went out is a new question (e.g. Patrik
+# retrying) and gets its own message, otherwise the dedup would swallow exactly what this fix is for.
 API_ERROR_TEXT = ("⚠️ Erre most nem tudtam válaszolni, mert a Claude-szolgáltatás hibát adott "
                   "(nem a gépen van a gond, újraindítás nem segít), kérlek, pár perc múlva írd újra.")
 API_ERROR_RX = re.compile(r"(?:^|\s)API Error:\s*\d{3}\b|Please run /login", re.I)
@@ -540,7 +542,8 @@ def handle_dir(progress_dir):
         for p in pend:
             cid = p.get("chat_id")
             key = _dedup_key(cid, answer or ERROR_TEXT)
-            if key in dedup:
+            # marker mtime = the round's start; only a round already waiting when the line went out is covered
+            if key in dedup and (now - age) <= dedup[key]:
                 modes.append(drop_placeholder(tok, cid, p.get("message_id"), progress_dir))
                 continue
             mode = deliver(tok, cid, p.get("message_id"), answer, progress_dir)

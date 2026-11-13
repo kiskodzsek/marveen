@@ -374,6 +374,35 @@ def owner_active_unreadable_ledger_fails_open(r):
     return rc == 0 and read(os.path.join(r['prod'], 'app.py')) == 'v2\n'
 
 
+
+def run_no_main_id(r, extra, *args):
+    """Like run_env, but MAIN_AGENT_ID is removed from the environment (the .env path is under test)."""
+    env = {k: v for k, v in dict(ENV, **extra).items() if k != 'MAIN_AGENT_ID'}
+    full = [sys.executable, '-I', SCRIPT, '--root', r['prod'], '--update-cmd', f'bash {r["fake"]}', *args]
+    p = subprocess.run(full, env=env, capture_output=True, text=True, timeout=60)
+    return p.returncode, p.stdout, p.stderr
+
+
+@case
+def owner_active_main_id_from_env_file_export_form(r):
+    """Viktor 40106 L2a: `export MAIN_AGENT_ID=...` in <root>/.env is honoured (synthetic fixture file)."""
+    push_upstream(r, {'app.py': 'v2\n'})
+    write(os.path.join(r['prod'], '.env'), 'OTHER=1\nexport MAIN_AGENT_ID="boss"  # main\n')
+    db = ledger(r, [('boss', 'in', 60)])
+    rc, out, _ = run_no_main_id(r, {'LEDGER_DB_PATH': db}, '--apply')
+    return rc == 3 and 'OWNER-AKTÍV' in out and read(os.path.join(r['prod'], 'app.py')) == 'v1\n'
+
+
+@case
+def owner_active_missing_main_id_fails_open_loudly(r):
+    """Viktor 40106 L2a: no MAIN_AGENT_ID anywhere -> no hold, but a stderr line says the check was skipped."""
+    push_upstream(r, {'app.py': 'v2\n'})
+    db = ledger(r, [('marveen', 'in', 60), ('boss', 'in', 60)])
+    rc, _, err = run_no_main_id(r, {'LEDGER_DB_PATH': db}, '--apply')
+    return (rc == 0 and 'fail open' in err and 'MAIN_AGENT_ID' in err
+            and read(os.path.join(r['prod'], 'app.py')) == 'v2\n')
+
+
 def main():
     failed = 0
     for fn in CASES:

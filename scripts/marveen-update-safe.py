@@ -444,7 +444,8 @@ def _apply(root, up, actions, update_cmd, sig):
 # signal and the same 15 minutes as the dashboard's scheduled-prompt deferral (src/web/owner-activity.ts). The
 # override is --owner-active-ok "<reason>" (an outage fix that cannot wait). CHECK mode only reports it.
 # Fails OPEN (no hold) when the ledger cannot be read: a missing or broken ledger must not block every update.
-# Test seams: LEDGER_DB_PATH (default <root>/store/claudeclaw.db), MAIN_AGENT_ID (default: <root>/.env, then marveen).
+# Test seams: LEDGER_DB_PATH (default <root>/store/claudeclaw.db), MAIN_AGENT_ID (default: <root>/.env, plain or
+# `export` form; set nowhere -> no hold, with a stderr line).
 OWNER_ACTIVE_WINDOW_SEC = 15 * 60
 OWNER_ACTIVE_OK_MIN = 8
 OWNER_ACTIVE_EXIT = 3
@@ -456,19 +457,29 @@ OWNER_ACTIVE_REASON = (
 
 
 def _main_agent_id(root):
+    """MAIN_AGENT_ID from the environment, else from <root>/.env (plain or `export` form; only that one line is
+    parsed, nothing else is kept). None when it is set nowhere -- the caller fails open and SAYS so (Viktor 40106
+    L2a: a silent default id would read an empty ledger and turn the hold off without a trace)."""
     v = (os.environ.get('MAIN_AGENT_ID') or '').strip()
     if v:
         return v
     try:
         with open(os.path.join(root, '.env'), encoding='utf-8') as fh:
             for line in fh:
+                line = line.strip()
+                if line.startswith('export '):
+                    line = line[len('export '):].lstrip()
                 if line.startswith('MAIN_AGENT_ID='):
-                    v = line.split('=', 1)[1].strip().strip('"\'')
+                    v = line.split('=', 1)[1].split('#', 1)[0].strip().strip('"\'')
                     if v:
                         return v
     except OSError:
         pass
-    return 'marveen'
+    return None
+
+
+def _hold_warn(msg):
+    print(f'OWNER-AKTIV check skipped (fail open): {msg}', file=sys.stderr)
 
 
 def owner_active_minutes(root, now=None):
@@ -478,14 +489,19 @@ def owner_active_minutes(root, now=None):
     db = os.environ.get('LEDGER_DB_PATH') or os.path.join(root, 'store', 'claudeclaw.db')
     if not os.path.isfile(db):
         return None
+    agent = _main_agent_id(root)
+    if not agent:
+        _hold_warn('MAIN_AGENT_ID is set neither in the environment nor in <root>/.env')
+        return None
     try:
         con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=5)
         try:
             row = con.execute("SELECT MAX(created_at) FROM conversation_log WHERE agent_id = ? AND direction = 'in'",
-                              (_main_agent_id(root),)).fetchone()
+                              (agent,)).fetchone()
         finally:
             con.close()
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        _hold_warn(f'ledger unreadable ({type(e).__name__})')
         return None
     last = row[0] if row else None
     if last is None:

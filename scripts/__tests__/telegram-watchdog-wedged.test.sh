@@ -309,11 +309,38 @@ assert_eq "all six placeholders removed" "6" "$(count deleteMessage)"
 assert_eq "state file removed" "no" "$(pend_exists "$PK")"
 
 echo ""
-echo "(l) Cross-run dedup: the same line to the same chat within 10 min is not repeated"
-PL="$(make_api_case wk flag 1000 "P")"   # same agent dir -> same dedup state
+echo "(l) Cross-run dedup: a round that was ALREADY waiting when the line went out is not answered twice"
+PL="$(make_api_case wk flag 1000 "P")"   # same agent dir -> same dedup state; started 1000s ago, before (k)'s send
 run_wd 1 1
 assert_eq "no second send to the same chat" "0" "$(count sendMessage)"
 assert_eq "its placeholder is still removed" "1" "$(count deleteMessage)"
+
+# Viktor 40106 L1: a question asked AFTER the line went out (Patrik retrying) must get its own message,
+# even inside the 10-min window. Fixture: the line went to chat P 300s ago; the new round started 60s ago.
+set_dedup() { # agent_name seconds_ago
+    python3 - "$WATCHDOG" "$TMP/root/agents/$1/.claude/channels/telegram/progress" "$2" <<'PY2'
+import importlib.util, json, os, sys, time
+spec = importlib.util.spec_from_file_location("wd", sys.argv[1]); wd = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wd)
+with open(os.path.join(sys.argv[2], wd.DEDUP_FILE), "w") as f:
+    json.dump({wd._dedup_key("P", wd.API_ERROR_TEXT): time.time() - int(sys.argv[3])}, f)
+PY2
+}
+echo ""
+echo "(l2) NEGATIVE for the dedup: a round started AFTER the delivery, within 10 min -> its own message"
+PL2="$(make_api_case wl flag 60 "P")"
+set_dedup wl 300
+run_wd 1 900
+assert_eq "the retry gets one send" "1" "$(count sendMessage)"
+assert_eq "it is the Hungarian line" "yes" "$(body_has "Claude-szolg")"
+
+echo ""
+echo "(l3) Control: same window, but the round started BEFORE the delivery -> swallowed"
+PL3="$(make_api_case wl3 flag 400 "P")"
+set_dedup wl3 300
+run_wd 1 900
+assert_eq "no send for a round that the earlier line already answered" "0" "$(count sendMessage)"
+assert_eq "placeholder removed" "1" "$(count deleteMessage)"
 
 echo ""
 echo "(m) Older format (no isApiErrorMessage flag): the chrome line is still not sent"
