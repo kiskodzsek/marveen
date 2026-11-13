@@ -7,10 +7,11 @@ An agent writes a mark with scripts/reply-mark.py right before it sends; a gate 
   hook reply-marks-spend.py spends what that call held. PostToolUse runs only when the tool ran, so when another
   PreToolUse gate blocks the same reply (2026-11-13 18:30, claim-source-reply-gate), the mark is NOT spent and the
   corrected reply passes on it. Without a tool_use_id in the payload the gate spends at once, as before.
-- A hold by ANOTHER call keeps the mark from a second reply while that call may still be in flight: it is void only
-  when the session transcript already has that call's tool_result (a blocked or failed call, 2026-11-13 mérve: a
-  PreToolUse-blocked call gets an is_error tool_result) or when it is older than HOLD_MAX_S. An unreadable
-  transcript leaves it live (the reply blocks with "jelölj újra"; a new mark is a new nonce).
+- A hold by ANOTHER call keeps the mark from a second reply until it is spent: it is void only when the session
+  transcript has an is_error tool_result for that call (a blocked or failed call sent nothing; 2026-11-13 mérve: a
+  PreToolUse-blocked call gets an is_error tool_result) or when it is older than HOLD_MAX_S. A successful call's
+  tool_result does NOT free it (Viktor 41241 LOW 1: the harness may write it before PostToolUse spends). An
+  unreadable transcript leaves it live (the reply blocks with "jelölj újra"; a new mark is a new nonce).
 - Bound to the kind, the chat (as a number when it is one), and the agent that wrote it; 3 minutes to live.
 - Spending is atomic (flock on the ledger): two hooks running at once cannot both pass on one mark.
 - The ledger is store/reply-marks.jsonl of the install (REPLY_MARKS_PATH in tests): a regular file of our own uid,
@@ -54,24 +55,49 @@ def bind_call(payload):
         _call['transcript'] = tp if isinstance(tp, str) and tp else None
 
 
-def _call_finished(tid):
-    """True when the session transcript already holds a tool_result for call `tid` (it was blocked, failed or
-    done). Unreadable transcript = False (the hold stays live)."""
+def _call_failed(tid):
+    """True when the session transcript already holds an is_error tool_result for call `tid`: a PreToolUse gate blocked
+    it or the tool failed, so it sent nothing. A successful call's hold stays live until reply-marks-spend.py spends it
+    (or HOLD_MAX_S), whatever order the harness writes the tool_result and runs PostToolUse in (Viktor 41241 LOW 1);
+    and a spend hook that did not run leaves the mark spent-like, not free (LOW 2). Unreadable transcript, a FIFO or
+    any non-regular file = False (the hold stays live)."""
     if _call['done'] is None:
         data = b''
         tp = _call['transcript']
         if tp:
             try:
-                with open(tp, 'rb') as f:
-                    f.seek(0, os.SEEK_END)
-                    size = f.tell()
-                    f.seek(max(0, size - TRANSCRIPT_TAIL_BYTES))
-                    data = f.read()
+                fd = os.open(tp, os.O_RDONLY | os.O_NONBLOCK | getattr(os, 'O_NOFOLLOW', 0))
+                try:
+                    st = os.fstat(fd)
+                    if stat.S_ISREG(st.st_mode):
+                        os.lseek(fd, max(0, st.st_size - TRANSCRIPT_TAIL_BYTES), os.SEEK_SET)
+                        chunks = []
+                        while True:
+                            b = os.read(fd, 1 << 20)
+                            if not b:
+                                break
+                            chunks.append(b)
+                        data = b''.join(chunks)
+                finally:
+                    os.close(fd)
             except OSError:
                 data = b''
         _call['done'] = data
-    t = tid.encode('ascii')
-    return (b'"tool_use_id":"' + t + b'"') in _call['done'] or (b'"tool_use_id": "' + t + b'"') in _call['done']
+    needle = b'"tool_use_id":"' + tid.encode('ascii') + b'"'
+    for line in _call['done'].split(b'\n'):
+        if needle not in line:
+            continue
+        try:
+            ev = json.loads(line.decode('utf-8'))
+        except ValueError:
+            continue
+        msg = ev.get('message') if isinstance(ev, dict) else None
+        content = msg.get('content') if isinstance(msg, dict) else None
+        for b in content if isinstance(content, list) else ():
+            if (isinstance(b, dict) and b.get('type') == 'tool_result' and b.get('tool_use_id') == tid
+                    and b.get('is_error') is True):
+                return True
+    return False
 
 
 def _taken(rows, now):
@@ -81,7 +107,7 @@ def _taken(rows, now):
         h, c, ts = r.get('hold'), r.get('call'), r.get('ts')
         if not isinstance(h, str) or not isinstance(c, str) or c == _call['id']:
             continue
-        if isinstance(ts, int) and 0 <= now - ts <= HOLD_MAX_S and _CALL_ID.fullmatch(c) and not _call_finished(c):
+        if isinstance(ts, int) and 0 <= now - ts <= HOLD_MAX_S and _CALL_ID.fullmatch(c) and not _call_failed(c):
             out.add(h)
     return out
 

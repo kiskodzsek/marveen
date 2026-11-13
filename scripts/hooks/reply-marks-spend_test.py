@@ -126,6 +126,47 @@ class SpendAfterSend(Base):
         self.assertEqual(self.pre('toolu_A'), 0)
         self.assertEqual(self.pre('toolu_B'), 2)
 
+    def succeeded(self, call, is_error=None):
+        block = {'type': 'tool_result', 'tool_use_id': call, 'content': 'sent'}
+        if is_error is not None:
+            block['is_error'] = is_error
+        row = {'type': 'user', 'message': {'role': 'user', 'content': [block]}}
+        with open(self.transcript, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(row, separators=(',', ':')) + '\n')
+
+    def test_neg_a_successful_calls_result_does_not_free_its_hold(self):
+        # Viktor 41241 LOW 1 / INFO 3: the harness may write the tool_result before PostToolUse spends the mark; a
+        # successful call sent the message, so its hold stays live until spent.
+        self.mark()
+        self.assertEqual(self.pre('toolu_A'), 0)
+        self.succeeded('toolu_A')
+        self.assertEqual(self.pre('toolu_B'), 2)
+        self.succeeded('toolu_A', is_error=False)
+        self.assertEqual(self.pre('toolu_B'), 2)
+
+    def test_neg_spend_hook_that_never_ran_keeps_the_mark_spent_like(self):
+        # Viktor 41241 LOW 2: the reply went out, PostToolUse did not run: the mark is not free again.
+        self.mark()
+        self.assertEqual(self.pre('toolu_A'), 0)
+        self.succeeded('toolu_A')
+        self.log('out')
+        self.assertEqual(self.pre('toolu_B', 'És még ez.'), 2)
+
+    def test_neg_fifo_transcript_does_not_hang_and_keeps_the_hold(self):
+        self.mark()
+        self.assertEqual(self.pre('toolu_A'), 0)
+        os.remove(self.transcript)
+        os.mkfifo(self.transcript)
+        self.assertEqual(self.pre('toolu_B'), 2)
+
+    def test_bad_hold_rows_neither_crash_nor_block(self):
+        nonce = self.mark()
+        with open(self.marks, 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'hold': nonce, 'call': 'toolu_X', 'ts': 'now'}) + '\n')
+            f.write(json.dumps({'hold': nonce, 'call': 'töölu_Y', 'ts': int(time.time())}, ensure_ascii=False) + '\n')
+        self.assertEqual(self.pre('toolu_B'), 0)
+        self.assertEqual(reply_marks.spend_held('töölu_Y'), 0)
+
     def test_neg_unreadable_transcript_keeps_the_hold_live(self):
         self.mark()
         self.assertEqual(self.pre('toolu_A'), 0)
