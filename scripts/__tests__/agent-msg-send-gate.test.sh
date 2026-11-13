@@ -10,6 +10,9 @@
 # Retro R5 (card 858f80bc): a klodel work order on a Patrik TG is refused without a KERES-SZO-SZERINT line whose
 # quote is in that inbound TG message of a synthetic ledger, and without IGEN: TG m when the source is an idea.
 #
+# Retro R10 (card 1f943050): a shared/**.md file Radar delivers (a delivery word on the path's line) must pass
+# scripts/lib/hiany_lint.py; a mention, a negated delivery, another sender pass; the lint missing is exit 4.
+#
 # Run:  bash scripts/__tests__/agent-msg-send-gate.test.sh
 set -uo pipefail
 
@@ -490,6 +493,71 @@ ok "keres: the ledger missing when the rule fires: exit 4, no POST" "$([ "$RC" =
 text 'Kész a riport.'
 GATE_ENV="MARVEEN_MSG_GATE_LEDGER=$SANDBOX/nonexistent.db" run klodel dave
 ok "keres: the ledger missing when the rule does not fire: sent" "$(sent)" "rc=$RC posts=$POSTS"
+
+# --- retro R10 (card 1f943050): a shared file Radar DELIVERS must pass scripts/lib/hiany_lint.py ---
+HR="$SANDBOX/root"; mkdir -p "$HR/shared/k"
+printf 'Nyitott felhívás: NINCS ADAT\n' > "$HR/shared/k/bad.md"
+printf -- '- eMAG: NINCS ADAT, 410 botvédelem (emag.hu, 11-13)\n' > "$HR/shared/k/good.md"
+printf 'Ilyen itthon nincs.\n' > "$HR/shared/k/itthon.md"
+HROOT="MARVEEN_HIANY_ROOT=$HR"
+text 'KÉSZ: shared/k/bad.md, a 3. pont kész.'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a delivered file with a bare NINCS ADAT: refused" "$(refused)" "rc=$RC posts=$POSTS"
+ok "hiany: the refusal names the file and R10b" "$(grep -q 'shared/k/bad.md' "$SANDBOX/err" && grep -q 'R10b' "$SANDBOX/err" && echo 0 || echo 1)"
+text 'Leadva: /Users/klodel/marveen/shared/k/itthon.md'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: an absolute path, an absence claim without ITTHON-MERT: refused (R10a)" "$(refused)" "rc=$RC posts=$POSTS"
+ok "hiany: the refusal says R10a" "$(grep -q 'R10a' "$SANDBOX/err" && echo 0 || echo 1)"
+text 'KÉSZ: shared/k/good.md (forrás a soron).'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a delivered file that passes the lint: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Dave riportja (shared/k/bad.md) alapján dolgozom, a saját anyagom holnap.'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a mere mention of a file, no delivery word: sent (Radar 41293)" "$(sent)" "rc=$RC posts=$POSTS"
+text 'A shared/k/bad.md még nem kész, parkolva.'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: \"még nem kész\" is not a delivery: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Kész.
+Háttér: shared/k/bad.md'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: the delivery word on another line than the path: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'KÉSZ: shared/k/nincs-ilyen.md'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a delivered file that does not exist: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'KÉSZ: shared/../../etc/x.md'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a path that leaves shared/: refused" "$(refused)" "rc=$RC posts=$POSTS"
+printf 'Semmi hiány.\n' > "$HR/outside.md"
+text 'KÉSZ: shared/../outside.md'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a clean, existing file outside shared/ (via ..): refused" "$(refused)" "rc=$RC posts=$POSTS"
+# Viktor 41461 INFO 4: a symlink inside shared/ that resolves to a sibling "shared-evil/" (prefix without separator)
+# or out of the install (abspath instead of realpath) is refused
+mkdir -p "$HR/shared-evil" "$SANDBOX/out"; printf 'Semmi hiány.\n' > "$HR/shared-evil/x.md"; printf 'Semmi hiány.\n' > "$SANDBOX/out/y.md"
+ln -s "$HR/shared-evil/x.md" "$HR/shared/k/evil.md"; ln -s "$SANDBOX/out/y.md" "$HR/shared/k/out.md"
+text 'KÉSZ: shared/k/evil.md'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a symlink in shared/ to a sibling shared-evil/: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'KÉSZ: shared/k/out.md'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a symlink in shared/ out of the install: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# Viktor 41461 LOW 3: a long run of "shared/" without a blank stays linear
+python3 -c 'import sys; sys.stdout.write("kész " + "shared/" * 20000)' > "$SANDBOX/text"
+T0=$(python3 -c 'import time; print(time.time())')
+GATE_ENV="$HROOT" run radar klodel
+T1=$(python3 -c 'import time; print(time.time())')
+ok "hiany: 140 KB of shared/ on a delivery line finishes within 2 s" "$([ "$(python3 -c "print(int($T1 - $T0 < 2))")" = 1 ] && echo 0 || echo 1)" "secs=$(python3 -c "print(round($T1 - $T0, 2))")"
+text 'KÉSZ: shared/k/bad.md'
+GATE_ENV="$HROOT" run kernel klodel
+ok "hiany: only radar's deliveries are linted (kernel): sent" "$(sent)" "rc=$RC posts=$POSTS"
+# the lint missing next to the gate: exit 4, nothing sent (never a silent pass)
+mkdir -p "$SANDBOX/gate-only"; cp "$GATE" "$SANDBOX/gate-only/msg_gate.py"
+text 'KÉSZ: shared/k/good.md'
+GATE_ENV="$HROOT MARVEEN_MSG_GATE_BIN=$SANDBOX/gate-only/msg_gate.py MARVEEN_MSG_GATE_SECRET_SRC=$ROOT/src/security/secret-gate.ts" run radar klodel
+ok "hiany: the lint missing when the rule fires: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+text 'Kész a heti összefoglaló, nincs fájl.'
+GATE_ENV="$HROOT MARVEEN_MSG_GATE_BIN=$SANDBOX/gate-only/msg_gate.py MARVEEN_MSG_GATE_SECRET_SRC=$ROOT/src/security/secret-gate.ts" run radar klodel
+ok "hiany: the lint missing, no delivered file: sent" "$(sent)" "rc=$RC posts=$POSTS"
 
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."
