@@ -238,6 +238,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c '[ -f {{PROJECT_ROOT}}/scripts/hooks/count-claim-gate.py ] && exec python3 {{PROJECT_ROOT}}/scripts/hooks/count-claim-gate.py; exit 0'",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "Stop": [

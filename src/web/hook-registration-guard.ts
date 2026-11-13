@@ -60,6 +60,8 @@ export const KNOWN_HOOK_SCRIPTS: readonly string[] = [
   'time-claim-gate.py',
   // Klodel 39791: no direct marveen-update-safe.py --apply; only through the approval gate.
   'update-apply-gate.py',
+  // Klodel 39869: a count or an id in Kernel's message / card comment needs a MÉRVE: line (opt-in per agent).
+  'count-claim-gate.py',
   // The /clear continuity pair: SessionEnd capture + SessionStart replay.
   'clear-capture.py',
   'clear-replay.py',
