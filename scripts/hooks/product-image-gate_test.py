@@ -2826,6 +2826,15 @@ def elo_ok_component_list_passes(root):
     return mod.elo_check(fp, 'ok BabyMomentsView,MomentScreen') is None
 
 
+
+@case
+def elo_ok_name_only_outside_live_lines_blocked(root):
+    # Viktor 41311 INFO 7: a name that appears in the stamp only outside an "ÉLŐ <name> <-" line is not measured
+    body = ('EREDMENY: ELO\nORIGIN_MAIN: abc1234\nORIGIN_URL: https://x/BabyTellHome.git\n'
+            'ÉLŐ      BabyMomentsView <- src/app/x/page.tsx BabyTellHome\n')
+    mod, fp = elo_setup(root, body)
+    return 'BabyTellHome' in (mod.elo_check(fp, 'ok BabyMomentsView,BabyTellHome') or '')
+
 @case
 def elo_marketing_video_without_line_blocked(root):
     # the whole check() on the passing marketing video fixture, with the ELO line taken out

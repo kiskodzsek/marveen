@@ -64,6 +64,11 @@ ARRAY_SPECIAL = {'@', '*', 'argv', 'path', 'fpath', 'cdpath', 'manpath', 'mailpa
 KEYWORDS = {'if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', '!', '{', '}', 'time', 'coproc',
             'esac', 'case'}
 XARGS_VALUE_OPTS = {'-I', '-n', '-P', '-L', '-s', '-E', '-d', '-J', '-R', '-a'}
+# Viktor 41322 INFO 5: GNU long options whose required value may stand in the next word ("--max-args 1")
+XARGS_VALUE_OPTS |= {'--max-args', '--max-procs', '--max-lines', '--max-chars', '--delimiter', '--arg-file',
+                     '--process-slot-var'}
+# Viktor 41371 INFO 2: BSD xargs -S replsize takes its value in the next word
+XARGS_VALUE_OPTS.add('-S')
 PRECMD = {'sudo', 'command', 'builtin', 'exec', 'nocorrect', 'noglob', 'nohup', 'env', 'nice', 'caffeinate'}
 DECLARERS = {'typeset', 'local', 'declare', 'export', 'readonly', 'integer', 'float'}
 OPERATORS = [';;', ';&', ';|', '&&', '||', '|&', '&!', '&|', ';', '|', '&']
