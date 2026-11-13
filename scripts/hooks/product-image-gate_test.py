@@ -45,6 +45,9 @@ def as_marks(root, tool_input, agent):
     return ti
 
 
+# Retro R4 (card 686f1b5f): every marketing fixture states that it shows no app screen.
+ELO_NINCS = 'ELO: nincs-app-ui teszt-kép, csak könyv és szöveg látszik'
+
 def run(root, tool_input, raw=False):
     # LEDGER_DB_PATH points at a file that does not exist: the live ledger never decides a case (card 9df14a4c).
     env = {'PATH': '/usr/bin:/bin', 'CLAUDE_PROJECT_DIR': root, 'MARVEEN_OWNER_PRIVATE_CHAT': PRIV,
@@ -645,7 +648,7 @@ def caption_check(root, caption):
     cap = os.path.join(root, 'posztszoveg.txt')
     open(cap, 'w', encoding='utf-8').write(caption)
     lines = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
-             'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
+             'NAGYITVA: -', 'MAJSZTRO: MEHET 1', ELO_NINCS, 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
              'MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)', f'FEED: ok {sheet}', f'POSZTSZOVEG: {cap}',
              SAV_9X16_OK]
     mod.media_size = lambda _fp: (1080, 1920)  # the video here is a 1-byte stub; the safe band has its own cases
@@ -893,6 +896,7 @@ def marketing_image_still_needs_marka(root):
     mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
     mod.majsztro_ok = lambda _value: None
     mod.izles_ref = lambda _fp, _value: None  # IZLES-REF has its own cases (izles_*)
+    mod.elo_check = lambda _fp, _value: None  # ELO has its own cases (elo_*)
     return 'MARKA sor hiányzik' in (mod.check(img) or '')
 
 
@@ -913,7 +917,7 @@ def caption_check_setup(root, marka=True):
     body = mod.caption_body(ELSO_EVED_CAPTION)
     mod.urllib.request.urlopen = lambda req, timeout=5: FakeResponse({'from_agent': 'majsztro', 'content': ' '.join(body)})
     lines = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
-             'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
+             'NAGYITVA: -', 'MAJSZTRO: MEHET 1', ELO_NINCS, 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
              f'FEED: ok {sheet}', f'POSZTSZOVEG: {cap}', SAV_9X16_OK]
     mod.media_size = lambda _fp: (1080, 1920)  # the video here is a 1-byte stub; the safe band has its own cases
     if marka:
@@ -999,7 +1003,7 @@ def sav_check(root, w, h, sav, name='poszt.png'):
     else:
         open(img, 'wb').write(b'\x89PNG')  # not measurable
     lines = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
-             'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
+             'NAGYITVA: -', 'MAJSZTRO: MEHET 1', ELO_NINCS, 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év',
              'MARKA: logó + marabel.hu látható a képen (jobb alsó sarok)']
     if sav is not None:
         lines.append(f'SAV: {sav}')
@@ -1194,7 +1198,7 @@ def sav_real_video_measured_with_ffprobe(root):
     if mod.media_size(video) != (1080, 1920):
         return False
     base = ['KONYV: nincs', 'A5: nincs-konyv', 'PAPIR: nincs-konyv', 'SAJAT: nincs-konyv', 'KERES: teszt kérés, egyezik',
-            'NAGYITVA: -', 'MAJSZTRO: MEHET 1', 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év']
+            'NAGYITVA: -', 'MAJSZTRO: MEHET 1', ELO_NINCS, 'UZENET: friss szülők, akik fotóznak | most kezdődik az első év']
     results = []
     for sav in ('9x16 felso 269 also 672 430-1240', '9x16 felso 269 also 672 430-1700'):
         okf = os.path.join(mod.KAPU, 'reel.mp4.ok')
@@ -2727,6 +2731,118 @@ def group_command_not_this_gate(root):
     # The command gate is for the owner's private chat only.
     rc, err = run(root, {'chat_id': GROUP, 'text': 'sudo ls && echo ok'})
     return 'PARANCS-KAPU' not in err
+
+
+# ELO (retro R4, card 686f1b5f; Lex 41089, Klodel 41172): an app screen on a marketing piece is a live customer surface.
+def elo_setup(root, stamp_body=None, age_s=0):
+    mod = gate_module()
+    mod.ROOT = root
+    mod.KAPU = os.path.join(root, 'store', 'kep-kapu')
+    os.makedirs(mod.KAPU, exist_ok=True)
+    fp = os.path.join(root, 'reel.mp4')
+    open(fp, 'wb').write(b'\x00')
+    if stamp_body is not None:
+        st = os.path.join(mod.KAPU, 'reel.mp4.elo')
+        open(st, 'w', encoding='utf-8').write(stamp_body)
+        t = time.time() - age_s
+        os.utime(st, (t, t))
+    return mod, fp
+
+
+ELO_GREEN = 'EREDMENY: ELO\nORIGIN_MAIN: abc1234\nMERVE: 2026-11-13 19:40:00\nÉLŐ      BabyMomentsView <- src/app/x/page.tsx\n'
+
+
+@case
+def elo_missing_line_blocked(root):
+    mod, fp = elo_setup(root)
+    return 'ELO sor hiányzik' in (mod.elo_check(fp, None) or '')
+
+
+@case
+def elo_nincs_app_ui_with_reason_passes(root):
+    mod, fp = elo_setup(root)
+    return mod.elo_check(fp, 'nincs-app-ui könyv kézben, nincs képernyő') is None
+
+
+@case
+def elo_nincs_app_ui_without_reason_blocked(root):
+    mod, fp = elo_setup(root)
+    return 'mi látszik' in (mod.elo_check(fp, 'nincs-app-ui') or '')
+
+
+@case
+def elo_free_text_blocked(root):
+    # the r4-G case: a hand-written "valódi felület" is not a measurement
+    mod, fp = elo_setup(root)
+    return 'ELO sor hibás' in (mod.elo_check(fp, 'valódi felület') or '')
+
+
+@case
+def elo_ok_without_stamp_blocked(root):
+    mod, fp = elo_setup(root)
+    return 'nincs bélyeg' in (mod.elo_check(fp, 'ok BabyMomentsView') or '')
+
+
+@case
+def elo_ok_green_stamp_passes(root):
+    mod, fp = elo_setup(root, ELO_GREEN)
+    return mod.elo_check(fp, 'ok BabyMomentsView') is None
+
+
+@case
+def elo_ok_red_stamp_blocked(root):
+    mod, fp = elo_setup(root, ELO_GREEN + 'NEM ÉLŐ  BabyTellHome (csak az app-preview-ban vagy sehol)\n')
+    return 'nem zöld' in (mod.elo_check(fp, 'ok BabyMomentsView') or '')
+
+
+@case
+def elo_ok_stamp_without_result_blocked(root):
+    mod, fp = elo_setup(root, 'ÉLŐ      X <- y\n')
+    return 'nem zöld' in (mod.elo_check(fp, 'ok BabyMomentsView') or '')
+
+
+@case
+def elo_ok_old_stamp_blocked(root):
+    mod, fp = elo_setup(root, ELO_GREEN, age_s=8 * 86400)
+    return '7 napnál régebbi' in (mod.elo_check(fp, 'ok BabyMomentsView') or '')
+
+
+@case
+def elo_ok_without_components_blocked(root):
+    mod, fp = elo_setup(root, ELO_GREEN)
+    return 'komponenseit' in (mod.elo_check(fp, 'ok') or '')
+
+
+@case
+def elo_ok_component_not_in_stamp_blocked(root):
+    mod, fp = elo_setup(root, ELO_GREEN)
+    return 'BabyTellHome' in (mod.elo_check(fp, 'ok BabyMomentsView, BabyTellHome') or '')
+
+
+@case
+def elo_ok_component_list_passes(root):
+    mod, fp = elo_setup(root, ELO_GREEN + 'ÉLŐ      MomentScreen <- src/app/y/page.tsx\n')
+    return mod.elo_check(fp, 'ok BabyMomentsView,MomentScreen') is None
+
+
+@case
+def elo_marketing_video_without_line_blocked(root):
+    # the whole check() on the passing marketing video fixture, with the ELO line taken out
+    mod = caption_check_setup(root)
+    mod.run_ocr = lambda fp, budget: {0: 'marabel.hu', 1: 'marabel.hu'}
+    okf = os.path.join(mod.KAPU, 'short.mp4.ok')
+    body = ''.join(l for l in open(okf, encoding='utf-8') if not l.startswith('ELO:'))
+    open(okf, 'w', encoding='utf-8').write(body)
+    later = time.time() + 5
+    os.utime(okf, (later, later))
+    return 'ELO sor hiányzik' in (mod.check(os.path.join(root, 'short.mp4')) or '')
+
+
+@case
+def elo_not_asked_on_non_marketing(root):
+    img = book_fixture(root, KEPES_OK)
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'x', 'files': [img]})
+    return rc == 0 and 'ELO' not in err
 
 
 def main():
