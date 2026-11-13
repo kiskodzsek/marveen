@@ -69,6 +69,7 @@ rows = [
     ('111', '18060', 'in', 'Esetleg csináld meg a borítót.', 9000),
     ('111', '18061', 'in', 'Szerintem a gomb legyen piros.', 9100),
     ('111', '18062', 'in', 'Mi van, ha kékre festjük a hátteret.', 9200),
+    ('111', '18063', 'in', 'Mi van ha zöld lesz a háttér.', 9300),
 ]
 con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
                 "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
@@ -469,12 +470,16 @@ KERES-SZO-SZERINT: \"Megcsinálod a borítót holnapra\" (TG 18050)"
 run klodel dave
 ok "keres: a plain question (\"?\" only, no idea word) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
 # Viktor 41430 INFO 4: esetleg / szerintem / mi van ha are idea marks too
-for q in 'Esetleg csináld meg a borítót (TG 18060)' 'Szerintem a gomb legyen piros (TG 18061)' \
-         'kékre festjük a hátteret (TG 18062)'; do
+# (each quote is also sent with its IGEN, so a refusal for any other reason would show)
+for pair in '18060|Esetleg csináld meg a borítót' '18061|Szerintem a gomb legyen piros' \
+            '18062|Mi van, ha kékre festjük a hátteret' '18062|kékre festjük a hátteret' \
+            '18063|zöld lesz a háttér'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
   text "$WO
-KERES-SZO-SZERINT: \"${q% (TG*}\" (TG ${q##*TG })"
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
   run klodel dave
-  ok "keres: idea mark in \"${q% (TG*}\" without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres: idea mark, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres: the refusal is the IGEN one" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
 done
 # Viktor 41430 INFO 1: a ledger path with ? # % keeps mode=ro and opens the right file; the connection is read-only
 mkdir -p "$SANDBOX/a?b#c%d" && cp "$SANDBOX/ledger.db" "$SANDBOX/a?b#c%d/ledger.db"
