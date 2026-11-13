@@ -164,6 +164,26 @@ def NEG_a_new_message_post_is_still_judged(root):
             "--data-binary @- <<'JSON'\n{\"from\":\"kernel\",\"to\":\"klodel\",\"content\":\"29 új blokk\"}\nJSON")
     return run(root, post)[0] == 2
 
+@case
+def NEG_query_slash_and_escaped_result_forms_are_judged(root):
+    # Viktor 40140 LOW: these passed the first version of the narrowing (rc 0) and were blocked on main.
+    body = " -H 'Content-Type: application/json' --data-binary @- <<'JSON'\n{\"content\":\"29 új blokk\"}\nJSON"
+    esc = ('curl -s -X PUT http://localhost:3420/api/messages/39858 -H "Content-Type: application/json" '
+           '-d "{\\"status\\":\\"done\\",\\"result\\":\\"963 komment\\"}"')
+    return (run(root, 'curl -s -X POST "http://localhost:3420/api/messages?x=1"' + body)[0] == 2
+            and run(root, 'curl -s -X POST "localhost:3420/api/messages?"' + body)[0] == 2
+            and run(root, 'curl -s -X POST http://localhost:3420/api/messages/' + body)[0] == 2
+            and run(root, 'curl -s -X POST http://localhost:3420/api/messages//' + body)[0] == 2
+            and run(root, esc)[0] == 2
+            and run(root, CLOSE + "{'status':'done','result':'963 komment'}\nJSON")[0] == 2)
+
+
+@case
+def list_reads_with_trailing_slash_or_query_still_pass(root):
+    return (run(root, "curl -s -H 'Authorization: Bearer x' 'http://localhost:3420/api/messages/?agent=kernel' # 40050")[0] == 0
+            and run(root, LIST + ' | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" # 963 db')[0] == 0)
+
+
 def main():
     failed = 0
     for fn in CASES:

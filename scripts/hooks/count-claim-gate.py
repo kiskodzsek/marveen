@@ -18,6 +18,8 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     READ-ONLY (Klodel 39980, measured 2026-11-13: three blocks of Kernel's own calls in one morning): a GET of
     /api/messages/<id> or /api/messages?..., and a status-only PUT /api/messages/<id> ({"status":"done"}) carry no
     claim to anyone; the id in their URL or in the script that loops over them is an address, not a claim.
+    A /api/messages? or /api/messages/ (no id) call counts as a read only when the command shows no write
+    (-X POST/PUT/PATCH, -d, --data*, --json, a heredoc or < redirect, method=/data= in inline code): Viktor 40140.
   - Judged, each on its own (a MÉRVE: line covers the text it stands in): the command text (heredoc / -d payload) and a --data-binary @file, --data @file, -d @file or
     `< file` body when it is a regular file of at most 64 KB. A literal "\\n" (a JSON string's line break) counts
     as a line break.
@@ -50,8 +52,14 @@ AGENTS = {
 }
 SEND_RX = re.compile(r'(?<![\w-])(?:[a-z]+-msg|msg-close)\.sh(?![\w-])|/api/messages(?![\w/?-])')
 # /api/messages/<id> (or a template like /api/messages/{i}): a send only when a result is written (close + notify).
-MSG_ITEM_RX = re.compile(r'/api/messages/')
-RESULT_KEY_RX = re.compile(r'[\'"]result[\'"][ \t]*:')
+MSG_ITEM_RX = re.compile(r'/api/messages/+[\d{$<]')
+# The key in any quoting, also shell-escaped (-d "{\"result\":...}"): Viktor 40140 LOW (a).
+RESULT_KEY_RX = re.compile(r'[\\\'"]+result[\\\'"]+[ \t]*:')
+# /api/messages? or /api/messages/ with no id after it: a read (a list) UNLESS the command writes; a write there is
+# judged like a bare POST (Viktor 40140 LOW (b): the read is what has to be shown, not the missing write).
+MSG_OTHER_RX = re.compile(r'/api/messages(?:\?|/+(?![\d{$<]))')
+WRITE_RX = re.compile(r'(?:-X|--request)[ \t]*[\'"]?(?:POST|PUT|PATCH)\b|(?<![\w-])(?:-d|--data[\w-]*|--json)(?![\w-])'
+                      r'|<<|(?<![<\d&])<(?![<(&])|method=[\'"]?(?:POST|PUT|PATCH)|\bdata=')
 CARD_RX = re.compile(r'/api/kanban/[^\s/\'"]+/comments')
 NOUNS = (r'db|darab|komment\w*|blokk\w*|sor(?:a|t|ok\w*|ból|ban|ra)?|üzenet\w*|kártyá?\w*|fájl\w*|eset\w*|'
          r'találat\w*|hibá?\w*|oldal\w*|PR\w*|commit\w*|teszt\w*|mutáns\w*|ügynök\w*')
@@ -128,7 +136,8 @@ def verdict(payload):
     cmd = ti.get('command') if isinstance(ti, dict) else None
     if not isinstance(cmd, str):
         return None
-    send = bool(SEND_RX.search(cmd) or CARD_RX.search(cmd))
+    send = bool(SEND_RX.search(cmd) or CARD_RX.search(cmd)
+                or (MSG_OTHER_RX.search(cmd) and WRITE_RX.search(cmd)))
     item = not send and bool(MSG_ITEM_RX.search(cmd))
     if not send and not item:
         return None
