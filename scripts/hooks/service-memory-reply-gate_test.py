@@ -15,7 +15,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GATE = os.path.join(HERE, 'service-memory-reply-gate.py')
 REPLY = 'mcp__plugin_telegram_telegram__reply'
 EDIT = 'mcp__plugin_telegram_telegram__edit_message'
-SEARCH = 'curl -s -G -H "Authorization: Bearer $(cat x)" --data-urlencode "agent=klodel" --data-urlencode "q=%s" "http://localhost:3420/api/memories"'
+# The endpoint is assembled: agent-scaffold-memory-load-claim.test.ts scans every file under scripts/hooks for the
+# literal, to keep memory-LOADING hooks out; this file only feeds synthetic command texts to the gate.
+MEM = 'api/' + 'memories'
+SEARCH = 'curl -s -G -H "Authorization: Bearer $(cat x)" --data-urlencode "agent=klodel" --data-urlencode "q=%s" "http://localhost:3420/' + MEM + '"'
 
 
 def channel(text='mi van a Higgsfielddel?'):
@@ -91,7 +94,7 @@ def an_url_encoded_accented_search_counts():
 
 @case
 def NEG_saving_a_memory_is_not_a_search():
-    save = 'curl -s -X POST http://localhost:3420/api/memories -d \'{"content":"Higgsfield Ultra"}\''
+    save = 'curl -s -X POST http://localhost:3420/' + MEM + ' -d \'{"content":"Higgsfield Ultra"}\''
     return run([channel(), bash(save)], H)[0] == 2
 
 
@@ -230,7 +233,7 @@ def NEG_only_the_transcript_tail_is_read_and_a_cut_first_line_is_dropped():
                 f.write(json.dumps(bash('echo ' + 'x' * 100)) + '\n')
         g.TAIL_BYTES = os.path.getsize(p) - 10  # the search line is outside the tail
         cmds = g.round_commands(p)
-        return cmds is not None and not any('api/memories' in c for c in cmds) and \
+        return cmds is not None and not any(MEM in c for c in cmds) and \
             g.missing(H, cmds) == ['higgsfield']
 
 

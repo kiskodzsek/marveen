@@ -92,6 +92,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of mea-culpa-reply-gate.py (run: python3 -I scripts/hooks/mea-culpa-reply-gate_test.py); not itself a hook',
   'mute-video-reply-gate_test.py':
     'the unit test of mute-video-reply-gate.py (run: python3 -I scripts/hooks/mute-video-reply-gate_test.py); not itself a hook',
+  'service-memory-reply-gate_test.py':
+    'the unit test of service-memory-reply-gate.py (run: python3 -I scripts/hooks/service-memory-reply-gate_test.py); not itself a hook',
   'render-claim-reply-gate_test.py':
     'the unit test of render-claim-reply-gate.py (run: python3 -I scripts/hooks/render-claim-reply-gate_test.py); not itself a hook',
   'product-image-gate_test.py':
@@ -180,6 +182,8 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'fleet-wide BY CONSTRUCTION, so one wiring already covers every agent: it resolves the repo root from its own file location, and watched() enumerates agents/*/CLAUDE.md and SOUL.md alongside the main pair. Seeding it per-agent would point every seeded session at the SAME store/.persona-hashes.json, and because the hook stamps the new digest BEFORE it sends, whichever session reaches it first silences the others -- the race can only LOSE an alert, so seeding would weaken the guard rather than extend it',
   'mea-culpa-reply-gate.py':
     'PreToolUse gate on the telegram reply/edit_message tool that guards replies to Patrik\'s own chats (store/projektek.json elo_uzenet privat/csoport; none known = every chat gated, fail-closed). Its docstring: "Wiring: .claude/settings.json PreToolUse ... (the main agent\'s settings; the sub-agents have their own)". Seeded, every sub-agent would be gated on Patrik\'s rule for the main agent (#141)',
+  'service-memory-reply-gate.py':
+    'PreToolUse gate on the MAIN agent\'s telegram reply (Klodel 40111, #241, Patrik TG 5750/5753): a known service named in a reply needs a dashboard-memory search in the same round, read from the session transcript. It passes every non-main agent itself (ledger_lib.agent_id_from_payload), so seeding it would only add a no-op; a fleet-wide rule is a separate decision',
   'render-claim-reply-gate.py':
     'PreToolUse gate on the telegram reply/edit_message tool that guards replies to Patrik\'s own chats: a render-state claim only on a fresh ops/video_export_status.py measurement of THIS machine (docstring: chats as mea-culpa-reply-gate.py). Main-agent rule from Klodel 35696 (#147); same seeding objection as mea-culpa-reply-gate.py',
   'claim-source-reply-gate.py':
