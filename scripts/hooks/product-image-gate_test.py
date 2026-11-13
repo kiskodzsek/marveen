@@ -2214,16 +2214,16 @@ def itthon_claims_from_the_ledger_detected(root):
 
 # Card 9df14a4c (Klodel 40009, Patrik csoport TG 5704: "most meg ide reagálsz arra az üzenetemre amit a másik
 # chatbe irtam"): where the owner wrote last decides. A throw-away conversation_log ledger, synthetic ids.
-def ledger(root, *chats, agent='main', age_s=0):
+def ledger(root, *chats, agent='main', age_s=0, texts=None):
     import sqlite3
     import time
     db = os.path.join(root, 'ledger.db')
     con = sqlite3.connect(db)
     con.execute('CREATE TABLE conversation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, '
                 'chat_id TEXT, direction TEXT, text TEXT, created_at INTEGER)')
-    for chat in chats:
+    for i, chat in enumerate(chats):
         con.execute("INSERT INTO conversation_log (agent_id, chat_id, direction, text, created_at) "
-                    "VALUES (?, ?, 'in', 'x', ?)", (agent, chat, int(time.time()) - age_s))
+                    "VALUES (?, ?, 'in', ?, ?)", (agent, chat, (texts or {}).get(i, 'x'), int(time.time()) - age_s))
     con.commit()
     con.close()
     return db
@@ -2261,6 +2261,35 @@ def NEG_latest_private_group_reply_noncanonical_group_config_blocked(root):
         sub = tempfile.mkdtemp(dir=root)
         db = ledger(sub, GROUP, PRIV)
         rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Rendben, megnézem.'}, group_env=cfg)
+        out.append(rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err)
+    return all(out)
+
+
+# Patrik privát TG 18521 (Klodel 40951): "Ok mehet ki a masik chatben posztot irj es ott megtargyaljuk". When his
+# latest private message itself sends the work to the group, the group reply passes PRIVÁT-VÁLASZ-KAPU.
+@case
+def latest_private_owner_asked_group_reply_allowed(root):
+    out = []
+    for text in ('Ok mehet ki a masik chatben posztot irj es ott megtargyaljuk', 'A MÁSIK CHATBEN írd meg',
+                 'írd a csoportba, ott beszéljük meg'):
+        sub = tempfile.mkdtemp(dir=root)
+        db = ledger(sub, GROUP, PRIV, texts={1: text})
+        rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Itt a poszt-terv, beszéljük meg.'})
+        out.append(rc == 0 and 'PRIVÁT-VÁLASZ-KAPU' not in err and 'Traceback' not in err)
+    return all(out)
+
+
+@case
+def NEG_latest_private_plain_message_group_reply_still_blocked(root):
+    # A plain private message, an older private "másik chat" followed by a plain one, and a "másik chat" said in
+    # the GROUP (not the latest private) do not open the group reply.
+    out = []
+    for chats, texts in (((GROUP, PRIV), {1: 'Rendben, köszönöm.'}),
+                         ((GROUP, PRIV, PRIV), {1: 'írj a másik chatben', 2: 'Inkább itt maradjunk.'}),
+                         ((PRIV, GROUP, PRIV), {1: 'a másik chatben', 2: 'ok'})):
+        sub = tempfile.mkdtemp(dir=root)
+        db = ledger(sub, *chats, texts=texts)
+        rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Itt a poszt-terv.'})
         out.append(rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err)
     return all(out)
 
