@@ -531,6 +531,22 @@ printf 'Semmi hiány.\n' > "$HR/outside.md"
 text 'KÉSZ: shared/../outside.md'
 GATE_ENV="$HROOT" run radar klodel
 ok "hiany: a clean, existing file outside shared/ (via ..): refused" "$(refused)" "rc=$RC posts=$POSTS"
+# Viktor 41461 INFO 4: a symlink inside shared/ that resolves to a sibling "shared-evil/" (prefix without separator)
+# or out of the install (abspath instead of realpath) is refused
+mkdir -p "$HR/shared-evil" "$SANDBOX/out"; printf 'Semmi hiány.\n' > "$HR/shared-evil/x.md"; printf 'Semmi hiány.\n' > "$SANDBOX/out/y.md"
+ln -s "$HR/shared-evil/x.md" "$HR/shared/k/evil.md"; ln -s "$SANDBOX/out/y.md" "$HR/shared/k/out.md"
+text 'KÉSZ: shared/k/evil.md'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a symlink in shared/ to a sibling shared-evil/: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'KÉSZ: shared/k/out.md'
+GATE_ENV="$HROOT" run radar klodel
+ok "hiany: a symlink in shared/ out of the install: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# Viktor 41461 LOW 3: a long run of "shared/" without a blank stays linear
+python3 -c 'import sys; sys.stdout.write("kész " + "shared/" * 20000)' > "$SANDBOX/text"
+T0=$(python3 -c 'import time; print(time.time())')
+GATE_ENV="$HROOT" run radar klodel
+T1=$(python3 -c 'import time; print(time.time())')
+ok "hiany: 140 KB of shared/ on a delivery line finishes within 2 s" "$([ "$(python3 -c "print(int($T1 - $T0 < 2))")" = 1 ] && echo 0 || echo 1)" "secs=$(python3 -c "print(round($T1 - $T0, 2))")"
 text 'KÉSZ: shared/k/bad.md'
 GATE_ENV="$HROOT" run kernel klodel
 ok "hiany: only radar's deliveries are linted (kernel): sent" "$(sent)" "rc=$RC posts=$POSTS"

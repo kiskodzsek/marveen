@@ -91,6 +91,20 @@ with open(os.path.join(ROOT, 'shared', 'k', 'mert.md'), 'w', encoding='utf-8') a
     f.write(GOOD)
 check("ITTHON-MERT to another file of the install: clean", verdict("Itthon nincs ilyen.\nITTHON-MERT: shared/k/mert.md\n"), 0)
 
+# Viktor 41461 INFO 4 (c): a sibling of the install whose name starts with the root's name is outside it.
+sib = ROOT + 'x'
+os.makedirs(sib, exist_ok=True)
+with open(os.path.join(sib, 'm.md'), 'w', encoding='utf-8') as f:
+    f.write(GOOD)
+check("ITTHON-MERT to a sibling <root>x/ (prefix without separator): refused",
+      verdict(f"Itthon nincs ilyen.\nITTHON-MERT: {os.path.join(sib, 'm.md')}\n"), 1)
+
+# Viktor 41461 LOW 2: a long hyphenated token on a NINCS ADAT line stays linear.
+import time
+t0 = time.time()
+lint.check_nincs(['NINCS ADAT ' + 'A1-' * 350000])
+check("a 1 MB hyphenated NINCS ADAT line finishes within 2 s", time.time() - t0 < 2.0, True)
+
 # No copied patterns: the lint uses the reply gate's and the idea lint's objects.
 repo = os.path.realpath(os.path.join(HERE, '..', '..'))
 gate = load('pig', os.path.join(repo, 'scripts', 'hooks', 'product-image-gate.py'))
@@ -115,6 +129,7 @@ check("CLI: no argument exit 2", rc(), 2)
 
 os.unlink(outside.name)
 subprocess.run(['rm', '-r', '--', ROOT], check=False)
+subprocess.run(['rm', '-r', '--', sib], check=False)
 if FAILS:
     print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
     sys.exit(1)

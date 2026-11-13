@@ -437,7 +437,9 @@ def keres_reason(text, ledger_path):
 # Rule 6. The delivery word is matched on fold(line); the path on the raw line.
 DELIVER = re.compile(_B + r'(?:kesz|leadva|leadas|leadom|elkeszult)(?![a-z0-9])')
 NOT_YET = re.compile(_B + r'(?:ne|nem|meg\s+nem|nincs)\s+$')
-SHARED_MD = re.compile(r'(?<![\w.-])(shared/[^\s`\'"()<>,;|]+?\.md)(?![\w-])')
+# Viktor 41461 LOW 3 (CWE-1333): the path is bounded to 240 characters, so a long run of "shared/" without a blank
+# stays linear instead of quadratic (140 KB took 8 s).
+SHARED_MD = re.compile(r'(?<![\w.-])(shared/[^\s`\'"()<>,;|]{1,240}?\.md)(?![\w-])')
 MAX_FINDINGS = 3
 
 

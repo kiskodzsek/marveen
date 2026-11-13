@@ -51,11 +51,13 @@ site_hibak = _idea.site_hibak
 ITTHON_MERT_RE = re.compile(r'(?mi)^\s*[-*]?\s*ITTHON-M[EÉ]RT:[ \t]*(.+?)\s*$')
 SELF = ('ez a fájl', 'ez a fajl', 'itt', 'self')
 
+# Viktor 41461 LOW 2 (CWE-1333): the domain label is bounded to 63 characters (the DNS limit), so a long hyphenated
+# token no longer opens a scan to the line end at every hyphen (quadratic: 1 MB took minutes).
 NINCS = re.compile(r'NINCS ADAT')
 # Radar 41442: a brief line ("Kész, ha:") or a legend ("Jelölés(ek):") at the line start names NINCS ADAT as a term,
 # not as a claim; a backticked `NINCS ADAT` in a table cell stays a claim (formatting alone must not pass).
 DEFLINE = re.compile(r'^\s*(?:>\s*)?(?:[-*]\s+)?\**(?:Kész, ha|Jelölés(?:ek)?)\**\s*:')
-SRC = re.compile(r'(?i)https?://|(?<![\w@])[\w-]+\.(hu|com|org|io|eu|net|gov|de|co|app)\b|webread|websearch|'
+SRC = re.compile(r'(?i)https?://|(?<![\w@])[\w-]{1,63}\.(hu|com|org|io|eu|net|gov|de|co|app)\b|webread|websearch|'
                  r'quarantine|reader|\bGET\b|/search|\bapi\b|ads-|trends|ksh|meska|pepita|e-?mag|vatera|dm\b|'
                  r'google|meta|apify|curl|grep')
 RES = re.compile(r'(?i)(?<!\d)[45]\d\d(?!\d)|\b0\s*(db|találat|sor|hit)|nincs találat|nem hozott|nem talál|nem ad|'
