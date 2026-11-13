@@ -63,6 +63,18 @@ POSITIVE = [
     ('Patrik TG 18395 "x", és anya naplóz', NAPLO),
     # a TILOS: line only exempts itself, not the next line
     ('TILOS: toll\nde a jelenetben toll van', TOLL),
+    # ... and only up to its first sentence end (Viktor 41524 I3)
+    ('TILOS: toll. Videó jelenet: anya naplóz', NAPLO),
+    # more inflected pen forms (Viktor 41524 I4)
+    ('a tollával ír', TOLL),
+    ('elveszi a tolltól', TOLL),
+    ('a tollnál', TOLL),
+    ('a tollam', TOLL),
+    # every Cf and Mn mark goes: LRM, RLM, tag character, variation selector (Viktor 41524 I4)
+    ('tol\u200el', TOLL),
+    ('nap\u200flóz', NAPLO),
+    ('nap\U000E0041lóz', NAPLO),
+    ('tol\ufe0fl', TOLL),
 ]
 
 # texts that must stay clean
@@ -82,6 +94,7 @@ NEGATIVE = [
     'Patrik (TG 18412): „ne tegyél bele olyan könyvet, h ragasztgatni kell meg kézzel írni”',
     'TILOS: toll, ragasztó, kézírás, ír a könyvbe, naplóz, üres babanapló',
     '  tilos:   toll',
+    'TILOS: toll, ragasztó.',  # a list closed by a full stop
     'atollal',  # a word that only contains "toll" after a letter
     'kontroll',
     'kézzel írat',  # kezzel ir(?!at)
@@ -124,7 +137,20 @@ def main():
     if [l for l, _ in vni.TERMS] != [TOLL, RAG, KEZ, IR, NAPLO, MAS]:
         print('FAIL the six labels changed')
         bad += 1
-    n = len(POSITIVE) + len(NEGATIVE) + len(MATERIAL_YES) + len(MATERIAL_NO) + 3
+    # linear time (Viktor 41524 L1): 64 KB adversarial texts each under 1 s
+    import time
+    for name, text in (('tg + spaces', 'tg' + ' ' * 65536), ('kep run', 'kep' * 21846), ('foto run', 'foto' * 16384),
+                       ('ragaszt run', 'ragaszt' * 9363), ('kep + spaces', ('kep ' * 16384)),
+                       ('ir + spaces', 'ir ' * 21846), ('kezzel run', 'kezzel ' * 9363),
+                       ('quote run', '"' * 65536 + ' tg 1')):
+        t0 = time.perf_counter()
+        vni.found(text)
+        vni.is_material(text)
+        secs = time.perf_counter() - t0
+        if secs >= 1:
+            print(f'FAIL linear {name}: {secs:.2f} s')
+            bad += 1
+    n = len(POSITIVE) + len(NEGATIVE) + len(MATERIAL_YES) + len(MATERIAL_NO) + 3 + 8
     print(f'{n - bad}/{n} pass')
     return 1 if bad else 0
 

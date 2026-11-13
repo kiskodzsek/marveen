@@ -11,11 +11,16 @@ gluing a photo in, handwriting / writing by hand, writing in the book, journalin
 another (empty, fill-in) baby journal. hibanapló 2026-11-13 L308-L310.
 
 Used by scripts/lib/msg_gate.py (rule 7, briefs) and scripts/hooks/product-image-gate.py (the image .ok sheet).
-Matching is on folded text (NFKC, accents dropped, lower case, zero-width characters dropped). Two things are
-cut out before matching, and nothing else:
+Matching is on folded text (NFKC, accents and every Mn mark dropped, lower case, every Cf format character
+dropped). Two things are cut out before matching, and nothing else:
   - a quote ("...", „...”) on a line that names a Telegram message ("TG 18395"): Patrik's request is quoted word
     for word by rule (msg_gate rule 5), and his words were "a könyv ahogy naplóz anya benne" (TG 18395);
-  - a line that starts with "TILOS:": the place to name what may not appear ("TILOS: toll, ragasztó").
+  - a line that starts with "TILOS:" up to its first sentence end: the place to name what may not appear
+    ("TILOS: toll, ragasztó"); text after a ". " on that line is checked.
+Both exemptions are content-blind (the TG number is not matched to the ledger): they stop a slip, not a deliberate
+dodge (Viktor 41524 I3). Every pattern runs in linear time on a 64 KB text (Viktor 41524 L1; test below).
+Not covered (Viktor 41524 I4): ceruza, marker, írógép, fotósarok, "kitölti a babakönyvet", a word split by a hyphen;
+a text that names no material format (msg_gate rule 7) is not checked on the send path.
 Word forms were narrowed on 30 days of real traffic (2026-11-13, 4439 messages from the material briefers to the
 producers): "naplózva", "naplózd" (logging), "kézirat" (manuscript), "ráragasztottnak hat" (an image flaw),
 "ragasztott kötés" (binding) and a bare "babanapló" (Patrik's own SEO keyword, TG 17883) do not count.
@@ -27,15 +32,14 @@ Test: scripts/lib/vevo_nem_ir_test.py
 import re
 import unicodedata
 
-_ZW = dict.fromkeys(map(ord, '​‌‍⁠﻿­'))
 _L = r'(?<![a-z-])'
 
 TERMS = (
-    ('toll', re.compile(r'(?:' + _L + r'|golyos|tolto|filc)toll(?:al|at|ak|akat|ok|ban|ba|ra|rol|bol|hoz|nak|unk|unkat)?'
+    ('toll', re.compile(r'(?:' + _L + r'|golyos|tolto|filc)toll(?:al|at|ak|akat|ok|ban|ba|ra|rol|bol|hoz|nak|unk|unkat|aval|tol|nal|am|ad)?'
                         r'(?![a-z])')),
     ('ragasztó / ragasztás', re.compile(
         r'ragasztgat|ragaszto(?!t)|(?<!ra)(?:be|fel)ragaszt'
-        r'|ragaszt\w*\s+(?:\w+\s+){0,2}(?:foto|kep)|(?:foto|kep)\w*\s+(?:\w+\s+){0,2}(?:be|fel)?ragaszt')),
+        r'|ragaszt\w{0,20}\s+(?:\w{1,30}\s+){0,2}(?:foto|kep)|(?:foto|kep)\w{0,20}\s+(?:\w{1,30}\s+){0,2}(?:be|fel)?ragaszt')),
     ('kézírás / kézzel ír', re.compile(_L + r'kezira(?:s|so)|kezzel\s+(?:\w+\s+)?(?:bele|be|at)?ir(?!at)|kezzel\s+irhato')),
     ('ír a könyvbe', re.compile(
         r'(?<![a-z])(?:bele|be)?ir(?:ja|od|om|unk|jak|nak|ni|sz)?\s+(?:bele\s+)?(?:a\s+)?(?:\w+\s+)?(?:baba|emlek)?konyv(?:be|et|unket)'
@@ -50,13 +54,16 @@ MATERIAL = re.compile(r'(?<![a-z])(?:video|reel|poszt|hirdet|film|kisfilm|koncep
                       r'|short|tiktok|storyboard|forgatokonyv|snitt|termekkep|hirdeteskep)')
 
 _QUOTE = re.compile(r'["„“”][^"„“”\n]{1,600}["“”]')
-_TG = re.compile(r'(?<![a-z])tg\s*#?\s*\d+')
+_TG = re.compile(r'(?<![a-z])tg(?:\s*#)?\s*\d+')  # no two adjacent \s* (Viktor 41524 L1: quadratic)
 _TILOS = re.compile(r'^\s*tilos\s*:')
+_SENTENCE_END = re.compile(r'[.!?](?:\s|$)')
 
 
 def fold(text):
-    t = unicodedata.normalize('NFKC', str(text)).translate(_ZW)
-    return ''.join(c for c in unicodedata.normalize('NFKD', t) if not unicodedata.combining(c)).lower()
+    # every format character (Cf: zero-width, LRM/RLM, soft hyphen, tag characters) goes, as in msg_gate.fold
+    t = ''.join(c for c in unicodedata.normalize('NFKC', str(text)) if unicodedata.category(c) != 'Cf')
+    # Mn, not only combining(c) > 0: a variation selector has class 0 but is Mn (Viktor 41524 I4)
+    return ''.join(c for c in unicodedata.normalize('NFKD', t) if unicodedata.category(c) != 'Mn').lower()
 
 
 def checked_text(folded):
@@ -64,7 +71,11 @@ def checked_text(folded):
     out = []
     for line in folded.splitlines():
         if _TILOS.match(line):
-            continue
+            # only the list itself is exempt: after its first sentence end the line is checked again (Viktor 41524 I3)
+            end = _SENTENCE_END.search(line)
+            if not end:
+                continue
+            line = line[end.end():]
         if _TG.search(line):
             line = _QUOTE.sub(' ', line)
         out.append(line)
