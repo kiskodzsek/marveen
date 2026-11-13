@@ -66,6 +66,8 @@ export const KNOWN_HOOK_SCRIPTS: readonly string[] = [
   'repo-create-gate.py',
   // Retro 2026-11-13 R6 (card cf287c2c): the zsh traps (word splitting, $V:s modifier, =-expansion) and rm -r on a variable.
   'zsh-trap-gate.py',
+  // Retro 2026-11-13 R8 (card 84858637): no own-session meta line (restart, handoff, fresh context) to Patrik's chats.
+  'session-meta-reply-gate.py',
   // The /clear continuity pair: SessionEnd capture + SessionStart replay.
   'clear-capture.py',
   'clear-replay.py',

@@ -118,6 +118,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of count-claim-gate.py (run: python3 -I scripts/hooks/count-claim-gate_test.py); not itself a hook (Klodel 39869)',
   'repo-create-gate_test.py':
     'the unit test of repo-create-gate.py (run: python3 -I scripts/hooks/repo-create-gate_test.py); not itself a hook (Klodel 40048)',
+  'session-meta-reply-gate_test.py':
+    'the unit test of session-meta-reply-gate.py (run: python3 -I scripts/hooks/session-meta-reply-gate_test.py); not itself a hook (retro 2026-11-13 R8, card 84858637)',
   'zsh-trap-gate_test.py':
     'the unit test of zsh-trap-gate.py (run: python3 -I scripts/hooks/zsh-trap-gate_test.py); not itself a hook (retro 2026-11-13 R6, card cf287c2c)',
   'update-apply-gate_test.py':
