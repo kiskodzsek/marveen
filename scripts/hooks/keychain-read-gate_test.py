@@ -224,6 +224,7 @@ BLOCK = [
     'GIT_CONFIG_NOSYSTEM=0 GIT_CONFIG_GLOBAL=/dev/null git fetch',  # 0 keeps the system helper (measured)
     'GIT_CONFIG_NOSYSTEM=1 env -u GIT_CONFIG_NOSYSTEM HOME=/x git fetch',
     'export GIT_CONFIG_NOSYSTEM=1; unset GIT_CONFIG_NOSYSTEM; HOME=/x git fetch',
+    'export GIT_CONFIG_NOSYSTEM=1; unset GIT_CONFIG_NOSYSTEM; GIT_CONFIG_GLOBAL=/dev/null git fetch',  # the unset alone (mutant, 15896271)
     'HOME=/x git -c cr3dential.helper=foo fetch',  # a helper added, the system one kept
     'HOME=/x git -c cr3dential.helper= -c cr3dential.helper=osxkeychain fetch',
     'HOME=/x node -e "require(\'child_process\').execSync(\'git fetch\')"',
@@ -245,6 +246,20 @@ BLOCK = [
     'readonly GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch',
     'f() { local GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch; }; f',
     'export GIT_CONFIG_NOSYSTEM=1; declare GIT_CONFIG_NOSYSTEM=0; GIT_CONFIG_GLOBAL=/dev/null git fetch',
+    # Viktor 42224 LOW 1: an unexport takes the exemption away (measured, bash 3.2 and zsh: the system helper is back);
+    # a -x after the name is a name in bash 3.2, readonly never exports
+    'export -n GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'export GIT_CONFIG_NOSYSTEM=1; declare +x GIT_CONFIG_NOSYSTEM; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'declare +x GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'export GIT_CONFIG_NOSYSTEM=1; export -n GIT_CONFIG_NOSYSTEM; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'declare GIT_CONFIG_NOSYSTEM=1 -x; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'declare -- -x GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'readonly -x GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    # an option outside x, g, r: invalid in bash 3.2 and zsh (the declaration fails, nothing is exported; measured)
+    'declare -nx GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'typeset -nx GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'export -q GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'export -f GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
     # Viktor 42207 M3: a declaration longer than MAX_ARGS words is read to its end
     'f() { local HOME; git fetch; }; f',  # a local without a value: HOME unset in the function (measured)
     'f() { declare HOME; git fetch; }; f',
@@ -261,6 +276,28 @@ BLOCK = [
     'HOME=/x git -ccr3dential.helper= ls-remote x',  # joined: no git option (git: unknown option), not a reset
     # accepted false positive, the class above
     "grep -n 'git cr3dential fill' notes.md",
+    # card 15896271 (Viktor 41970 INFO 5): a redirection before the command
+    '>/dev/null s3curity find-generic-password -s x',
+    '2>/dev/null s3curity dump-keychain',
+    '2> /dev/null s3curity dump-keychain',
+    '</dev/null s3curity dump-keychain',
+    '>&2 s3curity dump-keychain',
+    '&>/dev/null s3curity dump-keychain',
+    'echo a; >>log s3curity dump-keychain',
+    'sudo -u root >/dev/null s3curity dump-keychain',
+    'env >>log s3curity dump-keychain',
+    # Viktor 41970 LOW 4: the macOS wrappers that run their command, and doas as a chain word
+    'doas s3curity dump-keychain',
+    'doas -n s3curity dump-keychain',
+    'sandbox-exec -p "(version 1)(allow default)" s3curity dump-keychain',
+    'sandbox-exec -n no-network -D A=b s3curity dump-keychain',
+    'lockf -k /tmp/l s3curity dump-keychain',
+    'launchctl asuser 501 s3curity dump-keychain',
+    '/bin/launchctl bsexec 1 s3curity dump-keychain',
+    'login -fp root s3curity dump-keychain',
+    'login -f -h h root s3curity dump-keychain',
+    'sandbox-exec s3curity dump-keychain',  # a chain word with no flag skipped (mutant sandbox_chain_out)
+    'sudo 2>&1 s3curity dump-keychain',
 ]
 # Viktor 41970 INFO 6: one row per WRAP_ARGS entry, so a dropped or mistyped entry fails here. A spec of its own,
 # not read from the gate: wrapper -> (short flags with a word, whole flags with the next word, positional words).
@@ -284,6 +321,11 @@ WRAP_SPEC = {
     'flock': ('wE', ['--timeout', '--wait', '--conflict-exit-code'], 1),
     'sg': ('', [], 1),
     'chroot': ('ugG', ['--userspec', '--groups'], 1),
+    # card 15896271
+    'sandbox-exec': ('fnpD', [], 0),
+    'lockf': ('t', [], 1),
+    'launchctl': ('', [], 2),
+    'login': ('h', [], 1),
     # card 04d67b39
     'git': ('Cc', ['--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'], 0),
     'xcrun': ('f', ['-sdk', '--sdk', '-toolchain', '--toolchain', '--find'], 0),
@@ -386,6 +428,14 @@ ALLOW = [
     'GIT_CONFIG_NOSYSTEM=On GIT_CONFIG_GLOBAL=/dev/null git init -q a',
     'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="/dev/null" git init -q a',
     'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/tmp/s GIT_CONFIG_GLOBAL=/dev/null git fetch',  # NOSYSTEM: the file is not read (measured)
+    # Viktor 42224 (his mutants D05, D07, D08): a declare of an EXPORTED NOSYSTEM keeps the export (measured, bash 3.2
+    # and zsh), so a true value, no value, or TRUE in capitals keeps the exemption
+    'export GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'export GIT_CONFIG_NOSYSTEM=1; declare GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'export GIT_CONFIG_NOSYSTEM=1; declare GIT_CONFIG_NOSYSTEM; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'export GIT_CONFIG_NOSYSTEM=1; declare GIT_CONFIG_NOSYSTEM=TRUE; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'declare -rx GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',  # readonly + export (measured)
+    'export -- GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
     "echo 'measured: `git config --show-scope --show-origin`, `find . -name x`'",  # prose that names config
     'node -e "assert.match(config, /key: `${X}`/)"',
     'git config user.email "$E"',  # the value expands, the key is read
@@ -411,6 +461,18 @@ ALLOW = [
     # a wrapper written with its path right at another one's command is walked in the same pass: 9 nested past
     # WRAP_PASSES (8), one per pass would fail closed (mutant qualified_first_only)
     'sudo -u a ' + '/usr/bin/env ' * 9 + 'ls',
+    # card 15896271: a redirection's target is no command, the new wrappers' own words are not either
+    'echo a > s3curity dump-keychain',
+    'cat f >> out.log',
+    'ls 2>/dev/null; s3curity list-keychains',
+    'launchctl list',
+    'launchctl load -w /tmp/x.plist',
+    'login',
+    'echo login root s3curity dump-keychain',
+    'sandbox-exec -p "(version 1)" ls',
+    # the & of `>&2` / `&>` is a redirection's, no command end: the word after it is an argument (bash runs `x`)
+    'x >&2 s3curity dump-keychain',
+    'x &>/dev/null s3curity dump-keychain',
 ]
 
 
@@ -490,9 +552,16 @@ def script_cases():
         os.makedirs(sub)
         with open(os.path.join(sub, 'deep.py'), 'w', encoding='utf-8') as f:
             f.write("SEC = '" + S + "'\nimport subprocess; subprocess.run([SEC, 'dump-keychain'])\n")
+        # card 15896271: a run's output that quotes the blocked call (a negative test run's log)
+        w('out.txt', "FAIL should block: '/usr/bin/env " + S + " dump-keychain'\n")
         block = [
             ('python3 measure.py', d),
             ('python3 -I ./measure.py', d),
+            # card 15896271: a redirection before the interpreter; an output target skipped, the script still read
+            ('>/dev/null python3 measure.py', d),
+            ('sudo -u root 2>/dev/null python3 measure.py', d),
+            ('python3 > out.txt measure.py', d),
+            ('python3 2>err.log measure.py', d),
             ('python3 -u -B measure.py --flag', d),
             ('/usr/bin/python3 ' + os.path.join(d, 'measure.py'), None),
             ('cd ' + d + ' && python3 measure.py', None),
@@ -672,6 +741,15 @@ def script_cases():
         ]
         allow = [
             ('python3 list.py', d),
+            # card 15896271: an output redirection's target is written, not run
+            ('python3 list.py > out.txt', d),
+            ('python3 list.py >out.txt', d),
+            ('python3 list.py >> out.txt', d),
+            ('python3 list.py 2>&1 > out.txt', d),
+            ('python3 list.py &> out.txt', d),
+            ('python3 list.py >| out.txt', d),
+            ('python3 list.py 2> out.txt', d),
+            ('python3 list.py > measure.py', d),  # truncated, not run
             ('python3 notes.py', d),
             ('python3 word.py', d),
             ('node labels.js', d),
@@ -1012,6 +1090,10 @@ def main():
                   ('HOME=/x git -c x= ; ' * 20000, 2), ('HOME=/x git -c y ' + "'a' " * 20000, 2),
                   ("HOME=/x git -c y '" * 20000, 2), ('HOME=/x bash -c "' + 'a; ' * 20000 + 'git fetch"', 2), ('git -c include.pat ' * 20000, 0),
                   ('git' + ' -c a' * 20000 + ' status', 2),
+                  # card 15896271: the redirection token reads one way (`>>x` is `>>` + `x`)
+                  (' >>x' * 20000 + ' z', 0), ('>>' * 50000, 0), ('2> x ' * 20000 + sec, 2), ('> ' * 40000, 0),
+                  ('sudo -u a >x ' * 10000 + sec, 2), ('lockf f ' * 20000 + 'z', 0), ('launchctl a b ' * 15000, 0),
+                  ('>&2 ' * 20000 + 'z', 0), ('2>&1 ' * 20000 + sec, 2), ('&>x ' * 20000 + 'z', 0),
                   ('sudo' + ' -u a' * 32 + ' ls', 0), ('sudo' + ' -u a' * 32 + ' -E ls', 2),
                   ('sudo -u a; ' * 20000, 0), ('(sudo -u a ' * 20000, 0), ('sudo -u a ' * 20000 + 'python3 x.py', 0),
                   ('ssh h ' * 20000 + sec, 2), ('nice -n 5 sudo -u a ' * 10000 + sec, 2)]
