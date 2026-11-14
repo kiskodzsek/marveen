@@ -31,6 +31,9 @@ import {
   resetIntakeObservations,
   startChannelIntakeMonitor,
   SEED_MAX_STRETCH_MS,
+  ERROR_TEXT_MAX,
+  ONGOING_OUTAGE_NOTICE_MS,
+  ongoingOutageNoticeFor,
   STATE_SEED_MAX_AGE_MS,
   INTAKE_ALERT_COOLDOWN_MS,
   unreachableRecoveredAfter,
@@ -47,7 +50,7 @@ const SILENCE_MS = 2 * DAY_MS
 const NOW = 1_760_000_000_000
 
 function probe(over: Partial<IntakeProbe> = {}): IntakeProbe {
-  return { reachable: true, tokenOk: true, pendingUpdates: 0, webhookUrl: '', lastErrorMessage: null, ...over }
+  return { reachable: true, tokenOk: true, pendingUpdates: 0, webhookUrl: '', lastErrorMessage: null, httpStatus: 200, ...over }
 }
 
 describe('parseIntakeProbe', () => {
@@ -62,6 +65,7 @@ describe('parseIntakeProbe', () => {
       pendingUpdates: 7,
       webhookUrl: '',
       lastErrorMessage: 'wrong response',
+      httpStatus: 200,
     })
   })
 
@@ -194,7 +198,7 @@ describe('decideIntakeVerdict', () => {
 
   it('never alerts when our own side could not reach Telegram', () => {
     const d = decideIntakeVerdict({
-      probe: probe({ reachable: false, pendingUpdates: null }),
+      probe: probe({ reachable: false, pendingUpdates: null, httpStatus: null }),
       prev: null,
       lastInboundAt: NOW - 9 * DAY_MS,
       now: NOW,
@@ -282,7 +286,7 @@ describe('intake state: a measurable trace without secrets', () => {
   })
 
   it('keeps an unknown pending count unknown, never 0 (Viktor 42107 INFO 1, M16)', () => {
-    expect(intakeStateEntry(probe({ reachable: false, pendingUpdates: null }), 'unreachable', NOW, null).pending).toBeNull()
+    expect(intakeStateEntry(probe({ reachable: false, pendingUpdates: null, httpStatus: null }), 'unreachable', NOW, null).pending).toBeNull()
   })
 
   it('records the verdict it was given, not a fixed one (M18)', () => {
@@ -311,7 +315,7 @@ describe('intake state: a measurable trace without secrets', () => {
 // why. The stretch is tracked across ticks and reported once, when it ends.
 describe('unreachable stretch: one line when a long outage ends', () => {
   const MIN = 60 * 1000
-  const down = probe({ reachable: false, pendingUpdates: null })
+  const down = probe({ reachable: false, pendingUpdates: null, httpStatus: null })
 
   it('starts the stretch at the first unreachable reading and keeps that start across ticks', () => {
     const first = intakeStateEntry(down, 'unreachable', NOW, null)
@@ -389,7 +393,7 @@ describe('unreachable stretch: one line when a long outage ends', () => {
 // cooldown) was untested; W01 (a notice per bot) and W02 (no cooldown) survived.
 describe('recoveryNoticeFor: one notice, main agent only, with the 3 h cooldown', () => {
   const MIN = 60 * 1000
-  const down = probe({ reachable: false, pendingUpdates: null })
+  const down = probe({ reachable: false, pendingUpdates: null, httpStatus: null })
   const prev = intakeStateEntry(down, 'unreachable', NOW, null)
 
   it('gives the main agent one notice with the stretch length and the 3 h cooldown', () => {
@@ -464,7 +468,7 @@ describe('parseIntakeProbe: only Telegram refusing the token is a token verdict'
 
   it('NEGATIVE: a 502 from Telegram is not a token verdict and does not alert', () => {
     const r = parseIntakeProbe(502, { ok: false, error_code: 502, description: 'Bad Gateway' })
-    expect(r).toEqual({ reachable: false, tokenOk: true, pendingUpdates: null, webhookUrl: null, lastErrorMessage: null })
+    expect(r).toEqual({ reachable: false, tokenOk: true, pendingUpdates: null, webhookUrl: null, lastErrorMessage: null, httpStatus: 502 })
     const d = decideIntakeVerdict({ probe: r, prev: null, lastInboundAt: null, now: NOW, silenceThresholdMs: SILENCE_MS })
     expect(d).toEqual({ verdict: 'unreachable', alert: false })
   })
@@ -500,7 +504,7 @@ describe('parseIntakeProbe: only Telegram refusing the token is a token verdict'
 // Viktor 42111 LOW (W14, W15): the pure decisions were tested, their call sites were not.
 describe('applyIntakeProbe: the alerts at their call site', () => {
   const MIN = 60 * 1000
-  const down = probe({ reachable: false, pendingUpdates: null })
+  const down = probe({ reachable: false, pendingUpdates: null, httpStatus: null })
   type Sent = { key: string, text: string, cooldownMs: number }
   const sender = () => {
     const sent: Sent[] = []
@@ -630,5 +634,130 @@ describe('seedMainStateFrom: lower bound and field types', () => {
 
   it('says "kb." in every outage notice: the stretch is measured in 5-minute ticks', () => {
     expect(formatUnreachableRecovered(MAIN_AGENT_ID, 40 * MIN, NOW)).toContain('a gép kb. 40 percig')
+  })
+})
+
+// Card 8d58be99 (Viktor 42131 INFO 1-4).
+describe('parseIntakeProbe: proxy pages, long error texts, the HTTP status', () => {
+  it("NEGATIVE: a proxy's 401 page (HTML, plain text, an array) is not a token verdict (INFO 1)", () => {
+    for (const body of [null, '<html>401 Authorization Required</html>', [1, 2]]) {
+      const r = parseIntakeProbe(401, body)
+      expect(r.tokenOk, JSON.stringify(body)).toBe(true)
+      expect(r.reachable, JSON.stringify(body)).toBe(false)
+    }
+    expect(isTokenRejection(401, null)).toBe(false)
+  })
+
+  it("still reads Telegram's own 401 JSON as a rejected token", () => {
+    const r = parseIntakeProbe(401, { ok: false, error_code: 401, description: 'Unauthorized' })
+    expect(r.tokenOk).toBe(false)
+    expect(r.lastErrorMessage).toBe('Unauthorized')
+  })
+
+  it('clips an unbounded error text to ERROR_TEXT_MAX characters (INFO 2)', () => {
+    expect(ERROR_TEXT_MAX).toBe(200)
+    const long = 'x'.repeat(100_000)
+    const rejected = parseIntakeProbe(401, { ok: false, description: long })
+    expect(rejected.lastErrorMessage).toBe('x'.repeat(200) + '…')
+    const healthy = parseIntakeProbe(200, { ok: true, result: { pending_update_count: 0, last_error_message: long } })
+    expect(healthy.lastErrorMessage).toBe('x'.repeat(200) + '…')
+    expect(parseIntakeProbe(401, { ok: false, description: 'x'.repeat(200) }).lastErrorMessage).toBe('x'.repeat(200))
+  })
+
+  it('NEGATIVE: a non-string description never becomes the error text (P05)', () => {
+    expect(parseIntakeProbe(401, { ok: false, description: { html: 'x' } }).lastErrorMessage).toBeNull()
+  })
+
+  it('NEGATIVE: a 200 with ok:false and a result is not a healthy answer (P06)', () => {
+    const r = parseIntakeProbe(200, { ok: false, result: { pending_update_count: 0 } })
+    expect(r.reachable).toBe(false)
+    expect(r.pendingUpdates).toBeNull()
+  })
+
+  it('keeps the HTTP status of an answer, and null when the call never completed', () => {
+    expect(parseIntakeProbe(502, null).httpStatus).toBe(502)
+    expect(parseIntakeProbe(200, { ok: true, result: { pending_update_count: 0 } }).httpStatus).toBe(200)
+    expect(parseIntakeProbe(0, null).httpStatus).toBeNull()
+  })
+})
+
+describe('ongoingOutageNoticeFor: one line WHILE Telegram answers unusably (INFO 3)', () => {
+  const MIN = 60 * 1000
+  const bad = parseIntakeProbe(502, { ok: false, error_code: 502, description: 'Bad Gateway' })
+  const net = parseIntakeProbe(0, null)
+  const start = intakeStateEntry(bad, 'unreachable', NOW, null)
+
+  it('pins the threshold at 2 hours and names the last HTTP status', () => {
+    expect(ONGOING_OUTAGE_NOTICE_MS).toBe(120 * MIN)
+    const entry = intakeStateEntry(bad, 'unreachable', NOW + 120 * MIN, start)
+    const n = ongoingOutageNoticeFor(MAIN_AGENT_ID, entry, bad, NOW + 120 * MIN)
+    expect(n!.key).toBe(`channel-intake:${MAIN_AGENT_ID}:outage-ongoing`)
+    expect(n!.cooldownMs).toBe(INTAKE_ALERT_COOLDOWN_MS)
+    expect(n!.text).toContain('kb. 120 perce nem kap használható választ')
+    expect(n!.text).toContain('utolsó HTTP-kód: 502')
+    expect(n!.text).toContain('valószínűleg')
+  })
+
+  it('NEGATIVE: not before 2 hours', () => {
+    const entry = intakeStateEntry(bad, 'unreachable', NOW + 120 * MIN - 1, start)
+    expect(ongoingOutageNoticeFor(MAIN_AGENT_ID, entry, bad, NOW + 120 * MIN - 1)).toBeNull()
+  })
+
+  it('NEGATIVE: not during a network outage (the alert could not go out anyway)', () => {
+    const entry = intakeStateEntry(net, 'unreachable', NOW + 180 * MIN, start)
+    expect(ongoingOutageNoticeFor(MAIN_AGENT_ID, entry, net, NOW + 180 * MIN)).toBeNull()
+  })
+
+  it('NEGATIVE: not for a sub-agent, and not once Telegram answers usefully', () => {
+    const entry = intakeStateEntry(bad, 'unreachable', NOW + 180 * MIN, start)
+    expect(ongoingOutageNoticeFor('some-sub-agent', entry, bad, NOW + 180 * MIN)).toBeNull()
+    const ok = intakeStateEntry(probe(), 'ok', NOW + 180 * MIN, start)
+    expect(ongoingOutageNoticeFor(MAIN_AGENT_ID, ok, probe(), NOW + 180 * MIN)).toBeNull()
+  })
+
+  it('the outage-end line says "no usable answer", not "could not reach"', () => {
+    const text = formatUnreachableRecovered(MAIN_AGENT_ID, 40 * MIN, NOW)
+    expect(text).toContain('nem kapott használható választ a Telegramtól')
+    expect(text).not.toContain('nem érte el')
+  })
+})
+
+describe('applyIntakeProbe: the mid-outage line at its call site', () => {
+  const MIN = 60 * 1000
+  const bad = parseIntakeProbe(502, { ok: false, error_code: 502, description: 'Bad Gateway' })
+  beforeEach(() => resetIntakeObservations())
+
+  it('sends outage-ongoing from 2 hours on (the sender applies the 3 h cooldown), then one outage-end line', () => {
+    const sent: { key: string, at: number, cooldownMs: number }[] = []
+    let at = 0
+    const send = (key: string, _t: string, o: { cooldownMs: number }) => { sent.push({ key, at, cooldownMs: o.cooldownMs }) }
+    for (let m = 0; m <= 130; m += 5) { at = m; applyIntakeProbe(MAIN_AGENT_ID, bad, null, NOW + m * MIN, send) }
+    at = 135
+    applyIntakeProbe(MAIN_AGENT_ID, probe(), null, NOW + 135 * MIN, send)
+    const ongoing = sent.filter(x => x.key.endsWith(':outage-ongoing'))
+    expect(ongoing.map(x => x.at)).toEqual([120, 125, 130])
+    expect(ongoing.every(x => x.cooldownMs === INTAKE_ALERT_COOLDOWN_MS)).toBe(true)
+    expect(sent.filter(x => x.key.endsWith(':unreachable-recovered')).map(x => x.at)).toEqual([135])
+    expect(sent).toHaveLength(4)
+  })
+
+  it('NEGATIVE: a sub-agent behind a 3-hour Telegram-side outage sends nothing (M15)', () => {
+    const sent: string[] = []
+    for (let m = 0; m <= 180; m += 5) applyIntakeProbe('some-sub-agent', bad, null, NOW + m * MIN, (k) => { sent.push(k) })
+    applyIntakeProbe('some-sub-agent', probe(), null, NOW + 185 * MIN, (k) => { sent.push(k) })
+    expect(sent).toEqual([])
+  })
+
+  it('NEGATIVE: a 3-hour network outage sends no mid-outage line', () => {
+    const sent: string[] = []
+    for (let m = 0; m <= 180; m += 5) applyIntakeProbe(MAIN_AGENT_ID, parseIntakeProbe(0, null), null, NOW + m * MIN, (k) => { sent.push(k) })
+    expect(sent).toEqual([])
+  })
+
+  it('NEGATIVE: the state snapshot is a copy, not the live map (W26)', () => {
+    applyIntakeProbe(MAIN_AGENT_ID, probe(), null, NOW, () => {})
+    const snap = intakeStateSnapshot()
+    snap.delete(MAIN_AGENT_ID)
+    expect(intakeStateSnapshot().has(MAIN_AGENT_ID)).toBe(true)
   })
 })
