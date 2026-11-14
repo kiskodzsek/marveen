@@ -284,6 +284,61 @@ describe('Bash: prose in a python/node heredoc body', () => {
 
 // Review P2 (Klodel 9186): the main agent does not run self-pace-gate.mjs, so the
 // same decision runs from its own hook, wired in the repo-shipped settings.
+// SCREENINGPROSE1114 (card 87aeff67, Klodel 42354): Mira's two reject dirs are ordinary Hungarian words; a
+// message, a grep pattern or a card title that says the word is prose. The bare rule stays for paths, single
+// quoted words, assignments, re-splitting constructs, other interpreters' inline code and the underscore dirs.
+describe('Bash: the reject-dir words as prose (card 87aeff67)', () => {
+  const V = 'visszavonva'
+  const P = 'panna-elvetett'
+  it.each([
+    `grep -n 'VISSZAVONVA a 37874 leállítás' shared/hibanaplo.md`,
+    `grep -i '${V} lett' x.md`,
+    `bash tools/kernel-msg.sh klodel 'a kártya ${V}, tárgytalan'`,
+    `bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel "${V} a 37874 leállítás"`,
+    `node tools/card.mjs 87aeff67 "Panna-Elvetett kép: tárgytalan"`,
+    `python3 -c 'print("VISSZAVONVA a 37874")'`,
+    `curl -s localhost:3420/api/kanban | python3 -c 'import json,sys; print([c for c in json.load(sys.stdin) if "${V} lett" in c["title"]])'`,
+    `python3 -I -c "print('${P} mappa: csak lista')"`,
+    `grep -c '${V} lett' a.md && echo ok`,
+    // a path form elsewhere in the command still needs its own reader to deny
+    `ls final/${V}/ && grep -n 'ez ${V} lett' notes.md`,
+  ])('allows: %s', (command) => {
+    expect(decide('Bash', { command })).toEqual({ deny: false })
+  })
+
+  it.each([
+    `cd ${V}`,
+    `cd final && cp -R ${V} /tmp/v`,
+    `cp -R '${V}' /tmp/v`,
+    `cp -R "Visszavonva" /tmp/v`,
+    `cat 'final dir/${V}/a.jpg'`,
+    `cat "a b" final/${V}/a.jpg`,
+    `X='a ${V}'; cp -R $X /tmp/v`,
+    `for d in 'a ${V}'; do cp -R $d /tmp; done`,
+    `echo 'a ${V}' | xargs cp -R -t /tmp`,
+    `printf '%s\\n' 'a ${V}' | while read a b; do cp -R "$b" /tmp; done`,
+    `sh -c 'cp -R a ${V} /tmp/v'`,
+    `eval 'cp -R a ${V} /tmp/v'`,
+    `cp -R $(echo 'a ${V}') /tmp`,
+    `cp -R \`echo 'a ${V}'\` /tmp`,
+    `python3 -c 'import os; os.system("cp -R a ${V} /tmp")'`,
+    `python3 -c 'import shutil; shutil.copytree("${V}", "/tmp/v")'`,
+    `python3 -c 'open("a/${V}/x.jpg","rb").read()'`,
+    `node -e 'require("child_process").execSync("cp -R a ${V} /tmp")'`,
+    `ruby -e 'system("cp -R a ${V} /tmp")'`,
+    `awk 'BEGIN{system("cp -R a ${V} /tmp")}'`,
+    `find . -name 'x ${V}' -exec cp -R {} /tmp \\;`,
+    `ssh box 'cp -R a ${V} /tmp'`,
+    `set -- 'a ${V}'; cp -R $2 /tmp`,
+    // the underscore dirs keep the bare rule, prose or not
+    `grep -n 'a _quarantine b' x.md`,
+    `bash tools/kernel-msg.sh klodel 'moved to _unscreened today'`,
+    `grep -n 'quarantine-meta is here' x.md`,
+  ])('denies: %s', (command) => {
+    expect(decide('Bash', { command })).toEqual(DENY)
+  })
+})
+
 describe('main-agent hook (scripts/hooks/image-quarantine-gate.mjs)', () => {
   const HOOK = join(__dirname, '..', '..', 'scripts', 'hooks', 'image-quarantine-gate.mjs')
   const run = (stdin: string) => spawnSync(process.execPath, [HOOK], { input: stdin, encoding: 'utf-8' })

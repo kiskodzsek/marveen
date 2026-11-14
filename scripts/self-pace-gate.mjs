@@ -501,6 +501,56 @@ export function screeningPipesAllowed(command) {
   return true
 }
 
+// SCREENINGPROSE1114 (card 87aeff67, Klodel 42354): Mira's two old reject dirs are named with ordinary
+// Hungarian words (visszavonva = "withdrawn"), so a message, a grep pattern or a card title that merely says
+// the word stopped the whole Bash call (measured 11-11 twice, 11-13). Only for these two names, and only for
+// the per-segment rule, a PROSE occurrence is blanked:
+//   - inside a MULTI-WORD literal quoted string ('...', or "..." without $( or a backtick), not touching a
+//     slash, a quote, a letter or a dash;
+//   - inside the inline code of python/node -c/-e/-p, by the IMAGESAFETYPROSE1110 rule for code bodies: no
+//     exec primitive (BODY_EXEC_RX) and no path form or exactly quoted token anywhere in the code.
+// The bare rule stays (review B3) for: the underscore dirs and quarantine-meta; a path form; an exactly quoted
+// single word ('visszavonva' is a path argument); an assignment value (X='a visszavonva', then $X splits); and
+// the WHOLE command when something can turn a string back into words or code: $( ` <( >(, xargs, parallel,
+// eval, for, select, read, while, until, mapfile, readarray, set --, find -exec/-ok, awk, ssh, watch, and any
+// other interpreter's inline code (sh/bash/zsh/ruby/perl/php/osascript -c/-e). The pipe rule and the
+// sh -c / eval recursion keep reading the unblanked text, so `echo 'a visszavonva' | xargs cp` still denies.
+// Residual, by design an accident layer like the rest: a script run with the prose as an argument
+// (`bash x.sh 'a visszavonva'`) is not followed into the script.
+const PROSE_WORD_DIR_NAMES = ['visszavonva', 'panna-elvetett']
+const PROSE_WORD_ANY_RX = new RegExp(dirAlt(PROSE_WORD_DIR_NAMES), 'i')
+const PROSE_WORD_RX = new RegExp(String.raw`(?<![\/'"\x60\w-])(?:${dirAlt(PROSE_WORD_DIR_NAMES)})(?![\/'"\x60\w-])`, 'gi')
+const PROSE_CODE_WORD_RX = new RegExp(String.raw`(?<![\/\w-])(?:${dirAlt(PROSE_WORD_DIR_NAMES)})(?![\/\w-])`, 'gi')
+const PROSE_SUBST_RX = /\$\(|`|[<>]\(/
+const PROSE_RESPLIT_RX = new RegExp(
+  String.raw`(?:^|[\s;&|(])(?:\S*\/)?(?:xargs|parallel|eval|for|select|read|while|until|mapfile|readarray|awk|gawk|mawk|nawk|ssh|watch)(?=[\s;&|)]|$)` +
+  String.raw`|(?:^|[\s;&|(])set\s+--|(?:^|\s)-(?:exec|execdir|ok|okdir)(?=\s|$)` +
+  String.raw`|(?:^|[\s;&|(])(?:\S*\/)?(?:ruby|perl|php|osascript|lua|tclsh|deno|bun|(?:ba|z|da|k)?sh)\s+(?:-\S+\s+)*-[A-Za-z]*[ceE]\b`,
+)
+const PROSE_INLINE_CODE_OWNER_RX = /(?:^|[\s;&|(])(?:\S*\/)?(?:python[0-9.]*|node|nodejs)\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*[cep]\s*$/
+const PROSE_QUOTED_LITERAL_RX = /'[^']*'|"(?:[^"\\]|\\.)*"/g
+
+export function blankScreeningProseWords(text) {
+  const s = String(text ?? '')
+  if (!PROSE_WORD_ANY_RX.test(s) || PROSE_SUBST_RX.test(s)) return s
+  if (PROSE_RESPLIT_RX.test(s.replace(PROSE_QUOTED_LITERAL_RX, "''"))) return s
+  // A heredoc body an interpreter runs is still in the text here; its rule is IMAGESAFETYPROSE1110 (and the
+  // bare rule for ruby/perl/php), so nothing in such a command is blanked.
+  for (const m of s.matchAll(/<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*/g)) {
+    if (heredocOwnerRunsBody(s.slice(0, m.index), { screening: true })) return s
+  }
+  return s.replace(PROSE_QUOTED_LITERAL_RX, (q, offset) => {
+    const body = q.slice(1, -1)
+    if (PROSE_INLINE_CODE_OWNER_RX.test(s.slice(0, offset))) {
+      if (BODY_EXEC_RX.test(body) || bodyNamesScreening(body)) return q
+      return q[0] + body.replace(PROSE_CODE_WORD_RX, 'x') + q[q.length - 1]
+    }
+    if (!/\s/.test(body.trim())) return q // a single word is a path argument
+    if (offset > 0 && s[offset - 1] === '=') return q // X='...' splits again at $X
+    return q[0] + body.replace(PROSE_WORD_RX, 'x') + q[q.length - 1]
+  })
+}
+
 export function screeningBashSegmentAllowed(seg) {
   const s = String(seg ?? '').trim()
   if (!SCREENING_TOKEN_RX.test(s)) return true
@@ -1052,7 +1102,8 @@ export function screeningDecision(toolName, toolInput, opts = {}) {
   if (heredocBodyScreeningDenied(raw)) return { deny: true, reason: 'image-quarantine' }
   const heredocOpts = { screening: true }
   const safe = stripProseArguments(stripDataPayloads(stripGitCommitMessages(stripHeredocBodies(raw, heredocOpts))))
-  for (const seg of splitSegments(safe)) {
+  // SCREENINGPROSE1114: the segment rule only; the pipe rule and the recursion below read `safe`/`raw`.
+  for (const seg of splitSegments(blankScreeningProseWords(safe))) {
     if (!screeningBashSegmentAllowed(seg)) return { deny: true, reason: 'image-quarantine' }
   }
   if (!screeningPipesAllowed(safe)) return { deny: true, reason: 'image-quarantine' }
