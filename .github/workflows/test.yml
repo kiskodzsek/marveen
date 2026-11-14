@@ -70,6 +70,10 @@ jobs:
       # good, so its fail-direction cases are gate instruments (hermetic:
       # stubbed vault/supabase, throwaway dirs).
       - run: python3 scripts/__tests__/mio-orszem-precheck.test.py
+      # Kernel's heartbeat preCheck (quota / disk / gitconfig): same rule, an
+      # error path that said SKIP would silence the alert. Hermetic: KHP_*
+      # paths point at throwaway files, the guard state is never written.
+      - run: python3 scripts/__tests__/kernel-heartbeat-precheck.test.py
       # MEMLINKAUDIT915: the audit's own footer calls UNRESOLVED the repair
       # queue, so an over-report sends someone to rewrite working links. The
       # over-report GROWS with every consolidation round, which is why this
