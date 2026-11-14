@@ -215,6 +215,31 @@ def script_cases():
             ('bash -c "./dump.sh"', d),
             ("bash -lc 'sub/deep.py --x'", d),
             ('sh -c "python3 measure.py"', d),
+            # Viktor 41790 LOW 1: payloads a quote opens after eval, watch, tmux new, `-c --` / `-c -x`, osascript's
+            # do shell script and a shell call inside inline code; a quoted interpreter name; a quoted cat file
+            ('eval "python3 measure.py"', d),
+            ("eval 'python3 measure.py'", d),
+            ('eval "./dump.sh"', d),
+            ('eval python3 measure.py', d),
+            ('eval "A=1 python3 measure.py"', d),  # the payload, not only the interpreter right after the quote
+            ('watch -n 1 "A=1 python3 measure.py"', d),
+            ('watch -n 1 python3 measure.py', d),
+            ('. -- ./dump.sh', d),
+            ("bash -c -- 'python3 measure.py'", d),
+            ("bash -c -x 'python3 measure.py'", d),
+            ("watch 'python3 measure.py'", d),
+            ("watch -n 1 'python3 measure.py'", d),
+            ("tmux new 'python3 measure.py'", d),
+            ("tmux new-session -d -s x 'python3 measure.py'", d),
+            ('osascript -e \'do shell script "python3 measure.py"\'', d),
+            ('osascript -e "do shell script \\"python3 measure.py\\""', d),  # an escaped quote opens it too
+            ('python3 -c \'import os; os.system("python3 measure.py")\'', d),
+            ('node -e \'require("child_process").execSync("./dump.sh")\'', d),
+            ("'python3' measure.py", d),
+            ('"python3" -I measure.py', d),
+            ('cat "measure.py" | python3', d),
+            ('cat list.py measure.py | python3', d),  # every cat file, not only the first
+            ('. dump.sh', d),
         ] + [('python3 lit%d.py' % i, d) for i in range(len(LIT_FORMS))] + [
             ('ls; python3 "measure.py"', d),
             ('python3 -c "import subprocess; subprocess.run([\'' + S + '\', \'dump-keychain\'])"', d),
@@ -241,6 +266,19 @@ def script_cases():
             ("sed -n '1,5p' sub/deep.py", d),
             ('grep -n "x" "sub/deep.py"', d),
             ('echo "run" python3 measure.py', d),
+            ('grep -n "eval" sub/deep.py', d),  # a word that only names a payload command is not one
+            ("grep -n 'watch' sub/deep.py", d),
+            # prose after a ")": a sentence-ending "." is not `source` of a file named later in the sentence
+            # (an agent-msg heredoc blocked on the #275 gate, 2026-11-14)
+            ("cat <<'E'\nmerge-base egyezik). Egy commit, csak sub/deep.py es a teszt.\nE", d),
+            ('source ./ok.js sub/deep.py', d),  # source runs its first file; the rest are its arguments
+            # the boundaries (Viktor 41790 INFO 2): -mMOD stops the walk, exactly MAX_ARGS words, a cat of 64 words,
+            # CAT_RX after a closing quote is not a command
+            ('python3 -mlist ' + 'a ' * 70, d),
+            ('python3 list.py ' + ' '.join(f'a{i}' for i in range(63)), d),
+            ('cat ' + 'x ' * 63 + 'list.py | python3', d),
+            ('echo "x" cat measure.py | python3', d),
+            ('python3 ' + 'A' * 4095, d),  # the window ends exactly at the end of the command: nothing unread
             ('python3 list.py ' + ' '.join(f'a{i}' for i in range(62)), d),  # 63 words: inside MAX_ARGS (64)
             ('python3 -c pass ' + 'a ' * 100, d),  # the walk stops at -c: the rest is not a script's words
             ('cd sub2 && cat only.py', d),  # no interpreter: reading a file is not running it
@@ -377,11 +415,33 @@ def script_cases():
             ('python3 ' + 'A' * 5000 + ' measure.py', d),
             ('python3 list.py ' + ' '.join(f'a{i}' for i in range(64)), d),
             ('cat ' + 'x ' * 70 + 'measure.py | python3', d),
+            ('cat ' + 'x ' * 64 + 'list.py | python3', d),  # 65 words
+            ('python3 ' + 'A' * 4096, d),  # one char past the window
         ]
         for cmd, cwd in too_many:
             code, err = bash_in(cmd, cwd)
             if code != 2 or 'script-too-many-args' not in err:
                 fails.append(f'script: past MAX_ARGS/ARGS_WINDOW should block (got {code}): {cmd[:60]!r}')
+        # Viktor 41790 INFO 3: the message says why (the word count and the limit, or the window)
+        _, err = bash_in('python3 list.py ' + ' '.join(f'a{i}' for i in range(69)), d)
+        if '70 szó' not in err or 'MAX_ARGS 64' not in err:
+            fails.append(f'script: too-many-args message should name 70 words and MAX_ARGS 64: {err[:200]!r}')
+        _, err = bash_in('python3 ' + 'A' * 5000, d)
+        if '4096' not in err:
+            fails.append(f'script: window message should name the 4096-char window: {err[:200]!r}')
+        # the new payload positions stay linear (Viktor 41790: his first try ran past 5 s on ' -exec' x 12 000)
+        payload_redos = [
+            ('bash -c' + ' -x' * 20000 + " 'a'", 0), ('eval ' * 20000, 0), ('watch -n 1 ' * 10000, 0),
+            ('tmux new ' + 'a ' * 20000, 0), ('tmux new a ' * 10000, 0), (' -exec' * 12000, 0), ('-c ' * 30000, 0),
+            ('watch ' + '-n ' * 20000, 0), ('do shell script \\' * 20000, 0),
+            ('do shell script ' * 10000, 0), ('os.system(' * 20000, 0), ('"python3" ' * 20000, 2),  # past MAX_ARGS: blocks, fast
+        ]
+        for cmd, want in payload_redos:
+            t = _t.monotonic()
+            code, _ = bash_in(cmd, d)
+            took = _t.monotonic() - t
+            if code != want or took > 2:
+                fails.append(f'script: payload padding {cmd[:24]!r}: want rc {want} under 2 s, got {code} in {took:.1f} s')
         # Viktor 41756 INFO 4 (s1): past MAX_TRIES (4000) path lookups the gate blocks. 31 directories x 3 calls x
         # 60 missing words = 5580 lookups, no file found anywhere.
         code, err = bash_in('cd a && ' * 30 + ' ; '.join('python3 ' + ' '.join(f'm{j}' for j in range(60))
@@ -395,7 +455,7 @@ def script_cases():
         took = _t.monotonic() - t
         if took > 2:
             fails.append(f'script: 30 000 interpreter calls took {took:.1f} s (want under 2 s)')
-        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2
+        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + len(payload_redos)
 
 
 def main():

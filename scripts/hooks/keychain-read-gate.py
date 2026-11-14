@@ -33,12 +33,15 @@ file a command runs is read and judged too:
     hatch run), every one of its following words that is an existing regular file, its arguments included (an
     innocent first file, `node -r ./ok.js m.js`, does not hide the script; Viktor 41756 LOW 2), up to MAX_ARGS
     words: more words, or a command running past ARGS_WINDOW, blocks unread ('script-too-many-args', LOW 1); after
-    -c / -e or `-` the code is inline or on stdin; python -m mod: the files
+    -c / -e or `-` the code is inline or on stdin; source and `.` run their first word only (the rest are that
+    script's arguments); python -m mod: the files
     the module runs from the cwd, mod.py, mod/__init__.py, mod/__main__.py and each dotted parent); when an
-    interpreter runs, also a `< file` redirect and the files of a `cat` (`cat m.py | python3`); and a path in
-    command position run directly (`./x.py`, `/abs/x.sh`, `tools/x.py`). For these script rules a quote is a command
-    position only where a shell -c payload opens (`bash -c "./x.sh"`), so the word after a closing quote
-    (`grep -n "x" f.py`) is not a command. A relative path is resolved against the
+    interpreter runs, also a `< file` redirect and the files of a `cat` (`cat m.py | python3`, quoted too); and a
+    path in command position run directly (`./x.py`, `/abs/x.sh`, `tools/x.py`). A quoted interpreter name counts
+    (`'python3' m.py`, `os.system("python3 m.py")`). For these script rules a quote is a command position only where
+    a payload opens (`bash -c "./x.sh"`, `bash -c -- '...'`, `eval "..."`, `watch -n 1 '...'`, `tmux new '...'`,
+    `do shell script "..."`; Viktor 41790 LOW 1), so the word after a closing quote (`grep -n "x" f.py`) is not a
+    command. A relative path is resolved against the
     payload cwd and the directory after each `cd` in order, a relative cd on top of the one before; `~`, `$HOME` and
     variables assigned in the command itself (`F=m.py; python3 $F`) are expanded (Viktor 41715 LOW). The first
     MAX_SCRIPT_BYTES of each file. Fail-closed: more than MAX_SCRIPTS files, MAX_BASES directories or MAX_TRIES
@@ -53,7 +56,9 @@ file a command runs is read and judged too:
     (`python3 -c "..."`, `python3 - <<'PY' ... PY`).
   Not seen: a module the script imports, a file the script builds or downloads, a name assembled at run time
   ('sec' + 'urity'), keychain APIs (Security.framework, keyring), a variable set outside the command, a quoted path
-  with spaces, a Ruby %w list. The gate's own test assembles its fixtures at
+  with spaces, a Ruby %w list, a payload a quote opens after other commands (`command '...'`, `time '...'` run a
+  command literally named so, which fails; `script -q /dev/null python3 m.py`, `su -c`, `ssh` run remotely or are
+  not listed). The gate's own test assembles its fixtures at
   run time, so running the test is not blocked.
 Any error while matching blocks (fail-closed; exit 1 would not block). Input that is not a Bash call is allowed.
 The command text is never logged: it may itself carry a secret.
@@ -67,7 +72,7 @@ import sys
 import time
 
 WRAPPERS = (r'(?:env|sudo|exec|command|nohup|time|nice|xargs|caffeinate|arch|builtin|timeout|stdbuf|setsid'
-            r'|if|then|else|elif|do|while|until)')
+            r'|if|then|else|elif|do|while|until|eval|watch)')
 # Command position, then any words that may stand before the command: wrapper words, their flags, a number (a
 # duration or a niceness: `timeout 5`, `nice -n 5`), VAR=value assignments, `!`. One token matches one way only (a
 # token starts with a letter and is a wrapper, with `-`, with a digit or `+`/`.`, or is NAME=...; `\s+` ends it):
@@ -85,7 +90,15 @@ POSITION = (r'(?:^|[;&|(){}\n`\'"]|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*'
 # position only where a shell -c payload opens (`bash -c "./x.sh"`, `bash -lc '...'`). With every quote a position, the
 # word after a CLOSING quote looked like a command: `grep -n "for x" scripts/hooks/keychain-read-gate.py` read the
 # gate's own source as a script it runs and blocked (measured 2026-11-14 on the #275 gate; card 7427e6f4).
-SCRIPT_POSITION = (r'(?:^|[;&|(){}\n`]|\$\(|\s-(?:exec|execdir|ok)(?=\s)|[ \t]-[A-Za-z]*c[ \t]+[\'"])[ \t]*'
+# Payloads a quote opens (Viktor 41790 LOW 1): after `-c` and up to four more flags (`bash -c -- '...'`, `-c -x`),
+# after eval, watch (its flags and numbers), tmux new / new-session (up to six words), osascript's `do shell script`;
+# an escaped quote too (`do shell script \"...\"`). Each run of words is bounded ({0,4}, {0,6}): an unbounded one
+# rescanned " -exec" runs (Viktor's first try ran past 5 s on 12 000 x " -exec"). A call in inline code,
+# os.system("python3 m.py"), opens at the "(" position with the quote before the interpreter (INTERP_RX below).
+PAYLOAD_OPEN = (r'(?:[ \t]-[A-Za-z]*c(?:[ \t]+-' + WORD + r'*){0,4}'
+                r'|(?<![\w-])(?:eval|watch(?:[ \t]+(?:-' + WORD + r'*|\d[\w.]*)){0,4}'
+                r'|tmux[ \t]+new(?:-session)?(?:[ \t]+' + WORD + r'+){0,6}|do[ \t]+shell[ \t]+script))[ \t]+\\?[\'"]')
+SCRIPT_POSITION = (r'(?:^|[;&|(){}\n`]|\$\(|\s-(?:exec|execdir|ok)(?=\s)|' + PAYLOAD_OPEN + r')[ \t]*'
                    r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|[+.]?\d[\w.]*|\w+=' + WORD
                    + r'*)[ \t]+)*')
 BINARY = r'(?:' + WORD + r'*/)?security'
@@ -131,7 +144,7 @@ def script_budget():
 PATH_TOKEN = r'''['"]?([^\s'";|&<>()`$]+)['"]?'''
 INTERP = (r'(?:' + WORD + r'*/)?(?:python[\d.]*|node|bash|sh|zsh|dash|ksh|ruby|perl|osascript|deno|bun|tsx|ts-node|php|swift'
           r'|source|\.|npx[ \t]+(?:tsx|ts-node)|(?:uv|poetry|pipenv|pdm|hatch)[ \t]+run(?:[ \t]+python[\d.]*)?)')
-INTERP_RX = re.compile(SCRIPT_POSITION + INTERP + r'(?=\s|$)', re.I)
+INTERP_RX = re.compile(SCRIPT_POSITION + r'\\?[\'"]?' + INTERP + r'[\'"]?(?=\s|$)', re.I)
 # After the interpreter: its words up to the end of that command, read without a regex (Viktor 41715 LOW a: a flag's
 # argument, `-W ignore`, `-o pipefail`, was taken for the file). Every word that is an existing regular file is judged,
 # not only the first (Viktor 41756 LOW 2: `node -r ./ok.js measure.js` hid measure.js behind ./ok.js); a code flag
@@ -151,7 +164,7 @@ MODULE_NAME_RX = re.compile(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){0,7}')
 # The script on stdin (Viktor 41715 LOW d): `python3 < m.py`, `python3 - < m.py`, `cat m.py | python3`. Only when the
 # command runs an interpreter.
 REDIRECT_RX = re.compile(r'(?<![<\d&])<(?![<(&])[ \t]*' + PATH_TOKEN)
-CAT_RX = re.compile(SCRIPT_POSITION + r'cat((?:[ \t]+' + WORD + r'+)+)')
+CAT_RX = re.compile(SCRIPT_POSITION + r'cat((?:[ \t]+[\'"]?' + WORD + r'+[\'"]?)+)')
 # Shell variables set in the command (Viktor 41715 LOW f: `F=m.py; python3 $F`), and every cd in order, a relative one
 # on top of the one before (LOW b: `cd sub && python3 only.py`).
 ASSIGN_RX = re.compile(r'''(?<![\w$])([A-Za-z_]\w*)=(['"]?)([^\s'";|&<>()`$]+)\2(?=\s|$|;)''')
@@ -190,7 +203,8 @@ def literal_hit(text):
 
 
 def strip_quotes(word):
-    return word[1:-1] if len(word) >= 2 and word[0] == word[-1] and word[0] in '\'"' else word.strip('\'"')
+    # a backslash too: the escaped quote that closes `do shell script \"python3 m.py\"` left "m.py\"
+    return word[1:-1] if len(word) >= 2 and word[0] == word[-1] and word[0] in '\'"' else word.strip('\'"\\')
 
 
 def expand(text):
@@ -230,9 +244,17 @@ def interp_groups(text):
     groups = []
     for m in INTERP_RX.finditer(text):
         python = 'python' in m.group(0).lower()
+        name = re.split(r'[\s;&|(){}`\'"/\\]', m.group(0).rstrip('\'"\\'))[-1]
         rest = text[m.end():m.end() + ARGS_WINDOW]  # a window, not the rest: 6 000 calls x the rest was quadratic
         cut = min([i for i in (rest.find(ch) for ch in CMD_END) if i >= 0] or [len(rest)])
         all_words = rest[:cut].split()
+        if name in ('.', 'source'):
+            # source runs its first word; the rest are that script's arguments. Prose after a ")" made a sentence-
+            # ending "." read as source of a file named later in the sentence (an agent-msg heredoc, 2026-11-14).
+            first = [strip_quotes(w) for w in all_words[:2] if not w.startswith('-')][:1]  # `. -- f.sh` too
+            if first and first[0]:
+                groups.append(first)
+            continue
         # the window ended inside this command: what follows it is not read
         clipped = cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text)
         words = [strip_quotes(w) for w in all_words[:MAX_ARGS]]
@@ -257,8 +279,10 @@ def interp_groups(text):
             if not w.startswith('-') and w:
                 group.append(w)
             i += 1
-        if not stopped and (len(all_words) > MAX_ARGS or clipped):
-            raise TooManyArgs()
+        if not stopped and clipped:
+            raise TooManyArgs(f'a parancs hosszabb a {ARGS_WINDOW} karakteres ablaknál')
+        if not stopped and len(all_words) > MAX_ARGS:
+            raise TooManyArgs(f'{len(all_words)} szó, MAX_ARGS {MAX_ARGS}')
         if group:
             groups.append(group)
     return groups
@@ -274,7 +298,7 @@ def script_paths(cmd, cwd):
         for m in CAT_RX.finditer(text):
             cat_words = m.group(1).split()
             if len(cat_words) > MAX_ARGS:
-                raise TooManyArgs()
+                raise TooManyArgs(f'cat: {len(cat_words)} szó, MAX_ARGS {MAX_ARGS}')
             groups += [[strip_quotes(w)] for w in cat_words if not w.startswith('-')]
     groups += [[m.group(1)] for m in DIRECT_RX.finditer(text)]
     bases = cd_bases(text, cwd)
@@ -310,8 +334,8 @@ def script_hits(cmd, cwd):
         found.append('script-inline')
     try:
         paths = script_paths(cmd, cwd)
-    except TooManyArgs:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
-        return found + ['script-too-many-args']
+    except TooManyArgs as e:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
+        return found + [f'script-too-many-args ({e})']
     if len(paths) > MAX_SCRIPTS:  # not "check the first ten": an eleventh file would slip past (fail-closed)
         return found + ['script-too-many']
     budget = script_budget()
