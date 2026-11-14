@@ -23,6 +23,11 @@ A wrapper flag with a word argument and a wrapper's positional words (`sudo -u r
 5`, `exec -a x`, `script -q /dev/null`, `ssh host`, `flock f`, `sg g`, `chroot d`) no longer hide the command: the
 blank before the command they run becomes a command boundary (wrapper_bounds, WRAP_ARGS; card 3085a683, the gap
 Viktor 30044 and 41831 INFO 3 named). A walk past MAX_ARGS words blocks ('wrapper-unread').
+git's credential paths into the login keychain (card 04d67b39, Viktor 41943): `git credential fill|approve|reject`,
+the osxkeychain helper called directly (`git credential-osxkeychain get`, `git-credential-osxkeychain`, by path),
+and choosing it (`git -c credential.helper=osxkeychain ...`, `git config ... credential.helper osxkeychain`,
+GIT_CONFIG_PARAMETERS / GIT_CONFIG_VALUE_<n>), with git's own options before the subcommand (`git -C d -c a=b`) and
+behind xcrun. Plain `git fetch` / `git push` pass. These read the command text, not a script file's (GIT_RULES).
 Not seen: everything listed above under "does not see"; a wrapper not in WRAP_ARGS whose flag takes a word (su,
 runuser, ionice, taskset, unbuffer ...), and a quoted string that starts with a wrapped call blocks like one that
 starts with the call (`git commit -m "sudo -u root security dump-keychain"`).
@@ -143,6 +148,31 @@ RULES = [
     ('secret-read', re.compile(POSITION + BINARY + OPTIONS + r'\s+' + SECRET_SUB + r'(?![\w-])', re.I)),
     ('stdin-mode', re.compile(POSITION + BINARY + r'(?:\s+-\S+)*?\s+-[a-z]*[ip][a-z]*(?=\s|$|[;&|)`\'"])', re.I)),
 ]
+# git's credential paths into the login keychain (Viktor 41943 HIGH, Klodel 41948, card 04d67b39): the system git
+# config names osxkeychain as the helper, so `git credential fill` (and approve / reject, which store and erase) and
+# the helper itself (`git credential-osxkeychain get`, `git-credential-osxkeychain get`, by path too) read or write
+# the login keychain's credentials, other agents' included. `git` is walked like a wrapper (WRAP_ARGS: -C, -c,
+# --git-dir ...), and its subcommand is always marked a command position, so `git -C d -c a=b credential fill` is
+# read as `credential fill`. Choosing the helper by name blocks too (`git -c credential.helper=osxkeychain fetch`,
+# `git config credential.helper osxkeychain`). A plain `git fetch` / `git push` passes (Klodel 41948: Pulzus and
+# the push scripts use an extraheader); what the system helper does inside them is the config's to fix (card
+# 1c205f39: GIT_CONFIG_NOSYSTEM), not this gate's.
+# These rules read the COMMAND text (inline code in it too), not a script file's text: scripts/gh-pr.mjs runs
+# `git credential fill` with the helper list reset to the clone's own helpers (the keychain helper never asked) and
+# names it in a comment and a string, both of which read as a command position.
+GIT_RULES = [
+    ('git-credential', re.compile(POSITION + r'credential[ \t]+(?:fill|approve|reject)(?![\w-])', re.I)),
+    ('git-credential-helper', re.compile(POSITION + r'\\?[\'"]?(?:' + WORD + r'*/)?(?:git-)?credential-osxkeychain'
+                                         r'(?![\w-])', re.I)),
+    # choosing the helper: `git -c credential.helper=osxkeychain ...`, `git config [flags] credential.helper
+    # osxkeychain`, GIT_CONFIG_PARAMETERS / GIT_CONFIG_VALUE_<n>; not the words in prose (a commit message that says
+    # "the system config sets credential.helper=osxkeychain" passes: two of 19 861 replayed commands were such)
+    ('git-credential-helper', re.compile(r'(?<![\w-])-c[ \t]+[\'"]?credential\.helper=[\'"]?!?[^\s\'";|&]*osxkeychain',
+                                         re.I)),
+    ('git-credential-helper', re.compile(POSITION + r'config(?:[ \t]+-' + WORD + r'*)*[ \t]+[\'"]?credential\.helper'
+                                         r'[\'"]?[ \t]+[\'"]?!?[^\s\'";|&]*osxkeychain', re.I)),
+    ('git-credential-helper', re.compile(r'(?<![\w-])GIT_CONFIG_(?:PARAMETERS|VALUE_\d+)=[^\n;&|]*osxkeychain', re.I)),
+]
 
 
 def normalise(cmd):
@@ -153,7 +183,8 @@ def normalise(cmd):
     return cmd
 
 
-def hits(cmd):
+def hits(cmd, script=False):
+    """Rule names the text matches; a script file's text (script=True) is not judged by GIT_RULES."""
     text = normalise(cmd)
     # `sudo -u root security ...` (card 3085a683): the text with the wrapped commands' boundaries is judged TOO, not
     # instead: a wrong mark (a flag the table reads as taking a word that it does not) could split a call the plain
@@ -165,7 +196,11 @@ def hits(cmd):
     # More false positives than the first pass, which the gate already accepts (see the docstring).
     texts = [text] if bounded == text else [text, bounded]
     texts += [re.sub(r'[\'"\\]', '', t) for t in texts]
-    return [name for name, rx in RULES if any(rx.search(t) for t in texts)]
+    found = []
+    for name, rx in RULES + ([] if script else GIT_RULES):
+        if name not in found and any(rx.search(t) for t in texts):
+            found.append(name)
+    return found
 
 
 MAX_SCRIPTS = 10
@@ -491,7 +526,12 @@ WRAP_ARGS = {
     'command': ('', set(), 0),
     'builtin': ('', set(), 0),
     'setsid': ('', set(), 0),
+    # card 04d67b39: git's subcommand (GIT_RULES), and the tool xcrun runs (`xcrun security find-...` passed too)
+    'git': ('Cc', {'--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'}, 0),
+    'xcrun': ('f', {'-sdk', '--sdk', '-toolchain', '--toolchain', '--find'}, 0),  # -f / --find name: only a path
 }
+# Neither git nor xcrun is a CHAIN word, so the word after their options is marked even when the walk skipped none.
+WRAP_ALWAYS = {'git', 'xcrun'}
 WRAP_PASSES = 8
 _WRAP_NAME = (r'\\?[\'"]?(?:' + WORD + r'*/)?(' + '|'.join(sorted(WRAP_ARGS, key=len, reverse=True))
               + r')[\'"]?(?=[ \t])')
@@ -513,7 +553,8 @@ def wrap_command_start(text, i, name, qualified=False):
     into the word: `sudo -p a\\ b` is one word, as for the shell (Viktor 41970 LOW 1)."""
     short, whole, positional = WRAP_ARGS[name]
     n = len(text)
-    need_arg = flags_done = skipped = False
+    need_arg = flags_done = False
+    skipped = name in WRAP_ALWAYS
     for _ in range(MAX_ARGS + 1):
         while i < n and text[i] in ' \t':
             i += 1
@@ -624,7 +665,7 @@ def script_hits(cmd, cwd):
             return found + ['script-too-slow']
         with open(path, 'rb') as f:
             body = f.read(MAX_SCRIPT_BYTES).decode('utf-8', errors='replace')
-        if hits(body) or literal_hit(body):
+        if hits(body, script=True) or literal_hit(body):
             found.append('script-file')
             break
     return found

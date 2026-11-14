@@ -13,9 +13,11 @@ import sys
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'keychain-read-gate.py')
 
 # The fixtures spell the binary with a 3 for its first e ("s3curity"); fix() restores it at run time, so this file
-# carries no runnable keychain call and running it is not blocked by the gate it tests (card bc009036).
+# carries no runnable keychain call and running it is not blocked by the gate it tests (card bc009036). The git
+# credential fixtures likewise spell "cr3dential" (card 04d67b39).
 def fix(cmd):
-    return cmd.replace('s3c', 'sec').replace('S3C', 'SEC').replace('s"3c"', 's"ec"')
+    return (cmd.replace('s3c', 'sec').replace('S3C', 'SEC').replace('s"3c"', 's"ec"')
+            .replace('cr3d', 'cred').replace('CR3D', 'CRED'))
 
 
 BLOCK = [
@@ -134,6 +136,42 @@ BLOCK = [
     # runs, still blocks
     'sudo -u "$(env -u X s3curity dump-keychain)" ls',
     "sudo -p 'a b' sudo -u \"$(env -u X s3curity dump-keychain)\" ls",
+    # card 04d67b39 (Viktor 41943 HIGH, Klodel 41948): git's credential paths into the login keychain (all allow
+    # on f877074a)
+    'git cr3dential fill',
+    'git cr3dential approve',
+    'git cr3dential reject',
+    'git -C /tmp cr3dential fill',
+    'git -c a=b -c c=d cr3dential fill',
+    'git --git-dir /x/.git cr3dential fill',
+    'git --git-dir=/x/.git --no-pager cr3dential fill',
+    "printf 'protocol=https\\nhost=github.com\\n\\n' | git cr3dential fill",
+    'echo x | /usr/bin/git cr3dential fill',
+    '"git" cr3dential fill',
+    'GIT CR3DENTIAL FILL',  # the default macOS volume is case-insensitive
+    'git cr3dential "fill"',
+    'x=$(git cr3dential fill)',
+    "bash -c 'git cr3dential fill'",
+    'python3 -c "import os; os.system(\'git cr3dential fill\')"',
+    'ssh localhost git cr3dential fill',
+    'sudo -u root git cr3dential fill',
+    'git cr3dential-osxkeychain get',
+    'git cr3dential-osxkeychain erase',
+    'git-cr3dential-osxkeychain get',
+    'git-cr3dential-osxkeychain',
+    '/Library/Developer/CommandLineTools/usr/libexec/git-core/git-cr3dential-osxkeychain get',
+    'xcrun git cr3dential fill',
+    'xcrun -sdk macosx git cr3dential fill',
+    'xcrun s3curity find-generic-password -s x',  # xcrun is a wrapper too
+    'git -c cr3dential.helper=osxkeychain fetch',
+    'git -c "cr3dential.helper=osxkeychain" push origin HEAD',
+    'git -c cr3dential.helper= -c cr3dential.helper=osxkeychain ls-remote origin',
+    'git config --global cr3dential.helper osxkeychain',
+    'git config --system --add cr3dential.helper osxkeychain',
+    'GIT_CONFIG_PARAMETERS="\'cr3dential.helper\'=\'osxkeychain\'" git fetch',
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=cr3dential.helper GIT_CONFIG_VALUE_0=osxkeychain git fetch',
+    # accepted false positive, the class above
+    "grep -n 'git cr3dential fill' notes.md",
 ]
 # Viktor 41970 INFO 6: one row per WRAP_ARGS entry, so a dropped or mistyped entry fails here. A spec of its own,
 # not read from the gate: wrapper -> (short flags with a word, whole flags with the next word, positional words).
@@ -157,6 +195,9 @@ WRAP_SPEC = {
     'flock': ('wE', ['--timeout', '--wait', '--conflict-exit-code'], 1),
     'sg': ('', [], 1),
     'chroot': ('ugG', ['--userspec', '--groups'], 1),
+    # card 04d67b39
+    'git': ('Cc', ['--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'], 0),
+    'xcrun': ('f', ['-sdk', '--sdk', '-toolchain', '--toolchain', '--find'], 0),
 }
 for _w, (_short, _whole, _pos) in WRAP_SPEC.items():
     _tail = ' p0s' * _pos + ' s3curity dump-keychain'  # the word is a letter run: CHAIN would read a number
@@ -181,6 +222,22 @@ ALLOW = [
     'python3 s3curity_check.py dump-keychain-list',
     's3curity find-generic-password-helper',
     'node scripts/s3curity-review.mjs',
+    # card 04d67b39: plain fetch / push pass (Klodel 41948: Pulzus and the push scripts use an extraheader)
+    'git fetch origin',
+    'git push origin HEAD',
+    'git -c http.extraheader="AUTHORIZATION: basic eA==" push origin HEAD',
+    'git -c cr3dential.helper= fetch origin',  # the helper list emptied
+    'git -C /tmp status',
+    'git cr3dential',
+    'git config --get cr3dential.helper',
+    'git config --get-all cr3dential.helper',
+    'git log --grep cr3dential',
+    'git cr3dential-store get',  # a plaintext file, not the keychain: not this gate's
+    'echo git cr3dential fill',  # prose
+    'grep -n osxkeychain scripts/pr-head.sh',
+    "git commit -m 'note: the system config sets cr3dential.helper=osxkeychain'",  # prose in a message
+    'xcrun --find clang',
+    'xcrun -f git-cr3dential-osxkeychain',  # -f only prints the path
     # card 3085a683: the wrapped command is judged, not the wrapper's words
     'sudo -u root ls',
     'sudo -u s3curity ls',  # a user named so: the command is ls
@@ -786,6 +843,9 @@ def main():
                   # Viktor 41970 LOW 3: a quoted flag word made finditer re-walk the chain from every wrapper
                   ('sudo -u "a b" ' * 4000 + 'z', 0), ("env -u 'a b' " * 4000 + 'z', 0),
                   ('sudo -p "a b" ' * 16000 + 'z', 0), ('sudo -u "a b" ' * 4000 + sec, 2),
+                  # card 04d67b39: git and xcrun are walked and always marked
+                  ('git ' * 30000 + 'status', 0), ('git -c a=b ' * 10000 + fix('cr3dential fill'), 2),
+                  ('xcrun git ' * 15000 + 'status', 0), ('git' + ' -c a' * 20000 + ' status', 2),
                   ('sudo' + ' -u a' * 32 + ' ls', 0), ('sudo' + ' -u a' * 32 + ' -E ls', 2),
                   ('sudo -u a; ' * 20000, 0), ('(sudo -u a ' * 20000, 0), ('sudo -u a ' * 20000 + 'python3 x.py', 0),
                   ('ssh h ' * 20000 + sec, 2), ('nice -n 5 sudo -u a ' * 10000 + sec, 2)]
@@ -798,9 +858,18 @@ def main():
                 fails.append(f'wrapper timing case: want {want}, got {p.returncode}: {cmd[:40]!r}...')
         except subprocess.TimeoutExpired:
             fails.append(f'wrapper timing case timed out (5 s): {cmd[:40]!r}...')
+    # card 04d67b39: the GIT_RULES read the command, not a script file: the fleet's GitHub path, which runs
+    # `git credential fill` with the helper list reset (and names it in a comment and a string), passes
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(HOOK)))
+    if not os.path.isfile(os.path.join(repo, 'scripts', 'gh-pr.mjs')):
+        fails.append('gh-pr.mjs not found next to the gate: the regression case did not run')
+    else:
+        code, err = bash_in('node scripts/gh-pr.mjs pr view 1', repo)
+        if code != 0:
+            fails.append(f'gh-pr.mjs should pass (got {code}): {err[:160]}')
     script_fails, script_n = script_cases()
     fails += script_fails
-    total = len(BLOCK) + len(ALLOW) + 6 + 11 + len(wrap_timed) + script_n
+    total = len(BLOCK) + len(ALLOW) + 6 + 11 + len(wrap_timed) + 1 + script_n
     for f in fails:
         print('FAIL', f)
     print(f'{total - len(fails)}/{total} passed')
