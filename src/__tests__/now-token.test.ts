@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeAll } from 'vitest'
+import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { initDatabase, createAgentMessage, getAgentMessage, getDailyLog, getDailyLogDates, getPendingMessages } from '../db.js'
+import { initDatabase, createAgentMessage, getAgentMessage, getDailyLog, getDailyLogDates, getPendingMessages, createKanbanCard, getKanbanComments } from '../db.js'
 import { tryHandleMessages } from '../web/routes/messages.js'
 import { tryHandleDailyLog } from '../web/routes/daily-log.js'
+import { tryHandleKanban } from '../web/routes/kanban.js'
 import { fillNowToken, NOW_TOKEN } from '../web/now-token.js'
 import { APP_TZ, MAIN_AGENT_ID } from '../config.js'
 import type { RouteContext } from '../web/routes/types.js'
@@ -119,5 +121,39 @@ describe('the write paths fill {{NOW}} at the server', () => {
     const row = getAgentMessage(r.json.id)!
     expect(row.content).not.toContain(NOW_TOKEN)
     expect(stampedNow(row.content, before, after)).toBe(true)
+  })
+})
+
+// DREAM 11-14 (the {{NOW}} kanban card): the kanban comment paths stored {{NOW}} verbatim.
+describe('the kanban comment paths fill {{NOW}} at the server', () => {
+  // A comment's content as the dashboard stored it, the newest last.
+  const lastComment = (id: string) => getKanbanComments(id).at(-1)?.content ?? ''
+
+  it('POST /api/kanban/:id/comments content', async () => {
+    const card = { id: randomUUID() }
+    createKanbanCard({ id: card.id, title: 'now-token comment', status: 'planned', assignee: 'dex', priority: 'normal' })
+    const before = new Date()
+    const r = await call(tryHandleKanban, 'POST', `/api/kanban/${card.id}/comments`, { author: 'dex', content: 'Kernel {{NOW}}: kész' })
+    const after = new Date()
+    expect(r.statusCode).toBe(200)
+    const stored = lastComment(card.id)
+    expect(stored).not.toContain(NOW_TOKEN)
+    expect(stampedNow(stored, before, after)).toBe(true)
+  })
+
+  it('the comment a move carries (POST /move) and a PUT carries', async () => {
+    const card = { id: randomUUID() }
+    createKanbanCard({ id: card.id, title: 'now-token move', status: 'planned', assignee: 'dex', priority: 'normal' })
+    await call(tryHandleKanban, 'POST', `/api/kanban/${card.id}/move`, { status: 'in_progress', actor: 'dex', comment: 'felvéve {{NOW}}' })
+    expect(lastComment(card.id)).toMatch(/^felvéve \d{2}:\d{2}$/)
+    await call(tryHandleKanban, 'PUT', `/api/kanban/${card.id}`, { status: 'waiting', actor: 'dex', comment: 'VÁR: Viktor - ítélet ({{NOW}})' })
+    expect(lastComment(card.id)).toMatch(/^VÁR: Viktor - ítélet \(\d{2}:\d{2}\)$/)
+  })
+
+  it('a quoted token ({{ NOW }}) stays as written', async () => {
+    const card = { id: randomUUID() }
+    createKanbanCard({ id: card.id, title: 'now-token quoted', status: 'planned', assignee: 'dex', priority: 'normal' })
+    await call(tryHandleKanban, 'POST', `/api/kanban/${card.id}/comments`, { author: 'dex', content: 'a token: {{ NOW }}' })
+    expect(lastComment(card.id)).toBe('a token: {{ NOW }}')
   })
 })

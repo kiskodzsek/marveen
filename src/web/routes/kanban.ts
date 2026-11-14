@@ -22,6 +22,7 @@ import {
   type TokenPruneLag,
 } from '../../db.js'
 import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
+import { fillNowToken } from '../now-token.js'
 import { waitingGateVerdict } from '../kanban-waiting-gate.js'
 import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, STORE_DIR, WEB_HOST, WEB_PORT, KANBAN_LABEL_COLORS, DB_FILENAME } from '../../config.js'
 import { listAgentNames, readAgentDisplayName } from '../agent-config.js'
@@ -180,10 +181,10 @@ function moveCommentError(comment: unknown): string | null {
 }
 
 // Stored only after the write succeeded, under the mover's name ("dashboard" when
-// the mover is anonymous), through the same ref normalisation as POST /comments.
+// the mover is anonymous), through the same ref normalisation and {{NOW}} fill as POST /comments.
 function storeMoveComment(cardId: string, comment: unknown, actor: string | undefined): void {
   if (typeof comment !== 'string' || comment.trim() === '') return
-  addKanbanComment(cardId, actor ?? 'dashboard', normalizeKanbanRefs(comment, getKanbanSeqByIdPrefix))
+  addKanbanComment(cardId, actor ?? 'dashboard', normalizeKanbanRefs(fillNowToken(comment), getKanbanSeqByIdPrefix))
 }
 
 // KANBANASSIGNFRAME1008 (SECSZIVEK1007 follow-up): the dispatch goes out in the
@@ -887,7 +888,9 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     // Code-side kanban-ref enforcement: rewrite `#<hex8>` references that map
     // to a real card into the human-facing `#<seq>` form before persistence
     // (#75 Cuzcoo dispatch). Random hex / non-matching tokens pass through.
-    const normalizedContent = normalizeKanbanRefs(content, getKanbanSeqByIdPrefix)
+    // DREAM 11-14 (the {{NOW}} kanban card): {{NOW}} is the server's clock at the write, as in a message, a close
+    // result and the daily log. The time-claim-gate recommends the token; comments used to store it verbatim.
+    const normalizedContent = normalizeKanbanRefs(fillNowToken(content), getKanbanSeqByIdPrefix)
     // `automated: true`: a bulk/machine writer marks its own comment, so the
     // stuck detector never reads it as a work-trace (KANBANSTUCKURES916).
     json(res, automated === true
