@@ -19,26 +19,37 @@ records a new deviation as "reported" when it exits 1, so running it here would 
 the reviewed tree. It repeats the guard's two reads (sha256 of the file, the global helper list ending with an
 empty entry) and reads the guard's state file as data.
 
-Install root = this file's grandparent (scripts/prechecks/ -> root). Paths are overridable by environment
-variables for the tests only (KHP_*).
+Install root = this file's grandparent (scripts/prechecks/ -> root). No environment variable changes a path or
+a threshold (Viktor 42470: an env override could silence the check without a trust-hash change); the tests import
+this module and set the constants in-process.
+
+What reaches the prompt is built from numbers and fixed words only, never a raw data field (Viktor 42470 LOW 1:
+the quota file is writable by any agent, and preCheck stdout lands in an owner-framed task body).
 """
 import hashlib
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import time
 
-ROOT = os.environ.get('KHP_ROOT') or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-NOW = float(os.environ.get('KHP_NOW') or time.time())
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-QUOTA_FILE = os.environ.get('KHP_QUOTA_FILE', os.path.join(ROOT, 'store', 'fleet-quota.jsonl'))
+QUOTA_FILE = os.path.join(ROOT, 'store', 'fleet-quota.jsonl')
 QUOTA_MAX_AGE_S = 3600          # an older last line means the sampler stopped: wake the round to say so
+QUOTA_MAX_FUTURE_S = 300        # a ts further ahead (ms instead of s, a wrong clock) also wakes the round
 QUOTA_LIMIT_PCT = 100           # the task's own threshold ("ha >=100")
-DISK_PATH = os.environ.get('KHP_DISK_PATH', ROOT)
-DISK_MIN_GIB = float(os.environ.get('KHP_DISK_MIN_GIB') or 10)   # the task's own threshold ("< 10 GiB")
-GUARD_STATE = os.environ.get('KHP_GUARD_STATE', os.path.join(ROOT, 'agents', 'kernel', 'state', 'gitconfig-guard.json'))
-GITCONFIG = os.environ.get('KHP_GITCONFIG', os.path.expanduser('~/.gitconfig'))
+DISK_PATH = ROOT
+DISK_MIN_GIB = 10               # the task's own threshold ("< 10 GiB"); GiB = 2**30 bytes, as df -k / host-monitor
+GUARD_STATE = os.path.join(ROOT, 'agents', 'kernel', 'state', 'gitconfig-guard.json')
+GITCONFIG = os.path.expanduser('~/.gitconfig')
+STATUS_RX = re.compile(r'[a-z_]{1,16}')
+
+
+def _now():
+    return time.time()
 
 
 def _last_json_line(path):
@@ -51,25 +62,32 @@ def _last_json_line(path):
     return json.loads(lines[-1])
 
 
+def _finite(v):
+    return not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)
+
+
 def quota():
     d = _last_json_line(QUOTA_FILE)
     seat = d['seats']['fleet']
     pct = seat['sevenDay']['pct']
     ts = d['ts']
-    if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not isinstance(ts, (int, float)):
-        raise ValueError('pct or ts is not a number')
-    age = NOW - ts
-    if age > QUOTA_MAX_AGE_S:
-        return f'PRECHECK: the last fleet-quota.jsonl line is {int(age // 60)} min old (pct {pct}); check the sampler.'
-    if pct >= QUOTA_LIMIT_PCT:
-        return f'PRECHECK: fleet 7d pct {pct} (>= {QUOTA_LIMIT_PCT}), status {seat.get("status")}.'
+    if not _finite(pct) or not _finite(ts):
+        raise ValueError('pct or ts is not a finite number')   # NaN / Infinity too (Viktor 42470 LOW 2): fail-open
+    status = seat.get('status')
+    status = status if isinstance(status, str) and STATUS_RX.fullmatch(status) else '?'
+    age = _now() - ts
+    if not (-QUOTA_MAX_FUTURE_S <= age <= QUOTA_MAX_AGE_S):
+        when = 'in the future' if age < 0 else f'{int(age // 60)} min old'
+        return f'PRECHECK: the last fleet-quota.jsonl line is {when} (pct {pct:g}); check the sampler.'
+    if not (pct < QUOTA_LIMIT_PCT):
+        return f'PRECHECK: fleet 7d pct {pct:g} (>= {QUOTA_LIMIT_PCT}), status {status}.'
     return 'SKIP'
 
 
 def disk():
     st = os.statvfs(DISK_PATH)
     free_gib = st.f_bavail * st.f_frsize / 2**30
-    if free_gib < DISK_MIN_GIB:
+    if not (free_gib >= DISK_MIN_GIB):
         return f'PRECHECK: free {free_gib:.2f} GiB (< {DISK_MIN_GIB:g} GiB).'
     return 'SKIP'
 
