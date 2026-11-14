@@ -8,7 +8,7 @@
 // HOME points at a temp dir BEFORE the modules load: SCHEDULED_TASKS_DIR is
 // computed from os.homedir() at import (same pattern as the other route tests).
 
-import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, chmodSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -900,6 +900,245 @@ describe('preCheck walk markers (Viktor 42472 b1-b4)', () => {
       }
     }
     expect(shipped.sort()).toEqual(expect.arrayContaining(['ledger-live-drain', 'memoria-heartbeat']))
+  })
+})
+
+// Viktor 42514: launcher words, embedded python / shell, parser-based imports,
+// a computed subprocess command, alias loads (MEDIUM 1, LOW 1, LOW 2, INFO 1).
+describe('preCheck walk: launchers, embedded code, parsed imports (Viktor 42514)', () => {
+  function dirWith(tag: string) {
+    const d = realpathOf(mkdtempSync(join(tmpHome, `pcl-${tag}-`)))
+    writeFileSync(join(d, 'x.py'), 'import localmod\nprint("SKIP")\n')
+    writeFileSync(join(d, 'localmod.py'), 'L = 1\n')
+    return d
+  }
+  function wrap(d: string, body: string) {
+    const w = join(d, 'w.sh')
+    writeFileSync(w, body + '\n')
+    return trust.preCheckWalk(w)
+  }
+  const hashed = (walk: { pairs: Array<[string, string]> }, f: string) => walk.pairs.some(([k, v]) => k === f && /^[0-9a-f]{64}$/.test(v))
+
+  it.each([
+    'timeout 5 python3 "$(dirname "$0")/x.py"',
+    'timeout -s KILL 5 python3 "$(dirname "$0")/x.py"',
+    'nice -n 5 python3 "$(dirname "$0")/x.py"',
+    'sudo -n -u nobody python3 "$(dirname "$0")/x.py"',
+    'echo a | xargs -n 1 python3 "$(dirname "$0")/x.py"',
+    'nohup python3 "$(dirname "$0")/x.py" &',
+    'env A=1 B=2 python3 "$(dirname "$0")/x.py"',
+    'caffeinate -i python3 "$(dirname "$0")/x.py"',
+    'exec timeout 5 nice python3 -I "$(dirname "$0")/x.py"',
+  ])('a launcher is stepped over: the script AND its imports are walked (%s)', (line) => {
+    const d = dirWith('launch')
+    const walk = wrap(d, line)
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
+  it.each([
+    ['sh -c', (d: string) => `sh -c "python3 ${join(d, 'x.py')}"`],
+    ['bash -c single quotes', (d: string) => `bash -c 'cd ${d} && python3 x.py'`],
+    ['python3 -c', (d: string) => `cd "${d}" && python3 -I -c "import localmod; print(1)"`],
+    ['python3 - heredoc', (d: string) => `cd "${d}"\npython3 - <<'EOF'\nimport os\nimport localmod\nEOF\necho done`],
+    ['python3 heredoc, unquoted, no expansion', (d: string) => `cd "${d}"\npython3 <<EOF\nimport localmod\nEOF`],
+  ])('embedded code is walked: %s', (_label, body) => {
+    const d = dirWith('embed')
+    const walk = wrap(d, body(d))
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
+  it.each([
+    ['launcher', 'mystarter python3 x.py'],
+    ['launcher', 'chrt 5 python3 x.py'],
+    ['interpreter stdin', 'cat x.py | python3'],
+    ['interpreter stdin', 'python3 - < x.py'],
+    ['interpreter -c', 'python3 -c "$CODE"'],
+    ['interpreter -c', 'bash -c "python3 $X"'],
+    ['heredoc expands', 'python3 <<EOF\nimport $MOD\nEOF'],
+    ['heredoc', "python3 <<'EOF'\nimport localmod"],
+  ])('what cannot be followed is UNRESOLVED: %s (%s)', (kind, body) => {
+    const d = dirWith('unres')
+    const walk = wrap(d, body)
+    expect(walk.blockers.some(b => b.startsWith(`UNRESOLVED ${join(d, 'w.sh')}#${kind}@`)), walk.blockers.join('|')).toBe(true)
+  })
+
+  it('a heredoc body is data: its lines are not read as shell', () => {
+    const d = dirWith('hdata')
+    expect(wrap(d, "cat <<'EOF' > out.txt\n$EVIL x\neval y\nEOF\necho ok").blockers).toEqual([])
+  })
+
+  it.each([
+    'command -v python3 >/dev/null || exit 0',
+    'python3 --version',
+    'echo "python3 missing"',
+    'type python3',
+  ])('a line that only names an interpreter is no marker (%s)', (line) => {
+    expect(wrap(dirWith('name'), line).blockers).toEqual([])
+  })
+
+  it.each([
+    ['semicolon', 'import os; import localmod'],
+    ['compound statement', 'try: import localmod\nexcept Exception: pass'],
+    ['backslash continuation', 'import os, \\\n    localmod'],
+    ['inside a function', 'def f():\n    if True: import localmod'],
+  ])('python imports come from the parser: %s', (_label, src) => {
+    const d = dirWith('ast')
+    writeFileSync(join(d, 'x.py'), src + '\n')
+    const walk = wrap(d, 'python3 "$(dirname "$0")/x.py"')
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py'))).toBe(true)
+  })
+
+  it('a package-relative import is followed (from .inner import y)', () => {
+    const d = dirWith('rel')
+    mkdirSync(join(d, 'pkg'))
+    writeFileSync(join(d, 'pkg', '__init__.py'), 'from .inner import y\nfrom . import sib\n')
+    writeFileSync(join(d, 'pkg', 'inner.py'), 'y = 1\n')
+    writeFileSync(join(d, 'pkg', 'sib.py'), 's = 1\n')
+    writeFileSync(join(d, 'x.py'), 'import pkg\n')
+    const walk = wrap(d, 'python3 "$(dirname "$0")/x.py"')
+    expect(walk.blockers).toEqual([])
+    for (const f of ['__init__.py', 'inner.py', 'sib.py']) expect(hashed(walk, join(d, 'pkg', f)), f).toBe(true)
+  })
+
+  it('a python file the parser rejects is UNPARSEABLE', () => {
+    const d = dirWith('syntax')
+    writeFileSync(join(d, 'x.py'), 'def (\n')
+    expect(wrap(d, 'python3 "$(dirname "$0")/x.py"').blockers).toEqual([`UNPARSEABLE ${join(d, 'x.py')}#python-SyntaxError`])
+  })
+
+  it.each([
+    ['subprocess.run', "import subprocess\nsubprocess.run([cmd, 'x'])"],
+    ['import_module', 'from importlib import import_module as im\nm = im(name)'],
+    ['site.addsitedir', 'import site\nsite.addsitedir(d)'],
+    ['__builtins__', "f = __builtins__['__import__']"],
+    ['exec', 'from builtins import exec as run\nrun(code)'],
+  ])('a computed or aliased load is UNRESOLVED: %s', (kind, src) => {
+    const d = dirWith('dyn')
+    writeFileSync(join(d, 'x.py'), src + '\n')
+    const walk = wrap(d, 'python3 "$(dirname "$0")/x.py"')
+    expect(walk.blockers.some(b => b.startsWith(`UNRESOLVED ${join(d, 'x.py')}#${kind}@`)), walk.blockers.join('|')).toBe(true)
+  })
+
+  it('an aliased literal import_module is followed like an import', () => {
+    const d = dirWith('alias')
+    writeFileSync(join(d, 'x.py'), "from importlib import import_module as im\nim('localmod')\n")
+    const walk = wrap(d, 'python3 "$(dirname "$0")/x.py"')
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py'))).toBe(true)
+  })
+
+  // Viktor 42560: MEDIUM 1 (b46, b47, b79), LOW 1-4
+  it.each([
+    ['eval', 'x=$((1<<N))\neval "$CMD"'],
+    ['eval', '(( y = 1 << SHIFT ))\neval x'],
+    ['heredoc', 'echo "cat <<EOF"\npython3 "$F"'],
+    ['interpreter argument', 'echo "cat <<EOF"\npython3 "$F"'],
+    ['heredoc', 'cat <<EOF\neval x'],
+    ['eval', 'cat <<EOF\neval x'],
+    ['launcher', '/usr/bin/arch -arm64 python3 x.py'],
+    ['launcher', './mystarter python3 x.py'],
+    ['interpreter stdin', "cat <<'EOF' | python3 -\nimport localmod\nEOF"],
+    ['interpreter stdin', "python3 - <<'EOF' | python3 -\nprint(1)\nEOF"],
+    ['interpreter -c', `python3 "-c" 'import localmod'`],
+    ['heredoc multiple', "python3 - <<'A'; python3 - <<'B'\nimport os\nA\nimport localmod\nB"],
+  ])('Viktor 42560: %s is UNRESOLVED (%s)', (kind, body) => {
+    const d = dirWith('v60')
+    const walk = wrap(d, body)
+    expect(walk.blockers.some(b => b.startsWith(`UNRESOLVED ${join(d, 'w.sh')}#${kind}@`)), walk.blockers.join('|')).toBe(true)
+  })
+
+  it('an unterminated heredoc does not swallow the lines after it (Viktor 42560 MEDIUM 1)', () => {
+    const d = dirWith('v60swallow')
+    const walk = wrap(d, 'echo "usage: cat <<EOF"\npython3 "$(dirname "$0")/x.py"')
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
+  it('an arithmetic shift is no heredoc: no marker, the next line is walked', () => {
+    const d = dirWith('v60arith')
+    const walk = wrap(d, 'n=$((1 << N))\n(( m = n << SHIFT ))\npython3 "$(dirname "$0")/x.py"')
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py'))).toBe(true)
+  })
+
+  it('the heredoc terminator line is part of the heredoc, not a command', () => {
+    expect(wrap(dirWith('v60term'), "cat <<eval > out.txt\ndata\neval\necho ok").blockers).toEqual([])
+  })
+
+  it.each([
+    '/usr/bin/env python3 "$(dirname "$0")/x.py"',
+    '/usr/bin/nice -n 5 python3 "$(dirname "$0")/x.py"',
+    'echo a | /usr/bin/xargs -n 1 python3 "$(dirname "$0")/x.py"',
+    '/usr/bin/caffeinate -i python3 "$(dirname "$0")/x.py"',
+  ])('a launcher written with a system path is stepped over (Viktor 42560 LOW 1): %s', (line) => {
+    const d = dirWith('v60sys')
+    const walk = wrap(d, line)
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
+  it('bash -C (noclobber) is a flag, not a walked -c: the script operand is walked (Viktor 42560 LOW 3)', () => {
+    const d = dirWith('v60noclobber')
+    writeFileSync(join(d, 'y.sh'), 'python3 "$(dirname "$0")/x.py"\n')
+    const walk = wrap(d, 'bash -C "$(dirname "$0")/y.sh"')
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
+  // Viktor 42560 INFO 2 Q29 / Q30: the import parser runs isolated (-I), and its failure blocks.
+  describe('the import parser process', () => {
+    let savedPath: string | undefined
+    beforeEach(() => { savedPath = process.env.PATH })
+    afterEach(() => { process.env.PATH = savedPath })
+
+    it('Q30: python3 that cannot start is UNPARSEABLE (fail-closed), not an empty import list', () => {
+      const d = dirWith('q30')
+      writeFileSync(join(d, 'x.py'), `# ${d}\nimport localmod\n`)
+      const empty = mkdtempSync(join(tmpHome, 'nopy-'))
+      process.env.PATH = empty
+      const walk = wrap(d, 'python3 "$(dirname "$0")/x.py"')
+      expect(walk.blockers).toContain(`UNPARSEABLE ${join(d, 'x.py')}#python-spawn`)
+    })
+
+    it('Q29: the parser is started with -I first (a json.py / ast.py beside the cwd is not loaded)', () => {
+      const d = dirWith('q29')
+      writeFileSync(join(d, 'x.py'), `# ${d}\nprint(1)\n`)
+      const bin = mkdtempSync(join(tmpHome, 'fakepy-'))
+      writeFileSync(join(bin, 'python3'), '#!/bin/sh\n[ "$1" = "-I" ] || exit 7\necho \'{"imports":[],"dynamic":[],"paths":[]}\'\n', { mode: 0o755 })
+      process.env.PATH = bin
+      expect(wrap(d, 'python3 "$(dirname "$0")/x.py"').blockers).toEqual([])
+    })
+  })
+
+  // Viktor 42514 INFO 2: the limits and the SQL guards, pinned by value
+  it('INFO 2: the file limit is 32 and the byte limit 2 MB', () => {
+    expect(trust.PRECHECK_WALK_MAX_FILES).toBe(32)
+    expect(trust.PRECHECK_WALK_MAX_BYTES).toBe(2 * 1024 * 1024)
+  })
+
+  it('INFO 2: the re-pin SQL writes only for the checked definition hash, the pin read, and a trusted row', () => {
+    const h = 'a'.repeat(64)
+    db.setScheduleTrust('sql-guard', 'approved', h, 'test', 1, 'b'.repeat(64))
+    expect(db.repinScheduleTrustPreCheck('sql-guard', 'c'.repeat(64), 'b'.repeat(64), 'd'.repeat(64))).toBe(false)
+    expect(db.repinScheduleTrustPreCheck('sql-guard', h, 'e'.repeat(64), 'd'.repeat(64))).toBe(false)
+    expect(db.repinScheduleTrustPreCheck('sql-guard', h, null, 'd'.repeat(64))).toBe(false)
+    expect(db.repinScheduleTrustPreCheck('no-such-task', h, null, 'd'.repeat(64))).toBe(false)
+    expect(db.getScheduleTrust('sql-guard')!.precheck_hash).toBe('b'.repeat(64))
+    expect(db.repinScheduleTrustPreCheck('sql-guard', h, 'b'.repeat(64), 'd'.repeat(64))).toBe(true)
+    expect(db.getScheduleTrust('sql-guard')!.precheck_hash).toBe('d'.repeat(64))
+  })
+
+  it('INFO 2: the one-time pin SQL never overwrites a pin, and a second run writes nothing', () => {
+    const h = 'a'.repeat(64)
+    db.setScheduleTrust('pin-has', 'legacy', h, 'test', 1, 'b'.repeat(64))
+    db.setScheduleTrust('pin-null', 'legacy', h, 'test', 1)
+    expect(db.pinScheduleTrustPreChecks([{ name: 'pin-has', hash: h, precheckHash: 'c'.repeat(64) }, { name: 'pin-null', hash: h, precheckHash: 'c'.repeat(64) }], 2)).toBe(1)
+    expect(db.getScheduleTrust('pin-has')!.precheck_hash).toBe('b'.repeat(64))
+    db.getDb().exec("UPDATE schedule_trust SET precheck_hash = NULL WHERE task_name = 'pin-null'")
+    expect(db.pinScheduleTrustPreChecks([{ name: 'pin-null', hash: h, precheckHash: 'c'.repeat(64) }], 3)).toBeNull()
+    expect(db.getScheduleTrust('pin-null')!.precheck_hash).toBeNull()
   })
 })
 

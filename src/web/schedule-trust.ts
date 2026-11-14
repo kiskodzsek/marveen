@@ -43,15 +43,21 @@
 // and of the files it directly calls is pinned at approval, in its own column
 // (preCheckContentHash; the definition hash is unchanged), and a changed file
 // is a mismatch like a changed definition (Viktor 42472).
-// - The walk follows literal references: a .py / .sh word, a shell
-//   interpreter's operand (after the dirname idiom and a literal cd), every
-//   python import name (stdlib included: X.py and X/__init__.py beside the
-//   script and on a literal sys.path dir; a missing candidate is ABSENT, so a
-//   shadowing json.py planted later moves the hash), literal importlib /
-//   spec_from_file_location / run_path paths, subprocess list literals.
+// - The walk follows literal references: a shell interpreter's operand
+//   (after the dirname idiom, a literal cd and launcher words such as timeout,
+//   nice, sudo, xargs, env), a path used as a command, the code of `python3 -c`,
+//   `sh -c` and a heredoc fed to an interpreter (Viktor 42514 MEDIUM 1), every
+//   python import name from Python's own parser (stdlib included: X.py and
+//   X/__init__.py beside the script and on a literal sys.path dir, and
+//   package-relative imports; a missing candidate is ABSENT, so a shadowing
+//   json.py planted later moves the hash; Viktor 42514 LOW 1), literal
+//   importlib / spec_from_file_location / run_path paths, subprocess list
+//   literals. A .py / .sh the script only NAMES is hashed, not walked.
 // - What it cannot follow is BLOCKING, never silently skipped: a computed
 //   import / exec / eval / sys.path / subprocess command / interpreter operand
-//   / cd is UNRESOLVED; a missing or unreadable file, a non-UTF-8 script, a
+//   / cd / -c body, an interpreter reading code from stdin, an interpreter
+//   named behind an unknown launcher, an aliased load, site.addsitedir and
+//   __builtins__ are UNRESOLVED; a python file the parser rejects is UNPARSEABLE; a missing or unreadable file, a non-UTF-8 script, a
 //   file over 2 MB or more than 32 files is MISSING / UNREADABLE /
 //   UNPARSEABLE / TOOBIG / LIMIT. Such a task is never trusted and cannot be
 //   approved until the script is fixed.
@@ -173,8 +179,69 @@ export const PRECHECK_BLOCKING_MARKERS: ReadonlySet<string> = new Set(['LIMIT', 
 const SH_DIRNAME_RX = /"?\$\(\s*dirname\s+"?\$(?:0|\{0\}|BASH_SOURCE(?:\[0\])?|\{BASH_SOURCE(?:\[0\])?\})"?\s*\)"?/g
 // A path-like word ending in .py or .sh (an interpreter target, a source, an importlib / subprocess literal).
 const CODE_PATH_RX = /[A-Za-z0-9_.\/~-]*[A-Za-z0-9_-]\.(?:py|sh)(?![A-Za-z0-9_])/g
-const PY_FROM_IMPORT_RX = /^[ \t]*from[ \t]+([A-Za-z_][\w.]*)[ \t]+import[ \t]+\(?([^#\n;)]*)/gm
-const PY_IMPORT_RX = /^[ \t]*import[ \t]+([^#\n;]+)/gm
+// Viktor 42514 LOW 1: imports come from Python's own parser, not a line-anchored regex (which missed
+// `import a; import b`, `try: import x`, a backslash continuation and package-relative imports). Run as
+// python3 -I -c with the source on stdin; a parse error is UNPARSEABLE. Also reported: a call through an
+// alias of import_module / __import__ / exec / eval (`from importlib import import_module as im`),
+// site.addsitedir, and any use of __builtins__ (Viktor 42514 INFO 1).
+const PY_AST_EXTRACTOR = String.raw`import ast, json, sys
+CANON = {'import_module', 'run_path', 'run_module', 'spec_from_file_location', 'addsitedir', '__import__', 'exec', 'eval', 'compile'}
+MODS = {'importlib', 'importlib.util', 'runpy', 'site', 'builtins'}
+def lit(n):
+    return n.value if isinstance(n, ast.Constant) and isinstance(n.value, str) else None
+def main():
+    try:
+        tree = ast.parse(sys.stdin.buffer.read())
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as e:
+        print(json.dumps({'error': type(e).__name__}))
+        return
+    imports, dyn, paths, aliases = [], [], [], {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                imports.append([a.name, [], 0, n.lineno])
+        elif isinstance(n, ast.ImportFrom):
+            imports.append([n.module or '', [a.name for a in n.names if a.name != '*'], n.level or 0, n.lineno])
+            if (n.module or '') in MODS:
+                for a in n.names:
+                    if a.name in CANON and (a.asname or a.name) != a.name:
+                        aliases[a.asname] = a.name
+        elif isinstance(n, ast.Name) and n.id == '__builtins__':
+            dyn.append(['__builtins__', n.lineno])
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
+        if name is None:
+            continue
+        aliased = name in aliases
+        canon = aliases.get(name, name)
+        if canon == 'addsitedir':
+            dyn.append(['site.addsitedir', n.lineno])
+        elif canon in ('import_module', '__import__', 'run_module'):
+            v = lit(n.args[0]) if n.args else None
+            if v is None:
+                dyn.append([canon, n.lineno])
+            else:
+                imports.append([v, [], 0, n.lineno])
+        elif canon == 'run_path':
+            v = lit(n.args[0]) if n.args else None
+            if v is None:
+                dyn.append(['run_path', n.lineno])
+            else:
+                paths.append([v, n.lineno])
+        elif canon == 'spec_from_file_location':
+            v = lit(n.args[1]) if len(n.args) > 1 else None
+            if v is None:
+                dyn.append(['spec_from_file_location', n.lineno])
+            else:
+                paths.append([v, n.lineno])
+        elif aliased and canon in ('exec', 'eval', 'compile'):
+            dyn.append([canon, n.lineno])
+    print(json.dumps({'imports': imports, 'dynamic': dyn, 'paths': paths}))
+main()
+`
 // sys.path growth: a literal absolute dir is followed; the script's own dir (the
 // dirname(abspath(__file__)) idiom) is already a candidate dir; anything else is UNRESOLVED.
 const PY_SYSPATH_RX = /sys\.path\s*(?:\.\s*(insert|append|extend)\s*\(|\[[^\]]*\]\s*=|\+=|=(?!=))/g
@@ -185,7 +252,33 @@ const PY_DYNAMIC_RX = /(?<![\w.])(exec|eval|compile|__import__)\s*\(|\b(import_m
 const INTERP_WORD = String.raw`(?:[\w./-]*\/)?(?:python[\d.]*|bash|sh|zsh|dash|ksh|node|perl|ruby|osascript)`
 const PY_INTERP_LITERAL_RX = new RegExp(String.raw`^[rRuU]?(['"])${INTERP_WORD}\1$`)
 const SH_INTERP_RX = new RegExp(String.raw`^${INTERP_WORD}$`)
-const SH_KEYWORDS: ReadonlySet<string> = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', 'exec', 'command', 'nohup', 'time', 'env', '{', 'builtin'])
+const SH_KEYWORDS: ReadonlySet<string> = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', 'builtin'])
+// Viktor 42514 MEDIUM 1: words that start the command after them. Each: the flags that take a value, and how
+// many plain words (a duration, a lock file) stand before the command.
+const SH_LAUNCHERS: Readonly<Record<string, { argFlags: readonly string[]; positional: number }>> = {
+  exec: { argFlags: ['-a'], positional: 0 },
+  command: { argFlags: [], positional: 0 },
+  nohup: { argFlags: [], positional: 0 },
+  time: { argFlags: ['-o', '-f'], positional: 0 },
+  env: { argFlags: ['-u', '-C', '-S', '-P'], positional: 0 },
+  timeout: { argFlags: ['-s', '-k', '--signal', '--kill-after'], positional: 1 },
+  gtimeout: { argFlags: ['-s', '-k', '--signal', '--kill-after'], positional: 1 },
+  nice: { argFlags: ['-n', '--adjustment'], positional: 0 },
+  ionice: { argFlags: ['-c', '-n', '--class', '--classdata'], positional: 0 },
+  setsid: { argFlags: [], positional: 0 },
+  stdbuf: { argFlags: ['-i', '-o', '-e'], positional: 0 },
+  caffeinate: { argFlags: ['-t', '-w'], positional: 0 },
+  sudo: { argFlags: ['-u', '-g', '-C', '-h', '-p', '-r', '-t', '-U', '-D', '-R', '-T'], positional: 0 },
+  doas: { argFlags: ['-u', '-C'], positional: 0 },
+  xargs: { argFlags: ['-n', '-I', '-P', '-L', '-d', '-E', '-s', '-a', '-J', '-R', '-S'], positional: 0 },
+  'sandbox-exec': { argFlags: ['-f', '-p', '-n', '-D'], positional: 0 },
+  lockf: { argFlags: ['-t'], positional: 1 },
+  flock: { argFlags: ['-w', '-E'], positional: 1 },
+}
+// A segment that names an interpreter but whose command is none of these and not resolved is a launcher the
+// walk does not know: UNRESOLVED, so an unknown starter cannot slip a script past (fail-closed).
+const SH_NAMING_ONLY: ReadonlySet<string> = new Set(['echo', 'printf', 'logger', ':', 'true', 'false', 'exit', 'return', 'test', '[', '[[', 'type', 'which', 'hash', 'whereis'])
+const SH_INFO_FLAG_RX = /^(?:--version|-V|--help|-h)$/
 
 export interface PreCheckRefs {
   /** Files the script RUNS or IMPORTS: read, hashed and walked in turn (a missing one is MISSING, blocking). */
@@ -196,6 +289,40 @@ export interface PreCheckRefs {
   absent: string[]
   /** Constructs the walk cannot follow (UNRESOLVED, blocking): `kind@line`. */
   unresolved: string[]
+  /** Python source the parser rejected (UNPARSEABLE, blocking): `python-<error>`. */
+  unparseable: string[]
+}
+
+type PyAst = { imports: Array<[string, string[], number, number]>; dynamic: Array<[string, number]>; paths: Array<[string, number]> } | { error: string }
+const pyAstCache = new Map<string, PyAst>()
+
+/**
+ * The imports, dynamic loads and literal load paths of a python source, from
+ * Python's own parser (python3 -I, no bytecode, 5 s). Cached by the sha256 of
+ * the source: the same bytes parse the same, and the approval list walks every
+ * chain on each request. A spawn failure is an error (blocking), never cached.
+ */
+function pyAst(src: string): PyAst {
+  const key = sha256Hex(src)
+  const hit = pyAstCache.get(key)
+  if (hit) return hit
+  const r = spawnSync('python3', ['-I', '-X', 'pycache_prefix=/dev/null/x', '-c', PY_AST_EXTRACTOR], {
+    input: src, encoding: 'utf8', timeout: 5000, maxBuffer: 8 * 1024 * 1024,
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+  })
+  if (r.error || r.status !== 0) return { error: r.error ? 'spawn' : `exit${r.status}` }
+  let res: PyAst
+  try {
+    const j = JSON.parse(r.stdout) as Record<string, unknown>
+    res = typeof j.error === 'string'
+      ? { error: j.error.replace(/[^A-Za-z]/g, '').slice(0, 32) || 'error' }
+      : { imports: (j.imports ?? []) as Array<[string, string[], number, number]>, dynamic: (j.dynamic ?? []) as Array<[string, number]>, paths: (j.paths ?? []) as Array<[string, number]> }
+  } catch {
+    return { error: 'output' }
+  }
+  if (pyAstCache.size >= 512) pyAstCache.clear()
+  pyAstCache.set(key, res)
+  return res
 }
 
 /** The text up to the parenthesis that closes the call opened just before `from` (strings not parsed; enough for argument lists). */
@@ -258,15 +385,19 @@ function pyReferences(file: string, text: string, out: PreCheckRefs, add: (p: st
     else out.unresolved.push(`sys.path@${lineOf(text, m.index ?? 0)}`)
   }
   const mods: Array<[string, string[]]> = []
-  for (const m of text.matchAll(PY_FROM_IMPORT_RX)) {
-    if (m[1].startsWith('.')) continue
-    mods.push([m[1], m[2].split(',').map(s => s.trim().split(/\s+/)[0]).filter(s => /^[A-Za-z_]\w*$/.test(s))])
-  }
-  for (const m of text.matchAll(PY_IMPORT_RX)) {
-    for (const part of m[1].split(',')) {
-      const name = part.trim().split(/\s+/)[0]
-      if (/^[A-Za-z_][\w.]*$/.test(name)) mods.push([name, []])
+  const rel: Array<[string, string, string[]]> = []
+  const parsed = pyAst(text)
+  if ('error' in parsed) out.unparseable.push(`python-${parsed.error}`)
+  else {
+    for (const [mod, names, level] of parsed.imports) {
+      if (level === 0) { if (mod) mods.push([mod, names]); continue }
+      // package-relative: `from .x import y` is beside this file, `from ..x` one dir up
+      let base = dir
+      for (let k = 1; k < level; k++) base = dirname(base)
+      rel.push([base, mod, names])
     }
+    for (const [kind, line] of parsed.dynamic) out.unresolved.push(`${kind}@${line}`)
+    for (const [pth] of parsed.paths) add(isAbsolute(pth) ? pth : join(dir, pth))
   }
   for (const m of text.matchAll(PY_DYNAMIC_RX)) {
     const at = (m.index ?? 0) + m[0].length
@@ -293,6 +424,8 @@ function pyReferences(file: string, text: string, out: PreCheckRefs, add: (p: st
       // command, or an interpreter with a computed argument, is not.
       const els = listLiteralElements(args)
       if (els === null) { out.unresolved.push(`subprocess.${m[4]}` + where); continue }
+      // Viktor 42514 LOW 2: the command itself computed (subprocess.run([cmd, 'x'])) is never followable.
+      if (els.length === 0 || (!/^[rRuU]?(['"])[^'"\n]*\1$/.test(els[0]) && !/^sys\.executable$/.test(els[0]))) { out.unresolved.push(`subprocess.${m[4]}` + where); continue }
       const interp = els.some(e => PY_INTERP_LITERAL_RX.test(e) || /\bsys\.executable\b/.test(e))
       if (interp && els.some(e => !/^[rRuU]?(['"])[^'"\n]*\1$/.test(e) && !/^sys\.executable$/.test(e))) { out.unresolved.push(`subprocess.${m[4]}` + where); continue }
       // A path-like literal in the command list is what runs (the command itself, or the interpreter's script).
@@ -307,6 +440,13 @@ function pyReferences(file: string, text: string, out: PreCheckRefs, add: (p: st
   }
   // Every imported name, stdlib included (Viktor 42472 b2): a module planted on a
   // searched dir shadows the stdlib, so its candidate path is part of the hash.
+  const relCands = rel.flatMap(([base, mod, names]) => mod
+    ? pyModuleCandidates([base], mod, names)
+    : names.flatMap(n => [join(base, n + '.py'), join(base, n, '__init__.py')]))
+  for (const cand of relCands) {
+    if (fileExists(cand)) out.refs.push(cand)
+    else out.absent.push(cand)
+  }
   for (const [mod, names] of mods) for (const cand of pyModuleCandidates(dirs, mod, names)) {
     if (fileExists(cand)) out.refs.push(cand)
     else out.absent.push(cand)
@@ -314,16 +454,121 @@ function pyReferences(file: string, text: string, out: PreCheckRefs, add: (p: st
 }
 
 /** Shell: the words after the dirname idiom is replaced, split at command boundaries. */
-function shReferences(file: string, body: string, out: PreCheckRefs, bases: string[], add: (p: string) => void): void {
+/** One shell word starting at `at` in `line` (a quoted string or a bare word); null when unterminated. */
+function shWordAt(line: string, at: number): { text: string; end: number; expands: boolean } | null {
+  const q = line[at]
+  if (q === "'") {
+    const e = line.indexOf("'", at + 1)
+    return e < 0 ? null : { text: line.slice(at + 1, e), end: e + 1, expands: false }
+  }
+  if (q === '"') {
+    for (let i = at + 1; i < line.length; i++) {
+      if (line[i] === '\\') { i++; continue }
+      if (line[i] === '"') {
+        const text = line.slice(at + 1, i)
+        return { text, end: i + 1, expands: /[$`]/.test(text) }
+      }
+    }
+    return null
+  }
+  const m = /^[^\s;&|()<>]+/.exec(line.slice(at))
+  return m ? { text: m[0], end: at + m[0].length, expands: /[$`]/.test(m[0]) } : null
+}
+
+const SH_EMBED_RX = /(?:^|[\s;&|(`])(?:[\w./-]*\/)?(python[\d.]*|bash|sh|zsh|dash|ksh)(?=\s)[^;&|\n]*?\s-c\s+/g
+const SH_HEREDOC_RX = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1/g
+// `(( a << b ))` / `$(( 1 << N ))`: a shift, not a heredoc (blanked for the heredoc search only).
+const SH_ARITH_RX = /\$?\(\((?:[^()]|\([^()]*\))*\)\)/g
+// What a walked `-c` is rewritten to: a word no script writes, so a real `-C` flag (bash noclobber) or a
+// quoted "-c" whose body was NOT walked is never taken for one (Viktor 42560 LOW 3).
+const SH_C_WALKED = '\u0001c'
+// Viktor 42560 LOW 1: a launcher written with a system path (/usr/bin/env, /usr/bin/nice) is the same launcher.
+const SH_SYS_BIN_RX = /^\/(?:usr\/(?:local\/)?|opt\/homebrew\/)?s?bin\/([^/]+)$/
+
+/**
+ * Embedded code (Viktor 42514 MEDIUM 1 (3)): `python3 -c '...'`, `sh -c "..."`, and a heredoc fed to an
+ * interpreter, are walked like a file of their own (python: the import parser; shell: this walker), with
+ * the cwd bases. A body that cannot be read off the line, or that the shell would expand, is UNRESOLVED.
+ */
+function shEmbedded(file: string, lang: string, body: string, out: PreCheckRefs, bases: string[], add: (p: string) => void, where: string, depth: number): void {
+  if (depth > 3) { out.unresolved.push('embedded depth' + where); return }
+  if (/^python/.test(lang)) pyReferences(join(bases[0], '-'), body, out, add, bases)
+  else shReferences(file, body, out, bases, add, depth + 1)
+}
+
+function shReferences(file: string, body: string, out: PreCheckRefs, bases: string[], add: (p: string) => void, depth = 0): void {
   const lines = body.split('\n')
-  lines.forEach((raw, i) => {
-    if (/^\s*#/.test(raw)) return
+  for (let i = 0; i < lines.length; i++) {
+    let raw = lines[i]
+    if (/^\s*#/.test(raw)) continue
     const where = `@${i + 1}`
+    // A heredoc's body is data for the command on this line, never shell for this walk. Embedded bodies
+    // are walked after this line's segments, so a `cd` earlier on the line sets their cwd.
+    const embedded: Array<[string, string]> = []
+    let heredocLang: string | null = null
+    const scan = raw.replace(SH_ARITH_RX, m => ' '.repeat(m.length))
+    const marks = [...scan.matchAll(SH_HEREDOC_RX)]
+    // Viktor 42560 LOW 4: a second heredoc on the line is not followed (its body would be read as shell).
+    if (marks.length > 1) out.unresolved.push('heredoc multiple' + where)
+    const hd = marks[0]
+    if (hd) {
+      const at = hd.index ?? 0
+      const strip = /<<-/.test(hd[0])
+      let j = i + 1
+      while (j < lines.length && (strip ? lines[j].replace(/^\t+/, '') : lines[j]) !== hd[2]) j++
+      if (j >= lines.length) {
+        // Viktor 42560 MEDIUM 1: no terminator. Whatever the command, UNRESOLVED, and the rest of the
+        // script is NOT swallowed as a body: its lines are walked as shell below.
+        out.unresolved.push('heredoc' + where)
+      } else {
+        const hbody = lines.slice(i + 1, j).join('\n')
+        const lang = /(?:^|[\s;&|(`])(?:[\w./-]*\/)?(python[\d.]*|bash|sh|zsh|dash|ksh)(?=[\s<]|$)/.exec(scan.slice(0, at))
+        if (lang) {
+          heredocLang = lang[1]
+          if (hd[1] === '' && /[$`]/.test(hbody)) out.unresolved.push('heredoc expands' + where)
+          else embedded.push([lang[1], hbody])
+        }
+        lines.splice(i + 1, j - i)
+      }
+      // Only the marker is blanked; the rest of the line stays, so `cat <<EOF | python3 -` still shows a
+      // stdin interpreter after it (Viktor 42560 LOW 2).
+      raw = raw.slice(0, at) + ' '.repeat(hd[0].length) + raw.slice(at + hd[0].length)
+    }
+    // The heredoc feeds ONE stdin interpreter on the line, the first; any other reads unknown code.
+    let heredocFree = heredocLang !== null
+    // `-c <code>`: walk the code, then blank it so its ; | ( do not split this line.
+    for (let guard = 0; guard < 8; guard++) {
+      SH_EMBED_RX.lastIndex = 0
+      const m = SH_EMBED_RX.exec(raw)
+      if (!m) break
+      const at = (m.index ?? 0) + m[0].length
+      const w = shWordAt(raw, at)
+      if (w === null || w.expands) { out.unresolved.push('interpreter -c' + where); raw = raw.slice(0, m.index ?? 0); break }
+      embedded.push([m[1], w.text])
+      const cpos = (m.index ?? 0) + m[0].lastIndexOf('-c')
+      raw = raw.slice(0, cpos) + SH_C_WALKED + ' ' + raw.slice(w.end)
+    }
     for (const seg of raw.split(/;|&&|\|\||\||\$\(|`|\(|\)/)) {
       const words = seg.trim().split(/\s+/).filter(Boolean)
-      while (words.length > 0 && (SH_KEYWORDS.has(words[0]) || /^[A-Za-z_]\w*=/.test(words[0]))) words.shift()
-      if (words.length === 0) continue
       const unq = (w: string) => w.replace(/^["']|["']$/g, '')
+      const named = words.some(w => SH_INTERP_RX.test(unq(w)))
+      const sysName = (w: string) => { const u = unq(w); const m = SH_SYS_BIN_RX.exec(u); return m ? m[1] : u }
+      // keywords, assignments, and launcher words with their flags and plain arguments
+      for (let changed = true; changed;) {
+        changed = false
+        while (words.length > 0 && (SH_KEYWORDS.has(words[0]) || /^[A-Za-z_]\w*=/.test(words[0]))) { words.shift(); changed = true }
+        const spec = words.length > 0 ? SH_LAUNCHERS[sysName(words[0])] : undefined
+        if (spec === undefined) continue
+        const lw = sysName(words.shift() as string)
+        changed = true
+        if (lw === 'command' && words.length > 0 && /^-[vV]$/.test(words[0])) { words.length = 0; break }
+        while (words.length > 0 && (/^-/.test(words[0]) || (lw === 'env' && /^[A-Za-z_]\w*=/.test(words[0])))) {
+          const f = words.shift() as string
+          if (spec.argFlags.includes(f)) words.shift()
+        }
+        words.splice(0, spec.positional)
+      }
+      if (words.length === 0) continue
       const cmd = unq(words[0])
       if (/[$`]/.test(cmd)) { out.unresolved.push('command' + where); continue }
       if (cmd === 'eval') { out.unresolved.push('eval' + where); continue }
@@ -339,34 +584,52 @@ function shReferences(file: string, body: string, out: PreCheckRefs, bases: stri
         if (cmd.includes('/')) {
           if (isAbsolute(cmd)) add(cmd)
           else add(bases.map(b => join(b, cmd)).find(fileExists) ?? join(bases[0], cmd))
+          // a path that runs and names an interpreter is a launcher the walk does not know (Viktor 42560 LOW 1)
+          if (named) out.unresolved.push('launcher' + where)
+        } else if (named && !SH_NAMING_ONLY.has(cmd)) {
+          out.unresolved.push('launcher' + where)
         }
         continue
       }
-      // The interpreter's operand: flags skipped (-X / -W take a value), -c is inline code (in this file).
+      // The interpreter's operand: flags skipped (-X / -W take a value); -C marks a -c body walked above.
       let j = 1
       let operand: string | null = null
+      let inline = false
+      let info = false
       while (j < words.length) {
+        if (words[j] === SH_C_WALKED) { inline = true; break }
         const w = unq(words[j])
-        if (w === '-c') { operand = null; j = words.length; break }
-        if (w === '-m') { out.unresolved.push('interpreter -m' + where); operand = null; j = words.length; break }
+        // a -c whose body was not walked above (quoted "-c", no body word): UNRESOLVED (Viktor 42560 LOW 3)
+        if (w === '-c') { out.unresolved.push('interpreter -c' + where); inline = true; break }
+        if (w === '-m') { out.unresolved.push('interpreter -m' + where); inline = true; break }
+        if (SH_INFO_FLAG_RX.test(w)) info = true
         if (/^-[XWO]$/.test(w) && !isSource) { j += 2; continue }
         if (w.startsWith('-') && w !== '-') { j++; continue }
         operand = w
         break
       }
-      if (operand === null || operand === '-' || operand.startsWith('<') || /^\d*>/.test(operand)) continue
-      if (/[$`~*?]/.test(operand)) { out.unresolved.push('interpreter argument' + where); continue }
-      if (isAbsolute(operand)) { add(operand); continue }
-      const hit = bases.map(b => join(b, operand as string)).find(fileExists)
-      add(hit ?? join(bases[0], operand))
+      if (inline) continue
+      const fromStdin = operand === null || operand === '-' || operand.startsWith('<') || /^\d*>/.test(operand)
+      if (fromStdin) {
+        // reads its code from stdin: a heredoc on this line was walked above; anything else is unknown code
+        if (heredocFree) heredocFree = false
+        else if (!info) out.unresolved.push('interpreter stdin' + where)
+        continue
+      }
+      const op = operand as string
+      if (/[$`~*?]/.test(op)) { out.unresolved.push('interpreter argument' + where); continue }
+      if (isAbsolute(op)) { add(op); continue }
+      const hit = bases.map(b => join(b, op)).find(fileExists)
+      add(hit ?? join(bases[0], op))
     }
-  })
+    for (const [lang, code] of embedded) shEmbedded(file, lang, code, out, bases, add, where, depth)
+  }
 }
 
 /** The files one script refers to: what to read next, what is absent, what cannot be followed. */
 export function preCheckReferences(file: string, text: string, root: string = PROJECT_ROOT): PreCheckRefs {
   const dir = dirname(file)
-  const out: PreCheckRefs = { refs: [], mentions: [], absent: [], unresolved: [] }
+  const out: PreCheckRefs = { refs: [], mentions: [], absent: [], unresolved: [], unparseable: [] }
   const isPy = file.endsWith('.py') || (!file.endsWith('.sh') && /^#!.*python/.test(text))
   const body = (isPy ? text : text.replace(SH_DIRNAME_RX, dir)).replace(/\r\n?/g, '\n')
   // Relative words resolve beside the script and in the runner's cwd (the install
@@ -462,6 +725,7 @@ export function preCheckWalk(entry: string, root: string = PROJECT_ROOT): PreChe
     try { text = utf8.decode(buf) } catch { seen.set(`${real}#text`, 'UNPARSEABLE'); continue }
     const r = preCheckReferences(real, text, root)
     for (const u of r.unresolved) seen.set(`${real}#${u}`, 'UNRESOLVED')
+    for (const u of r.unparseable) seen.set(`${real}#${u}`, 'UNPARSEABLE')
     for (const a of r.absent) if (!seen.has(a)) seen.set(a, 'ABSENT')
     for (const ref of r.refs) queue.push([ref, true])
     for (const m of r.mentions) queue.push([m, false])
