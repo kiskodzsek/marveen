@@ -101,13 +101,14 @@ class Disk(Base):
     def test_low_space_wakes(self):
         self.assertIn('< 1e+06 GiB', self.run_mode('disk', KHP_DISK_MIN_GIB='1000000'))
 
-    def test_default_threshold_is_10(self):
-        out = self.run_mode('disk', KHP_DISK_MIN_GIB='')
-        st = os.statvfs(self.d)
-        free = st.f_bavail * st.f_frsize / 2**30
-        self.assertEqual(out, 'SKIP' if free >= 10 else out)
-        if free < 10:
-            self.assertIn('< 10 GiB', out)
+    def test_default_thresholds_are_the_tasks_own(self):
+        # The task prompts say "ha >=100" and "< 10 GiB"; a drifted default would silence a real alert.
+        env = {k: v for k, v in self.env.items() if k not in ('KHP_DISK_MIN_GIB',)}
+        r = subprocess.run(['python3', '-I', '-c',
+                            'import sys; sys.path.insert(0, sys.argv[1]); import kernel_heartbeat_precheck as k; '
+                            'print(k.DISK_MIN_GIB, k.QUOTA_LIMIT_PCT, k.QUOTA_MAX_AGE_S)', PRECHECKS],
+                           env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(r.stdout.strip(), '10.0 100 3600')
 
     def test_missing_path_never_skips(self):
         self.assertEqual(self.run_mode('disk', KHP_DISK_PATH=os.path.join(self.d, 'nope')), '')
@@ -169,6 +170,11 @@ class Gitconfig(Base):
     def test_missing_gitconfig_runs(self):
         self.state('abc')
         self.assertEqual(self.run_mode('gitconfig'), '')
+
+    def test_missing_gitconfig_already_reported_skips(self):
+        # The guard records a deleted file as "MISSING|False"; the same reading here must stay quiet.
+        self.state('abc', reported='MISSING|False')
+        self.assertEqual(self.run_mode('gitconfig'), 'SKIP')
 
     def test_guard_state_is_not_written(self):
         base = self.write_cfg(self.RESET)
