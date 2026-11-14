@@ -81,7 +81,20 @@ export interface IntakeProbe {
   /** Updates queued upstream that nobody has fetched; null when unknown. */
   pendingUpdates: number | null
   webhookUrl: string | null
+  /** Telegram's own error text, clipped to ERROR_TEXT_MAX characters; null when absent. */
   lastErrorMessage: string | null
+  /** Status of the HTTP answer that came back; null when the call never completed (network, timeout). */
+  httpStatus: number | null
+}
+
+// Telegram's description (or a TLS-intercepting proxy's) goes into an alert
+// sent through Telegram itself; an unbounded one would break the message
+// (Viktor 42131 INFO 2).
+export const ERROR_TEXT_MAX = 200
+
+function clipErrorText(v: unknown): string | null {
+  if (typeof v !== 'string') return null
+  return v.length > ERROR_TEXT_MAX ? v.slice(0, ERROR_TEXT_MAX) + '…' : v
 }
 
 export interface IntakeObservation {
@@ -121,8 +134,9 @@ interface TelegramWebhookInfoBody {
  * which must NOT be read as a bad token: our own network being down would
  * otherwise page the owner about every agent at once.
  *
- * Only Telegram's own refusal is a token verdict: 401, or a 404 carrying
- * Telegram's JSON (ok:false). Everything else that is not a healthy answer --
+ * Only Telegram's own refusal is a token verdict: a 401 or 404 carrying
+ * Telegram's JSON (ok:false). A proxy's 401/404 page is not (Viktor 42131
+ * INFO 1). Everything else that is not a healthy answer --
  * 5xx, 429, a proxy's HTML page, a 200 without a usable body -- used to be read
  * as token-invalid as well, which during a Telegram-side outage would page the
  * owner about a "rejected token" and cut the outage stretch short (Viktor 42107
@@ -130,13 +144,13 @@ interface TelegramWebhookInfoBody {
  * stretch goes on.
  */
 export function isTokenRejection(status: number, body: unknown): boolean {
-  if (status === 401) return true
-  const parsed = (body ?? {}) as TelegramWebhookInfoBody
-  return status === 404 && parsed !== null && typeof parsed === 'object' && parsed.ok === false
+  if (status !== 401 && status !== 404) return false
+  return body !== null && typeof body === 'object' && (body as TelegramWebhookInfoBody).ok === false
 }
 
 export function parseIntakeProbe(status: number, body: unknown): IntakeProbe {
-  const unusable: IntakeProbe = { reachable: false, tokenOk: true, pendingUpdates: null, webhookUrl: null, lastErrorMessage: null }
+  const httpStatus = status === 0 ? null : status
+  const unusable: IntakeProbe = { reachable: false, tokenOk: true, pendingUpdates: null, webhookUrl: null, lastErrorMessage: null, httpStatus }
   if (status === 0) return unusable
   const parsed = (body ?? {}) as TelegramWebhookInfoBody
   if (isTokenRejection(status, body)) {
@@ -145,7 +159,8 @@ export function parseIntakeProbe(status: number, body: unknown): IntakeProbe {
       tokenOk: false,
       pendingUpdates: null,
       webhookUrl: null,
-      lastErrorMessage: typeof parsed.description === 'string' ? parsed.description : null,
+      lastErrorMessage: clipErrorText(parsed.description),
+      httpStatus,
     }
   }
   if (status !== 200 || parsed.ok !== true || !parsed.result) return unusable
@@ -155,7 +170,8 @@ export function parseIntakeProbe(status: number, body: unknown): IntakeProbe {
     tokenOk: true,
     pendingUpdates: typeof pending === 'number' ? pending : null,
     webhookUrl: parsed.result.url ?? null,
-    lastErrorMessage: parsed.result.last_error_message ?? null,
+    lastErrorMessage: clipErrorText(parsed.result.last_error_message),
+    httpStatus,
   }
 }
 
@@ -278,7 +294,7 @@ export function formatUnreachableRecovered(agentName: string, lengthMs: number, 
   // bot was deaf too is an inference, so the sentence says so (Viktor 42107 LOW 2).
   // "kb.": the stretch is measured in 5-minute ticks, and after a restart it also
   // counts the dashboard's own downtime, which no probe saw (Viktor 42111 INFO 2).
-  return `📶 ${agentName}: a gép kb. ${Math.round(lengthMs / MINUTE_MS)} percig nem érte el a Telegramot (${from} óta). Ez alatt a bot valószínűleg befelé süket volt; ami közben jött, feltehetően most egyben érkezik.`
+  return `📶 ${agentName}: a gép kb. ${Math.round(lengthMs / MINUTE_MS)} percig nem kapott használható választ a Telegramtól (${from} óta). Ez alatt a bot valószínűleg befelé süket volt; ami közben jött, feltehetően most egyben érkezik.`
 }
 
 export interface RecoveryNotice {
@@ -305,6 +321,39 @@ export function recoveryNoticeFor(
   return {
     key: `channel-intake:${agentName}:unreachable-recovered`,
     text: formatUnreachableRecovered(agentName, lengthMs, since),
+    cooldownMs: INTAKE_ALERT_COOLDOWN_MS,
+  }
+}
+
+// Telegram answering, but not usefully (5xx, 429, a proxy page), for this long
+// is worth a line WHILE it lasts: unlike a network outage, an alert can still go
+// out, and without it nothing would speak until the stretch ends (Viktor 42131
+// INFO 3). Repeats follow the 3 h alert cooldown.
+export const ONGOING_OUTAGE_NOTICE_MS = 2 * 60 * MINUTE_MS
+
+export function formatOngoingOutage(agentName: string, lengthMs: number, since: number, httpStatus: number): string {
+  const from = new Date(since).toLocaleTimeString('hu-HU', { timeZone: 'Europe/Budapest', hour: '2-digit', minute: '2-digit' })
+  return `⚠️ ${agentName}: a gép kb. ${Math.round(lengthMs / MINUTE_MS)} perce nem kap használható választ a Telegramtól (${from} óta, utolsó HTTP-kód: ${httpStatus}). Ez alatt a bot valószínűleg befelé süket.`
+}
+
+/**
+ * Pure: the mid-outage line, or null. Main agent only; only when the latest
+ * reading was an HTTP answer (a network outage could not deliver the alert);
+ * `entry` is the row AFTER this reading.
+ */
+export function ongoingOutageNoticeFor(
+  agentName: string,
+  entry: IntakeStateEntry,
+  probe: IntakeProbe,
+  now: number,
+): RecoveryNotice | null {
+  if (agentName !== MAIN_AGENT_ID) return null
+  if (probe.reachable || probe.httpStatus == null) return null
+  const since = entry.unreachableSince
+  if (since == null || now - since < ONGOING_OUTAGE_NOTICE_MS) return null
+  return {
+    key: `channel-intake:${agentName}:outage-ongoing`,
+    text: formatOngoingOutage(agentName, now - since, since, probe.httpStatus),
     cooldownMs: INTAKE_ALERT_COOLDOWN_MS,
   }
 }
@@ -525,11 +574,17 @@ export function applyIntakeProbe(
   }
 
   const prevState = lastState.get(agentName) ?? null
-  lastState.set(agentName, intakeStateEntry(probe, decision.verdict, now, prevState))
+  const entry = intakeStateEntry(probe, decision.verdict, now, prevState)
+  lastState.set(agentName, entry)
   const notice = recoveryNoticeFor(agentName, prevState, probe, now)
   if (notice) {
     logger.warn({ agent: agentName, unreachableSince: prevState?.unreachableSince }, 'channel-intake-monitor: Telegram reachable again after a long outage')
     send(notice.key, notice.text, { cooldownMs: notice.cooldownMs })
+  }
+  const ongoing = ongoingOutageNoticeFor(agentName, entry, probe, now)
+  if (ongoing) {
+    logger.warn({ agent: agentName, unreachableSince: entry.unreachableSince, httpStatus: probe.httpStatus }, 'channel-intake-monitor: Telegram answering but unusable for a long while')
+    send(ongoing.key, ongoing.text, { cooldownMs: ongoing.cooldownMs })
   }
 
   const silentForMs = lastInboundAt == null ? null : now - lastInboundAt
