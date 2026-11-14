@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync, mkdirSync, rmdirSync, rmSync, statSync, utimesSync, chmodSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { shouldTriggerDeafnessRespawn, readLastIngestionTimestamp, readLastIngestionTimestampAcross, inboundChannelLineTs, INGESTION_READ_DEFAULTS, mainTranscriptDirs, mainConfigRoots, TRANSCRIPT_DIR } from '../web/inbound-probe.js'
+import { shouldTriggerDeafnessRespawn, readLastIngestionTimestamp, readLastIngestionTimestampAcross, inboundChannelLineTs, INGESTION_READ_DEFAULTS, INGESTION_FUTURE_SKEW_MS, mainTranscriptDirs, mainConfigRoots, TRANSCRIPT_DIR } from '../web/inbound-probe.js'
 import { projectsDirFor } from '../web/active-model.js'
 import { PROJECT_ROOT } from '../config.js'
 
@@ -323,13 +323,43 @@ describe('readLastIngestionTimestamp', () => {
 
   // INFO 1 (e): pin the defaults. On 2026-11-14 the main agent's last inbound sat in its 15th newest
   // file, about 23 MB back; a smaller limit keeps every other test green but reads null live.
-  it('pins the default limits (the live main dir needs 15 files / ~23 MB)', () => {
-    expect(INGESTION_READ_DEFAULTS).toEqual({ maxFiles: 16, maxBytes: 32 * 1024 * 1024, chunkBytes: 256 * 1024 })
+  it('pins the default limits (the live main dir needs 15 files / ~23 MB; 24 since card 116c95c8)', () => {
+    expect(INGESTION_READ_DEFAULTS).toEqual({ maxFiles: 24, maxBytes: 32 * 1024 * 1024, chunkBytes: 256 * 1024 })
+    expect(INGESTION_FUTURE_SKEW_MS).toBe(5 * 60 * 1000)
+  })
+
+  // card 116c95c8 (Viktor 42177 INFO 5): a line stamped beyond now + skew is skipped, the scan goes on.
+  it('skips an inbound line stamped in the future and returns the previous real one', () => {
+    const dir = makeTmpDir()
+    const now = new Date('2026-06-01T12:00:00.000Z').getTime()
+    const real = '2026-06-01T11:00:00.000Z'
+    writeSession(dir, 'session.jsonl', [inboundLine(real), inboundLine('2026-06-02T12:00:00.000Z')])
+    expect(readLastIngestionTimestamp(dir, { nowMs: now })).toBe(new Date(real).getTime())
+  })
+
+  it('accepts a line inside the skew, refuses one just past it', () => {
+    const dir = makeTmpDir()
+    const now = new Date('2026-06-01T12:00:00.000Z').getTime()
+    const inside = new Date(now + INGESTION_FUTURE_SKEW_MS).toISOString()
+    const past = new Date(now + INGESTION_FUTURE_SKEW_MS + 1).toISOString()
+    writeSession(dir, 'a.jsonl', [inboundLine(inside)])
+    expect(readLastIngestionTimestamp(dir, { nowMs: now })).toBe(now + INGESTION_FUTURE_SKEW_MS)
+    writeSession(dir, 'a.jsonl', [inboundLine(past)])
+    expect(readLastIngestionTimestamp(dir, { nowMs: now })).toBe(null)
+  })
+
+  it('a future line in a newer file does not hide the real one in an older file', () => {
+    const dir = makeTmpDir()
+    const now = new Date('2026-06-01T12:00:00.000Z').getTime()
+    const real = '2026-06-01T10:00:00.000Z'
+    writeSession(dir, 'old.jsonl', [inboundLine(real)], '2026-06-01T10:05:00.000Z')
+    writeSession(dir, 'new.jsonl', [inboundLine('2026-07-01T00:00:00.000Z')], '2026-06-01T11:00:00.000Z')
+    expect(readLastIngestionTimestamp(dir, { nowMs: now })).toBe(new Date(real).getTime())
   })
 
   it('the default budget is bounded (B1: no unbounded synchronous read)', () => {
     expect(INGESTION_READ_DEFAULTS.maxBytes).toBeLessThanOrEqual(32 * 1024 * 1024)
-    expect(INGESTION_READ_DEFAULTS.maxFiles).toBeLessThanOrEqual(16)
+    expect(INGESTION_READ_DEFAULTS.maxFiles).toBeLessThanOrEqual(24)
   })
 })
 

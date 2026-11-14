@@ -224,8 +224,11 @@ export function shouldTriggerDeafnessRespawn(opts: {
 // and a dir with NO inbound (the worst case, the whole budget read) took
 // 7-14 ms per call. A longer silence than that reads as null ("unknown"). Called once a minute (keepalive)
 // and once per agent every 5 minutes (intake monitor).
+// maxFiles 16 -> 24 (card 116c95c8, Viktor 42177 INFO 2): at 16 the live main dir had one file of headroom;
+// the 32 MB budget still bounds the read (the main agent's files are 1-3 MB, so the budget, not the file
+// count, is now the usual limit).
 export const INGESTION_READ_DEFAULTS = {
-  maxFiles: 16,
+  maxFiles: 24,
   maxBytes: 32 * 1024 * 1024,
   chunkBytes: 256 * 1024,
 }
@@ -259,7 +262,13 @@ export function inboundChannelLineTs(line: string): number | null {
 
 // The last inbound line in one file, read backward chunk by chunk. `budget.left`
 // is shared across the files of one call and decremented by the bytes read.
-function lastInboundInFile(path: string, size: number, chunkBytes: number, budget: { left: number }): number | null {
+// A line stamped more than this far in the future is not trusted (card 116c95c8, Viktor 42177 INFO 5): the
+// timestamp comes from the Claude client's clock, and a future one would hold store/.channel-keepalive fresh
+// until the wall clock caught up. It is skipped, not clamped: a clamp to "now" would re-warm the keepalive
+// every minute for as long as the bad line stayed the newest. The scan goes on to the previous line.
+export const INGESTION_FUTURE_SKEW_MS = 5 * 60 * 1000
+
+function lastInboundInFile(path: string, size: number, chunkBytes: number, budget: { left: number }, latestOk: number): number | null {
   const fd = openSync(path, 'r')
   try {
     let pos = size
@@ -292,7 +301,7 @@ function lastInboundInFile(path: string, size: number, chunkBytes: number, budge
         let end = complete.indexOf(0x0a, at)
         if (end < 0) end = complete.length
         const ts = inboundChannelLineTs(complete.subarray(start, end).toString('utf-8'))
-        if (ts != null) return ts
+        if (ts != null && ts <= latestOk) return ts
         from = start - 1
       }
     }
@@ -304,9 +313,10 @@ function lastInboundInFile(path: string, size: number, chunkBytes: number, budge
 
 export function readLastIngestionTimestamp(
   transcriptDir: string,
-  opts: Partial<typeof INGESTION_READ_DEFAULTS> = {},
+  opts: Partial<typeof INGESTION_READ_DEFAULTS> & { nowMs?: number } = {},
 ): number | null {
   const { maxFiles, maxBytes, chunkBytes } = { ...INGESTION_READ_DEFAULTS, ...opts }
+  const latestOk = (opts.nowMs ?? Date.now()) + INGESTION_FUTURE_SKEW_MS
   try {
     if (!existsSync(transcriptDir)) return null
     const files: { path: string; mtimeMs: number; size: number }[] = []
@@ -327,7 +337,7 @@ export function readLastIngestionTimestamp(
       if (budget.left <= 0) break
       if (best != null && f.mtimeMs < best) break // nothing in it can be later
       let ts: number | null = null
-      try { ts = lastInboundInFile(f.path, f.size, chunkBytes, budget) } catch { /* unreadable -- skip */ }
+      try { ts = lastInboundInFile(f.path, f.size, chunkBytes, budget, latestOk) } catch { /* unreadable -- skip */ }
       if (ts != null && (best == null || ts > best)) best = ts
     }
     return best
