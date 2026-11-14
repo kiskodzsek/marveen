@@ -12,6 +12,7 @@ import { verifyHeartbeatKanban, HEARTBEAT_KANBAN_WINDOW_SEC } from './heartbeat-
 import { existsSync, readFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { disableExpiredDatedTasks } from './schedule-dated-once.js'
 import { logger } from '../logger.js'
 import { decideDesktopGate, readDesktopLock, recordDesktopSkip } from './desktop-lock.js'
 import {
@@ -3093,6 +3094,18 @@ export function startScheduleRunner(): NodeJS.Timeout {
           insertPendingTaskRetryIfNew(task.name, agentName, now, 'first-run')
         }
       }
+    }
+
+    // DATEDONCE1115 (card cb2c20bc): a cron that names one calendar day is a
+    // one-off; once its day and catch-up window are over it is switched off
+    // (enabled is not hashed: the trust row stays), so it does not run again
+    // on the same day next year. A failure here never stops the tick.
+    try {
+      const off = disableExpiredDatedTasks(tasks, now, catchUpMaxAgeMs,
+        name => [...pendingKeys].some(k => k.startsWith(`${name}@`)))
+      if (off.length) logger.info({ tasks: off }, 'schedule-runner: dated one-off task(s) switched off, their day is over')
+    } catch (err) {
+      logger.warn({ err }, 'schedule-runner: switching off expired dated tasks failed')
     }
 
     // Tell the operator, in one line, what the gap cost. Only fires when this
