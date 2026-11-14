@@ -208,6 +208,30 @@ def main():
                         aliases[a.asname] = a.name
         elif isinstance(n, ast.Name) and n.id == '__builtins__':
             dyn.append(['__builtins__', n.lineno])
+    # Viktor 42560 LOW 5: a loader taken as a VALUE (f = importlib.import_module; m = __import__), fetched by
+    # a literal key (globals()['exec'], importlib.__dict__['import_module']) or through getattr on a loader
+    # module / with a loader name is followed by nothing: dynamic.
+    called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    def dotted(x):
+        if isinstance(x, ast.Name):
+            return x.id
+        if isinstance(x, ast.Attribute):
+            b = dotted(x.value)
+            return b + '.' + x.attr if b else None
+        return None
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Name, ast.Attribute)) and id(n) not in called and isinstance(getattr(n, 'ctx', None), ast.Load):
+            nm = n.id if isinstance(n, ast.Name) else n.attr
+            # as an attribute, compile / eval / exec are common method names (re.compile, model.eval)
+            if nm in aliases or (nm in CANON and (isinstance(n, ast.Name) or nm not in ('exec', 'eval', 'compile'))):
+                dyn.append(['loader value', n.lineno])
+        elif isinstance(n, ast.Subscript) and lit(n.slice) in CANON:
+            dyn.append(['loader key', n.lineno])
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'getattr' and n.args:
+            tgt = n.args[0]
+            on_mod = dotted(tgt) in MODS or (isinstance(tgt, ast.Call) and isinstance(tgt.func, ast.Name) and tgt.func.id in ('__import__', 'import_module'))
+            if on_mod or (len(n.args) > 1 and lit(n.args[1]) in CANON):
+                dyn.append(['getattr', n.lineno])
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call):
             continue
@@ -466,7 +490,7 @@ function shWordAt(line: string, at: number): { text: string; end: number; expand
       if (line[i] === '\\') { i++; continue }
       if (line[i] === '"') {
         const text = line.slice(at + 1, i)
-        return { text, end: i + 1, expands: /[$`]/.test(text) }
+        return { text: text.replace(/\\(["\\])/g, '$1'), end: i + 1, expands: /[$`]/.test(text) }
       }
     }
     return null
@@ -475,7 +499,9 @@ function shWordAt(line: string, at: number): { text: string; end: number; expand
   return m ? { text: m[0], end: at + m[0].length, expands: /[$`]/.test(m[0]) } : null
 }
 
-const SH_EMBED_RX = /(?:^|[\s;&|(`])(?:[\w./-]*\/)?(python[\d.]*|bash|sh|zsh|dash|ksh)(?=\s)[^;&|\n]*?\s-c\s+/g
+// Viktor 42560 INFO 1: a short-flag cluster ending in c (-lc, -ec, -Ic) is a -c too, and the body may follow the
+// flag with no space (-c'...').
+const SH_EMBED_RX = /(?:^|[\s;&|(`])(?:[\w./-]*\/)?(python[\d.]*|bash|sh|zsh|dash|ksh)(?=\s)[^;&|\n]*?\s-[A-Za-z]*c(?:\s+|(?=['"]))/g
 const SH_HEREDOC_RX = /<<-?\s*(['"]?)([A-Za-z_]\w*)\1/g
 // `(( a << b ))` / `$(( 1 << N ))`: a shift, not a heredoc (blanked for the heredoc search only).
 const SH_ARITH_RX = /\$?\(\((?:[^()]|\([^()]*\))*\)\)/g
@@ -496,18 +522,50 @@ function shEmbedded(file: string, lang: string, body: string, out: PreCheckRefs,
   else shReferences(file, body, out, bases, add, depth + 1)
 }
 
+/**
+ * Which characters of a shell line are code: false inside quotes and in a comment. Fail-closed: from a
+ * `$(` or a backtick inside double quotes on, everything counts as code (a command substitution runs).
+ */
+function shCodeMask(s: string): boolean[] {
+  const code = new Array<boolean>(s.length).fill(true)
+  let q: string | null = null
+  for (let k = 0; k < s.length; k++) {
+    const c = s[k]
+    if (q === "'") { code[k] = false; if (c === "'") q = null; continue }
+    if (q === '"') {
+      if ((c === '$' && s[k + 1] === '(') || c === '`') break
+      code[k] = false
+      if (c === '\\') { if (k + 1 < s.length) code[k + 1] = false; k++; continue }
+      if (c === '"') q = null
+      continue
+    }
+    if (c === '\\') { k++; continue }
+    if (c === "'" || c === '"') { q = c; continue }
+    if (c === '#' && (k === 0 || /[\s;&|(]/.test(s[k - 1]))) { for (; k < s.length; k++) code[k] = false; break }
+  }
+  return code
+}
+
 function shReferences(file: string, body: string, out: PreCheckRefs, bases: string[], add: (p: string) => void, depth = 0): void {
   const lines = body.split('\n')
   for (let i = 0; i < lines.length; i++) {
     let raw = lines[i]
     if (/^\s*#/.test(raw)) continue
     const where = `@${i + 1}`
+    // Viktor 42578 INFO 3: a trailing backslash continues the command on the next line (the next line is
+    // emptied, so the line numbers of what follows stay).
+    for (let k = i + 1; /(?:^|[^\\])(?:\\\\)*\\$/.test(raw) && k < lines.length; k++) {
+      raw = raw.slice(0, -1) + ' ' + lines[k]
+      lines[k] = ''
+    }
     // A heredoc's body is data for the command on this line, never shell for this walk. Embedded bodies
     // are walked after this line's segments, so a `cd` earlier on the line sets their cwd.
     const embedded: Array<[string, string]> = []
     let heredocLang: string | null = null
     const scan = raw.replace(SH_ARITH_RX, m => ' '.repeat(m.length))
-    const marks = [...scan.matchAll(SH_HEREDOC_RX)]
+    // not a here-string (<<<), not inside quotes, not in a comment (Viktor 42578 LOW D)
+    const code = shCodeMask(scan)
+    const marks = [...scan.matchAll(SH_HEREDOC_RX)].filter(m => scan[(m.index ?? 0) - 1] !== '<' && code[m.index ?? 0])
     // Viktor 42560 LOW 4: a second heredoc on the line is not followed (its body would be read as shell).
     if (marks.length > 1) out.unresolved.push('heredoc multiple' + where)
     const hd = marks[0]
@@ -527,7 +585,7 @@ function shReferences(file: string, body: string, out: PreCheckRefs, bases: stri
           heredocLang = lang[1]
           if (hd[1] === '' && /[$`]/.test(hbody)) out.unresolved.push('heredoc expands' + where)
           else embedded.push([lang[1], hbody])
-        }
+        } else if (hd[1] === '' && /\$\(|`/.test(hbody)) out.unresolved.push('heredoc expands' + where)
         lines.splice(i + 1, j - i)
       }
       // Only the marker is blanked; the rest of the line stays, so `cat <<EOF | python3 -` still shows a
@@ -545,12 +603,12 @@ function shReferences(file: string, body: string, out: PreCheckRefs, bases: stri
       const w = shWordAt(raw, at)
       if (w === null || w.expands) { out.unresolved.push('interpreter -c' + where); raw = raw.slice(0, m.index ?? 0); break }
       embedded.push([m[1], w.text])
-      const cpos = (m.index ?? 0) + m[0].lastIndexOf('-c')
+      const cpos = (m.index ?? 0) + m[0].search(/\s-[A-Za-z]*c\s*$/) + 1
       raw = raw.slice(0, cpos) + SH_C_WALKED + ' ' + raw.slice(w.end)
     }
     for (const seg of raw.split(/;|&&|\|\||\||\$\(|`|\(|\)/)) {
       const words = seg.trim().split(/\s+/).filter(Boolean)
-      const unq = (w: string) => w.replace(/^["']|["']$/g, '')
+      const unq = (w: string) => w.replace(/^\\(?=[A-Za-z])/, '').replace(/^["']|["']$/g, '')
       const named = words.some(w => SH_INTERP_RX.test(unq(w)))
       const sysName = (w: string) => { const u = unq(w); const m = SH_SYS_BIN_RX.exec(u); return m ? m[1] : u }
       // keywords, assignments, and launcher words with their flags and plain arguments
@@ -600,7 +658,7 @@ function shReferences(file: string, body: string, out: PreCheckRefs, bases: stri
         if (words[j] === SH_C_WALKED) { inline = true; break }
         const w = unq(words[j])
         // a -c whose body was not walked above (quoted "-c", no body word): UNRESOLVED (Viktor 42560 LOW 3)
-        if (w === '-c') { out.unresolved.push('interpreter -c' + where); inline = true; break }
+        if (/^-[A-Za-z]*c$/.test(w)) { out.unresolved.push('interpreter -c' + where); inline = true; break }
         if (w === '-m') { out.unresolved.push('interpreter -m' + where); inline = true; break }
         if (SH_INFO_FLAG_RX.test(w)) info = true
         if (/^-[XWO]$/.test(w) && !isSource) { j += 2; continue }
