@@ -94,7 +94,12 @@ export default function setup(): () => void {
     const stuck = removeRoot(r)
     const msg = [leftoverProblem(r, names), stuck].filter(Boolean).join(' ')
     if (!msg) return
-    if (process.env.MARVEEN_TEST_TMP_STRICT === '1') throw new Error(msg)
+    if (process.env.MARVEEN_TEST_TMP_STRICT === '1') {
+      // vitest 4.1 reports an error thrown here as "error during close" and still exits 0 (card 400faadf, measured
+      // with a nested run): the exit code is what makes the run red
+      process.exitCode = 1
+      throw new Error(msg)
+    }
     console.warn(msg)
   }
 }

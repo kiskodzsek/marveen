@@ -56,6 +56,9 @@ export default defineConfig({
       './src/__tests__/setup/assert-not-live-install.ts',
       './src/__tests__/setup/assert-supported-node.ts',
       './src/__tests__/setup/default-ssh-dir-seam.ts',
+      // Card 400faadf: every test file gets its own TMPDIR under the run root, removed after the file. LAST, so
+      // the seams above still read the run root.
+      './src/__tests__/setup/per-file-tmp.ts',
     ],
   },
 })

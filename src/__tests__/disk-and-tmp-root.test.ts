@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +10,9 @@ import setup, {
 // root that is removed afterwards; a leftover is reported, and red under MARVEEN_TEST_TMP_STRICT=1.
 
 const saved = { ...process.env }
+// CI runs the suite with MARVEEN_TEST_TMP_STRICT=1 (card 400faadf); every test here starts without it and sets it
+// itself where it is the subject
+beforeEach(() => { delete process.env.MARVEEN_TEST_TMP_STRICT })
 afterEach(() => {
   for (const k of ['TMPDIR', 'MARVEEN_TEST_MIN_FREE_GIB', 'MARVEEN_TEST_TMP_STRICT']) {
     if (saved[k] === undefined) delete process.env[k]
@@ -83,7 +86,14 @@ describe('per-run temp root', () => {
     const teardown = setup()
     const root = process.env.TMPDIR as string
     writeFileSync(join(root, 'left'), 'x')
-    expect(() => teardown()).toThrow(/TMP-MARADEK/)
+    const code = process.exitCode
+    try {
+      expect(() => teardown()).toThrow(/TMP-MARADEK/)
+      // card 400faadf: vitest 4.1 exits 0 after an error thrown in a globalSetup teardown; the exit code makes it red
+      expect(process.exitCode).toBe(1)
+    } finally {
+      process.exitCode = code
+    }
     expect(existsSync(root)).toBe(false)
   })
 
