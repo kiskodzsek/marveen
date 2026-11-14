@@ -358,6 +358,14 @@ describe('Bash: the reject-dir words as prose (card 87aeff67)', () => {
     `env -S 'cp -R a ${V} /tmp/v'`,
     `trap 'cp -R a ${V} /tmp/v' EXIT`,
     `A=('a ${V}'); cp -R \${A[@]} /tmp`,
+    // pins for the scanner and the allowlist (Kernel's mutation run on Viktor's code: M1, M3, M4, M6-M8, M11, M13)
+    `grep -n foo x.md # it's\ncp -R ${V} /tmp/v\necho 'x'`,
+    `grep -n $'it\\'s' x ; cp -R ${V} /tmp/v ; echo 'a b'`,
+    `grep -n "$(cp -R a ${V} /tmp/v)" x.md`,
+    `grep -r foo \${X:-'a ${V}'}`,
+    `grep -rn foo '${V}'`,
+    `su -c 'cp -R a ${V} /tmp/v'`,
+    `node 'a ${V}'`,
     // the underscore dirs keep the bare rule, prose or not
     `grep -n 'a _quarantine b' x.md`,
     `bash tools/kernel-msg.sh klodel 'moved to _unscreened today'`,
