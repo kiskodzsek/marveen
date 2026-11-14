@@ -12,9 +12,11 @@ What blocks (exit 2): a `security` call in command position whose subcommand rea
 or that reads its subcommands from stdin (`security -i`, `security -p <prompt>`), which would hide the subcommand.
 Command position: the start of the command, or after ; & | ( ) { } a newline, a backtick, $( , an opening quote
 (`bash -c "security ..."`, `ssh host 'security ...'`), after find's -exec / -execdir / -ok, and after the
-wrapper and keyword words env, sudo, exec, command, nohup, time, nice, xargs, caffeinate, arch, builtin, timeout,
-stdbuf, setsid, if, then, else, elif, do, while, until, `!`, their flags, numbers (`timeout 5`, `nice -n 5`) and
-VAR=value assignments. A path before it counts (`/usr/bin/security`). Case-insensitive: the default macOS volume
+wrapper and keyword words env, sudo, doas, sandbox-exec, exec, command, nohup, time, nice, xargs, caffeinate, arch,
+builtin, timeout, stdbuf, setsid, if, then, else, elif, do, while, until, `!`, their flags, numbers (`timeout 5`,
+`nice -n 5`), VAR=value assignments and redirections (`>/dev/null`, `2> err`, `</dev/null`, `>&2`; Viktor 41970
+INFO 5, card 15896271). The & of a redirection (`>&2`, `<&3`, `&>x`) is no command end: `x >&2 security ...`
+runs x with the word as an argument, and passes. A path before it counts (`/usr/bin/security`). Case-insensitive: the default macOS volume
 resolves `SECURITY` to the same binary.
 Before matching, shell escapes that do not change the word are removed: backslash-newline, a backslash before a
 letter (`sec\\urity`), empty quotes inside a word (`sec''urity`), and `$IFS` / `${IFS}` read as a space. A second
@@ -37,8 +39,11 @@ a writing `git config` whose scope or key the shell still expands (`$K`, `$(...)
 Passes: reading (`git config --get ...`, `--list`), GIT_CONFIG_NOSYSTEM=1 (no system helper), the call's own
 `-c credential.helper=` (it empties the list last). A git that a program other than a shell runs (`HOME=/x npm
 test`) is not seen, nor a write to ~/.gitconfig by an editor or a Write tool (a path hook's job).
+The macOS wrappers that run a command after their own words are walked too (Viktor 41970 LOW 4, card 15896271):
+`sandbox-exec -p <profile> cmd`, `lockf -t 5 <file> cmd`, `launchctl asuser <uid> cmd` (any launchctl subcommand's
+third word is read as a command: fail-closed), `login -fp <user> cmd`.
 Not seen: everything listed above under "does not see"; a wrapper not in WRAP_ARGS whose flag takes a word (su,
-runuser, ionice, taskset, unbuffer ...), and a quoted string that starts with a wrapped call blocks like one that
+runuser and the like are not on this machine), and a quoted string that starts with a wrapped call blocks like one that
 starts with the call (`git commit -m "sudo -u root security dump-keychain"`).
 Allowed: every other `security` subcommand (list-keychains, find-identity, find-certificate, show-keychain-info,
 verify-cert ...) and the word in plain text (`grep find-generic-password notes.md`, `git commit -m "fix: security"`).
@@ -99,7 +104,7 @@ import stat
 import sys
 import time
 
-WRAPPERS = (r'(?:env|sudo|exec|command|nohup|time|nice|xargs|caffeinate|arch|builtin|timeout|stdbuf|setsid'
+WRAPPERS = (r'(?:env|sudo|doas|sandbox-exec|exec|command|nohup|time|nice|xargs|caffeinate|arch|builtin|timeout|stdbuf|setsid'
             r'|if|then|else|elif|do|while|until|eval|watch)')
 # Command position, then any words that may stand before the command: wrapper words, their flags, a number (a
 # duration or a niceness: `timeout 5`, `nice -n 5`), VAR=value assignments, `!`. One token matches one way only (a
@@ -113,8 +118,17 @@ WORD = r'[^\s;&|(){}`\'"]'
 # of a 6 000-newline run rescanned the rest (10 s; the same in the gate before card bc009036). A find -exec is a
 # position too, so it is not also read as a flag: 12 000 x " -exec" took 112 s that way.
 # CHAIN: the words that may stand before the command (one way to read each token, see above).
-CHAIN = r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|[+.]?\d[\w.]*|\w+=' + WORD + r'*)[ \t]+)*'
-POSITION = r'(?:^|[;&|(){}\n`\'"]|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*' + CHAIN
+# A redirection is a token too (`>/dev/null security ...`, `2> err`, `>&2`; Viktor 41970 INFO 5). Its target never
+# starts with < or >, so `>>x` reads one way only (`>>` + `x`, not `>` + `>x`): two ways per token backtracked
+# exponentially (the 30044 lesson).
+REDIR = r'\d*(?:&?>>?|<)&?[ \t]*[^\s;&|(){}`\'"<>]' + WORD + r'*'
+# An & is a position only as a command end: in `>&2`, `<&3`, `&>x` it belongs to a redirection (bash reads it so),
+# and with REDIR in CHAIN every such & rescanned the rest of a `>&2 >&2 ...` run (2 000 x ">&2 " ran into the 6 s
+# watchdog, measured 2026-11-14; card 15896271).
+AMP = r'(?<![<>])&(?!>)'
+CHAIN = (r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|' + REDIR + r'|[+.]?\d[\w.]*|\w+='
+         + WORD + r'*)[ \t]+)*')
+POSITION = r'(?:^|[;|(){}\n`\'"]|' + AMP + r'|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*' + CHAIN
 # The script rules below (an interpreter, a path run directly, cat into an interpreter) take a quote as a command
 # position only where a shell -c payload opens (`bash -c "./x.sh"`, `bash -lc '...'`). With every quote a position, the
 # word after a CLOSING quote looked like a command: `grep -n "for x" scripts/hooks/keychain-read-gate.py` read the
@@ -149,7 +163,7 @@ SHELL_RX = re.compile(r'(?:^|(?<=[\s;&|(){}`\'"/]))(?:(?:bash|sh|zsh|dash|ksh|fi
                       r'|\$\{?(?:SHELL|BASH)\}?|\$0)[\'"]?(?=[ \t])')
 C_WORD_RX = re.compile(r'(?<=[ \t])[\'"]?-[A-Za-z]*c[\'"]?(?=[ \t])')
 QUOTE_RX = re.compile(r'[\'"]')
-SCRIPT_POSITION = r'(?:^|[;&|(){}\n`]|\$\(|\s-(?:exec|execdir|ok)(?=\s)|' + PAYLOAD_OPEN + r')[ \t]*' + CHAIN
+SCRIPT_POSITION = r'(?:^|[;|(){}\n`]|' + AMP + r'|\$\(|\s-(?:exec|execdir|ok)(?=\s)|' + PAYLOAD_OPEN + r')[ \t]*' + CHAIN
 BINARY = r'(?:' + WORD + r'*/)?security'
 OPTIONS = r'(?:\s+-\S+)*'
 SECRET_SUB = r'(?:find-generic-password|find-internet-password|dump-keychain|export)'
@@ -305,7 +319,19 @@ def _segment(seg):
             tail = [strip_quotes(x) for x in every[i + 1:]]  # every word, not the MAX_ARGS slice (Viktor 42207 M3)
             # only export, or declare / typeset / local with -x, exports: `declare GIT_CONFIG_NOSYSTEM=1` and
             # `readonly ...` leave git the system helper (measured, bash; Dave on Viktor 42207 M2)
-            exports = base == 'export' or any(re.fullmatch(r'-[a-zA-Z]*x[a-zA-Z]*', x) for x in tail)
+            # Only the LEADING option words count (a bash `declare NAME=1 -x` takes -x for a name), `export -n` and
+            # `declare +x` take the export away, `readonly` never exports (measured, bash 3.2 and zsh; Viktor 42224 LOW 1)
+            opts = []
+            for x in tail:
+                if not re.fullmatch(r'[-+][a-zA-Z]+', x):  # a name, a value, or `--` ends the options
+                    break
+                opts.append(x)
+            # Only x, g, r keep an export (Dave on Viktor 42224, measured bash 3.2 and zsh): any other letter either
+            # takes it away (`export -n`) or is an invalid option there (`declare -nx`, `export -q`, `export -f`: the
+            # whole declaration fails, nothing is set), so it does not count as one; rare valid ones (-ix, -tx) block.
+            unexport = any(o[0] == '+' and 'x' in o or o[0] == '-' and set(o[1:]) - set('xgr') for o in opts)
+            exports = not unexport and base != 'readonly' and (
+                base == 'export' or any(o[0] == '-' and 'x' in o for o in opts))
             for x in tail:
                 name, eq, value = x.partition('=')
                 if base == 'unset':
@@ -314,7 +340,9 @@ def _segment(seg):
                     elif name == 'GIT_CONFIG_NOSYSTEM':
                         st['nosys'] = False
                 elif name == 'GIT_CONFIG_NOSYSTEM' and not exports:
-                    st['nosys'] = False if eq and value.lower() not in _TRUE else st['nosys']
+                    # not exported: an unexport, or a false value, ends the exemption; a true value or no value keeps an
+                    # earlier export's (declare keeps the export attribute; Viktor 42224 D05, D07, D08)
+                    st['nosys'] = False if unexport or eq and value.lower() not in _TRUE else st['nosys']
                 elif eq or name in OVERRIDE_VARS:  # `export HOME` after `HOME=/x;` counts too
                     _assign(st, name, value)
             return st
@@ -650,6 +678,10 @@ class SourceGroup:
         self.first, self.rest, self.over = first, rest, over
 
 
+# `>`, `2>>` alone (target next) or with it. & and | end the words (CMD_END): `&>`, `>&2`, `>|` never reach here.
+OUT_REDIR_RX = re.compile(r'\d*>>?(\S+)?$')
+
+
 def interp_groups(text):
     """For each interpreter call: the words that may be its script, in order (every existing file is judged).
     Raises TooManyArgs when a call's words run past MAX_ARGS or ARGS_WINDOW and the walk did not stop before."""
@@ -696,6 +728,12 @@ def interp_groups(text):
             if w == '-' or CODE_FLAG_RX.fullmatch(w):
                 stopped = True
                 break
+            # an output redirection's target is written, not run (`python3 x.py > out.txt`; card 15896271): a file
+            # an earlier run filled with the blocked call made the next run block. An input one (`< x.py`) is read.
+            out_redir = OUT_REDIR_RX.match(w)
+            if out_redir:
+                i += 1 if out_redir.group(1) else 2
+                continue
             if not w.startswith('-') and w:
                 group.append(w)
             i += 1
@@ -857,6 +895,11 @@ WRAP_ARGS = {
     # card 04d67b39: git's subcommand (GIT_RULES), and the tool xcrun runs (`xcrun security find-...` passed too)
     'git': ('Cc', {'--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'}, 0),
     'xcrun': ('f', {'-sdk', '--sdk', '-toolchain', '--toolchain', '--find'}, 0),  # -f / --find name: only a path
+    # card 15896271 (Viktor 41970 LOW 4): the macOS wrappers that exist here and run their command
+    'sandbox-exec': ('fnpD', set(), 0),  # -p <profile> / -f <file> / -n <name> / -D key=value
+    'lockf': ('t', set(), 1),  # lockf [-kns] [-t seconds] <file> cmd
+    'launchctl': ('', set(), 2),  # launchctl asuser <uid> cmd, bsexec <pid> cmd
+    'login': ('h', set(), 1),  # login -fp [-h host] <user> cmd
 }
 # Neither git nor xcrun is a CHAIN word, so the word after their options is marked even when the walk skipped none.
 WRAP_ALWAYS = {'git', 'xcrun'}
