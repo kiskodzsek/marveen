@@ -366,6 +366,8 @@ describe('Bash: the reject-dir words as prose (card 87aeff67)', () => {
     `grep -r foo \${X:-'a ${V}'}`,
     `grep -rn foo '${V}'`,
     `su -c 'cp -R a ${V} /tmp/v'`,
+    // Viktor 42390 INFO 1: only the re-split check stops this (no pipe; the literal belongs to jq, a text command)
+    `jq -n '"a ${V} b"' > /tmp/x; xargs cp -R /tmp/v < /tmp/x`,
     `node 'a ${V}'`,
     // the underscore dirs keep the bare rule, prose or not
     `grep -n 'a _quarantine b' x.md`,
