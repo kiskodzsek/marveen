@@ -225,6 +225,20 @@ BLOCK = [
     'GIT_CONFIG_NOSYSTEM=1 env -u GIT_CONFIG_NOSYSTEM HOME=/x git fetch',
     'export GIT_CONFIG_NOSYSTEM=1; unset GIT_CONFIG_NOSYSTEM; HOME=/x git fetch',
     'export GIT_CONFIG_NOSYSTEM=1; unset GIT_CONFIG_NOSYSTEM; GIT_CONFIG_GLOBAL=/dev/null git fetch',  # the unset alone (mutant, 15896271)
+    # Viktor 42251 MEDIUM 1: a redirection between the assignment and git hid the git (measured, bash 3.2 and zsh: the
+    # osxkeychain helper is the last value)
+    'HOME=/x 2>&1 git fetch origin',
+    'HOME=/x >/dev/null git fetch origin',
+    'GIT_CONFIG_GLOBAL=/dev/null 2>&1 git fetch origin',
+    'env -i 2>&1 git fetch origin',
+    'env >/dev/null HOME=/x git fetch origin',
+    'HOME=/x >/dev/null; git fetch origin',
+    'HOME=/x > /dev/null git fetch origin',  # the target as a word of its own
+    'HOME=/x &>/dev/null git fetch origin',  # the & before and after the operator (mutant, d868a616)
+    'HOME=/x >& /dev/null git fetch origin',
+    # Viktor 42251 INFO 6: an expanded word may be the option (`N=-n`): no export
+    'export $N GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'export `printf -- -n` GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
     'HOME=/x git -c cr3dential.helper=foo fetch',  # a helper added, the system one kept
     'HOME=/x git -c cr3dential.helper= -c cr3dential.helper=osxkeychain fetch',
     'HOME=/x node -e "require(\'child_process\').execSync(\'git fetch\')"',
@@ -283,6 +297,19 @@ BLOCK = [
     '</dev/null s3curity dump-keychain',
     '>&2 s3curity dump-keychain',
     '&>/dev/null s3curity dump-keychain',
+    # Viktor 42251 LOW 3: noclobber, here-string and heredoc before the command
+    '>|f s3curity dump-keychain',
+    '<<<x s3curity dump-keychain',
+    '<<EOF s3curity dump-keychain',
+    # Viktor 42251 LOW 4: launchctl submit runs the command after --
+    'launchctl submit -l a -o /tmp/o -- /usr/bin/s3curity dump-keychain',
+    'launchctl submit -l a -e /tmp/e -o /tmp/o -- s3curity dump-keychain',
+    # -p prog runs prog with the words after -- as argv, argv0 any word (Dave, measured on this branch): not read, blocks
+    'launchctl submit -l a -p /usr/bin/s3curity -- s3curity dump-keychain',
+    'launchctl submit -l a -p /usr/bin/s3curity -- x dump-keychain',
+    'launchctl submit -l a -p /usr/bin/env -- x s3curity dump-keychain',
+    'sudo launchctl submit -p /usr/bin/s3curity -l a -- x dump-keychain',
+    'launchctl submit -l a -p /bin/echo -- echo hi',  # fail-closed: any -p blocks
     'echo a; >>log s3curity dump-keychain',
     'sudo -u root >/dev/null s3curity dump-keychain',
     'env >>log s3curity dump-keychain',
@@ -436,6 +463,20 @@ ALLOW = [
     'export GIT_CONFIG_NOSYSTEM=1; declare GIT_CONFIG_NOSYSTEM=TRUE; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
     'declare -rx GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',  # readonly + export (measured)
     'export -- GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    # Viktor 42251: redirections around a plain git, and the exempted NOSYSTEM with one
+    'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null 2>&1 git fetch origin',
+    'git fetch 2>&1',
+    'git push >/dev/null 2>&1',
+    'git status &>/dev/null',
+    'git log 2>&1 | head',
+    'cat <<<x',
+    'git fetch >| /tmp/log',
+    'export PATH="$PATH:/x"; git fetch',  # an expanded word with = is a value, not an option
+    # ... and the NOSYSTEM after it is exported (measured, bash 3.2 and zsh; mutant, d868a616)
+    'export PATH=$PATH:/x GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    # >| is a redirection, its target no command (mutant, d868a616)
+    'echo a >|s3curity dump-keychain',
+    'echo a >| s3curity dump-keychain',
     "echo 'measured: `git config --show-scope --show-origin`, `find . -name x`'",  # prose that names config
     'node -e "assert.match(config, /key: `${X}`/)"',
     'git config user.email "$E"',  # the value expands, the key is read
@@ -466,6 +507,7 @@ ALLOW = [
     'cat f >> out.log',
     'ls 2>/dev/null; s3curity list-keychains',
     'launchctl list',
+    'launchctl submit -l a -o /tmp/o -- /bin/echo hi',
     'launchctl load -w /tmp/x.plist',
     'login',
     'echo login root s3curity dump-keychain',
@@ -562,6 +604,13 @@ def script_cases():
             ('sudo -u root 2>/dev/null python3 measure.py', d),
             ('python3 > out.txt measure.py', d),
             ('python3 2>err.log measure.py', d),
+            # Viktor 42251 LOW 2: the & / | of a redirection no longer cut the interpreter's words
+            ('python3 2>&1 ./measure.py', d),
+            ('python3 2>&1 measure.py', d),
+            ('python3 >& out.txt measure.py', d),
+            ('python3 &>o measure.py', d),
+            ('python3 >|o measure.py', d),
+            ('bash 2>&1 dump.sh', d),
             ('python3 -u -B measure.py --flag', d),
             ('/usr/bin/python3 ' + os.path.join(d, 'measure.py'), None),
             ('cd ' + d + ' && python3 measure.py', None),
@@ -749,7 +798,10 @@ def script_cases():
             ('python3 list.py &> out.txt', d),
             ('python3 list.py >| out.txt', d),
             ('python3 list.py 2> out.txt', d),
+            ('python3 list.py >& out.txt', d),  # Viktor 42251: the target of >& is written, not run
+            ('python3 list.py 2>&1 | head', d),
             ('python3 list.py > measure.py', d),  # truncated, not run
+            ('echo a >|./measure.py', d),  # the target of >| is written, not run (mutant, d868a616)
             ('python3 notes.py', d),
             ('python3 word.py', d),
             ('node labels.js', d),
