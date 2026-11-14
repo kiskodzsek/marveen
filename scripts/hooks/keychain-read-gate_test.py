@@ -299,6 +299,18 @@ def script_cases():
             # Viktor 41893 INFO 3: ksh and dash are shells
             ("ksh -c -o 'pipefail' 'python3 measure.py'", d),
             ("dash -c -e 'x' 'python3 measure.py'", d),
+            # Viktor 41906 LOW 1: a quoted -c word opens the payload (bash runs it, measured)
+            ("bash '-c' 'python3 measure.py'", d),
+            ('bash "-c" "python3 measure.py"', d),
+            ("bash '-lc' 'python3 measure.py'", d),
+            ("su '-c' 'python3 measure.py'", d),
+            # Viktor 41906 LOW 2: $BASH is a shell word; an option argument from a $(...) does not end the marking
+            ('"$BASH" -c -o \'pipefail\' \'python3 measure.py\'', d),
+            ("${BASH} -c -o 'pipefail' 'python3 measure.py'", d),
+            ("$BASH -c -o 'pipefail' 'python3 measure.py'", d),
+            ("bash -c $(echo -x) 'python3 measure.py'", d),
+            ('bash -c -o $(echo pipefail) "python3 measure.py"', d),
+            ("bash -c \"$(echo -x)\" 'python3 measure.py'", d),
             # accepted false positives, as on the live gate (Klodel 41895): a quoted interpreter call on a
             # keychain-reading file after any -c
             ('grep -c -i "python3 measure.py" notes.py', d),
@@ -356,6 +368,12 @@ def script_cases():
             ("git log -c --stat -p --follow -M -C 'measure.py'", d),
             ('find . -exec -a -b -c -d -e "x" ;', d),
             ("bash -c -o pipefail 'echo hi'", d),
+            ("bash -c -o 'pipefail' 'echo hi'", d),
+            ("bash '-c' 'echo hi'", d),  # Viktor 41906: a quoted -c with a clean payload passes
+            ("\"$BASH\" -c -o 'pipefail' 'echo hi'", d),
+            ("bash -c $(echo -x) 'echo hi'", d),
+            ("bash -c $(echo -x) 'echo hi'; grep -n 'x' notes.py", d),  # the marking ends at the ;
+            ('sort -c "x"', d),
             ("bash x.sh -c 'notes.py'", d),  # no file named so is run by the payload rules: notes.py is clean
             ('bash -c -x ; echo "python3 measure.py"', d),  # the all-quotes rule ends at the shell's command
             ('grep -c x f; echo "a" "python3 measure.py"', d),  # a non-shell -c: its first quote, in its command only

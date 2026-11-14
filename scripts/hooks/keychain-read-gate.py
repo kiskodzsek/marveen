@@ -116,14 +116,17 @@ PAYLOAD_OVER_RX = re.compile(r'(?<![\w-])watch(?:[ \t]+(?:-' + WORD + r'*|\d[\w.
 # A -c word (-c, -lc, -xc, and -exec: bash reads it as -e -x -e -c and runs the payload, measured 2026-11-14) after
 # ANY command opens a payload at the next quote: su -c, flock f -c, script -q -c, sg g -c, fish -c, "$SHELL" -c ...
 # all run one, and the live gate (741204a4) read every one (Viktor 41893 LOW 1, Klodel 41895: a list of shells is
-# never complete, the merge must not weaken the live gate). Accepted cost: a quoted interpreter call on a
-# keychain-reading file after any -c blocks (`grep -c "python3 m.py" f`), as on the live gate.
-# A shell word before the -c in the same command (bash5, "bash", /bin/bash, $SHELL, $0 too): every quote to the end
-# of that command opens one, since an option argument before the payload can be quoted too (`bash -c -o 'pipefail'
-# '...'`, `bash -c "-x" '...'`; Viktor 41893 LOW 2).
+# never complete, the merge must not weaken the live gate). The -c word may be quoted itself (`bash '-c' '...'`
+# runs the payload; Viktor 41906 LOW 1). Accepted cost, wider than the live gate's (which only read a quote right
+# after the -c): a quoted interpreter call on a keychain-reading file after any -c of the same command blocks
+# (`grep -c "python3 m.py" f`, `grep -c -i "python3 m.py" f`, `ssh -c aes128-ctr h "python3 m.py"`).
+# A shell word before the -c in the same command (bash5, "bash", /bin/bash, $SHELL, $BASH, $0 too): every quote up
+# to the next ; & | or newline opens one, since an option argument before the payload can be quoted too (`bash -c
+# -o 'pipefail' '...'`, `bash -c "-x" '...'`; Viktor 41893 LOW 2), and can come from a $(...) whose ")" would end
+# the command too early (`bash -c $(echo -x) '...'`; Viktor 41906 LOW 2).
 SHELL_RX = re.compile(r'(?:^|(?<=[\s;&|(){}`\'"/]))(?:(?:bash|sh|zsh|dash|ksh|fish|csh|tcsh|ash|rbash|pwsh)\d*'
-                      r'|\$\{?SHELL\}?|\$0)[\'"]?(?=[ \t])')
-C_WORD_RX = re.compile(r'(?<=[ \t])-[A-Za-z]*c(?=[ \t])')
+                      r'|\$\{?(?:SHELL|BASH)\}?|\$0)[\'"]?(?=[ \t])')
+C_WORD_RX = re.compile(r'(?<=[ \t])[\'"]?-[A-Za-z]*c[\'"]?(?=[ \t])')
 QUOTE_RX = re.compile(r'[\'"]')
 SCRIPT_POSITION = (r'(?:^|[;&|(){}\n`]|\$\(|\s-(?:exec|execdir|ok)(?=\s)|' + PAYLOAD_OPEN + r')[ \t]*'
                    r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|[+.]?\d[\w.]*|\w+=' + WORD
@@ -391,12 +394,14 @@ def script_paths(cmd, cwd, normalised=None):
 
 def payload_quotes(text):
     """Positions of the quotes that open a payload PAYLOAD_OPEN does not reach, each within its command: the first
-    quote after a -c word of any command, every quote after it when a shell word stands before that -c, and the first
-    quote after watch / tmux new past their bound (Viktor 41831 LOW 2, 41859 A/B, 41893 LOW 1-2). Linear: command
+    quote after a -c word of any command, every quote after it up to the next ; & | or newline when a shell word
+    stands before that -c, and the first quote after watch / tmux new past their bound (Viktor 41831 LOW 2, 41859 A/B,
+    41893 LOW 1-2, 41906 LOW 1-2). Linear: command
     ends, quotes and shell words are indexed once; a command whose quotes are all marked is not read again."""
     import bisect
     ends = [i for i, ch in enumerate(text) if ch in CMD_END]
     quotes = [i for i, ch in enumerate(text) if ch in '\'"']
+    hard = [i for i, ch in enumerate(text) if ch in ';&|\n']
     shells = [m.start() for m in SHELL_RX.finditer(text)]
 
     def cmd_end(pos):
@@ -418,6 +423,8 @@ def payload_quotes(text):
         end = cmd_end(c.end())
         k = bisect.bisect_left(shells, cmd_start(c.start()))
         if k < len(shells) and shells[k] < c.start():
+            j = bisect.bisect_left(hard, c.end())
+            end = hard[j] if j < len(hard) else len(text)
             marks += quotes[bisect.bisect_left(quotes, c.end()):bisect.bisect_left(quotes, end)]
             done = end
         else:
