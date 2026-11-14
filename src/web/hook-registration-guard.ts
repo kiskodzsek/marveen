@@ -68,6 +68,8 @@ export const KNOWN_HOOK_SCRIPTS: readonly string[] = [
   'zsh-trap-gate.py',
   // Retro 2026-11-13 R8 (card 84858637): no own-session meta line (restart, handoff, fresh context) to Patrik's chats.
   'session-meta-reply-gate.py',
+  // Retro 2026-11-13 Kernel c (card 7702bb13): a revocation that may touch the owner goes into his evening block.
+  'revocation-evening-note.py',
   // The /clear continuity pair: SessionEnd capture + SessionStart replay.
   'clear-capture.py',
   'clear-replay.py',
