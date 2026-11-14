@@ -245,6 +245,57 @@ describe('the accounting-folder hydrate job (card 7b30ebe5, Klodel 27138)', () =
   })
 })
 
+describe('the Bubek core LaunchAgent (card 8bd6d7b9, Viktor 41744, release fe5f4210)', () => {
+  const BU = 'local.bubek'
+  const buPlist = join(agentsDir, `${BU}.plist`)
+  const fixture = () => readFileSync(join(__dirname, 'fixtures', `${BU}.plist`))
+  it('bootstrap of the approved plist and bootout pass; kickstart is refused', () => {
+    writeFileSync(buPlist, fixture())
+    const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${buPlist}` }, pulzus)
+    expect(ok.deny).toBe(false)
+    expect(ok.launchdOps[0].plist_sha256).toBe('2480d72e8fe8502a449be5a6956d1680542775ebccadbbce2a619d7c24ac300b')
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${BU}` }, pulzus).deny).toBe(false)
+    expect(gateDecision('Bash', { command: `${L} kickstart -k gui/${UID}/${BU}` }, pulzus).deny).toBe(true)
+  })
+  it('another hash (the checkout instead of the app copy, another tree), a symlink, another path, another label: refused', () => {
+    const text = fixture().toString('utf8')
+    for (const changed of [
+      text.replace('/app-c88ea1260bce/src/main.ts', '/../../sajat-rendszer/src/main.ts'),
+      text.replace('app-c88ea1260bce', 'app-000000000000'),
+      // the earlier release 67e40495 (tree d98fc269): its hash a9db2508 is no longer approved
+      text.replace('app-c88ea1260bce', 'app-d98fc26915f1'),
+      text.replace('<key>Umask</key>', '<key>EnvironmentVariables</key><dict/><key>Umask</key>'),
+    ]) {
+      expect(changed).not.toBe(text)
+      writeFileSync(buPlist, changed)
+      expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${buPlist}` }, pulzus).deny).toBe(true)
+    }
+    const real = join(home, 'bubek-real.plist')
+    writeFileSync(real, fixture())
+    rmSync(buPlist, { force: true })
+    symlinkSync(real, buPlist)
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${buPlist}` }, pulzus).deny).toBe(true)
+    unlinkSync(buPlist)
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${real}` }, pulzus).deny).toBe(true)
+    const other = join(agentsDir, 'local.bubek2.plist')
+    writeFileSync(other, fixture())
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${other}` }, pulzus).deny).toBe(true)
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/local.bubek2` }, pulzus).deny).toBe(true)
+  })
+  it('the Bubek plist under another approved label is refused (Viktor 41885 INFO)', () => {
+    for (const label of ['com.marveen.host-monitor', 'hu.myshp.szamla.worker']) {
+      const elsewhere = join(agentsDir, `${label}.plist`)
+      writeFileSync(elsewhere, fixture())
+      expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${elsewhere}` }, pulzus).deny).toBe(true)
+    }
+  })
+  it('the same bootstrap from any other agent is refused', () => {
+    writeFileSync(buPlist, fixture())
+    const kernel = { ...pulzus, agent: 'kernel', configDirAgent: 'kernel' }
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${buPlist}` }, kernel).deny).toBe(true)
+  })
+})
+
 describe('the invoice mover v3 and its B5 probe (Pulzus 2864, card daef6926)', () => {
   const MOV = 'hu.myshp.szamla.mozgato'
   const B5 = 'hu.myshp.szamla.b5probe'
