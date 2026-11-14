@@ -64,6 +64,50 @@ BLOCK = [
     'stdbuf -o0 s3curity export',
     'setsid s3curity dump-keychain',
     'find . -name x -exec s3curity dump-keychain {} +',
+    # card 3085a683 (Viktor 30044 known gap, 41831 INFO 3): a wrapper flag with a word argument, or a wrapper's
+    # positional word, no longer breaks the chain (all allow on 43305327)
+    'sudo -u root s3curity find-generic-password -s x',
+    'sudo -Eu root s3curity dump-keychain',
+    'sudo -uroot s3curity dump-keychain',  # the word attached: the next one is the command
+    'sudo -h s3curity dump-keychain',  # a mark in the wrong place (if -h took no word) never lifts a block
+    'sudo -u root s3curity find-generic-password -s x -w',
+    'sudo --user root s3curity dump-keychain',
+    'sudo --user=root -g wheel s3curity dump-keychain',
+    'sudo -p "Pass: " s3curity dump-keychain',
+    'sudo -u $(whoami) s3curity dump-keychain',
+    'sudo -- s3curity dump-keychain',
+    '/usr/bin/sudo -u root s3curity dump-keychain',
+    '/usr/bin/env -u HOME s3curity dump-keychain',  # a path before the wrapper (main: allow; the sudo row is not)
+    '/usr/bin/ssh h s3curity dump-keychain',
+    'SUDO -u root s3curity dump-keychain',
+    '"sudo" "-u" root s3curity dump-keychain',
+    'doas -u root s3curity dump-keychain',
+    'env -u HOME s3curity dump-keychain',
+    'env -u HOME -u PATH A=1 s3curity export',
+    'env -C /tmp s3curity export',
+    'timeout -s KILL 5 s3curity dump-keychain',
+    'timeout -k 1 -s TERM 5s s3curity dump-keychain',
+    'timeout --signal KILL 5 s3curity dump-keychain',
+    'exec -a x s3curity dump-keychain',
+    'script -q /dev/null s3curity dump-keychain',
+    'script -q -t 0 /dev/null s3curity dump-keychain',
+    'ssh localhost s3curity dump-keychain',
+    'ssh -p 22 -i key -o BatchMode=yes localhost s3curity find-generic-password -s x',
+    'flock /tmp/l s3curity dump-keychain',
+    'flock -w 5 /tmp/l s3curity dump-keychain',
+    'sg staff s3curity dump-keychain',
+    'chroot / s3curity dump-keychain',
+    'xargs -I {} s3curity dump-keychain {}',
+    'arch -arch x86_64 s3curity dump-keychain',
+    'caffeinate -t 5 s3curity dump-keychain',
+    'time -o /tmp/t s3curity dump-keychain',
+    'stdbuf -o L s3curity export',
+    'nice -n 5 sudo -u root env -u HOME s3curity dump-keychain',  # wrappers in a row
+    'sudo -u a env -u B timeout -s KILL 5 ssh h s3curity dump-keychain',
+    'ls; sudo -u root s3curity dump-keychain',
+    'bash -c "sudo -u root s3curity dump-keychain"',
+    # accepted false positive, the class above: a quoted string that starts with the blocked call
+    'git commit -m "sudo -u root s3curity dump-keychain"',
 ]
 
 ALLOW = [
@@ -82,6 +126,18 @@ ALLOW = [
     'python3 s3curity_check.py dump-keychain-list',
     's3curity find-generic-password-helper',
     'node scripts/s3curity-review.mjs',
+    # card 3085a683: the wrapped command is judged, not the wrapper's words
+    'sudo -u root ls',
+    'sudo -u s3curity ls',  # a user named so: the command is ls
+    'timeout -s KILL 5 s3curity list-keychains',
+    'ssh host s3curity list-keychains',
+    'ssh s3curity-host uptime',
+    'script -q /dev/null ls',
+    'echo sudo -u root s3curity dump-keychain',  # prose: sudo is not in command position
+    'grep -n "sudo -u" notes.md',
+    'env -u HOME',
+    'sudo -u',
+    "sudo -p 'unclosed s3curity dump-keychain",  # an unclosed quote: the walk stops, nothing is marked
 ]
 
 
@@ -311,6 +367,20 @@ def script_cases():
             ("bash -c $(echo -x) 'python3 measure.py'", d),
             ('bash -c -o $(echo pipefail) "python3 measure.py"', d),
             ("bash -c \"$(echo -x)\" 'python3 measure.py'", d),
+            # card 3085a683 (Viktor 41831 INFO 3): a wrapper flag with a word argument or a positional word
+            ('sudo -u root python3 measure.py', d),
+            ('env -u HOME python3 measure.py', d),
+            ('timeout -s KILL 5 python3 measure.py', d),
+            ('script -q /dev/null python3 measure.py', d),
+            ('ssh localhost python3 measure.py', d),
+            ("ssh localhost 'python3 measure.py'", d),
+            ("sg staff 'python3 measure.py'", d),
+            ('exec -a x python3 measure.py', d),
+            ('sudo -u root ./dump.sh', d),
+            ('timeout -s KILL 5 ./dump.sh', d),
+            ('sudo -u a env -u B python3 measure.py', d),
+            ('cat measure.py | sudo -u root python3', d),
+            ('sudo -h python3 measure.py', d),  # a mark never lifts a file the plain text reads
             # accepted false positives, as on the live gate (Klodel 41895): a quoted interpreter call on a
             # keychain-reading file after any -c
             ('grep -c -i "python3 measure.py" notes.py', d),
@@ -375,6 +445,14 @@ def script_cases():
             ("bash -c $(echo -x) 'echo hi'; grep -n 'x' notes.py", d),  # the marking ends at the ;
             ("bash -c -o 'pipefail' 'echo hi'\necho \"python3 measure.py\"", d),  # and at a newline (Viktor 41917)
             ('sort -c "x"', d),
+            # card 3085a683: the wrapped command is judged, clean here
+            ('sudo -u root python3 list.py', d),
+            ("ssh host 'echo hi'", d),
+            ('script -q /dev/null ls', d),
+            ('timeout -s KILL 5 python3 notes.py', d),
+            ('echo sudo -u root python3 measure.py', d),  # prose: sudo is not in command position
+            # a quote is not a script position: the script rules walk wrappers at their own positions only
+            ('grep -n "sudo -u root python3 measure.py" notes.py', d),
             ("bash x.sh -c 'notes.py'", d),  # no file named so is run by the payload rules: notes.py is clean
             ('bash -c -x ; echo "python3 measure.py"', d),  # the all-quotes rule ends at the shell's command
             ('grep -c x f; echo "a" "python3 measure.py"', d),  # a non-shell -c: its first quote, in its command only
@@ -634,9 +712,31 @@ def main():
                 fails.append(f'redos case: want {want}, got {p.returncode}: {cmd[:40]!r}...')
         except subprocess.TimeoutExpired:
             fails.append(f'redos case timed out (5 s): {cmd[:40]!r}...')
+    # card 3085a683: the wrapper walk is linear (a walk per wrapper, a wrapper right after another in the same pass);
+    # a walk past MAX_ARGS words blocks ('wrapper-unread'): 64 words of flags and arguments pass, 65 block
+    sec = fix('s3curity') + ' dump-keychain'
+    # (`env -u env -u ...` runs no command at all; in `timeout -s K timeout ...` each wrapper is a word of the one
+    # before: 0 is right there)
+    wrap_timed = [('sudo -u a ' * 20000 + 'z', 0), ('sudo -u a ' * 20000 + sec, 2), ('timeout -s K ' * 20000, 0),
+                  ('ssh -o a ' * 20000, 0), ('env -u ' * 30000, 0), ('sudo -p "' * 20000, 2),
+                  ('sudo' + ' -u a' * 20000 + ' ls', 2), ('ssh' + ' -o a' * 20000 + ' h ls', 2),
+                  # past the cap after an opening quote (a secret-rule position only): the secret path blocks too
+                  ('echo "sudo' + ' -u a' * 40 + ' x"', 2),
+                  ('sudo' + ' -u a' * 32 + ' ls', 0), ('sudo' + ' -u a' * 32 + ' -E ls', 2),
+                  ('sudo -u a; ' * 20000, 0), ('(sudo -u a ' * 20000, 0), ('sudo -u a ' * 20000 + 'python3 x.py', 0),
+                  ('ssh h ' * 20000 + sec, 2), ('nice -n 5 sudo -u a ' * 10000 + sec, 2)]
+    for cmd, want in wrap_timed:
+        try:
+            p = subprocess.run([sys.executable, '-I', HOOK], capture_output=True, text=True, timeout=5,
+                               input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}),
+                               env={'PATH': '/usr/bin:/bin'})
+            if p.returncode != want:
+                fails.append(f'wrapper timing case: want {want}, got {p.returncode}: {cmd[:40]!r}...')
+        except subprocess.TimeoutExpired:
+            fails.append(f'wrapper timing case timed out (5 s): {cmd[:40]!r}...')
     script_fails, script_n = script_cases()
     fails += script_fails
-    total = len(BLOCK) + len(ALLOW) + 6 + 11 + script_n
+    total = len(BLOCK) + len(ALLOW) + 6 + 11 + len(wrap_timed) + script_n
     for f in fails:
         print('FAIL', f)
     print(f'{total - len(fails)}/{total} passed')
