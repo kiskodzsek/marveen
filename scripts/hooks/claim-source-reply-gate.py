@@ -160,10 +160,20 @@ def claims(text):
     return found
 
 
+# A denied measurement is none ("nem mertem", "nem is mertem", "nincs merve", "nem merve", "meres: nincs"): cut it out
+# before the SOURCES / MEASURED patterns look (their lookbehind has a fixed width; \s+ here takes any run of spaces,
+# tabs or newlines, so the text keeps its lines for the "FORRÁS:" line rule). Viktor 41981 LOW 2.
+DENIED_MEAS = re.compile(r'\b(nem|sem|se|nincs)\b(?:\s+\w+)?\s+(mert\w*|merve)\b|\bmeres\s*:\s*(nincs|nem)\b')
+
+
+def _measure_text(text):
+    return DENIED_MEAS.sub(' ', norm(text))
+
+
 def has_source(text, files):
     if files:
         return True
-    plain = norm(text)
+    plain = _measure_text(text)
     return any(rx.search(plain) for rx in SOURCES)
 
 
@@ -171,7 +181,7 @@ def has_measurement(text, files):
     """A site's state needs a measurement (or an attached screenshot), not just any source."""
     if files:
         return True
-    plain = norm(text)
+    plain = _measure_text(text)
     return any(rx.search(plain) for rx in MEASURED)
 
 
@@ -185,7 +195,7 @@ CAP_LABEL = 'képesség'
 HEDGE = re.compile(r'\btipp\b|\bnem ellenoriztem\b|\bnem mertem\b|\bnem mert\b')
 # A denial stands right before the label ("nem tipp", "nem is tipp", "nem csak egy tipp", "korantsem tipp", "nincs
 # itt semmi tipp", "nem (tipp)") or right after it ("tipp helyett", "tipp nelkul"): up to two words and no comma between.
-DENY_BEFORE = re.compile(r'\b(nem|sem|se|korantsem|semmi|nincs)\b(?:\s+\w+){0,2}\s*[(\["*_]*$')
+DENY_BEFORE = re.compile(r'\b(nem|sem|se|korantsem|semmi|nincs)\b(?:(?:\s+\w+){0,2}\s*|\s*[(\["*_]+)$')
 DENY_AFTER = re.compile(r'tipp\W*(helyett|nelkul)\b')
 
 
