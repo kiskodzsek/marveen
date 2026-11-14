@@ -779,6 +779,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsBashEgressParser(name)) injectBashEgressParser(existing)
   if (agentGetsImageQuarantineGate(name)) injectImageQuarantineGate(existing)
   if (agentGetsKeychainReadGate(name)) injectKeychainReadGate(existing)
+  if (agentGetsRevocationNote(name)) injectRevocationNote(existing)
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
 }
 
@@ -1688,6 +1689,57 @@ export function ensureKeychainReadGate(name: string): boolean {
   if (wired) return false
   if (isUnsafeHookCommand(command)) return false
   injectKeychainReadGate(settings)
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  return true
+}
+
+// Card 7702bb13 (retro 2026-11-13, Kernel c): a revocation that may touch the owner (claude mcp logout, gh auth
+// logout, a keychain item deleted, ...) is noted in store/patrik-este-blokk.json, so the evening message tells him.
+// On 11-12 a sub-agent (Kernel) signed the owner's Higgsfield login out and nobody told him, so it is every
+// sub-agent; the main agent carries the same hook in the repo-shipped project settings. PostToolUse: only a
+// command that ran. The hook never blocks (always exit 0).
+export function agentGetsRevocationNote(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+export function injectRevocationNote(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'revocation-evening-note.py'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  const entry = {
+    matcher: 'Bash',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PostToolUse) ? (hooks.PostToolUse as unknown[]) : []
+  // One canonical entry: a prior one under another matcher or with a stale command would never fire.
+  hooks.PostToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('revocation-evening-note.py')),
+    entry,
+  ]
+}
+
+// Idempotent migration for the running fleet (same shape as ensureKeychainReadGate). Returns true if written; a
+// settings file that is not there is not created (a never-spawned agent gets the hook on its first spawn).
+export function ensureRevocationNote(name: string): boolean {
+  if (!agentGetsRevocationNote(name)) return false
+  const settingsPath = agentSettingsPath(name)
+  if (!existsSync(settingsPath)) return false
+  let settings: Record<string, unknown> = {}
+  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'revocation-evening-note.py'))
+  const hooks = (settings.hooks && typeof settings.hooks === 'object')
+    ? settings.hooks as Record<string, unknown>
+    : {}
+  const post = Array.isArray(hooks.PostToolUse) ? hooks.PostToolUse as unknown[] : []
+  const mine = post.filter((e) => JSON.stringify(e).includes('revocation-evening-note.py'))
+  const wired = mine.length === 1 && (mine[0] as { matcher?: unknown })?.matcher === 'Bash'
+    && hookCommandWired(JSON.stringify(mine[0]), command)
+  if (wired) return false
+  if (isUnsafeHookCommand(command)) return false
+  injectRevocationNote(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }

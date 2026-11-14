@@ -122,6 +122,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of summary-form-reply-gate.py (run: python3 -I scripts/hooks/summary-form-reply-gate_test.py); not itself a hook (retro 2026-11-13 R9, card dddca664)',
   'session-meta-reply-gate_test.py':
     'the unit test of session-meta-reply-gate.py (run: python3 -I scripts/hooks/session-meta-reply-gate_test.py); not itself a hook (retro 2026-11-13 R8, card 84858637)',
+  'revocation-evening-note_test.py':
+    'the unit test of revocation-evening-note.py, scripts/lib/este_blokk.py and scripts/este-blokk-add.py (run: python3 -I scripts/hooks/revocation-evening-note_test.py); not itself a hook (card 7702bb13)',
   'zsh-trap-gate_test.py':
     'the unit test of zsh-trap-gate.py (run: python3 -I scripts/hooks/zsh-trap-gate_test.py); not itself a hook (retro 2026-11-13 R6, card cf287c2c)',
   'update-apply-gate_test.py':
