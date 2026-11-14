@@ -12,7 +12,8 @@ whose text makes a CLAIM and carries no SOURCE.
   élesben / élesítve / élesítettem, fut / futnak, kint van, kiment), or a CAPABILITY ("ki tudjuk emelni",
   "kiemelhetjük", "képesek vagyunk", "meg lehet oldani", "működik", "be van állítva"; retro R2, TG 6035), that is not negated or conditional just before
   ("nincs kész", "még nem fut", "ha kész", "amint kész") nor future ("kész lesz"), or a number with a unit (%, Ft / forint / HUF, $ / USD / EUR / €, db, "N perc múlva").
-  SOURCE, anywhere in the message: a "FORRÁS:" line, "mérve" / "mérés:" / "X mérte" / "mértem", "<X> szerint",
+  SOURCE, anywhere in the message: a "FORRÁS:" line, "mérve" / "mérés:" / "X mérte" / "mértem" (not "nem mértem" /
+  "sem mérte": a denied measurement is none, Viktor 41972 LOW 2), "<X> szerint",
   "<X> jelzése", "forrással", "becslés (... szerint)", msg_id / msg 123,
   TG 1234, a PR (#123, PR 123), a file path (a/b.ext or /abs/path), a URL, a commit sha (7-40 hex with a digit and
   a letter), or an attached file (the reply's `files`: the result itself is the evidence).
@@ -89,12 +90,12 @@ SITE_EXPLICIT = re.compile(r'\b(webshop|weboldal\w*|honlap\w*|' + PAGE + r')\b|\
 DOWN = re.compile(r'\b(alszik|alszanak|alvo\w*|aludt\w*|leallt\w*|le van allva|leallitva)\b')
 DEPT = re.compile(r'\b\w*reszleg\w*\b')  # reszleg, csapatreszleg (replay 2026-11-10: the correction itself blocked)
 MEASURED = [re.compile(rx) for rx in (
-    r'\bmerve\b|\bmeres\s*:|\bmert(e|em|uk|ek|ed)\b|\bmeresevel\b|\belo(ben)? meres',
+    r'\bmerve\b|\bmeres\s*:|(?<!\bnem )(?<!\bsem )\bmert(e|em|uk|ek|ed)\b|\bmeresevel\b|\belo(ben)? meres',
     r'\bhttp\s?[1-5]\d\d\b|\bstatusz(kod)?\s*:?\s*[1-5]\d\d\b|\bstatus\s*:?\s*[1-5]\d\d\b',
 )]
 SOURCES = [re.compile(rx) for rx in (
     r'(^|\n)\s*forras\s*:',
-    r'\bmerve\b|\bmeres\s*:|\bmert(e|em|uk|ek|ed)\b|\bmeresevel\b|\belo(ben)? meres',
+    r'\bmerve\b|\bmeres\s*:|(?<!\bnem )(?<!\bsem )\bmert(e|em|uk|ek|ed)\b|\bmeresevel\b|\belo(ben)? meres',
     r'\b\w+ szerint\b|\b\w+ jelzese\b|\bforrassal\b|\bforras\s*:',
     r'\bbecsles\s*\([^)]*szerint[^)]*\)',
     r'\bmsg[_ ]?(id)?[:= #]?\s?\d{3,}',
@@ -125,31 +126,54 @@ NEGW = re.compile(r'\b(nem|nincs|sincs|semmi|sem|meg nem)\b')
 IDIOM = re.compile(r'\bes kesz\s*[.!]?\s*$')
 
 
+def _plain(text):
+    """Normalized text without quotes; a dot inside a word ("marabel.hu", "a/b.md") is not a sentence end: kept as a
+    middle dot for the split."""
+    return re.sub(r'(?<=\w)\.(?=\w)', '\u00b7', QUOTED.sub(' ', norm(text)))
+
+
+def _sentence_claims(sent):
+    """The claim labels of one sentence, outside a question and conditional or negated clauses."""
+    found = []
+    if sent.endswith('?'):
+        return found
+    for clause in re.split(r'[,;:\u2013\u2014]| - ', sent):
+        clause = ' '.join(clause.split())
+        if not clause or COND.search(clause) or NEGW.search(clause) or IDIOM.search(clause):
+            continue
+        for label, rx in CLAIMS:
+            if label not in found and rx.search(clause):
+                found.append(label)
+        if (SITE_LABEL not in found and DOWN.search(clause) and SITE.search(clause)
+                and not (DEPT.search(clause) and not SITE_EXPLICIT.search(clause))):
+            found.append(SITE_LABEL)
+    return found
+
+
 def claims(text):
     """The claim labels in the text, outside quotes, questions, conditional and negated clauses."""
-    # A dot inside a word ("marabel.hu", "a/b.md") is not a sentence end: kept as a middle dot for the split.
-    plain = re.sub(r'(?<=\w)\.(?=\w)', '\u00b7', QUOTED.sub(' ', norm(text)))
     found = []
-    for sent in sentences(plain):
-        if sent.endswith('?'):
-            continue
-        for clause in re.split(r'[,;:\u2013\u2014]| - ', sent):
-            clause = ' '.join(clause.split())
-            if not clause or COND.search(clause) or NEGW.search(clause) or IDIOM.search(clause):
-                continue
-            for label, rx in CLAIMS:
-                if label not in found and rx.search(clause):
-                    found.append(label)
-            if (SITE_LABEL not in found and DOWN.search(clause) and SITE.search(clause)
-                    and not (DEPT.search(clause) and not SITE_EXPLICIT.search(clause))):
-                found.append(SITE_LABEL)
+    for sent in sentences(_plain(text)):
+        for label in _sentence_claims(sent):
+            if label not in found:
+                found.append(label)
     return found
+
+
+# A denied measurement is none ("nem mertem", "nem is mertem", "nincs merve", "nem merve", "meres: nincs"): cut it out
+# before the SOURCES / MEASURED patterns look (their lookbehind has a fixed width; \s+ here takes any run of spaces,
+# tabs or newlines, so the text keeps its lines for the "FORRÁS:" line rule). Viktor 41981 LOW 2.
+DENIED_MEAS = re.compile(r'\b(nem|sem|se|nincs)\b(?:\s+\w+)?\s+(mert\w*|merve)\b|\bmeres\s*:\s*(nincs|nem)\b')
+
+
+def _measure_text(text):
+    return DENIED_MEAS.sub(' ', norm(text))
 
 
 def has_source(text, files):
     if files:
         return True
-    plain = norm(text)
+    plain = _measure_text(text)
     return any(rx.search(plain) for rx in SOURCES)
 
 
@@ -157,27 +181,50 @@ def has_measurement(text, files):
     """A site's state needs a measurement (or an attached screenshot), not just any source."""
     if files:
         return True
-    plain = norm(text)
+    plain = _measure_text(text)
     return any(rx.search(plain) for rx in MEASURED)
 
 
 CAP_LABEL = 'képesség'
-# A capability may also go out as a labelled guess (CLAUDE.md "Tények és találgatás": a tipp is marked as one in the
-# same sentence): "tipp", "[tipp]", "nem ellenőriztem", "nem mértem". Only for the capability label: a state claim
+# A capability may also go out as a labelled guess (CLAUDE.md "Tények és találgatás": a tipp is marked as one IN THE
+# SAME SENTENCE): "tipp", "[tipp]", "nem ellenőriztem", "nem mértem". Only for the capability label: a state claim
 # ("kész", "fut") still needs a source (replay 2026-11-13: "100 kép ..., ezt tudjuk kinyerni belőle (a
 # megvalósíthatóság tipp, próbaképsoron mérjük)" was a correct sentence).
+# The label counts in the capability's own sentence only, and a denied one is no label (Viktor 41287 LOW 1: "Ki tudjuk
+# emelni. Egyébként a tipp: holnap szólok." and "Ki tudjuk emelni! Ez nem tipp, ez biztos." both went through).
 HEDGE = re.compile(r'\btipp\b|\bnem ellenoriztem\b|\bnem mertem\b|\bnem mert\b')
+# A denial stands right before the label ("nem tipp", "nem is tipp", "nem csak egy tipp", "korantsem tipp", "nincs
+# itt semmi tipp", "nem (tipp)") or right after it ("tipp helyett", "tipp nelkul"): up to two words and no comma between.
+DENY_BEFORE = re.compile(r'\b(nem|sem|se|korantsem|semmi|nincs)\b(?:(?:\s+\w+){0,2}\s*|\s*[(\["*_]+)$')
+DENY_AFTER = re.compile(r'tipp\W*(helyett|nelkul)\b')
+
+
+def hedged(sent):
+    """True when the sentence carries a guess label that is not denied. Whitespace is collapsed first ("nem  tipp",
+    "nem<tab>tipp")."""
+    s = ' '.join(sent.split())
+    for m in HEDGE.finditer(s):
+        if m.group().startswith('tipp') and (DENY_BEFORE.search(s[max(0, m.start() - 40):m.start()])
+                                             or DENY_AFTER.match(s, m.start())):
+            continue
+        return True
+    return False
+
+
+def unhedged_capability(text):
+    """True when some sentence claims a capability and carries no guess label of its own."""
+    return any(CAP_LABEL in _sentence_claims(sent) and not hedged(sent) for sent in sentences(_plain(text)))
 
 
 def unsourced(text, files):
-    """The claim labels that lack what they need: a source in general (a capability: a source or a labelled guess),
-    a measurement for a site's state."""
+    """The claim labels that lack what they need: a source in general (a capability: a source, or a guess label in
+    each capability sentence), a measurement for a site's state."""
     found = claims(text)
     out = []
     general = [l for l in found if l not in (SITE_LABEL, CAP_LABEL)]
     if general and not has_source(text, files):
         out += general
-    if CAP_LABEL in found and not has_source(text, files) and not HEDGE.search(norm(text)):
+    if CAP_LABEL in found and not has_source(text, files) and unhedged_capability(text):
         out.append(CAP_LABEL)
     if SITE_LABEL in found and not has_measurement(text, files):
         out.append(SITE_LABEL)

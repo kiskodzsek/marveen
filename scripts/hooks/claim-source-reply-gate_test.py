@@ -157,6 +157,74 @@ for text in CAP_HEDGED:
 ok('a guess label does not clear a state claim', gate.unsourced('Kész a film (tipp).', []) == ['kész'],
    gate.unsourced('Kész a film (tipp).', []))
 ok('"tippet" is no label', gate.unsourced('Ki tudjuk emelni, kérek tippet.', []) == ['képesség'])
+# The guess label counts in the capability's own sentence, and a denied label is none (Viktor 41287 LOW 1).
+CAP_LABEL_ELSEWHERE = [
+    'Ki tudjuk emelni. Egyébként a tipp: holnap szólok.',      # Viktor's case: the label in another sentence
+    'Ki tudjuk emelni! Ez nem tipp, ez biztos.',               # Viktor's case: a denied label, another sentence
+    'Ki tudjuk emelni, ez nem tipp.',                          # a denied label in the same sentence
+    'Ki tudjuk emelni, és ez sem tipp.',
+    'Ki tudjuk emelni, ez nem egy tipp.',
+    'Ki tudjuk emelni (tipp). A feltöltés is működik.',       # two capabilities, only the first one labelled
+    # other natural denials (Viktor 41972 LOW 1): extra space, "is", a longer word, a word between, a mark, after
+    'Ki tudjuk emelni, ez nem  tipp.',
+    'Ki tudjuk emelni, ez nem\ttipp.',
+    'Ki tudjuk emelni, ez nem' + ' ' * 45 + 'tipp.',          # a whitespace run longer than the 40-char window
+    'Ki tudjuk emelni, ez nem is tipp.',
+    'Ki tudjuk emelni, ez korántsem tipp.',
+    'Ki tudjuk emelni, ez nem csak tipp.',
+    'Ki tudjuk emelni, ez nem csupán tipp.',
+    'Ki tudjuk emelni, nem csak egy tipp.',
+    'Ki tudjuk emelni, se tipp, se kétely.',
+    'Ki tudjuk emelni, nincs itt semmi tipp.',
+    'Ki tudjuk emelni, nincs tipp.',
+    'Ki tudjuk emelni, semmi tipp.',
+    'Ki tudjuk emelni, ez nem (tipp).',
+    'Ki tudjuk emelni, ez nem [tipp].',
+    'Ki tudjuk emelni, tipp helyett tény.',
+    'Ki tudjuk emelni, tipp nélkül.',
+    # "nem mértem" in ANOTHER sentence is neither a label nor a source (Viktor 41972 LOW 2)
+    'Ki tudjuk emelni. Nem mértem.',
+]
+for text in CAP_LABEL_ELSEWHERE:
+    ok(f'capability, no label in its own sentence: {text!r} -> blocks', gate.unsourced(text, []) == ['képesség'],
+       (gate.claims(text), gate.unsourced(text, [])))
+for text in ['Ki tudjuk emelni (tipp). Holnap szólok.', 'Ki tudjuk emelni (tipp). A feltöltés is működik (tipp).',
+             'Holnap szólok. Ki tudjuk emelni, de ez csak tipp.',
+             'Ki tudjuk emelni, nem mértem.',                     # the "nem mértem" label in its own sentence
+             'Ki tudjuk emelni, nem biztos, de ez tipp.',         # a denial before a comma does not reach the label
+             'Ki tudjuk emelni, nem mértem, csak tipp.',
+             # a denial word with words before the label's bracket is a sentence of its own (Viktor 41981 LOW 1)
+             'Ki tudjuk emelni, de nem biztos (tipp).', 'Ki tudjuk emelni, nincs akadálya (tipp).',
+             'Ki tudjuk emelni, nem gond (tipp).', 'Ki tudjuk emelni, semmi baj (tipp).',
+             'Ki tudjuk emelni, nem biztos de szerintem tipp.']:  # three words between: beyond the denial window
+    ok(f'every capability sentence labelled: {text!r} -> passes', gate.unsourced(text, []) == [],
+       (gate.claims(text), gate.unsourced(text, [])))
+# "nem mértem" / "nem mérte" is no source and no measurement (Viktor 41972 LOW 2: it cleared every state claim).
+for text in ['Kész. Nem mértem.', 'A poszt kint van, nem mértem.', '100 db kép kész, nem mértem.',
+             'Élesben van. Ezt nem mértem le.', 'Kész, Pulzus sem mérte.',
+             # other denied measurements (Viktor 41981 LOW 2)
+             'Kész. Nincs mérve.', 'Kész. Nem mérve.', 'Kész. Még nincs mérve.', 'Kész. Mérés: nincs.',
+             'Kész. Mérés: nem történt.', 'Kész. Nem is mértem.', 'Kész. Nem  mértem.', 'Kész. Nem\nmértem.']:
+    ok(f'a denied measurement is no source: {text!r} -> blocks', gate.unsourced(text, []) != [] and
+       not gate.has_source(text, []), (gate.claims(text), gate.unsourced(text, [])))
+ok('a denied measurement is no site measurement', gate.unsourced('A marabel.hu leállt, nem mértem.', []) == [gate.SITE_LABEL])
+ok('a measurement still is one: "Pulzus mérte"', gate.has_source('Kész, Pulzus mérte.', []))
+for text in ['Kész. Nem mértem, de Pulzus mérte.', 'Kész. Nem sokat, de mértem.', 'Kész (mérve: HTTP 200).',
+             'Kész. Mérés: 200 OK.']:
+    ok(f'a real measurement next to a denied one is still a source: {text!r}', gate.unsourced(text, []) == [],
+       gate.unsourced(text, []))
+ok('site: "nincs mérve" is no measurement', gate.unsourced('A webshop alszik. Nincs mérve.', []) == [gate.SITE_LABEL])
+ok('site: "Pulzus sem mérte" is no measurement',
+   gate.unsourced('A webshop leállt, Pulzus sem mérte.', []) == [gate.SITE_LABEL])
+ok('a source anywhere still clears every capability sentence',
+   gate.unsourced('Ki tudjuk emelni. A feltöltés is működik. Mira mérte, msg 41144.', []) == [])
+# Boundary cases (Viktor 41287 INFO 3/4): the "tud ... -ni" window takes up to two words between, not three; the
+# -hetem form is a capability too.
+for text in ['Tudjuk a posztot kiemelni.', 'Tudjuk majd emelni.', 'Kiemelhetem a posztot.']:
+    ok(f'capability boundary: {text!r} -> blocks', gate.unsourced(text, []) == ['képesség'],
+       (gate.claims(text), gate.unsourced(text, [])))
+ok('three words between "tud" and the infinitive: no capability (the window is {0,2})',
+   'képesség' not in gate.claims('Tudjuk majd a posztot kiemelni.'), gate.claims('Tudjuk majd a posztot kiemelni.'))
 ok('an attached file is the source', gate.has_source('Kész a papás film.', ['/x/papa.mp4']))
 ok('"mert" (because) is not "mérte"', not gate.has_source('Kész, mert Dave megcsinálta.', []))
 ok('"szerintem" is not an attribution', not gate.has_source('Szerintem kész van.', []))
