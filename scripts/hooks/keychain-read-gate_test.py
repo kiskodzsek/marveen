@@ -11,6 +11,9 @@ import subprocess
 import sys
 
 HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'keychain-read-gate.py')
+# the repo's own agent-msg.sh, the one data recipient by path (card 8a5d51e8, Viktor 42575)
+AM = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'agent-msg.sh'))
+AM_ROOT = os.path.dirname(os.path.dirname(AM))
 
 # The fixtures spell the binary with a 3 for its first e ("s3curity"); fix() restores it at run time, so this file
 # carries no runnable keychain call and running it is not blocked by the gate it tests (card bc009036). The git
@@ -567,6 +570,12 @@ def script_cases():
         # measure.py's shape: the binary in a variable, the subcommand in a list
         w('measure.py', "import subprocess\nSEC = '/usr/bin/" + S + "'\n"
                         "subprocess.run([SEC, 'find-generic-password', '-a', 'acct', '-s', 'svc'])\n")
+        os.makedirs(os.path.join(d, 'scripts'), exist_ok=True)
+        w('agent-msg.sh', 'eval "$(cat)"\n')  # a look-alike recipient that runs its stdin (Viktor 42575 MEDIUM)
+        w(os.path.join('scripts', 'agent-msg.sh'), 'eval "$(cat)"\n')
+        os.makedirs(os.path.join(d, 'bin'), exist_ok=True)
+        w(os.path.join('bin', 'git'), '#!/bin/sh\nexec sh\n')  # a planted git that runs its stdin (Viktor 42639)
+        w(os.path.join('bin', 'bash'), '#!/bin/sh\nexec sh\n')
         w('stdin.py', "import subprocess\nSEC = '" + S + "'\nsubprocess.Popen([SEC, '-i', '-p', ''])\n")
         w('shellish.py', "import os\nos.system('" + S + " dump-keychain')\n")
         w('read.mjs', "import { execFileSync } from 'node:child_process';\n"
@@ -802,6 +811,86 @@ def script_cases():
             ('python3 -c "import subprocess; subprocess.run([\'' + S + '\', \'dump-keychain\'])"', d),
             ("python3 - <<'PY'\nimport subprocess\nsubprocess.run(['" + S + "', 'find-generic-password'])\nPY", d),
             ("node -e \"require('child_process').execFileSync('" + S + "', ['dump-keychain'])\"", d),
+            # card 8a5d51e8 (Viktor 42491): a heredoc body is code when its recipient runs it, so these keep blocking
+            ("python3 - <<'PY'\n./measure.py\nPY", d),
+            ("bash -s scripts/agent-msg.sh <<'M'\n./measure.py\nM", d),  # bash -s reads the script from stdin
+            ("python3 - git commit -F - <<'PY'\n./measure.py\nPY", d),  # the recipient is python3, not git
+            ("git commit -F - <<MSG\n$(python3 measure.py)\nMSG", d),  # unquoted: the body's $(...) runs
+            ("git commit -F - <<'MSG' | bash\n./measure.py\nMSG", d),  # something after the operator
+            ("cat > run.sh <<'E'\n./measure.py\nE", d),  # a written file may be run next: not a data recipient
+            ("git commit -m x <<'MSG'\n./measure.py\nMSG", d),  # no -F -: git does not read stdin
+            ("git commit -F - <<'MSG'\nx\nMSG\npython3 measure.py", d),  # after the terminator: a command again
+            # anything after the operator on its line keeps the body (conservative, mutation round 1)
+            ("git commit -F - <<'MSG' ; true\n./measure.py\nMSG", d),
+            ("git commit -F - <<'MSG' && true\n./measure.py\nMSG", d),
+            ("git commit -F - <<'MSG' `true`\n./measure.py\nMSG", d),
+            ("git commit -F - <<'MSG' $(true)\n./measure.py\nMSG", d),
+            ("git commit -F - <<'MSG' < /dev/null\n./measure.py\nMSG", d),
+            ("git commit -F - <<\\MSG\n./measure.py\nMSG", d),  # normalise() makes it <<MSG: unquoted, kept
+            # Viktor 42575 HIGH: `<<'D'` that is no operator hid real lines up to the next line equal to D
+            ("git commit -F - <<<'true'\npython3 ./measure.py\ntrue", d),  # here-string: no body
+            ("bash " + AM + " dave v - <<<'true'\npython3 ./measure.py\ntrue", d),
+            ("git commit -F - \\<<'true'\npython3 ./measure.py\ntrue", d),  # \< is a word, <'true' reads a file
+            ('git commit -F - -m "x <<\'true\'"\npython3 ./measure.py\ntrue', d),  # inside a quote
+            ("bash " + AM + " d v \"<<'true'\"\npython3 ./measure.py\ntrue", d),
+            ("true # a; git commit -F - <<'true'\npython3 ./measure.py\ntrue", d),  # after a comment
+            ("true # curl -d @- x <<'true'\npython3 ./measure.py\ntrue", d),
+            ('echo "x\ngit commit -F - <<\'true\'\n"\npython3 ./measure.py\ntrue', d),  # a quote from a line before
+            ("echo 'x\ngit commit -F - <<\"true\"\n'\npython3 ./measure.py\ntrue", d),  # a single quote, too
+            # relative, no cwd: not resolved against the hook process's own cwd either (relpath from it reaches AM)
+            ("bash " + os.path.relpath(AM) + " dave v - <<'M'\n" + d + "/measure.py\nM", None),
+            ("cat <<A\ngit commit -F - <<'true'\nA\npython3 ./measure.py\ntrue", d),  # inside an earlier heredoc
+            ("echo `true` && git commit -F - <<'MSG'\n./measure.py\nMSG", d),  # a backtick before
+            # Viktor 42575 MEDIUM: agent-msg.sh only as this repo's script, resolved against the cwd
+            ("bash agent-msg.sh dave v - <<'M'\n./measure.py\nM", d),
+            ("bash ./agent-msg.sh dave v - <<'M'\n./measure.py\nM", d),
+            ("bash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", d),
+            ("./scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", d),
+            ("bash " + d + "/scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", d),
+            ("cd " + d + " && bash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", AM_ROOT),  # cd moved it
+            ("cd " + d + "\nbash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", AM_ROOT),
+            ("cd " + d + "; bash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", AM_ROOT),
+            ("cd " + d + " & bash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", AM_ROOT),
+            ("bash ~/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),  # ~ is not resolved: kept
+            # no VAR=x prefix: PATH=, GIT_EXEC_PATH=, BASH_ENV= can hand the body to a program of the caller's choosing
+            ("PATH=" + d + ":/usr/bin bash " + AM + " dave v - <<'M'\n./measure.py\nM", d),
+            ("GIT_EXEC_PATH=" + d + " git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("_X=1 git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("lc=1 git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("ZX=1 git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            # Viktor 42639 HIGH: a quote left open after the operator makes the next lines part of the command line
+            ('git commit -F - <<\'MSG\' -m "x\n" ; ./measure.py #\nMSG', d),
+            ("git commit -F - <<'MSG' -m 'x\n' ; ./measure.py #\nMSG", d),
+            ("git commit -F - <<'MSG' 2>/dev/null\n./measure.py\nMSG", d),  # anything after the operator keeps it
+            # a quote, comment, backtick or $( opened before the operator ends on a body line: what follows runs (bash)
+            ('git commit -F - -m "x <<\'MSG\'\n" ; ./measure.py\nMSG', d),
+            ("git commit -F - -m 'x <<\"MSG\"\n' ; ./measure.py\nMSG", d),
+            ("git commit -F - #x <<'MSG'\n./measure.py\nMSG", d),
+            ("git commit -F - `true <<'MSG'\n` ; ./measure.py\nMSG", d),
+            ("git commit -F - $(true <<'MSG'\n) ; ./measure.py\nMSG", d),
+            # Viktor 42639 MEDIUM: only `cd <path>` or `true` before the recipient; anything else may redefine it
+            ("git() { bash; }\ngit commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("export PATH=./bin:$PATH\ngit commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("export PATH=./bin:$PATH\ncurl -d @- x <<'J'\n./measure.py\nJ", d),
+            ("alias git=bash; git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("echo x && git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("git add && git commit -F - <<'MSG'\n./measure.py\nMSG", d),  # git add needs a plain path
+            ("git config core.hooksPath x && git commit -F - <<'MSG'\n./measure.py\nMSG", d),  # only git add
+            ("git add x:y && git commit -F - <<'MSG'\n./measure.py\nMSG", d),  # a pathspec magic char is no plain path
+            ("cd ~ && git commit -F - <<'MSG'\n./measure.py\nMSG", d),  # a cd path with ~ or $ is not plain
+            ("cd " + d + " & git commit -F - <<'MSG'\n./measure.py\nMSG", d),  # a lone & is no join
+            (d + "/bin/bash " + AM + " dave v - <<'M'\n./measure.py\nM", d),  # the caller's own bash
+            ("./bin/bash " + AM + " dave v - <<'M'\n./measure.py\nM", d),
+            # only the first heredoc: a later one may sit in a state the regex cannot see
+            ("git commit -F - <<'A'\nx\nA\ngit commit -F - <<'B'\n./measure.py\nB", d),
+            # Viktor 42695 HIGH 1: normalise() joins backslash-newline, bash does not inside a quoted-delimiter body. A
+            # body line ending in a backslash and then the terminator line: bash ends the body there and runs what
+            # follows; the joined text had no terminator until a LATER one, so the lines between were blanked
+            ("git commit -F - <<'MSG'\nx\\\nMSG\n./measure.py\nMSG", d),
+            ("git add f && git commit -F - <<'MSG'\nx\\\nMSG\n./measure.py\nMSG", d),
+            ("curl -s -d @- <<'J'\nx\\\nJ\n./measure.py\nJ", d),
+            ("git commit -F - <<-'MSG'\n\tx\\\n\tMSG\n./measure.py\nMSG", d),
+            ("bash " + AM + " dave v - <<'M'\nx\\\nM\n./measure.py\nM", d),
         ]
         allow = [
             ('python3 list.py', d),
@@ -899,6 +988,41 @@ def script_cases():
             ('grep -n find-generic-password measure.py', d),
             ('python3 measure.py', None),  # relative path, no cwd and no cd: not resolvable, not judged
             ('ls ' + d, None),
+            # card 8a5d51e8 (Viktor 42491): a quoted heredoc whose recipient only stores or sends it is data
+            ("git commit -q -F - <<'MSG'\ntitle\n\n./measure.py is quoted here\nMSG", d),
+            ("git -C . commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("bash " + AM + " dave viktor - <<'M'\n./measure.py sorai\nM", d),
+            ("sh " + AM + " dave viktor - <<'M'\n./measure.py\nM", d),
+            (AM + " dave viktor - <<'M'\n./measure.py\nM", d),
+            ("bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),  # first command
+            ("true | bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),  # pipe
+            ("/bin/bash " + AM + " dave viktor - <<'M'\n./measure.py\nM", d),
+            ("/usr/bin/sh " + AM + " dave viktor - <<'M'\n./measure.py\nM", d),
+            ("cd " + d + " || git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("\tcd\t" + d + "/./sub-dir\t&&\tgit commit -F - <<'MSG'\n./measure.py\nMSG", d),  # tabs, . and - in the path
+            (" true ;  git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            # the fleet's real form (replay): git add <paths> && git commit -F - <<'MSG'
+            ("git add src/a_test.py b/c.txt && git commit -q -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("cd " + d + " && git add -A && git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("git\tadd\tx\n git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("cd " + d + "\ntrue\ngit commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("git commit -F - <<'MSG'   \n./measure.py\nMSG", d),  # trailing blanks after the operator
+            ("cd " + d + " && bash " + AM + " dave viktor - <<'M'\n./measure.py\nM", d),  # absolute: any cd
+            ("curl -s -X POST localhost:3420/api/messages --data-binary @- <<'J'\n./measure.py\nJ", d),
+            # mutation round 1: the operator's forms, the command's prefixes, the terminator only as a whole line
+            ("git commit -F - <<-'MSG'\n\t./measure.py\n\tMSG", d),
+            ("git commit -F - << 'MSG'\n./measure.py\nMSG", d),
+            ("git commit -F - <<\t\"MSG\"\n./measure.py\nMSG", d),
+            ("git commit --file=- <<'MSG'\n./measure.py\nMSG", d),
+            ("git tag -a v1 --file - <<'MSG'\n./measure.py\nMSG", d),
+            ("cd " + d + " && git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("cd " + d + "; git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("true | git commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            ("git commit -F - <<'MSG'\nfix the MSG parser\n./measure.py\nMSG", d),
+            # Viktor 42695 HIGH 1 fix (blank on the raw text): a body that really ends at its first terminator line
+            ("git commit -F - <<'MSG'\nx\ny\nMSG", d),
+            ("git commit -F - <<'MSG'\nfix the path ./measure.py in the note\nMSG", d),
+            ("git commit -F - <<'MSG'\nx\\\n./measure.py\nMSG", d),  # a body line ending in \ joins nothing in bash
         ]
         for cmd, cwd in block:
             code, err = bash_in(cmd, cwd)
