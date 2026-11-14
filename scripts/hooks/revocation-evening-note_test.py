@@ -75,6 +75,49 @@ NOTE = [  # (command, the phrase the item must carry)
     ('claude mcp remove ' + 'a' * 24, 'claude mcp remove ' + 'a' * 24),
     ('claude mcp remove ' + 'a' * 25, 'claude mcp remove <név nem ismert>'),
     ('claude mcp remove abc1234', 'claude mcp remove <név nem ismert>'),
+    # Viktor 41840 LOW 4 (card 1a2eb541): each form he measured as missed
+    ('/usr/local/bin/claude mcp logout higgsfield', 'claude mcp logout higgsfield'),
+    ('~/.local/bin/claude mcp logout higgsfield', 'claude mcp logout higgsfield'),
+    ('env -i HOME=/tmp claude mcp logout higgsfield', 'claude mcp logout higgsfield'),
+    ('sudo -u root gh auth logout', 'gh logout'),
+    ('timeout -s KILL 5 gh auth logout', 'gh logout'),
+    ('time gh auth logout', 'gh logout'),
+    ("eval 'claude mcp logout higgsfield'", 'claude mcp logout higgsfield'),
+    ('echo higgsfield | xargs claude mcp logout', 'claude mcp logout <név nem ismert>'),
+    ('npx -y vercel logout', 'vercel logout'),
+    ('gh --hostname github.com auth logout', 'gh logout'),
+    ('python3 -c "import os; os.system(\'claude mcp logout higgsfield\')"', 'claude mcp logout higgsfield'),
+    # the walk: wrappers in a chain, attached and long flags, a quoted or escaped flag word, positionals, paths
+    ('sudo -u root env -u HOME -i timeout -s KILL 5 gh auth logout', 'gh logout'),
+    ('sudo -uroot gh auth logout', 'gh logout'),
+    ('sudo --user root gh auth logout', 'gh logout'),
+    ('sudo --user=root gh auth logout', 'gh logout'),
+    ('sudo -p "Pass: " gh auth logout', 'gh logout'),
+    ('sudo -p a\\ b gh auth logout', 'gh logout'),
+    ('/usr/bin/sudo -u root /usr/bin/env -i /opt/homebrew/bin/gh auth logout', 'gh logout'),
+    ('nice -n 5 vercel logout', 'vercel logout'),
+    ('xargs -I {} claude mcp remove {}', 'claude mcp remove <név nem ismert>'),
+    ('ls; sudo -u root claude logout', 'claude logout'),
+    ("bash -c 'sudo -u root gh auth logout'", 'gh logout'),
+    ('time -p sudo -u root git credential reject', 'git credential reject'),
+    ('sudo -u root security delete-generic-password -s svc', 'delete-generic-password -s svc'),
+    ('sudo -u root curl -X POST https://api.example.test/oauth/revoke', 'HTTP revoke (api.example.test)'),
+    ('gh -R o/r auth logout', 'gh logout'),
+    ('claude --debug mcp logout higgsfield', 'claude mcp logout higgsfield'),
+    ('git -C /tmp credential reject', 'git credential reject'),
+    ('node -e "require(\'child_process\').execSync(\'vercel logout\')"', 'vercel logout'),
+    ('python3 -c "import subprocess; subprocess.run(\'gh auth logout\', shell=True)"', 'gh logout'),
+    # one item: a named match is not noted again as a nameless one at the same place (replay, a note in a heredoc)
+    ('(claude mcp logout higgsfield, "Signed out")', 'claude mcp logout higgsfield'),
+    ("bash -c 'claude mcp logout higgsfield'", 'claude mcp logout higgsfield'),
+    # a $(...) in a flag's word is one word, and the wrapper inside it is walked on its own (no chain skip)
+    ('sudo -u $(timeout -s KILL 5 vercel logout) ls', 'vercel logout'),
+    ('sudo -u $(sudo -u $(env -u X gh auth logout) ls) ls', 'gh logout'),
+    ('sudo -u "$(sudo -u root gh auth logout)" ls', 'gh logout'),
+    ('sudo -u $(id -un) gh auth logout', 'gh logout'),
+    # a chain longer than WRAP_PASSES is walked in one pass; an assignment with a quoted blank is skipped
+    ('sudo -u a ' * 6 + 'gh auth logout', 'gh logout'),
+    ('env -i A="x y" claude mcp logout higgsfield', 'claude mcp logout higgsfield'),
 ]
 QUIET = [
     'git commit -m "fix: gh auth logout docs"',
@@ -90,6 +133,21 @@ QUIET = [
     'ls -la',
     "cat <<'E'\ngh auth logout\n  E",  # a heredoc with an indented terminator: its body is not run
     'x' * 100000 + '\ngh auth logout',  # past MAX_CMD: not read (documented limit, keeps the hook fast)
+    # card 1a2eb541: the walk reads the wrapper's own words, not prose or quoted text
+    'echo sudo -u root gh auth logout',
+    'grep -n "sudo -u root gh auth logout" notes.md',
+    'env FOO="gh auth logout" ls',
+    'sudo -p "gh auth logout" ls',
+    'sudo -u gh ls',  # a user named so: the command is ls
+    'timeout -s KILL 5 gh auth status',
+    "claude -p \"please logout\"",
+    'git -C /tmp credential fill',
+    'xargs -I {} echo gh auth logout',
+    'sudo -u root',
+    "sudo -p 'unclosed gh auth logout",  # an unclosed quote: the walk stops
+    'python3 -c "print(\'gh auth logout\')"',
+    'vercel --scope "my logout"',  # a flag's word never starts with a quote: the quoted text is no subcommand
+    'sudo -u $(echo gh auth logout) ls',  # echo runs inside, sudo runs ls
 ]
 
 
@@ -252,7 +310,14 @@ def main():
         # long inputs decide fast (bounded runs; ReDoS; Viktor 41840 INFO 6: unterminated heredocs, MAX_CMD)
         for cmd in ["cat <<E\n" * 20000, "bash <<'E'\n" * 20000, 'gh auth logout ' * 30000,'env a=b ' * 20000 + 'x', 'curl ' + 'a' * 100000, "<<'E'\n" * 10000, ' -c "' * 20000,
                     'claude mcp logout' + ' -x' * 20000, 'security delete-generic-password' + ' a' * 50000,
-                    'curl https://x/' + 'a/' * 50000]:
+                    'curl https://x/' + 'a/' * 50000,
+                    # card 1a2eb541: the wrapper walk, the path prefix, the flags, the call position
+                    'sudo -u a ' * 20000 + 'gh auth logout', 'sudo -u "a b" ' * 8000 + 'x', "env -u 'a b' " * 8000,
+                    'sudo -p "' * 20000, 'sudo' + ' -u a' * 30000 + ' ls', 'time ' * 30000 + 'x',
+                    'eval ' * 30000, 'xargs -I a ' * 20000, '/' * 100000 + 'claude logout', 'a/' * 50000 + 'gh',
+                    'gh' + ' --x y' * 20000 + ' auth logout', 'system("' * 20000, ';sudo' * 30000,
+                    'sudo -u a; ' * 20000, 'sudo -u $(' * 20000, '$(sudo -u a ' * 20000 + 'x',
+                    'sudo -u "$(sudo -u a ' * 10000, 'sudo -u $(x) ' * 20000 + 'gh auth logout', '(' * 50000 + ')' * 50000]:
             n += 1
             t = time.monotonic()
             rc = run_hook(cmd, os.path.join(d, 'redos.json'))

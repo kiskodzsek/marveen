@@ -9,8 +9,11 @@ hibanapló 11-13 15:16). Now every such command that ran writes one item to stor
 Klodel decides there whether it was Patrik's; an agent's own test login shows up too, on purpose (a missed one
 cost Patrik a login, a needless one costs a line).
 
-What counts (in command position: line start, ; & | ( ` $( , a shell -c payload, after VAR=... / env / sudo / npx
-/ exec / command / nohup / timeout N):
+What counts (in command position: line start, ; & | ( ` $( , a shell -c payload, a string handed to a call in inline
+code (os.system('...'), execSync(`...`)), after VAR=... / env / sudo / npx / exec / command / nohup / timeout N, and
+after a wrapper with its flags and words (WRAP_ARGS: sudo -u X, env -i A=b, timeout -s X N, time, eval '...', xargs,
+npx -y, nice -n N ...; card 1a2eb541); a CLI by path (/usr/local/bin/claude, ~/.local/bin/claude) and flags between
+the CLI and its subcommand (gh --hostname h auth logout) too):
   claude mcp logout|remove <server>, claude [auth] logout, <cli> [auth] logout|signout for gh vercel supabase
   netlify firebase heroku stripe npm docker wrangler fly flyctl railway doctl az tailscale codex gemini, op signout,
   gcloud auth revoke, aws sso logout, security delete-generic-password|delete-internet-password [-s <service>],
@@ -35,9 +38,10 @@ The agent: $CLAUDE_CONFIG_DIR's agents/<name> first (a sub-agent's own folder), 
 41840 LOW 5: a sub-agent working in another agent's folder was named after the folder). A failure of the hook and a
 parked item (a broken block) go to store/hook-errors.log (hook_errlog), not only to stderr nobody reads (LOW 3).
 Only the first MAX_CMD characters are read (an unterminated-heredoc flood was quadratic: 20 000 took 7.6 s).
-Known misses (Viktor 41840 LOW 4, follow-up card): claude by path (/usr/local/bin/claude, ~/.local/bin/claude),
-wrapper flags (env -i, sudo -u X, timeout -s X N), time / eval / xargs before the CLI, npx -y, a flag between the CLI
-and auth (gh --hostname h auth logout), and a revocation inside inline code (python3 -c "os.system(...)").
+Known misses (after card 1a2eb541): the list form in inline code (subprocess.run(['gh', 'auth', 'logout'])), a
+string a wrapper splits itself (env -S 'gh auth logout', npx -c '...'), a wrapper not in WRAP_ARGS whose flag takes a
+word (su, runuser, ionice, taskset ...), a wrapper followed by more than MAX_ARGS words, a CLI named through a
+variable, alias or $(which gh), and a flag argument that starts with a quote (`gh --hostname "h" auth logout`).
 Wiring: .claude/settings.json PostToolUse, matcher "Bash" (every agent). Tests: revocation-evening-note_test.py.
 """
 import json
@@ -48,25 +52,164 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib'))
 
 # Command position, then up to six words that may stand before the command. Bounded, so a long run of them stays
-# linear (the keychain gate's ReDoS lessons, card bc009036).
-POS = (r'(?:^|[;&|(\n`]|\$\(|[ \t]-[A-Za-z]*c[ \t]+[\'"])[ \t]*'
+# linear (the keychain gate's ReDoS lessons, card bc009036). A string handed to a call in inline code
+# (`python3 -c "import os; os.system('gh auth logout')"`, execSync(`...`)) is a command position too (Viktor 41840
+# LOW 4); a wrapper with flags (`sudo -u root`, `env -i`, `timeout -s KILL 5`) is read by wrap_marks() below.
+POS = (r'(?:^|[;&|(\n`]|\$\(|[ \t]-[A-Za-z]*c[ \t]+[\'"]'
+       r'|\b(?:system|popen|getoutput|getstatusoutput|check_output|check_call|call|run|Popen|execSync|spawnSync|exec)'
+       r'\([ \t]*\[?[ \t]*[fbr]?[\'"`])[ \t]*'
        r'(?:(?:\w+=[^\s;&|]*|env|sudo|npx|exec|command|nohup|timeout[ \t]+[\d.]+[smh]?)[ \t]+){0,6}')
+PFX = r'(?:[\w.~/-]{0,256}/)?'  # a CLI by path: /usr/local/bin/claude, ~/.local/bin/claude (Viktor 41840 LOW 4)
+# flags between the CLI and its subcommand (`gh --hostname github.com auth logout`); an argument never starts with a
+# quote or a dash, so `claude -p "please logout"` is no logout
+FLAGS = r'(?:[ \t]+-{1,2}[\w-]+(?:=[^\s;&|]*|[ \t]+[^\s;&|\'"-][^\s;&|]*)?){0,4}'
 NAME = r'["\']?([\w.@-]{1,64})["\']?'
 CLIS = r'(gh|vercel|supabase|netlify|firebase|heroku|stripe|npm|docker|wrangler|flyctl|fly|railway|doctl|az|tailscale|codex|gemini)'
 RULES = [
-    ('claude-mcp', re.compile(POS + r'claude[ \t]+mcp[ \t]+(logout|remove)((?:[ \t]+-{1,2}[\w-]+(?:[ =][\w.-]+)?){0,4})'
-                              r'[ \t]+' + NAME)),
-    ('claude-logout', re.compile(POS + r'claude[ \t]+(?:auth[ \t]+)?(logout)\b')),
-    ('cli-logout', re.compile(POS + CLIS + r'[ \t]+(?:auth[ \t]+)?(logout|signout)\b')),
-    ('op-signout', re.compile(POS + r'(op)[ \t]+(signout)\b')),
-    ('gcloud-revoke', re.compile(POS + r'(gcloud)[ \t]+auth[ \t]+(revoke)\b')),
-    ('aws-sso-logout', re.compile(POS + r'(aws)[ \t]+sso[ \t]+(logout)\b')),
-    ('keychain-delete', re.compile(POS + r'(?:/usr/bin/)?security[ \t]+(delete-(?:generic|internet)-password)\b'
+    ('claude-mcp', re.compile(POS + PFX + r'claude' + FLAGS + r'[ \t]+mcp[ \t]+(logout|remove)'
+                              r'((?:[ \t]+-{1,2}[\w-]+(?:[ =][\w.-]+)?){0,4})[ \t]+' + NAME)),
+    # no name: it comes from stdin or a placeholder (`xargs claude mcp logout`, `xargs -I {} ... remove {}`), so it
+    # is not known; only flags without a value and at most one word that is no name before the end, so
+    # `claude mcp remove --verbose higgsfield` is the rule above's alone
+    ('claude-mcp-noname', re.compile(POS + PFX + r'claude' + FLAGS + r'[ \t]+mcp[ \t]+(logout|remove)'
+                              r'((?:[ \t]+-{1,2}[\w-]+){0,4})()(?:[ \t]+[^\s;&|)\'"`]{0,32}[^\w.@\s;&|)\'"`-][^\s;&|)\'"`]{0,32})?'
+                              r'[ \t]*(?=$|[;&|\n)`\'"])')),
+    # a claude flag takes no separate word here: `claude --debug mcp logout x` is the mcp rule's, not a logout
+    ('claude-logout', re.compile(POS + PFX + r'claude(?:[ \t]+-{1,2}[\w-]+(?:=[^\s;&|]*)?){0,4}'
+                                 r'[ \t]+(?:auth[ \t]+)?(logout)\b')),
+    ('cli-logout', re.compile(POS + PFX + CLIS + FLAGS + r'[ \t]+(?:auth[ \t]+)?(logout|signout)\b')),
+    ('op-signout', re.compile(POS + PFX + r'(op)' + FLAGS + r'[ \t]+(signout)\b')),
+    ('gcloud-revoke', re.compile(POS + PFX + r'(gcloud)' + FLAGS + r'[ \t]+auth[ \t]+(revoke)\b')),
+    ('aws-sso-logout', re.compile(POS + PFX + r'(aws)' + FLAGS + r'[ \t]+sso[ \t]+(logout)\b')),
+    ('keychain-delete', re.compile(POS + PFX + r'security[ \t]+(delete-(?:generic|internet)-password)\b'
                                    r'(?:[^;&|\n]{0,300}?[ \t]-s[ \t]+(?:["\']([^"\'\n]{1,64})["\']|([^\s;&|"\']{1,64})))?')),
-    ('git-credential', re.compile(POS + r'git[ \t]+credential(?:-osxkeychain)?[ \t]+(reject|erase)\b')),
-    ('http-revoke', re.compile(POS + r'curl\b[^;&|\n]{0,2000}?https?://(?:([^/@\s;&|\'"]{0,200})@)?([\w.-]{1,100})'
+    ('git-credential', re.compile(POS + PFX + r'git' + FLAGS + r'[ \t]+credential(?:-osxkeychain)?[ \t]+(reject|erase)\b')),
+    ('http-revoke', re.compile(POS + PFX + r'curl\b[^;&|\n]{0,2000}?https?://(?:([^/@\s;&|\'"]{0,200})@)?([\w.-]{1,100})'
                                r'[^\s;&|\'"]{0,500}?/(revoke|logout|signout)\b')),
 ]
+
+# Wrappers whose flags take a word, or that take positional words, before the command they run (Viktor 41840 LOW 4,
+# card 1a2eb541): wrapper -> (short flags taking the next word, long flags taking the next word, positional words).
+# The keychain gate's table (card 3085a683), plus time, eval, xargs and npx.
+WRAP_ARGS = {
+    'sudo': ('CDghprRtTuU', {'--user', '--group', '--close-from', '--chdir', '--host', '--prompt', '--role', '--type',
+                             '--command-timeout', '--other-user', '--chroot'}, 0),
+    'doas': ('Cu', set(), 0),
+    'env': ('uCP', {'--unset', '--chdir'}, 0),
+    'timeout': ('sk', {'--signal', '--kill-after'}, 1),
+    'time': ('of', {'--output', '--format'}, 0),
+    'nice': ('n', {'--adjustment'}, 0),
+    'nohup': ('', set(), 0),
+    'exec': ('a', set(), 0),
+    'command': ('', set(), 0),
+    'eval': ('', set(), 0),
+    'xargs': ('IJLnPEdsaRS', {'--max-args', '--max-procs', '--delimiter', '--arg-file', '--max-lines', '--replace',
+                              '--eof', '--max-chars'}, 0),
+    'npx': ('p', {'--package'}, 0),
+    'stdbuf': ('ioe', {'--input', '--output', '--error'}, 0),
+    'caffeinate': ('tw', set(), 0),
+}
+WRAP_RX = re.compile(POS + PFX + r'(' + '|'.join(sorted(WRAP_ARGS, key=len, reverse=True)) + r')(?=[ \t])')
+NEXT_WRAP_RX = re.compile(PFX + r'(' + '|'.join(sorted(WRAP_ARGS, key=len, reverse=True)) + r')(?=[ \t])')
+WRAP_END = ';&|\n)`'
+MAX_ARGS = 64
+WRAP_PASSES = 4
+
+
+def paren_close(text):
+    """Where each `(` closes ({index of '(': index of ')'}), in one pass; an unclosed one is missing."""
+    close, stack = {}, []
+    for i, ch in enumerate(text):
+        if ch == '(':
+            stack.append(i)
+        elif ch == ')' and stack:
+            close[stack.pop()] = i
+    return close
+
+
+def wrap_command_start(text, i, name, close):
+    """Index of the first word of the command `name` runs, its words starting at i; None if there is none in this
+    command (a ; & | newline ) ` or the end comes first, an unclosed quote or $(, or more than MAX_ARGS words: the hook
+    never blocks, so a flood past the cap is only not read). One pass over the words, no regex over them (linear). A
+    quoted word, a $(...) (`close`, from paren_close), and a backslash with the next character stay in one word:
+    `sudo -u $(timeout -s KILL 5 vercel logout) ls` runs ls, and the $(...) is walked on its own (its `$(` is a
+    command position)."""
+    short, whole, positional = WRAP_ARGS[name]
+    n = len(text)
+    need_arg = flags_done = False
+    for _ in range(MAX_ARGS + 1):
+        while i < n and text[i] in ' \t':
+            i += 1
+        if i >= n or text[i] in WRAP_END:
+            return None
+        start = i
+        while i < n and text[i] not in ' \t' and text[i] not in WRAP_END:
+            if text[i] in '"\'':
+                j = text.find(text[i], i + 1)
+                if j < 0:
+                    return None
+                i = j + 1
+            elif text[i] == '$' and i + 1 < n and text[i + 1] == '(':
+                j = close.get(i + 1)
+                if j is None:
+                    return None
+                i = j + 1
+            elif text[i] == '\\':
+                i += 2
+            else:
+                i += 1
+        word = text[start:i]
+        if need_arg:
+            need_arg = False
+            continue
+        if not flags_done and len(word) > 1 and word[0] == '-':
+            if word == '--':
+                flags_done = True
+            elif word.startswith('--'):
+                need_arg = '=' not in word and word in whole
+            else:
+                for k, c in enumerate(word[1:]):
+                    if c in short:
+                        need_arg = k == len(word) - 2  # `-uroot` carries its own word
+                        break
+            continue
+        if re.match(r'\w+=', word):  # env A=b, sudo A=b
+            continue
+        if positional:
+            positional -= 1
+            continue
+        return start
+    return None
+
+
+def wrap_marks(text):
+    """text with the start of each command a wrapper runs made a command position: the blank before it becomes a
+    `;`, a quote opening it (`eval 'claude mcp logout x'`) becomes a `;`. A wrapper right at that command is walked in
+    the same pass; a later pass finds what a mark exposed elsewhere. The plain text is judged too (a mark only adds).
+    Every wrapper in command position is walked, a later one of a chain too: unlike the keychain gate (its `reach`,
+    Viktor 41970 LOW 3), a quote is no command position here, so finditer does not find a chain's later wrappers, and
+    a wrapper inside a flag's $(...) must be walked (`sudo -u $(timeout -s KILL 5 vercel logout) ls`)."""
+    for _ in range(WRAP_PASSES):
+        chars = None
+        close = paren_close(text)
+        for m in WRAP_RX.finditer(text):
+            i, name = m.end(), m.group(1)
+            while True:
+                k = wrap_command_start(text, i, name, close)
+                if k is None:
+                    break
+                at = k if text[k] in '"\'' else k - 1
+                if text[at] != ';':
+                    chars = chars or list(text)
+                    chars[at] = ';'
+                nxt = NEXT_WRAP_RX.match(text, k + 1 if text[k] in '"\'' else k)
+                if not nxt:
+                    break
+                i, name = nxt.end(), nxt.group(1)
+        if chars is None:
+            return text
+        text = ''.join(chars)
+    return text
 MAX_CMD = 100000
 KNOWN_SERVICES = {'Claude Code-credentials', 'Claude Code', 'Claude Safe Storage'}
 SECRETISH_RX = re.compile(r'\d{4}|^(?:sk|rk|pk)[_-]|^(?:gh[pousr]_|github_pat_|xox|AKIA|ASIA|eyJ|glpat-|AIza|ya29\.)')
@@ -174,15 +317,22 @@ def strip_heredocs(cmd):
 def phrases(cmd):
     """The revocations in a command, as short phrases (no command text beyond the match)."""
     text = strip_heredocs(cmd[:MAX_CMD].replace('\\\n', ' '))
+    marked = wrap_marks(text)
     out = []
     known = None
+    named = set()  # where the named claude-mcp rule matched (a mark keeps the length: positions compare)
     for kind, rx in RULES:
-        for m in rx.finditer(text):
+        for m in [m for t in ([text] if marked == text else [text, marked]) for m in rx.finditer(t)]:
             g = [x for x in m.groups() if x]
             if kind == 'claude-mcp':
+                named.add(m.start(1))
+            if kind == 'claude-mcp-noname' and m.start(1) in named:
+                continue
+            if kind in ('claude-mcp', 'claude-mcp-noname'):
                 if known is None:
                     known = known_mcp_names()
-                p = f'claude mcp {m.group(1)} {safe_mcp_name(m.group(3), known)}'
+                name = m.group(3)
+                p = f'claude mcp {m.group(1)} {safe_mcp_name(name, known) if name else "<név nem ismert>"}'
             elif kind == 'claude-logout':
                 p = 'claude logout'
             elif kind == 'keychain-delete':
