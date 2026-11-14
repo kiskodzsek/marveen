@@ -108,7 +108,62 @@ BLOCK = [
     'bash -c "sudo -u root s3curity dump-keychain"',
     # accepted false positive, the class above: a quoted string that starts with the blocked call
     'git commit -m "sudo -u root s3curity dump-keychain"',
+    # Viktor 41970 LOW 1: an escaped blank or separator is part of the flag's word
+    'sudo -p a\\ b s3curity find-generic-password -s x',
+    'sudo -p a\\)b s3curity dump-keychain',
+    'sudo -p a\\;b s3curity dump-keychain',
+    'sudo -p a\\&b s3curity dump-keychain',
+    'sudo -p a\\|b s3curity dump-keychain',
+    'sudo -p a\\`b s3curity dump-keychain',
+    'sudo -u a\\ b -u c s3curity dump-keychain',
+    'env -u A\\ B s3curity dump-keychain',
+    'ssh -o A\\ B host s3curity dump-keychain',
+    # Viktor 41970 LOW 2: a wrapper written with its path is no CHAIN word, with or without a flag
+    '/usr/bin/env s3curity find-generic-password -s x',
+    '/usr/bin/env -i s3curity dump-keychain',
+    '/usr/bin/env A=b s3curity dump-keychain',
+    '/usr/bin/nice s3curity dump-keychain',
+    '/usr/bin/caffeinate s3curity dump-keychain',
+    '/usr/bin/caffeinate -i s3curity dump-keychain',
+    '/usr/bin/arch s3curity dump-keychain',
+    '/usr/bin/xargs s3curity dump-keychain',
+    '/usr/bin/time s3curity dump-keychain',
+    '/usr/bin/nohup s3curity dump-keychain',
+    'sudo -u root /usr/bin/env s3curity dump-keychain',
+    # a chain is walked once per pass (Viktor 41970 LOW 3), yet a command substitution in a flag's argument, which
+    # runs, still blocks
+    'sudo -u "$(env -u X s3curity dump-keychain)" ls',
+    "sudo -p 'a b' sudo -u \"$(env -u X s3curity dump-keychain)\" ls",
 ]
+# Viktor 41970 INFO 6: one row per WRAP_ARGS entry, so a dropped or mistyped entry fails here. A spec of its own,
+# not read from the gate: wrapper -> (short flags with a word, whole flags with the next word, positional words).
+WRAP_SPEC = {
+    'sudo': ('CDghprRtTuU', ['--user', '--group', '--close-from', '--chdir', '--host', '--prompt', '--role', '--type',
+                             '--command-timeout', '--other-user', '--chroot'], 0),
+    'doas': ('Cu', [], 0),
+    'env': ('uCP', ['--unset', '--chdir'], 0),
+    'timeout': ('sk', ['--signal', '--kill-after'], 1),
+    'nice': ('n', ['--adjustment'], 0),
+    'xargs': ('IJLnPEdsaRS', ['--max-args', '--max-procs', '--delimiter', '--arg-file', '--max-lines', '--replace',
+                              '--eof', '--max-chars'], 0),
+    'stdbuf': ('ioe', ['--input', '--output', '--error'], 0),
+    'exec': ('a', [], 0),
+    'time': ('of', ['--output', '--format'], 0),
+    'caffeinate': ('tw', [], 0),
+    'arch': ('', ['-arch'], 0),
+    'script': ('tTEoIOBm', ['--timing', '--log-io', '--log-in', '--log-out', '--log-timing', '--logging-format',
+                            '--echo', '--output-limit'], 1),
+    'ssh': ('BbcDEeFIiJLlmOopQRSWw', [], 1),
+    'flock': ('wE', ['--timeout', '--wait', '--conflict-exit-code'], 1),
+    'sg': ('', [], 1),
+    'chroot': ('ugG', ['--userspec', '--groups'], 1),
+}
+for _w, (_short, _whole, _pos) in WRAP_SPEC.items():
+    _tail = ' p0s' * _pos + ' s3curity dump-keychain'  # the word is a letter run: CHAIN would read a number
+    BLOCK += [f'{_w} -{c} w0rd{_tail}' for c in _short] + [f'{_w} {f} w0rd{_tail}' for f in _whole]
+    if _pos:
+        BLOCK.append(f'{_w}{_tail}')
+BLOCK += ['/usr/bin/' + w + ' s3curity dump-keychain' for w in ('setsid', 'command', 'builtin')]  # path only (nohup above)
 
 ALLOW = [
     'ls -la',
@@ -138,6 +193,9 @@ ALLOW = [
     'env -u HOME',
     'sudo -u',
     "sudo -p 'unclosed s3curity dump-keychain",  # an unclosed quote: the walk stops, nothing is marked
+    # a wrapper written with its path right at another one's command is walked in the same pass: 9 nested past
+    # WRAP_PASSES (8), one per pass would fail closed (mutant qualified_first_only)
+    'sudo -u a ' + '/usr/bin/env ' * 9 + 'ls',
 ]
 
 
@@ -381,6 +439,9 @@ def script_cases():
             ('sudo -u a env -u B python3 measure.py', d),
             ('cat measure.py | sudo -u root python3', d),
             ('sudo -h python3 measure.py', d),  # a mark never lifts a file the plain text reads
+            ('sudo -p a\\ b python3 measure.py', d),  # Viktor 41970 LOW 1
+            ('/usr/bin/env python3 measure.py', d),  # Viktor 41970 LOW 2
+            ('/usr/bin/env ./dump.sh', d),
             # accepted false positives, as on the live gate (Klodel 41895): a quoted interpreter call on a
             # keychain-reading file after any -c
             ('grep -c -i "python3 measure.py" notes.py', d),
@@ -722,6 +783,9 @@ def main():
                   ('sudo' + ' -u a' * 20000 + ' ls', 2), ('ssh' + ' -o a' * 20000 + ' h ls', 2),
                   # past the cap after an opening quote (a secret-rule position only): the secret path blocks too
                   ('echo "sudo' + ' -u a' * 40 + ' x"', 2),
+                  # Viktor 41970 LOW 3: a quoted flag word made finditer re-walk the chain from every wrapper
+                  ('sudo -u "a b" ' * 4000 + 'z', 0), ("env -u 'a b' " * 4000 + 'z', 0),
+                  ('sudo -p "a b" ' * 16000 + 'z', 0), ('sudo -u "a b" ' * 4000 + sec, 2),
                   ('sudo' + ' -u a' * 32 + ' ls', 0), ('sudo' + ' -u a' * 32 + ' -E ls', 2),
                   ('sudo -u a; ' * 20000, 0), ('(sudo -u a ' * 20000, 0), ('sudo -u a ' * 20000 + 'python3 x.py', 0),
                   ('ssh h ' * 20000 + sec, 2), ('nice -n 5 sudo -u a ' * 10000 + sec, 2)]

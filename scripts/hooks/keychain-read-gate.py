@@ -486,6 +486,11 @@ WRAP_ARGS = {
     'flock': ('wE', {'--timeout', '--wait', '--conflict-exit-code'}, 1),
     'sg': ('', set(), 1),
     'chroot': ('ugG', {'--userspec', '--groups'}, 1),
+    # CHAIN words with no word-taking flag: walked only for their path form (`/usr/bin/nohup cmd`, Viktor 41970 LOW 2)
+    'nohup': ('', set(), 0),
+    'command': ('', set(), 0),
+    'builtin': ('', set(), 0),
+    'setsid': ('', set(), 0),
 }
 WRAP_PASSES = 8
 _WRAP_NAME = (r'\\?[\'"]?(?:' + WORD + r'*/)?(' + '|'.join(sorted(WRAP_ARGS, key=len, reverse=True))
@@ -497,13 +502,15 @@ NEXT_WRAP_RX = re.compile(CHAIN + _WRAP_NAME, re.I)  # a wrapper the walk expose
 # position in the plain text, which is judged too (a separate stop list without them changed no decision: mutant)
 
 
-def wrap_command_start(text, i, name):
+def wrap_command_start(text, i, name, qualified=False):
     """Index of the first word of the command the wrapper `name` runs, its words starting at i; None if there is
     none in this command (the walk reaches a ; & | newline, the end, or an unclosed quote), or if the walk skipped
     no word POSITION cannot read (a flag's argument, a positional): there the chain reaches the command already, and
-    a mark would only cost a pass (26 x `env a=b` needed 26). -1 past MAX_ARGS words: the caller blocks (a walk to
-    the end of every command was quadratic, 20 000 x `sudo -p "` ran past 5 s; stopping unread would let the command
-    behind 65 flags through)."""
+    a mark would only cost a pass (26 x `env a=b` needed 26). A wrapper written with its path (`qualified`:
+    `/usr/bin/env security ...`) is no CHAIN word, so its command is always marked (Viktor 41970 LOW 2). -1 past
+    MAX_ARGS words: the caller blocks (a walk to the end of every command was quadratic, 20 000 x `sudo -p "` ran
+    past 5 s; stopping unread would let the command behind 65 flags through). A backslash takes the next character
+    into the word: `sudo -p a\\ b` is one word, as for the shell (Viktor 41970 LOW 1)."""
     short, whole, positional = WRAP_ARGS[name]
     n = len(text)
     need_arg = flags_done = skipped = False
@@ -519,6 +526,8 @@ def wrap_command_start(text, i, name):
                 if j < 0:
                     return None
                 i = j + 1
+            elif text[i] == '\\':  # an escaped blank or separator is part of the word: `sudo -p a\ b ...`
+                i += 2
             else:
                 i += 1
         if need_arg:
@@ -540,7 +549,7 @@ def wrap_command_start(text, i, name):
             positional -= 1
             skipped = True
             continue
-        return start if skipped else None
+        return start if skipped or qualified else None
     return -1
 
 
@@ -548,17 +557,26 @@ def wrapper_bounds(text, rx):
     """text with the blank before each wrapped command made a `;` (see WRAP_ARGS); None past WRAP_PASSES. A wrapper
     right at the command another one runs (`sudo -u a env -u B ...`) is walked in the same pass (linear: 20 000 x
     `sudo -u a ` is one pass); a later pass only finds what a mark exposed elsewhere. None also when a walk runs past
-    MAX_ARGS words."""
+    MAX_ARGS words.
+    A chain is walked once per pass (`reach`, Viktor 41970 LOW 3, his tested proposal): a quote is a command
+    position, so in `sudo -u "a b" sudo -u "a b" ...` finditer found every later wrapper of the chain again and each
+    walk ran to the chain's end (4 000 x took 6 s). A command substitution in a flag's argument
+    (`sudo -u "$(env -u X security ...)" ls`) still blocks (tested, one pass too)."""
     for _ in range(WRAP_PASSES):
         chars = None
+        reach = 0  # a quote makes every later wrapper of a chain a command position: walk each chain once
         for m in rx.finditer(text):
+            if m.start() < reach:
+                continue
             i, name = m.end(), m.group(1).lower()
+            qualified = m.start(1) > 0 and text[m.start(1) - 1] == '/'  # `/usr/bin/env cmd`: CHAIN does not read a path
             while True:
-                k = wrap_command_start(text, i, name)
+                k = wrap_command_start(text, i, name, qualified)
                 if k is None:
                     break
                 if k < 0:
                     return None
+                reach = k
                 if text[k - 1] in ' \t':
                     chars = chars or list(text)
                     chars[k - 1] = ';'
@@ -566,6 +584,7 @@ def wrapper_bounds(text, rx):
                 if not nxt:
                     break
                 i, name = nxt.end(), nxt.group(1).lower()
+                qualified = nxt.start(1) > 0 and text[nxt.start(1) - 1] == '/'
         if chars is None:
             return text
         text = ''.join(chars)
