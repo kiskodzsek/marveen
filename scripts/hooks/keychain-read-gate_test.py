@@ -268,6 +268,43 @@ def script_cases():
             ("/bin/bash -lc -o pipefail 'python3 measure.py'", d),
             ("sudo sh -c -e 'cd sub2 && python3 only.py'", d),
             ("bash -exec 'python3 measure.py'", d),  # bash reads -exec as -e -x -e -c (measured)
+            # Viktor 41893 LOW 1 (Klodel 41895: option a): a -c after ANY command opens a payload, as on the live gate
+            ("su -c 'python3 measure.py'", d),
+            ('sudo su -c "python3 measure.py"', d),
+            ("sudo -u x -c 'python3 measure.py'", d),
+            ("flock lockfile -c 'python3 measure.py'", d),
+            ("script -q -c 'python3 measure.py' /dev/null", d),
+            ("sg staff -c 'python3 measure.py'", d),
+            ("fish -c 'python3 measure.py'", d),
+            ("csh -c 'python3 measure.py'", d),
+            ("tcsh -c 'python3 measure.py'", d),
+            ("ash -c 'python3 measure.py'", d),
+            ("rbash -c 'python3 measure.py'", d),
+            ("pwsh -c 'python3 measure.py'", d),
+            ("bash5 -c 'python3 measure.py'", d),
+            ('"$SHELL" -c \'python3 measure.py\'', d),
+            ("$SHELL -c 'python3 measure.py'", d),
+            ("$0 -c 'python3 measure.py'", d),
+            ('"bash" -c \'python3 measure.py\'', d),
+            ("'bash' -c 'python3 measure.py'", d),
+            # Viktor 41893 LOW 2: a quoted option argument before the payload, after a shell's -c
+            ("bash -c -o 'pipefail' 'python3 measure.py'", d),
+            ('bash -c -o "pipefail" "python3 measure.py"', d),
+            ("bash -c -O 'extglob' \"./dump.sh\"", d),
+            ("bash -c \"-x\" 'python3 measure.py'", d),
+            ("bash -c $'-x' 'python3 measure.py'", d),
+            ('"bash" -c -o \'pipefail\' \'python3 measure.py\'', d),
+            ("$SHELL -c -o 'pipefail' 'python3 measure.py'", d),
+            ("bash5 -c -o 'pipefail' 'python3 measure.py'", d),  # a versioned shell is a shell
+            # Viktor 41893 INFO 3: ksh and dash are shells
+            ("ksh -c -o 'pipefail' 'python3 measure.py'", d),
+            ("dash -c -e 'x' 'python3 measure.py'", d),
+            # accepted false positives, as on the live gate (Klodel 41895): a quoted interpreter call on a
+            # keychain-reading file after any -c
+            ('grep -c -i "python3 measure.py" notes.py', d),
+            ('bash -n x.sh; grep -c -i "python3 measure.py" notes.py', d),
+            ('wc -c "python3 measure.py"', d),
+            ("ssh -c aes128-ctr host 'python3 measure.py'", d),
             ('bash -o "pipefail" -c \'python3 measure.py\'', d),  # the payload is the quote after -c, not before
         ] + [('python3 lit%d.py' % i, d) for i in range(len(LIT_FORMS))] + [
             ('ls; python3 "measure.py"', d),
@@ -318,12 +355,12 @@ def script_cases():
             ('tar -c -v -z -p -h -X "ex" x', d),
             ("git log -c --stat -p --follow -M -C 'measure.py'", d),
             ('find . -exec -a -b -c -d -e "x" ;', d),
-            ("ssh -c aes128-ctr host 'python3 measure.py'", d),  # ssh runs it remotely (not seen, documented)
             ("bash -c -o pipefail 'echo hi'", d),
-            ("bash x.sh -c 'notes.py'", d),
-            ('bash -n x.sh; grep -c -i "python3 measure.py" notes.py', d),  # a shell's segment ends at its command
-            ('grep -c -i "python3 measure.py" notes.py', d),  # -c opens a payload only after a shell (980fb40a blocked)
-            ('wc -c "python3 measure.py"', d),  # no file named so is run by the payload rules: notes.py is clean
+            ("bash x.sh -c 'notes.py'", d),  # no file named so is run by the payload rules: notes.py is clean
+            ('bash -c -x ; echo "python3 measure.py"', d),  # the all-quotes rule ends at the shell's command
+            ('grep -c x f; echo "a" "python3 measure.py"', d),  # a non-shell -c: its first quote, in its command only
+            ('grep -c x f; echo "python3 measure.py"', d),  # no quote in the -c's command: nothing is marked
+            ('bash x.sh; grep -c x "a" "python3 measure.py"', d),  # a shell in an EARLIER command: first quote only
             # the boundaries (Viktor 41790 INFO 2): -mMOD stops the walk, exactly MAX_ARGS words, a cat of 64 words,
             # CAT_RX after a closing quote is not a command
             ('python3 -mlist ' + 'a ' * 70, d),
@@ -515,7 +552,7 @@ def script_cases():
             ('watch ' + '-n ' * 20000, 0), ('tmux new a ' * 3, 0), ('bash -c ' * 30000 + "'", 0),
             # bash as an interpreter whose words run past the window: script-too-many-args, as on 980fb40a
             ('bash ' * 30000, 2), ('bash' + ' -o x' * 20000 + " -c 'a'", 2), ("watch" + " -x" * 30000 + " 'a'", 0), ('tmux new ' * 20000 + "'", 0),
-            ('sh -c "' * 20000, 0), ('watch -x -x -x -x -x ' * 20000 + "'", 0), ('bash -c -o pipefail ' + "'a' " * 20000, 0), ('do shell script \\' * 20000, 0),
+            ('sh -c "' * 20000, 0), ('bash' + " -c 'a'" * 30000, 0), ('watch -x -x -x -x -x ' * 20000 + "'", 0), ('bash -c -o pipefail ' + "'a' " * 20000, 0), ('do shell script \\' * 20000, 0),
             ('do shell script ' * 10000, 0), ('os.system(' * 20000, 0), ('"python3" ' * 20000, 2),  # past MAX_ARGS: blocks, fast
         ]
         for cmd, want in payload_redos:
