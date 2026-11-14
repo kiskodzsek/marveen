@@ -50,7 +50,11 @@ jobs:
           exit 1
           EOF
       - run: npm run typecheck
+      # Card 400faadf: a temp entry left in the per-run root turns the run red (every test file has its own TMPDIR,
+      # removed after the file; src/__tests__/setup/per-file-tmp.ts).
       - run: npm test
+        env:
+          MARVEEN_TEST_TMP_STRICT: '1'
       # Shell-test wiring (SEEDREFRESH826 fold-in, from the #1066 verify): a
       # regression guard that only runs manually rots exactly like a one-shot
       # seed. Runs natively here (ubuntu = the Linux branch it asserts).
