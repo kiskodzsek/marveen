@@ -42,9 +42,11 @@ file a command runs is read and judged too:
     (`'python3' m.py`, `os.system("python3 m.py")`). For these script rules a quote is a command position only where
     a payload opens (`bash -c "./x.sh"`, `bash -c -- '...'`, `eval "..."`, `watch -n 1 '...'`, `tmux new '...'`,
     `do shell script "..."`; Viktor 41790 LOW 1), so the word after a closing quote (`grep -n "x" f.py`) is not a
-    command. Past the bound on the words before such a quote (PAYLOAD_OVER_RX: a fifth flag after -c, a fifth
-    watch word, a fifteenth tmux new word) a quote later in the same command blocks unread
-    ('script-payload-too-many-words', Viktor 41831 LOW 2), as does a command running past ARGS_WINDOW there. A relative path is resolved against the
+    command. Past those bounds (a fifth watch word, a fifteenth tmux new word: PAYLOAD_OVER_RX), and after a
+    shell's -c with any options between (`bash -c -o pipefail '...'`, `bash -c +x '...'`; Viktor 41831 LOW 2,
+    41859 B), the first quote later in the same command is turned into a command boundary and the payload is judged
+    by these same rules (payload_quotes). Not a blind block: `ls -c -l -a -h -t -r "my dir"`, `grep -c ... "x"`,
+    `git log -c ... 'f'` pass (Viktor 41859 A: the blind block of 1392cfac stopped them). A relative path is resolved against the
     payload cwd and the directory after each `cd` in order, a relative cd on top of the one before; `~`, `$HOME` and
     variables assigned in the command itself (`F=m.py; python3 $F`) are expanded (Viktor 41715 LOW). The first
     MAX_SCRIPT_BYTES of each file. Fail-closed: more than MAX_SCRIPTS files, MAX_BASES directories or MAX_TRIES
@@ -93,21 +95,27 @@ POSITION = (r'(?:^|[;&|(){}\n`\'"]|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*'
 # position only where a shell -c payload opens (`bash -c "./x.sh"`, `bash -lc '...'`). With every quote a position, the
 # word after a CLOSING quote looked like a command: `grep -n "for x" scripts/hooks/keychain-read-gate.py` read the
 # gate's own source as a script it runs and blocked (measured 2026-11-14 on the #275 gate; card 7427e6f4).
-# Payloads a quote opens (Viktor 41790 LOW 1): after `-c` and up to four more flags (`bash -c -- '...'`, `-c -x`),
-# after eval, watch (its flags and numbers), tmux new / new-session (up to fourteen words), osascript's `do shell script`;
-# an escaped quote too (`do shell script \"...\"`). Each run of words is bounded ({0,4}, {0,6}): an unbounded one
+# Payloads a quote opens (Viktor 41790 LOW 1): after eval, watch (its flags and numbers), tmux new / new-session (up to fourteen words), osascript's `do shell script`;
+# an escaped quote too (`do shell script \"...\"`). A shell's -c is not here but in payload_quotes(): only after a
+# shell word, with any options between (Viktor 41859 A/B, Klodel 41861: a -c here opened a payload after any command,
+# `grep -c -i "python3 m.py" f` blocked, on 980fb40a too). Each run of words is bounded ({0,4}, {0,14}): an unbounded one
 # rescanned " -exec" runs (Viktor's first try ran past 5 s on 12 000 x " -exec"). Past the bound the run is not
-# allowed (Viktor 41831 LOW 2: `bash -c` with five -x, watch with five -x, tmux new with seven words let the payload
-# through): PAYLOAD_OVER_RX finds one word more than the bound, and a quote later in the same command blocks.
+# read (Viktor 41831 LOW 2: `bash -c` with five -x, tmux new with seven words let the payload through): payload_quotes()
+# turns the first quote after it into a boundary, for watch / tmux past their bound (PAYLOAD_OVER_RX) and for a
+# shell word followed by a -c word (SHELL_RX, C_WORD_RX), and the payload is judged like any command. Linear: one
+# pass per command, the next command end looked up in an index (a scan per match was quadratic).
 # tmux new takes fourteen words (six stopped `tmux new-session -d -s a -x 1 -y 1 '...'`, a real call; with -n and
 # -c a real call has eleven). A find -exec is not a -c flag: 12 000 x " -exec" read as one blocked. A call in inline code,
 # os.system("python3 m.py"), opens at the "(" position with the quote before the interpreter (INTERP_RX below).
-PAYLOAD_OPEN = (r'(?:[ \t]-[A-Za-z]*c(?:[ \t]+-' + WORD + r'*){0,4}'
-                r'|(?<![\w-])(?:eval|watch(?:[ \t]+(?:-' + WORD + r'*|\d[\w.]*)){0,4}'
+PAYLOAD_OPEN = (r'(?:(?<![\w-])(?:eval|watch(?:[ \t]+(?:-' + WORD + r'*|\d[\w.]*)){0,4}'
                 r'|tmux[ \t]+new(?:-session)?(?:[ \t]+' + WORD + r'+){0,14}|do[ \t]+shell[ \t]+script))[ \t]+\\?[\'"]')
-PAYLOAD_OVER_RX = re.compile(r'[ \t]-(?!exec(?=\s))[A-Za-z]*c(?:[ \t]+-' + WORD + r'*){5}'
-                             r'|(?<![\w-])watch(?:[ \t]+(?:-' + WORD + r'*|\d[\w.]*)){5}'
+PAYLOAD_OVER_RX = re.compile(r'(?<![\w-])watch(?:[ \t]+(?:-' + WORD + r'*|\d[\w.]*)){5}'
                              r'|tmux[ \t]+new(?:-session)?(?:[ \t]+' + WORD + r'+){15}')
+# A shell as a word of its own (`/bin/bash` too, not x.sh or ssh), and a -c word after it (-c, -lc, -xc, and -exec:
+# bash reads it as -e -x -e -c and runs the payload, measured 2026-11-14).
+SHELL_RX = re.compile(r'(?:^|(?<=[\s;&|(){}`\'"/]))(?:bash|sh|zsh|dash|ksh)(?=[ \t])')
+C_WORD_RX = re.compile(r'(?<=[ \t])-[A-Za-z]*c(?=[ \t])')
+QUOTE_RX = re.compile(r'[\'"]')
 SCRIPT_POSITION = (r'(?:^|[;&|(){}\n`]|\$\(|\s-(?:exec|execdir|ok)(?=\s)|' + PAYLOAD_OPEN + r')[ \t]*'
                    r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|[+.]?\d[\w.]*|\w+=' + WORD
                    + r'*)[ \t]+)*')
@@ -313,10 +321,10 @@ def interp_groups(text):
     return groups
 
 
-def script_paths(cmd, cwd):
+def script_paths(cmd, cwd, normalised=None):
     """The script files the command runs (resolved, existing regular files), at most MAX_SCRIPTS (an eleventh file
     or more than MAX_BASES directories returns MAX_SCRIPTS + 1 entries: the caller blocks). Raises TooManyArgs."""
-    text = expand(normalise(cmd))
+    text = expand(normalise(cmd) if normalised is None else normalised)
     groups = interp_groups(text)
     if INTERP_RX.search(text):  # the script on stdin: only when an interpreter runs
         groups += [[m.group(1)] for m in REDIRECT_RX.finditer(text)]
@@ -372,18 +380,36 @@ def script_paths(cmd, cwd):
     return out
 
 
-def payload_over(cmd):
-    """Why a payload past the PAYLOAD_OPEN bound goes unread ('' if none): a quote later in the same command, or the
-    command running past ARGS_WINDOW after the bound (Viktor 41831 LOW 2)."""
-    text = normalise(cmd)
+def payload_quotes(text):
+    """Positions of the quotes that open a payload PAYLOAD_OPEN does not reach: the first quote after a shell's -c
+    word, and after watch / tmux new past their bound, each within its command (Viktor 41831 LOW 2, 41859 A/B)."""
+    import bisect
+    ends = [i for i, ch in enumerate(text) if ch in CMD_END]
+
+    def cmd_end(pos):
+        k = bisect.bisect_left(ends, pos)
+        return ends[k] if k < len(ends) else len(text)
+    marks = []
+    done = 0
+    for m in SHELL_RX.finditer(text):
+        if m.start() < done:  # inside a command already read: each character is scanned once
+            continue
+        end = cmd_end(m.end())
+        c = C_WORD_RX.search(text, m.end(), end)
+        q = QUOTE_RX.search(text, c.end(), end) if c else None
+        if q:
+            marks.append(q.start())
+        done = end
+    done = 0
     for m in PAYLOAD_OVER_RX.finditer(text):
-        rest = text[m.end():m.end() + ARGS_WINDOW]
-        cut = min([i for i in (rest.find(ch) for ch in CMD_END) if i >= 0] or [len(rest)])
-        if '"' in rest[:cut] or "'" in rest[:cut]:
-            return 'a payload-nyitó előtt több szó áll, mint a korlát (-c után 4 flag, watch után 4, tmux new után 14)'
-        if cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text):
-            return f'a payload-nyitó korlát után a parancs hosszabb a {ARGS_WINDOW} karakteres ablaknál'
-    return ''
+        if m.start() < done:
+            continue
+        end = cmd_end(m.end())
+        q = QUOTE_RX.search(text, m.end(), end)
+        if q:
+            marks.append(q.start())
+        done = end
+    return marks
 
 
 def script_hits(cmd, cwd):
@@ -391,11 +417,17 @@ def script_hits(cmd, cwd):
     found = []
     if INTERP_RX.search(normalise(cmd)) and literal_hit(cmd):
         found.append('script-inline')
-    over = payload_over(cmd)
-    if over:  # not "allow past the bound": the payload behind it would not be read (fail-closed, like MAX_ARGS)
-        return found + [f'script-payload-too-many-words ({over})']
+    # the payload a quote opens past PAYLOAD_OPEN's reach: that quote becomes a command boundary (`;`), so the
+    # script rules read the payload as a command; nothing else changes
+    text = normalise(cmd)
+    marks = payload_quotes(text)
+    if marks:
+        chars = list(text)
+        for i in marks:
+            chars[i] = ';'
+        text = ''.join(chars)
     try:
-        paths = script_paths(cmd, cwd)
+        paths = script_paths(cmd, cwd, text)
     except TooManyArgs as e:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
         return found + [f'script-too-many-args ({e})']
     if len(paths) > MAX_SCRIPTS:  # not "check the first ten": an eleventh file would slip past (fail-closed)
