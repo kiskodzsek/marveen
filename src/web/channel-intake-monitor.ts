@@ -26,12 +26,12 @@
  * to do is legitimately silent for days, so silence never alerts on its own.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { encodeClaudeProjectDir } from '../claude-project-dir.js'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID } from '../config.js'
+import { MAIN_AGENT_ID, STORE_DIR } from '../config.js'
 import { agentDir, listAgentNames } from './agent-config.js'
 import { isAgentRunning } from './agent-process.js'
 import { readLastIngestionTimestamp, readLastIngestionTimestampAcross, mainTranscriptDirs } from './inbound-probe.js'
@@ -51,6 +51,19 @@ export const BACKLOG_CONFIRM_MIN_GAP_MS = 3 * MINUTE_MS
 // The channel is either deaf or it is not; repeating hourly buries the first
 // message (see routine-alert). Matches the fleet's 3h re-alert cadence.
 export const INTAKE_ALERT_COOLDOWN_MS = 3 * 60 * MINUTE_MS
+
+// An unreachable stretch this long is worth one line to the owner once it ends:
+// while our side cannot reach api.telegram.org the plugin's getUpdates cannot
+// succeed either, so whatever was written to the bot arrives in one burst
+// afterwards. Measured 2026-11-13 (card 6a9c1cc0): the main bot's backlog came
+// in at once at 10:38 after the network outage, and nobody had been told that
+// the bot was deaf. Shorter blips are routine and stay in the state file only.
+export const UNREACHABLE_RECOVERY_NOTICE_MS = 30 * MINUTE_MS
+
+// Written every tick so the monitor's work is MEASURABLE. The monitor is silent
+// on success by design, which on 2026-11-13 left no way to tell a working probe
+// of the main bot from one that never ran (Pulzus 11:10, card 6a9c1cc0).
+export const INTAKE_STATE_FILE = join(STORE_DIR, 'channel-intake-state.json')
 
 const CHECK_INTERVAL_MS = 5 * MINUTE_MS
 const INITIAL_DELAY_MS = 100 * 1000
@@ -183,12 +196,143 @@ export function formatIntakeAlert(agentName: string, decision: IntakeDecision, p
   return `🔇 ${agentName}: ${probe.pendingUpdates} bejövő üzenet áll a Telegram sorában, és senki nem veszi le. A plugin fut, de a poll-ciklusa halott. ${silence}.`
 }
 
+/** What the state file records for one agent: no token, no webhook URL, no Telegram error text. */
+export interface IntakeStateEntry {
+  /** ms epoch of the reading. */
+  at: number
+  /** 'no-token': the agent's channel .env (or its token line) was not found, so it was NOT probed. */
+  verdict: IntakeVerdict | 'no-token'
+  reachable: boolean | null
+  tokenOk: boolean | null
+  pending: number | null
+  /** ms epoch of the first unreachable reading of the current stretch; null when reachable. */
+  unreachableSince: number | null
+}
+
+/** Pure: the state entry for one probe. Only booleans, counts and timestamps leave this function. */
+export function intakeStateEntry(
+  probe: IntakeProbe,
+  verdict: IntakeVerdict,
+  now: number,
+  prev: IntakeStateEntry | null,
+): IntakeStateEntry {
+  const unreachableSince = probe.reachable ? null : (prev?.unreachableSince ?? now)
+  return {
+    at: now,
+    verdict,
+    reachable: probe.reachable,
+    tokenOk: probe.tokenOk,
+    pending: probe.pendingUpdates,
+    unreachableSince,
+  }
+}
+
+/**
+ * Pure: the row for an agent whose token was not found -- main agent only. A
+ * sub-agent without a channel is normal; the main agent without a token is the
+ * 11-13 blind spot made visible.
+ */
+export function noTokenStateEntryFor(agentName: string, now: number): IntakeStateEntry | null {
+  if (agentName !== MAIN_AGENT_ID) return null
+  return { at: now, verdict: 'no-token', reachable: null, tokenOk: null, pending: null, unreachableSince: null }
+}
+
+/**
+ * Pure: the length of an unreachable stretch that THIS reading ends, when it is
+ * long enough to report; null otherwise (still unreachable, never was, or a blip).
+ */
+export function unreachableRecoveredAfter(
+  prev: IntakeStateEntry | null,
+  probe: IntakeProbe,
+  now: number,
+  minMs: number = UNREACHABLE_RECOVERY_NOTICE_MS,
+): number | null {
+  if (!probe.reachable) return null
+  const since = prev?.unreachableSince
+  if (since == null) return null
+  const lengthMs = now - since
+  return lengthMs >= minMs ? lengthMs : null
+}
+
+export function formatUnreachableRecovered(agentName: string, lengthMs: number, since: number): string {
+  const from = new Date(since).toLocaleTimeString('hu-HU', { timeZone: 'Europe/Budapest', hour: '2-digit', minute: '2-digit' })
+  // The probe is the dashboard's own call, not the plugin's getUpdates: that the
+  // bot was deaf too is an inference, so the sentence says so (Viktor 42107 LOW 2).
+  return `📶 ${agentName}: a gép ${Math.round(lengthMs / MINUTE_MS)} percig nem érte el a Telegramot (${from} óta). Ez alatt a bot valószínűleg befelé süket volt; ami közben jött, feltehetően most egyben érkezik.`
+}
+
+export interface RecoveryNotice {
+  key: string
+  text: string
+  cooldownMs: number
+}
+
+/**
+ * Pure: the one notice a long outage's end earns, or null. Main agent only: a
+ * network outage hits every bot at once and would otherwise send one line per
+ * bot (Viktor 42107 LOW 3, W01). The cooldown travels with it (W02).
+ */
+export function recoveryNoticeFor(
+  agentName: string,
+  prev: IntakeStateEntry | null,
+  probe: IntakeProbe,
+  now: number,
+): RecoveryNotice | null {
+  if (agentName !== MAIN_AGENT_ID) return null
+  const lengthMs = unreachableRecoveredAfter(prev, probe, now)
+  const since = prev?.unreachableSince
+  if (lengthMs == null || since == null) return null
+  return {
+    key: `channel-intake:${agentName}:unreachable-recovered`,
+    text: formatUnreachableRecovered(agentName, lengthMs, since),
+    cooldownMs: INTAKE_ALERT_COOLDOWN_MS,
+  }
+}
+
+// A restart in the middle of an outage (power cut, reboot: exactly when the bot
+// is deaf) would otherwise lose the stretch's start (Viktor 42107 LOW 1). A row
+// older than this describes another moment and is not carried over.
+export const STATE_SEED_MAX_AGE_MS = 15 * MINUTE_MS
+
+/** Pure: the main agent's row from a previous run's state file, if it is fresh and well-formed; else null. */
+export function seedMainStateFrom(raw: string | null, now: number): IntakeStateEntry | null {
+  if (raw == null) return null
+  let body: unknown
+  try { body = JSON.parse(raw) } catch { return null }
+  const row = (body as { agents?: Record<string, unknown> } | null)?.agents?.[MAIN_AGENT_ID] as Partial<IntakeStateEntry> | undefined
+  if (!row || typeof row !== 'object') return null
+  const numOrNull = (v: unknown) => v === null || (typeof v === 'number' && Number.isFinite(v))
+  const boolOrNull = (v: unknown) => v === null || typeof v === 'boolean'
+  if (typeof row.at !== 'number' || !Number.isFinite(row.at)) return null
+  if (row.at > now || now - row.at > STATE_SEED_MAX_AGE_MS) return null
+  if (typeof row.verdict !== 'string' || !numOrNull(row.pending) || !numOrNull(row.unreachableSince)) return null
+  if (!boolOrNull(row.reachable) || !boolOrNull(row.tokenOk)) return null
+  if (row.unreachableSince != null && row.unreachableSince > row.at) return null
+  return {
+    at: row.at,
+    verdict: row.verdict as IntakeStateEntry['verdict'],
+    reachable: row.reachable ?? null,
+    tokenOk: row.tokenOk ?? null,
+    pending: row.pending ?? null,
+    unreachableSince: row.unreachableSince ?? null,
+  }
+}
+
+/** Atomic write of the per-agent state (tmp + rename), so a reader never sees half a file. */
+export function writeIntakeState(path: string, entries: ReadonlyMap<string, IntakeStateEntry>, now: number): void {
+  const body = { writtenAt: now, agents: Object.fromEntries(entries) }
+  const tmp = `${path}.tmp-${process.pid}`
+  writeFileSync(tmp, JSON.stringify(body, null, 2) + '\n', { mode: 0o600 })
+  renameSync(tmp, path)
+}
+
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
 
 const lastObservation = new Map<string, IntakeObservation>()
 const lastQuietLogAt = new Map<string, number>()
+const lastState = new Map<string, IntakeStateEntry>()
 
 // A quiet channel is a standing condition, not an event; repeating it every
 // tick would bury the lines that matter in dashboard.log.
@@ -198,6 +342,7 @@ const QUIET_LOG_INTERVAL_MS = 6 * 60 * MINUTE_MS
 export function resetIntakeObservations(): void {
   lastObservation.clear()
   lastQuietLogAt.clear()
+  lastState.clear()
 }
 
 /**
@@ -292,7 +437,11 @@ async function probeIntake(token: string): Promise<IntakeProbe> {
 
 async function checkAgentIntake(agentName: string, projectRoot: string): Promise<void> {
   const token = readTelegramToken(agentName, projectRoot)
-  if (!token) return
+  if (!token) {
+    const entry = noTokenStateEntryFor(agentName, Date.now())
+    if (entry) lastState.set(agentName, entry)
+    return
+  }
 
   const probe = await probeIntake(token)
   const now = Date.now()
@@ -307,6 +456,14 @@ async function checkAgentIntake(agentName: string, projectRoot: string): Promise
 
   if (probe.pendingUpdates != null) {
     lastObservation.set(agentName, { at: now, pendingUpdates: probe.pendingUpdates })
+  }
+
+  const prevState = lastState.get(agentName) ?? null
+  lastState.set(agentName, intakeStateEntry(probe, decision.verdict, now, prevState))
+  const notice = recoveryNoticeFor(agentName, prevState, probe, now)
+  if (notice) {
+    logger.warn({ agent: agentName, unreachableSince: prevState?.unreachableSince }, 'channel-intake-monitor: Telegram reachable again after a long outage')
+    sendRoutineAlert(notice.key, notice.text, { cooldownMs: notice.cooldownMs })
   }
 
   const silentForMs = lastInboundAt == null ? null : now - lastInboundAt
@@ -341,12 +498,14 @@ async function checkAgentIntake(agentName: string, projectRoot: string): Promise
 }
 
 export function startChannelIntakeMonitor(projectRoot: string): NodeJS.Timeout {
+  let stateWriteWarned = false
   async function check(): Promise<void> {
     const names = [MAIN_AGENT_ID, ...listAgentNames().filter(n => n !== MAIN_AGENT_ID)]
     for (const name of names) {
       // A stopped agent has no poller by design; that is not deafness.
       if (name !== MAIN_AGENT_ID && !isAgentRunning(name)) {
         lastObservation.delete(name)
+        lastState.delete(name)
         continue
       }
       try {
@@ -355,6 +514,21 @@ export function startChannelIntakeMonitor(projectRoot: string): NodeJS.Timeout {
         logger.debug({ err, agent: name }, 'channel-intake-monitor: check error')
       }
     }
+    try {
+      writeIntakeState(INTAKE_STATE_FILE, lastState, Date.now())
+      stateWriteWarned = false
+    } catch (err) {
+      // A lasting failure (full disk) would otherwise leave a stale file in silence (Viktor 42107 INFO 2).
+      if (!stateWriteWarned) logger.warn({ err }, 'channel-intake-monitor: state file write failed -- readers see a stale file')
+      stateWriteWarned = true
+    }
+  }
+
+  try {
+    const seeded = seedMainStateFrom(existsSync(INTAKE_STATE_FILE) ? readFileSync(INTAKE_STATE_FILE, 'utf-8') : null, Date.now())
+    if (seeded) lastState.set(MAIN_AGENT_ID, seeded)
+  } catch (err) {
+    logger.debug({ err }, 'channel-intake-monitor: state seed read error')
   }
 
   // Offset past channel-monitor (30s) and channel-health-monitor (45s) so the
