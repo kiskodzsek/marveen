@@ -19,8 +19,13 @@ resolves `SECURITY` to the same binary.
 Before matching, shell escapes that do not change the word are removed: backslash-newline, a backslash before a
 letter (`sec\\urity`), empty quotes inside a word (`sec''urity`), and `$IFS` / `${IFS}` read as a space. A second
 pass matches with every quote and backslash removed (`"security" find-...`, `s"ec"urity`, `security "export"`).
-Not seen (known gaps, Viktor 30044): a wrapper flag with a word argument (`sudo -u root`, `env -u A`,
-`script -q /dev/null`), and everything listed above under "does not see".
+A wrapper flag with a word argument and a wrapper's positional words (`sudo -u root`, `env -u A`, `timeout -s KILL
+5`, `exec -a x`, `script -q /dev/null`, `ssh host`, `flock f`, `sg g`, `chroot d`) no longer hide the command: the
+blank before the command they run becomes a command boundary (wrapper_bounds, WRAP_ARGS; card 3085a683, the gap
+Viktor 30044 and 41831 INFO 3 named). A walk past MAX_ARGS words blocks ('wrapper-unread').
+Not seen: everything listed above under "does not see"; a wrapper not in WRAP_ARGS whose flag takes a word (su,
+runuser, ionice, taskset, unbuffer ...), and a quoted string that starts with a wrapped call blocks like one that
+starts with the call (`git commit -m "sudo -u root security dump-keychain"`).
 Allowed: every other `security` subcommand (list-keychains, find-identity, find-certificate, show-keychain-info,
 verify-cert ...) and the word in plain text (`grep find-generic-password notes.md`, `git commit -m "fix: security"`).
 Known false positive: a quoted string that starts with the blocked call (`grep "security dump-keychain" f`):
@@ -65,8 +70,9 @@ file a command runs is read and judged too:
   Not seen: a module the script imports, a file the script builds or downloads, a name assembled at run time
   ('sec' + 'urity'), keychain APIs (Security.framework, keyring), a variable set outside the command, a quoted path
   with spaces, a Ruby %w list, a payload a quote opens after other commands (`command '...'`, `time '...'` run a
-  command literally named so, which fails; `script -q /dev/null python3 m.py`, `su -c`, `ssh` run remotely or are
-  not listed). The gate's own test assembles its fixtures at
+  command literally named so, which fails). A wrapped script (`sudo -u root python3 m.py`, `ssh localhost python3
+  m.py`, `sg staff 'python3 m.py'`) is read like any other (card 3085a683; for ssh the file is looked up here, which
+  is right for localhost and a fail-closed guess for a remote host). The gate's own test assembles its fixtures at
   run time, so running the test is not blocked.
 Any error while matching blocks (fail-closed; exit 1 would not block). Input that is not a Bash call is allowed.
 The command text is never logged: it may itself carry a secret.
@@ -92,8 +98,9 @@ WORD = r'[^\s;&|(){}`\'"]'
 # Blanks after a position are spaces and tabs only: a newline is a position of its own, and with \s* every newline
 # of a 6 000-newline run rescanned the rest (10 s; the same in the gate before card bc009036). A find -exec is a
 # position too, so it is not also read as a flag: 12 000 x " -exec" took 112 s that way.
-POSITION = (r'(?:^|[;&|(){}\n`\'"]|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*'
-            r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|[+.]?\d[\w.]*|\w+=' + WORD + r'*)[ \t]+)*')
+# CHAIN: the words that may stand before the command (one way to read each token, see above).
+CHAIN = r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|[+.]?\d[\w.]*|\w+=' + WORD + r'*)[ \t]+)*'
+POSITION = r'(?:^|[;&|(){}\n`\'"]|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*' + CHAIN
 # The script rules below (an interpreter, a path run directly, cat into an interpreter) take a quote as a command
 # position only where a shell -c payload opens (`bash -c "./x.sh"`, `bash -lc '...'`). With every quote a position, the
 # word after a CLOSING quote looked like a command: `grep -n "for x" scripts/hooks/keychain-read-gate.py` read the
@@ -128,9 +135,7 @@ SHELL_RX = re.compile(r'(?:^|(?<=[\s;&|(){}`\'"/]))(?:(?:bash|sh|zsh|dash|ksh|fi
                       r'|\$\{?(?:SHELL|BASH)\}?|\$0)[\'"]?(?=[ \t])')
 C_WORD_RX = re.compile(r'(?<=[ \t])[\'"]?-[A-Za-z]*c[\'"]?(?=[ \t])')
 QUOTE_RX = re.compile(r'[\'"]')
-SCRIPT_POSITION = (r'(?:^|[;&|(){}\n`]|\$\(|\s-(?:exec|execdir|ok)(?=\s)|' + PAYLOAD_OPEN + r')[ \t]*'
-                   r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|[+.]?\d[\w.]*|\w+=' + WORD
-                   + r'*)[ \t]+)*')
+SCRIPT_POSITION = r'(?:^|[;&|(){}\n`]|\$\(|\s-(?:exec|execdir|ok)(?=\s)|' + PAYLOAD_OPEN + r')[ \t]*' + CHAIN
 BINARY = r'(?:' + WORD + r'*/)?security'
 OPTIONS = r'(?:\s+-\S+)*'
 SECRET_SUB = r'(?:find-generic-password|find-internet-password|dump-keychain|export)'
@@ -150,10 +155,17 @@ def normalise(cmd):
 
 def hits(cmd):
     text = normalise(cmd)
+    # `sudo -u root security ...` (card 3085a683): the text with the wrapped commands' boundaries is judged TOO, not
+    # instead: a wrong mark (a flag the table reads as taking a word that it does not) could split a call the plain
+    # text blocks (`security;dump-keychain`), so a mark only ever adds a block
+    bounded = wrapper_bounds(text, WRAP_RX)
+    if bounded is None:
+        return ['wrapper-unread']
     # Second pass with every quote and backslash removed: "security" find-..., s"ec"urity, security "export".
     # More false positives than the first pass, which the gate already accepts (see the docstring).
-    bare = re.sub(r'[\'"\\]', '', text)
-    return [name for name, rx in RULES if rx.search(text) or rx.search(bare)]
+    texts = [text] if bounded == text else [text, bounded]
+    texts += [re.sub(r'[\'"\\]', '', t) for t in texts]
+    return [name for name, rx in RULES if any(rx.search(t) for t in texts)]
 
 
 MAX_SCRIPTS = 10
@@ -443,6 +455,142 @@ def payload_quotes(text):
     return marks
 
 
+# A wrapper flag with a word argument broke the chain (Viktor 30044 known gap, 41831 INFO 3, card 3085a683): in
+# `sudo -u root security find-...`, `env -u HOME ...`, `timeout -s KILL 5 ...`, `exec -a x ...` the argument word
+# ("root") stood where POSITION wants a wrapper, a flag, a number or NAME=value, so the command after it was not in
+# command position, and neither the secret rules nor the script rules saw it (measured on 43305327: all allow). Some
+# wrappers take positional words before the command too: timeout its duration, script (macOS) its file, ssh its host
+# (ssh localhost runs the command here), flock its file, sg its group, chroot its directory.
+# wrapper_bounds() walks every such wrapper in command position with this table, without a regex over the arguments
+# (one way to read each word: no backtracking), and turns the blank before the command it runs into a command
+# boundary (`;`), as payload_quotes() does for a payload; the rules then read that command like any other. A wrapper
+# the walk exposes (`sudo -u a env -u B ...`) is found by the next pass; past WRAP_PASSES the gate blocks.
+# name: (short flags that take a word, whole flags that take the next word, positional words before the command)
+WRAP_ARGS = {
+    'sudo': ('CDghprRtTuU', {'--user', '--group', '--close-from', '--chdir', '--host', '--prompt', '--role', '--type',
+                             '--command-timeout', '--other-user', '--chroot'}, 0),
+    'doas': ('Cu', set(), 0),
+    'env': ('uCP', {'--unset', '--chdir'}, 0),
+    'timeout': ('sk', {'--signal', '--kill-after'}, 1),
+    'nice': ('n', {'--adjustment'}, 0),
+    'xargs': ('IJLnPEdsaRS', {'--max-args', '--max-procs', '--delimiter', '--arg-file', '--max-lines', '--replace',
+                              '--eof', '--max-chars'}, 0),
+    'stdbuf': ('ioe', {'--input', '--output', '--error'}, 0),
+    'exec': ('a', set(), 0),
+    'time': ('of', {'--output', '--format'}, 0),
+    'caffeinate': ('tw', set(), 0),
+    'arch': ('', {'-arch'}, 0),
+    'script': ('tTEoIOBm', {'--timing', '--log-io', '--log-in', '--log-out', '--log-timing', '--logging-format',
+                            '--echo', '--output-limit'}, 1),
+    'ssh': ('BbcDEeFIiJLlmOopQRSWw', set(), 1),
+    'flock': ('wE', {'--timeout', '--wait', '--conflict-exit-code'}, 1),
+    'sg': ('', set(), 1),
+    'chroot': ('ugG', {'--userspec', '--groups'}, 1),
+    # CHAIN words with no word-taking flag: walked only for their path form (`/usr/bin/nohup cmd`, Viktor 41970 LOW 2)
+    'nohup': ('', set(), 0),
+    'command': ('', set(), 0),
+    'builtin': ('', set(), 0),
+    'setsid': ('', set(), 0),
+}
+WRAP_PASSES = 8
+_WRAP_NAME = (r'\\?[\'"]?(?:' + WORD + r'*/)?(' + '|'.join(sorted(WRAP_ARGS, key=len, reverse=True))
+              + r')[\'"]?(?=[ \t])')
+WRAP_RX = re.compile(POSITION + _WRAP_NAME, re.I)  # the secret rules' positions (an opening quote is one)
+SCRIPT_WRAP_RX = re.compile(SCRIPT_POSITION + _WRAP_NAME, re.I)  # the script rules' positions
+NEXT_WRAP_RX = re.compile(CHAIN + _WRAP_NAME, re.I)  # a wrapper the walk exposed, read where the command starts
+# The walk ends at CMD_END. A ")" or a backtick there (`sudo -u $(whoami) ...`) needs no mark: it is a command
+# position in the plain text, which is judged too (a separate stop list without them changed no decision: mutant)
+
+
+def wrap_command_start(text, i, name, qualified=False):
+    """Index of the first word of the command the wrapper `name` runs, its words starting at i; None if there is
+    none in this command (the walk reaches a ; & | newline, the end, or an unclosed quote), or if the walk skipped
+    no word POSITION cannot read (a flag's argument, a positional): there the chain reaches the command already, and
+    a mark would only cost a pass (26 x `env a=b` needed 26). A wrapper written with its path (`qualified`:
+    `/usr/bin/env security ...`) is no CHAIN word, so its command is always marked (Viktor 41970 LOW 2). -1 past
+    MAX_ARGS words: the caller blocks (a walk to the end of every command was quadratic, 20 000 x `sudo -p "` ran
+    past 5 s; stopping unread would let the command behind 65 flags through). A backslash takes the next character
+    into the word: `sudo -p a\\ b` is one word, as for the shell (Viktor 41970 LOW 1)."""
+    short, whole, positional = WRAP_ARGS[name]
+    n = len(text)
+    need_arg = flags_done = skipped = False
+    for _ in range(MAX_ARGS + 1):
+        while i < n and text[i] in ' \t':
+            i += 1
+        if i >= n or text[i] in CMD_END:
+            return None
+        start = i
+        while i < n and text[i] not in ' \t' and text[i] not in CMD_END:
+            if text[i] in '\'"':  # a quoted word is one word: `sudo -p 'a b' ...`
+                j = text.find(text[i], i + 1)
+                if j < 0:
+                    return None
+                i = j + 1
+            elif text[i] == '\\':  # an escaped blank or separator is part of the word: `sudo -p a\ b ...`
+                i += 2
+            else:
+                i += 1
+        if need_arg:
+            need_arg = False
+            skipped = True
+            continue
+        t = strip_quotes(text[start:i])
+        if not flags_done and t == '--':
+            flags_done = True
+            continue
+        if not flags_done and t.startswith('-'):
+            if t in whole:
+                need_arg = True
+            elif not t.startswith('--'):  # -uroot carries its word, -Eu takes the next one
+                k = next((p for p, ch in enumerate(t[1:], 1) if ch in short), None)
+                need_arg = k == len(t) - 1
+            continue
+        if positional:
+            positional -= 1
+            skipped = True
+            continue
+        return start if skipped or qualified else None
+    return -1
+
+
+def wrapper_bounds(text, rx):
+    """text with the blank before each wrapped command made a `;` (see WRAP_ARGS); None past WRAP_PASSES. A wrapper
+    right at the command another one runs (`sudo -u a env -u B ...`) is walked in the same pass (linear: 20 000 x
+    `sudo -u a ` is one pass); a later pass only finds what a mark exposed elsewhere. None also when a walk runs past
+    MAX_ARGS words.
+    A chain is walked once per pass (`reach`, Viktor 41970 LOW 3, his tested proposal): a quote is a command
+    position, so in `sudo -u "a b" sudo -u "a b" ...` finditer found every later wrapper of the chain again and each
+    walk ran to the chain's end (4 000 x took 6 s). A command substitution in a flag's argument
+    (`sudo -u "$(env -u X security ...)" ls`) still blocks (tested, one pass too)."""
+    for _ in range(WRAP_PASSES):
+        chars = None
+        reach = 0  # a quote makes every later wrapper of a chain a command position: walk each chain once
+        for m in rx.finditer(text):
+            if m.start() < reach:
+                continue
+            i, name = m.end(), m.group(1).lower()
+            qualified = m.start(1) > 0 and text[m.start(1) - 1] == '/'  # `/usr/bin/env cmd`: CHAIN does not read a path
+            while True:
+                k = wrap_command_start(text, i, name, qualified)
+                if k is None:
+                    break
+                if k < 0:
+                    return None
+                reach = k
+                if text[k - 1] in ' \t':
+                    chars = chars or list(text)
+                    chars[k - 1] = ';'
+                nxt = NEXT_WRAP_RX.match(text, k)
+                if not nxt:
+                    break
+                i, name = nxt.end(), nxt.group(1).lower()
+                qualified = nxt.start(1) > 0 and text[nxt.start(1) - 1] == '/'
+        if chars is None:
+            return text
+        text = ''.join(chars)
+    return None
+
+
 def script_hits(cmd, cwd):
     """Rule names for inline interpreter code and for the files the command runs."""
     found = []
@@ -457,8 +605,15 @@ def script_hits(cmd, cwd):
         for i in marks:
             chars[i] = ';'
         text = ''.join(chars)
+    # `sudo -u root python3 m.py` (card 3085a683): the files of the text with the wrapped commands' boundaries are
+    # judged TOO, as in hits(): a mark only ever adds a file
+    bounded = wrapper_bounds(text, SCRIPT_WRAP_RX)
+    if bounded is None:
+        return found + ['wrapper-unread']
     try:
         paths = script_paths(cmd, cwd, text)
+        if bounded != text:
+            paths += [p for p in script_paths(cmd, cwd, bounded) if p not in paths]
     except TooManyArgs as e:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
         return found + [f'script-too-many-args ({e})']
     if len(paths) > MAX_SCRIPTS:  # not "check the first ten": an eleventh file would slip past (fail-closed)
