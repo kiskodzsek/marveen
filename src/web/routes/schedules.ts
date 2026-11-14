@@ -21,7 +21,7 @@ import { validateScheduleUpdate, scheduleCreateRefusal, COMMAND_TASK_API_REFUSAL
 import { runScheduledTaskNow } from '../schedule-runner.js'
 import { createOnceTask, readOnceAnchors, recordOnceAnchor, shouldAlertCap, isOnceTask, ONCE_EDIT_REFUSAL, type OnceRequestBody } from '../once-schedule.js'
 import { resolveDashboardOrigin } from '../agent-scaffold.js'
-import { scheduleTrustOf, scheduleTrustHash, scheduleTrustShortHash, approveScheduledTask, clearScheduleTrust, scheduleEditorHiddenFields } from '../schedule-trust.js'
+import { scheduleTrustOf, scheduleTrustHash, scheduleTrustShortHash, approveScheduledTask, clearScheduleTrust, scheduleEditorHiddenFields, preCheckApprovalInfo } from '../schedule-trust.js'
 import { fleetOwnerSession } from './fleet.js'
 import { logConfigChange } from '../../db.js'
 import type { RouteContext } from './types.js'
@@ -169,7 +169,9 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     // SCHEDTRUST1112: each task carries its trust verdict for the dashboard
     // (approved / legacy = owner framing; agent / mismatch = agent framing).
     // trustHash (16 hex) is what an approval must echo (Viktor 39032 #3).
-    json(res, listScheduledTasks().map(t => ({ ...t, trust: scheduleTrustOf(t), trustHash: scheduleTrustShortHash(t) })))
+    // PRECHECKTRUST1114 (Viktor 42472 INFO ii): beside the 16 hex, the number of
+    // files the preCheck chain reads and its blocking markers (null = no preCheck).
+    json(res, listScheduledTasks().map(t => ({ ...t, trust: scheduleTrustOf(t), trustHash: scheduleTrustShortHash(t), trustPreCheck: preCheckApprovalInfo(t) })))
     return true
   }
 
@@ -440,13 +442,21 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
     }
     const task = readScheduledTask(name)
     if (!task) { json(res, { error: 'Schedule not found' }, 404); return true }
-    if (scheduleTrustShortHash(task) !== seen) {
+    const before = scheduleTrustOf(task)
+    // PRECHECKTRUST1114: the seen-hash check and the write use one reading of the
+    // definition AND the preCheck files, so a script edited in between is not approved.
+    const hash = approveScheduledTask(task, `session:${owner}`, Date.now(), seen)
+    const blockers = hash === null ? (preCheckApprovalInfo(task)?.blockers ?? []) : []
+    if (hash === null && blockers.length > 0) {
+      logConfigChange('security.schedule_approve_blocked', null, name, `session:${owner}`)
+      json(res, { error: 'A preCheck-lánc olyat tartalmaz, amit a rendszer nem tud követni vagy nem tud elolvasni (lásd: blockers). Előbb a szkriptet kell javítani; így nem hagyható jóvá.', blockers: blockers.slice(0, 20) }, 409)
+      return true
+    }
+    if (hash === null) {
       logConfigChange('security.schedule_approve_stale', null, name, `session:${owner}`)
       json(res, { error: 'A feladat megváltozott, mióta megnyitottad. Frissítsd az oldalt, és nézd meg újra.' }, 409)
       return true
     }
-    const before = scheduleTrustOf(task)
-    const hash = approveScheduledTask(task, `session:${owner}`)
     logConfigChange('security.schedule_approve', `${name}:${before}`, `${name}:approved:${hash.slice(0, 16)}`, `session:${owner}`)
     logger.info({ name, user: owner, hash: hash.slice(0, 16) }, 'schedule-trust: task approved by the owner')
     json(res, { ok: true, trust: 'approved' })

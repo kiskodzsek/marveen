@@ -9,9 +9,10 @@
 // computed from os.homedir() at import (same pattern as the other route tests).
 
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, chmodSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, chmodSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import { join, dirname } from 'node:path'
 import { Readable } from 'node:stream'
 import type http from 'node:http'
 import type { RouteContext } from '../web/routes/types.js'
@@ -36,7 +37,7 @@ const io = await import('../web/scheduled-tasks-io.js')
 const { tryHandleSchedules } = await import('../web/routes/schedules.js')
 const { SESSION_COOKIE_NAME } = await import('../web/auth-gate.js')
 const { createSession, _clearSessionCacheForTest } = await import('../web/auth-sessions.js')
-const { MAIN_AGENT_ID } = await import('../config.js')
+const { MAIN_AGENT_ID, PROJECT_ROOT } = await import('../config.js')
 
 afterAll(() => {
   process.env.HOME = realHome
@@ -45,7 +46,7 @@ afterAll(() => {
 
 let ownerCookie = ''
 beforeEach(() => {
-  db.getDb().exec("DELETE FROM auth_sessions; DELETE FROM dashboard_users; DELETE FROM sqlite_sequence WHERE name = 'dashboard_users'; DELETE FROM schedule_trust; DELETE FROM schedule_trust_baseline; DELETE FROM agent_messages; DELETE FROM config_change_log WHERE key LIKE 'security.schedule_%'")
+  db.getDb().exec("DELETE FROM auth_sessions; DELETE FROM dashboard_users; DELETE FROM sqlite_sequence WHERE name = 'dashboard_users'; DELETE FROM schedule_trust; DELETE FROM schedule_trust_baseline; DELETE FROM schedule_trust_precheck_pin; DELETE FROM agent_messages; DELETE FROM config_change_log WHERE key LIKE 'security.schedule_%'")
   _clearSessionCacheForTest()
   trust._resetScheduleTrustAlertsForTest()
   rmSync(io.SCHEDULED_TASKS_DIR, { recursive: true, force: true })
@@ -301,6 +302,8 @@ describe('an owner editor save approves only what the editor shows (Viktor 39055
   it('a preCheck task approved in one click stays approved after an owner schedule edit, and falls on a prompt edit', async () => {
     await call('POST', '/api/schedules', NEW_TASK, { owner: true })
     setConfig('napi-riport', { preCheck: 'check.sh' })
+    // PRECHECKTRUST1114: the preCheck has to exist (a missing one is a blocking marker)
+    writeFileSync(join(io.SCHEDULED_TASKS_DIR, 'napi-riport', 'check.sh'), 'echo SKIP\n')
     expect((await approve('napi-riport', { owner: true })).status).toBe(200)
     expect(await trustOf('napi-riport')).toBe('approved')
     await call('PUT', '/api/schedules/napi-riport', { schedule: '0 10 * * *' }, { owner: true })
@@ -474,3 +477,547 @@ describe('the runner runs no bash for an untrusted task', () => {
     for (const at of sends) expect(SRC.slice(Math.max(0, at - 900), at)).toMatch(/if \(!isOwnerTrusted\(digestTrust\)\)/)
   })
 })
+
+// PRECHECKTRUST1114 (Viktor 42462 MEDIUM, Klodel 42464/42469): the preCheck path
+// in the definition is not enough -- ops/ is gitignored, so a script can change
+// under an approved task without any alarm. The CONTENT of the preCheck and of
+// the files it directly calls is pinned at approval; a change is a mismatch.
+describe('preCheck content is part of the trust (PRECHECKTRUST1114)', () => {
+  // A fresh directory per test, with a wrapper -> python -> sibling module / sys.path module /
+  // importlib literal / subprocess literal chain, like the ops/prechecks scripts.
+  function chain(tag: string) {
+    const d = join(tmpHome, `pc-${tag}-${Math.random().toString(36).slice(2, 8)}`)
+    const lib = join(d, 'lib')
+    mkdirSync(lib, { recursive: true })
+    const files = {
+      wrapper: join(d, 'w.sh'),
+      main: join(d, 'main_check.py'),
+      sibling: join(d, 'common_mod.py'),
+      onPath: join(lib, 'pathmod.py'),
+      loaded: join(d, 'loaded-by-importlib.py'),
+      sub: join(d, 'sub-run.py'),
+    }
+    writeFileSync(files.wrapper, '#!/usr/bin/env bash\npython3 "$(dirname "$0")/main_check.py" 2>/dev/null || true\nexit 0\n')
+    writeFileSync(files.main, [
+      'import os, sys, json',
+      `sys.path.insert(0, '${lib}')`,
+      'import common_mod',
+      'from pathmod import x',
+      `spec = importlib.util.spec_from_file_location('l', '${files.loaded}')`,
+      `subprocess.run(['python3', '-I', '${files.sub}'])`,
+      'print("SKIP")',
+    ].join('\n') + '\n')
+    writeFileSync(files.sibling, 'A = 1\n')
+    writeFileSync(files.onPath, 'x = 1\n')
+    writeFileSync(files.loaded, 'B = 1\n')
+    writeFileSync(files.sub, 'C = 1\n')
+    return { d, files }
+  }
+  function taskWith(name: string, wrapper: string) {
+    io.writeScheduledTask(name, { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: wrapper })
+    return io.readScheduledTask(name)!
+  }
+
+  it('the walk reaches the wrapper, the script, a sibling import, a sys.path import, an importlib and a subprocess literal', () => {
+    const { files } = chain('walk')
+    const paths = trust.preCheckFileDigests(files.wrapper).map(([p]) => p)
+    for (const f of Object.values(files)) expect(paths).toContain(realpathOf(f))
+    // Viktor 42472 b2: a stdlib name with no file beside the script is listed as an ABSENT candidate
+    const pairs = trust.preCheckFileDigests(files.wrapper)
+    expect(pairs).toContainEqual([join(realpathOf(dirname(files.main)), 'json.py'), 'ABSENT'])
+    expect(pairs).toContainEqual([join(realpathOf(dirname(files.main)), 'os', '__init__.py'), 'ABSENT'])
+    expect(trust.preCheckWalk(files.wrapper).blockers).toEqual([])
+  })
+
+  it('an approved task stays approved while nothing changes; any file in the chain changing is a mismatch', () => {
+    for (const which of ['wrapper', 'main', 'sibling', 'onPath', 'loaded', 'sub'] as const) {
+      const { files } = chain(which)
+      const name = `pc-chain-${which.toLowerCase()}`
+      trust.approveScheduledTask(taskWith(name, files.wrapper), 'test')
+      expect(trust.scheduleTrustOf(io.readScheduledTask(name)!)).toBe('approved')
+      writeFileSync(files[which], readFileSync(files[which], 'utf8') + '# changed\n')
+      expect(trust.scheduleTrustOf(io.readScheduledTask(name)!), which).toBe('mismatch')
+    }
+  })
+
+  it('a module planted beside the script (shadowing the stdlib) is a mismatch', () => {
+    const { d, files } = chain('shadow')
+    trust.approveScheduledTask(taskWith('pc-shadow', files.wrapper), 'test')
+    writeFileSync(join(d, 'json.py'), 'print("planted")\n')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pc-shadow')!)).toBe('mismatch')
+  })
+
+  it('Viktor 42472 b1: a file the chain runs that is missing is a blocking MISSING: not trusted, not approvable', () => {
+    const { files } = chain('missing')
+    rmSync(files.sub)
+    expect(trust.preCheckFileDigests(files.wrapper)).toContainEqual([files.sub, 'MISSING'])
+    expect(trust.preCheckWalk(files.wrapper).blockers).toEqual([`MISSING ${files.sub}`])
+    expect(trust.approveScheduledTask(taskWith('pc-missing', files.wrapper), 'test')).toBeNull()
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pc-missing')!)).toBe('agent')
+    // a row written behind the API does not help either
+    const t = io.readScheduledTask('pc-missing')!
+    db.setScheduleTrust('pc-missing', 'approved', trust.scheduleTrustHash(t), 'test', 1, trust.preCheckContentHash(t))
+    expect(trust.scheduleTrustOf(t)).toBe('mismatch')
+    // once the file is there, the owner can approve it
+    writeFileSync(files.sub, 'C = 2\n')
+    expect(trust.approveScheduledTask(io.readScheduledTask('pc-missing')!, 'test')).toMatch(/^[0-9a-f]{64}$/)
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pc-missing')!)).toBe('approved')
+  })
+
+  it('a symlinked wrapper is hashed by its target; retargeting the link is a mismatch', () => {
+    const a = chain('linka')
+    const b = chain('linkb')
+    const link = join(tmpHome, `pc-link-${Math.random().toString(36).slice(2, 8)}.sh`)
+    symlinkSync(a.files.wrapper, link)
+    trust.approveScheduledTask(taskWith('pc-link', link), 'test')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pc-link')!)).toBe('approved')
+    rmSync(link)
+    symlinkSync(b.files.wrapper, link)
+    writeFileSync(b.files.sibling, 'A = 99\n')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pc-link')!)).toBe('mismatch')
+  })
+
+  it('Viktor 42472 b1: 32 files walk; the 33rd is a blocking LIMIT, never a silent cut; the hash stays deterministic', () => {
+    function many(n: number) {
+      const d = join(tmpHome, `pc-many-${Math.random().toString(36).slice(2, 8)}`)
+      mkdirSync(d, { recursive: true })
+      const names = Array.from({ length: n }, (_, i) => `m${i}.py`)
+      for (const x of names) writeFileSync(join(d, x), 'x = 1\n')
+      const w = join(d, 'w.sh')
+      writeFileSync(w, names.map(x => `python3 "$(dirname "$0")/${x}"`).join('\n') + '\n')
+      return w
+    }
+    const atLimit = trust.preCheckWalk(many(trust.PRECHECK_WALK_MAX_FILES - 1))   // the wrapper + 31 = 32
+    expect(atLimit.files).toBe(trust.PRECHECK_WALK_MAX_FILES)
+    expect(atLimit.blockers).toEqual([])
+    const w = many(trust.PRECHECK_WALK_MAX_FILES)                                   // 33 files
+    const a = trust.preCheckWalk(w)
+    expect(a.pairs[a.pairs.length - 1]).toEqual(['(walk limit)', 'LIMIT:1'])
+    expect(a.blockers).toEqual(['LIMIT (walk limit)'])
+    expect(trust.preCheckFileDigests(w)).toEqual(a.pairs)
+    expect(trust.approveScheduledTask(taskWith('pc-limit', w), 'test')).toBeNull()
+  })
+
+  it('Klodel 42469 b: a task with a preCheck and an unpinned (null) row is a mismatch, also when created after the pin', () => {
+    expect(trust.ensureScheduleTrustBaseline(io.listScheduledTasks)).not.toBeUndefined()
+    expect(db.scheduleTrustPreCheckPinDone()).toBe(true)
+    const { files } = chain('null')
+    const t = taskWith('pc-null', files.wrapper)
+    db.setScheduleTrust('pc-null', 'approved', trust.scheduleTrustHash(t), 'test', 1)
+    expect(db.getScheduleTrust('pc-null')!.precheck_hash).toBeNull()
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pc-null')!)).toBe('mismatch')
+    // a later start does not pin it either
+    expect(trust.ensurePreCheckTrustPin(io.listScheduledTasks)).toBeNull()
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pc-null')!)).toBe('mismatch')
+  })
+
+  it('the one-time pin: trusted rows with a matching definition get today\'s content; the others do not; never again', () => {
+    const ok = chain('pinok')
+    const edited = chain('pinedit')
+    const plain = chain('pinplain')
+    io.writeScheduledTask('pin-legacy', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: ok.files.wrapper })
+    io.writeScheduledTask('pin-edited', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: edited.files.wrapper })
+    io.writeScheduledTask('pin-agent', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: plain.files.wrapper })
+    io.writeScheduledTask('pin-noprecheck', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID })
+    // the rows as they are on an install today: legacy rows at the definition hash, no pin
+    for (const n of ['pin-legacy', 'pin-edited', 'pin-noprecheck']) {
+      db.setScheduleTrust(n, 'legacy', trust.scheduleTrustHash(io.readScheduledTask(n)!), 'baseline', 1)
+    }
+    db.getDb().exec("INSERT INTO schedule_trust_baseline (id, at, task_count) VALUES (1, 1, 3)")
+    io.writeScheduledTask('pin-edited', { prompt: 'átírva' })   // definition changed behind the API
+    const before = trust.scheduleTrustShortHash(io.readScheduledTask('pin-noprecheck')!)
+    // Viktor 42472 a: a PINNED TOFU -- only a hash equal to the reviewed table is written
+    const reviewed = {
+      'pin-legacy': trust.preCheckContentHash(io.readScheduledTask('pin-legacy')!)!,
+      'pin-edited': trust.preCheckContentHash(io.readScheduledTask('pin-edited')!)!,
+    }
+    expect(trust.ensurePreCheckTrustPin(io.listScheduledTasks, Date.now(), reviewed)).toBe(1)
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pin-legacy')!)).toBe('legacy')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pin-edited')!)).toBe('mismatch')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pin-agent')!)).toBe('agent')
+    // a task without a preCheck: same verdict and same short hash as before the change
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pin-noprecheck')!)).toBe('legacy')
+    expect(before).toBe(trust.scheduleTrustHash(io.readScheduledTask('pin-noprecheck')!).slice(0, 16))
+    // after the pin, a changed script is a mismatch, and a second pin does not launder it
+    writeFileSync(ok.files.sibling, 'A = 2\n')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pin-legacy')!)).toBe('mismatch')
+    db.getDb().exec("UPDATE schedule_trust SET precheck_hash = NULL WHERE task_name = 'pin-legacy'")
+    expect(trust.ensurePreCheckTrustPin(io.listScheduledTasks, Date.now(), reviewed)).toBeNull()
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pin-legacy')!)).toBe('mismatch')
+  })
+
+  it('Viktor 42476 (1): a script that moved since the review is not pinned, and neither is a task missing from the table', () => {
+    const moved = chain('pinmoved')
+    const absent = chain('pinabsent')
+    for (const [n, c] of [['pin-moved', moved], ['pin-absent', absent]] as const) {
+      io.writeScheduledTask(n, { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: c.files.wrapper })
+      db.setScheduleTrust(n, 'legacy', trust.scheduleTrustHash(io.readScheduledTask(n)!), 'baseline', 1)
+    }
+    const reviewed = { 'pin-moved': trust.preCheckContentHash(io.readScheduledTask('pin-moved')!)! }
+    writeFileSync(moved.files.sibling, 'A = "after the review"\n')
+    expect(trust.ensurePreCheckTrustPin(io.listScheduledTasks, Date.now(), reviewed)).toBe(0)
+    expect(db.getScheduleTrust('pin-moved')!.precheck_hash).toBeNull()
+    expect(db.getScheduleTrust('pin-absent')!.precheck_hash).toBeNull()
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pin-moved')!)).toBe('mismatch')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pin-absent')!)).toBe('mismatch')
+  })
+
+  it('a fresh install: the legacy baseline and the pin run in the same start-up call; an unreviewed chain stays a mismatch', () => {
+    const { files } = chain('fresh')
+    io.writeScheduledTask('fresh-pc', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: files.wrapper })
+    expect(trust.ensureScheduleTrustBaseline(io.listScheduledTasks)).toBe(1)
+    expect(db.scheduleTrustPreCheckPinDone()).toBe(true)
+    // not in the reviewed table and outside any repo: no pin, no re-pin; the owner approves it
+    expect(db.getScheduleTrust('fresh-pc')!.precheck_hash).toBeNull()
+    expect(trust.scheduleTrustOf(io.readScheduledTask('fresh-pc')!)).toBe('mismatch')
+  })
+
+  it('the owner approves what is on disk: the shown hash covers the script; a script edit after showing is 409', async () => {
+    const { files } = chain('route')
+    io.writeScheduledTask('pc-route', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: files.wrapper })
+    const shown = (await listed('pc-route')).trustHash
+    writeFileSync(files.sibling, 'A = 3\n')
+    expect((await listed('pc-route')).trustHash).not.toBe(shown)
+    expect((await approve('pc-route', { owner: true, hash: shown })).status).toBe(409)
+    expect(db.getScheduleTrust('pc-route')).toBeUndefined()
+    expect((await approve('pc-route', { owner: true })).status).toBe(200)
+    expect(await trustOf('pc-route')).toBe('approved')
+  })
+
+  it('approveScheduledTask with an expected short hash writes nothing when it differs', () => {
+    const { files } = chain('expect')
+    const t = taskWith('pc-expect', files.wrapper)
+    expect(trust.approveScheduledTask(t, 'test', Date.now(), '0000000000000000')).toBeNull()
+    expect(db.getScheduleTrust('pc-expect')).toBeUndefined()
+    expect(trust.approveScheduledTask(t, 'test', Date.now(), trust.scheduleTrustShortHash(t))).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('the runner does not run a preCheck whose content changed after approval, and the alert says why', async () => {
+    const runner = await import('../web/schedule-runner.js')
+    const marker = join(tmpHome, `pc-ran-${Math.random().toString(36).slice(2, 8)}`)
+    const { files } = chain('runner')
+    writeFileSync(files.wrapper, `#!/bin/bash\ntouch '${marker}'\npython3 "$(dirname "$0")/main_check.py" >/dev/null 2>&1\necho context\n`)
+    trust.approveScheduledTask(taskWith('pc-runner', files.wrapper), 'test')
+    writeFileSync(files.sibling, 'A = "evil"\n')
+    const r = await runner.runPreCheckAsync(io.readScheduledTask('pc-runner')!)
+    expect(r).toEqual({ skip: false })
+    expect(existsSync(marker)).toBe(false)
+    const alerts = db.getDb().prepare("SELECT content FROM agent_messages WHERE from_agent = 'system'").all() as Array<{ content: string }>
+    expect(alerts.some(a => a.content.includes('pc-runner') && a.content.includes('preCheck szkriptjének'))).toBe(true)
+  })
+})
+
+// PRECHECKTRUST1114, Viktor 42472 b1-b4 and the mutant rows of INFO iii: what
+// the walk cannot follow blocks; what it follows moves the hash.
+describe('preCheck walk markers (Viktor 42472 b1-b4)', () => {
+  function pyChain(tag: string, extra: string) {
+    const d = join(tmpHome, `pcm-${tag}-${Math.random().toString(36).slice(2, 8)}`)
+    mkdirSync(d, { recursive: true })
+    const w = join(d, 'w.sh')
+    const main = join(d, 'main_check.py')
+    writeFileSync(w, 'python3 -I -X pycache_prefix=/dev/null/x "$(dirname "$0")/main_check.py" 2>/dev/null || true\nexit 0\n')
+    writeFileSync(main, `import os, sys, subprocess, importlib\n${extra}\nprint("SKIP")\n`)
+    return { d: realpathOf(d), w, main: realpathOf(main) }
+  }
+  function shChain(tag: string, body: string) {
+    const d = join(tmpHome, `pcs-${tag}-${Math.random().toString(36).slice(2, 8)}`)
+    mkdirSync(d, { recursive: true })
+    writeFileSync(join(d, 'main_check.py'), 'print("SKIP")\n')
+    const w = join(d, 'w.sh')
+    writeFileSync(w, body + '\n')
+    return { d: realpathOf(d), w }
+  }
+  function taskWith(name: string, wrapper: string) {
+    io.writeScheduledTask(name, { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: wrapper })
+    return io.readScheduledTask(name)!
+  }
+
+  it.each([
+    ['exec', 'exec(code)'],
+    ['eval', 'x = eval(expr)'],
+    ['__import__', 'm = __import__(name)'],
+    ['import_module', 'm = importlib.import_module(name)'],
+    ['spec_from_file_location', "s = importlib.util.spec_from_file_location('m', path)"],
+    ['run_path', 'runpy.run_path(p)'],
+    ['subprocess.run', "subprocess.run(['python3', script])"],
+    ['subprocess.run', 'subprocess.run(cmd)'],
+    ['os.system', "os.system('ls')"],
+    ['shell=True', "subprocess.check_output('ls', shell=True)"],
+    ['sys.path', 'sys.path.insert(0, d)'],
+    ['sys.path', "sys.path.append(os.path.join(a, 'b'))"],
+    ['sys.path', 'sys.path = [d]'],
+  ])('python: a computed %s is UNRESOLVED: not trusted, not approvable (%s)', (kind, line) => {
+    const c = pyChain('unres', line)
+    const walk = trust.preCheckWalk(c.w)
+    expect(walk.blockers.some(b => b.startsWith(`UNRESOLVED ${c.main}#${kind}@`)), walk.blockers.join('|')).toBe(true)
+    expect(trust.approveScheduledTask(taskWith('pcm-unres', c.w), 'test')).toBeNull()
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pcm-unres')!)).toBe('agent')
+  })
+
+  it.each([
+    'spec.loader.exec_module(m)',
+    'con.execute("SELECT 1")',
+    "rx = re.compile('x')",
+    'sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))',
+    "m = importlib.import_module('json')",
+    "subprocess.run(['tmux', 'ls', 'agent-' + n], capture_output=True, timeout=5)",
+    "exec('x = 1')",
+  ])('python: a literal or harmless form is not a marker (%s)', (line) => {
+    expect(trust.preCheckWalk(pyChain('ok', line).w).blockers).toEqual([])
+  })
+
+  it('python: a literal import_module / subprocess interpreter path is followed (and hashed)', () => {
+    const c = pyChain('lit', '')
+    writeFileSync(join(c.d, 'plug.py'), 'P = 1\n')
+    writeFileSync(join(c.d, 'child.py'), 'C = 1\n')
+    writeFileSync(c.main, `import importlib, subprocess\nimportlib.import_module('plug')\nsubprocess.run(['python3', '-I', '${join(c.d, 'child.py')}'])\n`)
+    const keys = trust.preCheckWalk(c.w).pairs.filter(([, v]) => /^[0-9a-f]{64}$/.test(v)).map(([k]) => k)
+    expect(keys).toEqual(expect.arrayContaining([join(c.d, 'plug.py'), join(c.d, 'child.py')]))
+  })
+
+  it.each([
+    ['interpreter argument', 'python3 "$X/a.py"'],
+    ['interpreter argument', 'bash $S'],
+    ['interpreter argument', 'source "$F"'],
+    ['cd', 'cd "$D" && python3 a.py'],
+    ['command', '"$CMD" arg'],
+    ['eval', 'eval "$x"'],
+    ['interpreter -m', 'python3 -I -m mod'],
+  ])('shell: a computed %s is UNRESOLVED (%s)', (kind, body) => {
+    const c = shChain('unres', body)
+    const walk = trust.preCheckWalk(c.w)
+    expect(walk.blockers.some(b => b.startsWith(`UNRESOLVED ${join(c.d, 'w.sh')}#${kind}@`)), walk.blockers.join('|')).toBe(true)
+  })
+
+  it('shell: the wrappers in use today are not markers (dirname idiom, $( ) capture, $? / $out words, a literal cd)', () => {
+    const c = shChain('ok', [
+      'python3 -I -X pycache_prefix=/dev/null/x "$(dirname "$0")/main_check.py" 2>/dev/null || echo "HIBA: main_check.py"',
+      `out=$(python3 -I ${'$'}(dirname "$0")/main_check.py 2>&1); rc=$?`,
+      'if [ "$rc" -eq 0 ]; then echo SKIP; else echo "rc=$rc"; echo "$out"; fi',
+      'cd "$(dirname "$0")" || exit 1',
+      'exec python3 main_check.py --precheck',
+      'exit 0',
+    ].join('\n'))
+    const walk = trust.preCheckWalk(c.w)
+    expect(walk.blockers).toEqual([])
+    expect(walk.pairs.map(([k]) => k)).toContain(join(c.d, 'main_check.py'))
+  })
+
+  it('a file over 2 MB is TOOBIG; a non-UTF-8 script is UNPARSEABLE; a directory the chain runs is NOTFILE', () => {
+    const big = pyChain('big', 'import common_mod')
+    writeFileSync(join(big.d, 'common_mod.py'), Buffer.alloc(trust.PRECHECK_WALK_MAX_BYTES + 1, 0x20))
+    expect(trust.preCheckWalk(big.w).blockers).toEqual([`TOOBIG ${join(big.d, 'common_mod.py')}`])
+    const bad = pyChain('utf', '')
+    writeFileSync(bad.main, Buffer.concat([Buffer.from('print("SKIP")\n# '), Buffer.from([0xff, 0xfe]), Buffer.from('\n')]))
+    expect(trust.preCheckWalk(bad.w).blockers).toEqual([`UNPARSEABLE ${bad.main}#text`])
+    const dir = shChain('dir', '')
+    mkdirSync(join(dir.d, 'adir.py'))
+    writeFileSync(dir.w, `python3 ${join(dir.d, 'adir.py')}\n`)
+    expect(trust.preCheckWalk(dir.w).blockers).toEqual([`NOTFILE ${join(dir.d, 'adir.py')}`])
+  })
+
+  it('CRLF: the references are still found, and a line-ending change is a mismatch', () => {
+    const c = shChain('crlf', '')
+    writeFileSync(c.w, 'python3 "$(dirname "$0")/main_check.py"\r\nexit 0\r\n')
+    expect(trust.preCheckWalk(c.w).pairs.map(([k]) => k)).toContain(join(c.d, 'main_check.py'))
+    trust.approveScheduledTask(taskWith('pcm-crlf', c.w), 'test')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pcm-crlf')!)).toBe('approved')
+    writeFileSync(c.w, 'python3 "$(dirname "$0")/main_check.py"\nexit 0\n')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pcm-crlf')!)).toBe('mismatch')
+  })
+
+  it('a script the chain only NAMES is hashed, not walked: its own computed lines are no marker, its change is a mismatch', () => {
+    const other = join(tmpHome, `pcm-other-${Math.random().toString(36).slice(2, 8)}.sh`)
+    writeFileSync(other, '"$EVIL" x\n')
+    const gone = join(tmpHome, 'pcm-never-there.sh')
+    const c = pyChain('named', `"""Runs beside ${other}; the old ${gone} is gone."""`)
+    const walk = trust.preCheckWalk(c.w)
+    expect(walk.blockers).toEqual([])
+    expect(walk.pairs).toContainEqual([realpathOf(other), expect.stringMatching(/^[0-9a-f]{64}$/)])
+    expect(walk.pairs).toContainEqual([gone, 'ABSENT'])
+    trust.approveScheduledTask(taskWith('pcm-named', c.w), 'test')
+    writeFileSync(other, '"$EVIL" y\n')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('pcm-named')!)).toBe('mismatch')
+  })
+
+  it('the list shows the file count and the markers; an approve of a chain with a marker is 409 and writes nothing', async () => {
+    const c = pyChain('route', 'exec(code)')
+    io.writeScheduledTask('pcm-route', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: c.w })
+    const row = (await call('GET', '/api/schedules', undefined)).json.find((t: { name: string }) => t.name === 'pcm-route')
+    expect(row.trustPreCheck.files).toBe(2)
+    expect(row.trustPreCheck.blockers[0]).toMatch(/^UNRESOLVED .*main_check\.py#exec@/)
+    const r = await approve('pcm-route', { owner: true })
+    expect(r.status).toBe(409)
+    expect(r.json.blockers.length).toBeGreaterThan(0)
+    expect(db.getScheduleTrust('pcm-route')).toBeUndefined()
+  })
+
+  it('an approved task whose chain gains a marker alerts with the marker reason, not as a plain edit', () => {
+    const c = pyChain('alert', '')
+    trust.approveScheduledTask(taskWith('pcm-alert', c.w), 'test')
+    writeFileSync(c.main, 'exec(code)\n')
+    const t = io.readScheduledTask('pcm-alert')!
+    expect(trust.scheduleTrustOf(t)).toBe('mismatch')
+    trust.alertScheduleTrust(t, 'mismatch', 'test')
+    const alerts = db.getDb().prepare("SELECT content FROM agent_messages WHERE from_agent = 'system'").all() as Array<{ content: string }>
+    expect(alerts.some(a => a.content.includes('pcm-alert') && a.content.includes('nem tud követni'))).toBe(true)
+  })
+
+  // b4: the shipped tasks' chains are all in the repo (git ls-files); ops/ is
+  // the known exception list, empty today (the move PR keeps it empty).
+  it('b4 + RES1/RES2: every file a shipped task\'s preCheck walks is git-tracked, unmarked, and python runs -I with no pycache', () => {
+    const OPS_EXCEPTIONS: string[] = []
+    const SHIPPED_WRAPPER_LINES: Record<string, string> = {
+      'scripts/prechecks/memoria-heartbeat-precheck.sh': 'python3 -I -X pycache_prefix=/dev/null/x "$(dirname "$0")/memoria_heartbeat_precheck.py" 2>/dev/null || true',
+      'scripts/hooks/ledger-live-drain-precheck.sh': 'exec python3 -I -X pycache_prefix=/dev/null/x scripts/hooks/ledger-live-drain.py --precheck',
+    }
+    const root = realpathOf(PROJECT_ROOT)
+    const tracked = new Set(execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' }).split('\0'))
+    const shipped: string[] = []
+    for (const top of ['scheduled-tasks', 'seed-scheduled-tasks']) {
+      const dir = join(root, top)
+      if (!existsSync(dir)) continue
+      for (const name of readdirSync(dir)) {
+        const f = join(dir, name, 'task-config.json')
+        if (!existsSync(f)) continue
+        const pc = (JSON.parse(readFileSync(f, 'utf8')) as { preCheck?: string }).preCheck
+        if (!pc) continue
+        shipped.push(name)
+        const entry = pc.replace(/^\{\{(PROJECT_ROOT|INSTALL_DIR)\}\}(?=\/)/, root)
+        const walk = trust.preCheckWalk(entry, root)
+        expect(walk.blockers, name).toEqual([])
+        expect(walk.linked, name).toBe(false)
+        for (const file of walk.contents.keys()) {
+          const rel = file.slice(root.length + 1)
+          expect(file.startsWith(root + '/') && (tracked.has(rel) || OPS_EXCEPTIONS.includes(rel)), `${name}: ${file}`).toBe(true)
+          if (file.endsWith('.sh')) {
+            // the WHOLE python3 line (Viktor 42502 INFO 1: a substring check passes with the flags only in a
+            // trailing comment, or with a second call after ||); a new wrapper needs its line here
+            const calls = readFileSync(file, 'utf8').split('\n').filter(x => !/^\s*#/.test(x) && x.includes('python3'))
+            expect(calls.map(x => x.trim()), `${name}: ${rel}`).toEqual([SHIPPED_WRAPPER_LINES[rel]])
+          }
+        }
+      }
+    }
+    expect(shipped.sort()).toEqual(expect.arrayContaining(['ledger-live-drain', 'memoria-heartbeat']))
+  })
+})
+
+// Klodel 42478 / Viktor 42476 (2): a trusted task whose chain moved is re-pinned
+// at start-up only when every file is tracked and byte-equal to the upstream.
+describe('preCheck re-pin from upstream (PRECHECKTRUST1114)', () => {
+  const G = ['-c', 'user.email=t@example.invalid', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', '-c', 'init.defaultBranch=main']
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', [...G, ...args], { cwd, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' } })
+  function repo(tag: string) {
+    const base = realpathOf(mkdtempSync(join(tmpHome, `rp-${tag}-`)))
+    git(base, 'init', '-q', '--bare', 'up.git')
+    git(base, 'clone', '-q', 'up.git', 'wc')
+    const wc = join(base, 'wc')
+    git(wc, 'checkout', '-q', '-b', 'main')
+    mkdirSync(join(wc, 'pc'))
+    const w = join(wc, 'pc', 'w.sh')
+    writeFileSync(w, 'python3 -I -X pycache_prefix=/dev/null/x "$(dirname "$0")/m.py"\n')
+    writeFileSync(join(wc, 'pc', 'm.py'), 'import sys\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\nimport helper\n')
+    writeFileSync(join(wc, 'pc', 'helper.py'), 'H = 1\n')
+    git(wc, 'add', '-A')
+    git(wc, 'commit', '-qm', 'init')
+    git(wc, 'push', '-q', '-u', 'origin', 'main')
+    return { wc, w, helper: join(wc, 'pc', 'helper.py') }
+  }
+  function approved(name: string, w: string) {
+    io.writeScheduledTask(name, { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: w })
+    expect(trust.approveScheduledTask(io.readScheduledTask(name)!, 'test')).toMatch(/^[0-9a-f]{64}$/)
+    return db.getScheduleTrust(name)!.precheck_hash
+  }
+  const alerts = () => (db.getDb().prepare("SELECT content FROM agent_messages WHERE from_agent = 'system'").all() as Array<{ content: string }>).map(a => a.content)
+
+  it('a merged upstream change re-pins, writes only precheck_hash, and alerts the main agent with the commit', () => {
+    const r = repo('ok')
+    const before = approved('rp-ok', r.w)
+    const rowBefore = db.getScheduleTrust('rp-ok')!
+    writeFileSync(r.helper, 'H = 2\n')
+    git(r.wc, 'commit', '-qam', 'change')
+    git(r.wc, 'push', '-q')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('rp-ok')!)).toBe('mismatch')
+    expect(trust.repinPreChecksFromUpstream(io.listScheduledTasks, Date.now(), r.wc)).toBe(1)
+    const row = db.getScheduleTrust('rp-ok')!
+    expect(row.precheck_hash).not.toBe(before)
+    expect({ ...row, precheck_hash: null }).toEqual({ ...rowBefore, precheck_hash: null })
+    expect(trust.scheduleTrustOf(io.readScheduledTask('rp-ok')!)).toBe('approved')
+    const head = git(r.wc, 'rev-parse', 'HEAD').trim()
+    expect(alerts().some(a => a.includes('rp-ok') && a.includes(head.slice(0, 12)) && a.includes('pc/helper.py'))).toBe(true)
+    // nothing moved since: a second start does nothing
+    expect(trust.repinPreChecksFromUpstream(io.listScheduledTasks, Date.now(), r.wc)).toBe(0)
+  })
+
+  it('a never-pinned trusted row (null) is pinned from upstream too (another install)', () => {
+    const r = repo('null')
+    io.writeScheduledTask('rp-null', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: r.w })
+    db.setScheduleTrust('rp-null', 'legacy', trust.scheduleTrustHash(io.readScheduledTask('rp-null')!), 'baseline', 1)
+    expect(trust.repinPreChecksFromUpstream(io.listScheduledTasks, Date.now(), r.wc)).toBe(1)
+    expect(trust.scheduleTrustOf(io.readScheduledTask('rp-null')!)).toBe('legacy')
+  })
+
+  it.each([
+    ['a local commit not on the upstream', (r: ReturnType<typeof repo>) => { writeFileSync(r.helper, 'H = 3\n'); git(r.wc, 'commit', '-qam', 'local') }],
+    ['a local commit on top, even with the chain equal to the upstream', (r: ReturnType<typeof repo>) => {
+      writeFileSync(r.helper, 'H = 6\n'); git(r.wc, 'commit', '-qam', 'merged'); git(r.wc, 'push', '-q')
+      writeFileSync(join(r.wc, 'other.txt'), 'x\n'); git(r.wc, 'add', 'other.txt'); git(r.wc, 'commit', '-qm', 'local only')
+    }],
+    ['an uncommitted edit', (r: ReturnType<typeof repo>) => { writeFileSync(r.helper, 'H = 4\n') }],
+    ['an edit hidden by --assume-unchanged', (r: ReturnType<typeof repo>) => {
+      git(r.wc, 'update-index', '--assume-unchanged', 'pc/helper.py')
+      writeFileSync(r.helper, 'H = 5\n')
+      expect(git(r.wc, 'status', '--porcelain')).toBe('')
+    }],
+    ['an untracked shadowing module', (r: ReturnType<typeof repo>) => { writeFileSync(join(r.wc, 'pc', 'json.py'), 'X = 1\n'); writeFileSync(join(r.wc, 'pc', 'm.py'), readFileSync(join(r.wc, 'pc', 'm.py'), 'utf8') + 'import json\n'); git(r.wc, 'commit', '-qam', 'json'); git(r.wc, 'push', '-q') }],
+    ['a symlink hop in the chain', (r: ReturnType<typeof repo>) => {
+      symlinkSync(join(r.wc, 'pc', 'helper.py'), join(r.wc, 'pc', 'linked.py'))
+      writeFileSync(r.w, 'python3 -I "$(dirname "$0")/linked.py"\n')
+      git(r.wc, 'add', '-A'); git(r.wc, 'commit', '-qm', 'link'); git(r.wc, 'push', '-q')
+    }],
+    ['a blocking marker', (r: ReturnType<typeof repo>) => { writeFileSync(r.helper, 'exec(code)\n'); git(r.wc, 'commit', '-qam', 'exec'); git(r.wc, 'push', '-q') }],
+  ])('no re-pin: %s', (_label, mutate) => {
+    const r = repo('neg')
+    const before = approved('rp-neg', r.w)
+    mutate(r)
+    expect(trust.repinPreChecksFromUpstream(io.listScheduledTasks, Date.now(), r.wc)).toBe(0)
+    expect(db.getScheduleTrust('rp-neg')!.precheck_hash).toBe(before)
+    expect(trust.scheduleTrustOf(io.readScheduledTask('rp-neg')!)).toBe('mismatch')
+    expect(alerts().some(a => a.includes('újrarögzítettem'))).toBe(false)
+  })
+
+  it('no re-pin for a deny-listed watcher, a changed definition, or an untrusted task', () => {
+    for (const name of trust.PRECHECK_REPIN_DENY) {
+      const r = repo('deny')
+      const before = approved(name, r.w)
+      writeFileSync(r.helper, 'H = 9\n'); git(r.wc, 'commit', '-qam', 'c'); git(r.wc, 'push', '-q')
+      expect(trust.repinPreChecksFromUpstream(io.listScheduledTasks, Date.now(), r.wc)).toBe(0)
+      expect(db.getScheduleTrust(name)!.precheck_hash).toBe(before)
+      rmSync(join(io.SCHEDULED_TASKS_DIR, name), { recursive: true, force: true })
+    }
+    const r = repo('def')
+    approved('rp-def', r.w)
+    io.writeScheduledTask('rp-def', { prompt: 'átírva a fájlban' })
+    writeFileSync(r.helper, 'H = 10\n'); git(r.wc, 'commit', '-qam', 'c'); git(r.wc, 'push', '-q')
+    io.writeScheduledTask('rp-agent', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: r.w })
+    expect(trust.repinPreChecksFromUpstream(io.listScheduledTasks, Date.now(), r.wc)).toBe(0)
+    expect(trust.scheduleTrustOf(io.readScheduledTask('rp-def')!)).toBe('mismatch')
+    expect(trust.scheduleTrustOf(io.readScheduledTask('rp-agent')!)).toBe('agent')
+  })
+
+  it('a chain outside the repo is never re-pinned', () => {
+    const r = repo('out')
+    const outside = join(tmpHome, `rp-outside-${Math.random().toString(36).slice(2, 8)}.sh`)
+    writeFileSync(outside, `python3 -I ${join(r.wc, 'pc', 'm.py')}\n`)
+    const before = approved('rp-out', outside)
+    writeFileSync(r.helper, 'H = 11\n'); git(r.wc, 'commit', '-qam', 'c'); git(r.wc, 'push', '-q')
+    expect(trust.repinPreChecksFromUpstream(io.listScheduledTasks, Date.now(), r.wc)).toBe(0)
+    expect(db.getScheduleTrust('rp-out')!.precheck_hash).toBe(before)
+  })
+})
+
+function realpathOf(p: string): string {
+  // macOS: tmpdir() is under /var -> /private/var
+  return realpathSync(p)
+}

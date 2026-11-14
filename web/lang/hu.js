@@ -599,6 +599,8 @@ window._i18n.hu = {
   'tasks.approve.too_long':      'A feladat szövege {n} karakter, ez több, mint amennyi itt megjeleníthető ({max}). Egy kattintással nem hagyható jóvá: megnyitom a szerkesztőt, ott nézd át a teljes szöveget, és mentéssel hagyd jóvá. Ha a feladat a szerkesztőben nem látható mezőt is beállít (pl. command, preCheck), a mentés nem hagyja jóvá.',
   'tasks.approve.unreadable':    'A feladat szövege {lines} sor, vagy rejtett vezérlőkaraktert tartalmaz, ezért itt nem jeleníthető meg megbízhatóan (legfeljebb {max} sor, rejtett karakter nélkül). Egy kattintással nem hagyható jóvá: megnyitom a szerkesztőt, ott nézd át a teljes szöveget.',
   'tasks.approve.runs_bash':     'FUTTAT bash-t:',
+  'tasks.approve.precheck_blocked': 'A preCheck-lánc {n} jelölőt tartalmaz, amit a rendszer nem tud követni vagy elolvasni; így nem hagyható jóvá. Előbb a szkriptet kell javítani:',
+  'tasks.approve.precheck_files': 'preCheck-lánc: {n} fájl (a jóváhagyás ezek mostani tartalmára szól)',
   'tasks.retries.title':         'Függőben lévő ütemezett feladatok ({n})',
   'tasks.retries.hint':          'Busy cél-session, a rendszer tovább próbálkozik. Nyilvánvaló hibánál visszavonhatod.',
   'tasks.retries.meta':          '{age} vár ({n} próbálkozás)',

@@ -6585,6 +6585,15 @@ function scheduleApprovalView(task) {
   const lines = [t('tasks.confirm.approve'), '']
   if (task.command) lines.push('⚠ ' + t('tasks.approve.runs_bash') + ' command: ' + String(task.command))
   if (task.preCheck) lines.push('⚠ ' + t('tasks.approve.runs_bash') + ' preCheck: ' + String(task.preCheck))
+  // PRECHECKTRUST1114 (Viktor 42472 INFO ii): what the 16 hex covers, and a chain that cannot be approved.
+  const pc = task.trustPreCheck
+  if (pc && typeof pc === 'object') {
+    const blockers = Array.isArray(pc.blockers) ? pc.blockers.map(String) : []
+    if (blockers.length) {
+      return { blocked: true, text: t('tasks.approve.precheck_blocked').replace('{n}', String(blockers.length)) + '\n\n' + blockers.slice(0, 10).join('\n') }
+    }
+    lines.push(t('tasks.approve.precheck_files').replace('{n}', String(Number(pc.files) || 0)))
+  }
   lines.push('agent: ' + String(task.agent || ''))
   lines.push('schedule: ' + String(task.schedule || ''))
   if (task.type && task.type !== 'task') lines.push('type: ' + String(task.type))
