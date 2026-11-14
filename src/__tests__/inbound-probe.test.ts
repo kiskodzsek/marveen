@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, mkdirSync, rmdirSync, rmSync, statSync, utimesSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmdirSync, rmSync, statSync, utimesSync, chmodSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { shouldTriggerDeafnessRespawn, readLastIngestionTimestamp, readLastIngestionTimestampAcross, inboundChannelLineTs, INGESTION_READ_DEFAULTS, mainTranscriptDirs, mainConfigRoots, TRANSCRIPT_DIR } from '../web/inbound-probe.js'
@@ -285,6 +285,48 @@ describe('readLastIngestionTimestamp', () => {
     expect(readLastIngestionTimestamp(dir, { maxBytes: newerSize + 4096 })).toBe(new Date(ts).getTime())
   })
 
+  // Viktor 42177 INFO 1 (c): the max-across rule -- a later-visited file with an OLDER inbound must not win.
+  it('an older inbound in a later-visited file does not override a newer one already found', () => {
+    const dir = makeTmpDir()
+    const newer = '2026-06-01T09:30:00.000Z'
+    writeSession(dir, 'a.jsonl', [inboundLine(newer)], '2026-06-01T10:00:00.000Z')
+    writeSession(dir, 'b.jsonl', [inboundLine('2026-06-01T09:00:00.000Z')], '2026-06-01T09:40:00.000Z')
+    expect(readLastIngestionTimestamp(dir)).toBe(new Date(newer).getTime())
+  })
+
+  // INFO 1 (d): only *.jsonl is read -- a newer .bak, .gz or .jsonl.bak with an inbound line is not.
+  it('reads only *.jsonl files', () => {
+    const dir = makeTmpDir()
+    const ts = '2026-06-01T07:00:00.000Z'
+    writeSession(dir, 'real.jsonl', [inboundLine(ts)], '2026-06-01T07:00:00.000Z')
+    for (const name of ['x.bak', 'x.jsonl.bak', 'x.jsonl.gz', 'x.json']) {
+      writeSession(dir, name, [inboundLine('2026-06-01T12:00:00.000Z')], '2026-06-01T12:00:00.000Z')
+    }
+    expect(readLastIngestionTimestamp(dir)).toBe(new Date(ts).getTime())
+  })
+
+  // INFO 1 (f): one unreadable file or a directory named *.jsonl does not lose the others.
+  it('skips an unreadable file and a directory named *.jsonl, and still reads the rest', () => {
+    const dir = makeTmpDir()
+    const ts = '2026-06-01T07:00:00.000Z'
+    writeSession(dir, 'ok.jsonl', [inboundLine(ts)], '2026-06-01T07:00:00.000Z')
+    const locked = writeSession(dir, 'locked.jsonl', [inboundLine('2026-06-01T11:00:00.000Z')], '2026-06-01T11:00:00.000Z')
+    chmodSync(locked, 0o000)
+    mkdirSync(join(dir, 'd.jsonl'))
+    utimesSync(join(dir, 'd.jsonl'), new Date('2026-06-01T12:00:00.000Z'), new Date('2026-06-01T12:00:00.000Z'))
+    try {
+      expect(readLastIngestionTimestamp(dir)).toBe(new Date(ts).getTime())
+    } finally {
+      chmodSync(locked, 0o600)
+    }
+  })
+
+  // INFO 1 (e): pin the defaults. On 2026-11-14 the main agent's last inbound sat in its 15th newest
+  // file, about 23 MB back; a smaller limit keeps every other test green but reads null live.
+  it('pins the default limits (the live main dir needs 15 files / ~23 MB)', () => {
+    expect(INGESTION_READ_DEFAULTS).toEqual({ maxFiles: 16, maxBytes: 32 * 1024 * 1024, chunkBytes: 256 * 1024 })
+  })
+
   it('the default budget is bounded (B1: no unbounded synchronous read)', () => {
     expect(INGESTION_READ_DEFAULTS.maxBytes).toBeLessThanOrEqual(32 * 1024 * 1024)
     expect(INGESTION_READ_DEFAULTS.maxFiles).toBeLessThanOrEqual(16)
@@ -304,6 +346,12 @@ describe('inboundChannelLineTs', () => {
     expect(inboundChannelLineTs(JSON.stringify({ type: 'user', timestamp: 'not a date', message: { role: 'user', content: CHANNEL } }))).toBe(null)
     expect(inboundChannelLineTs(JSON.stringify({ type: 'user', message: { role: 'user', content: CHANNEL } }))).toBe(null)
     expect(inboundChannelLineTs(JSON.stringify({ type: 'user', timestamp: '2026-06-01T10:00:00.000Z', message: null }))).toBe(null)
+    // Viktor 42177 INFO 1 (a): the enqueue branch also needs the marker at the START
+    expect(inboundChannelLineTs(JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: '2026-06-01T10:00:00.000Z', content: 'x ' + CHANNEL }))).toBe(null)
+    expect(inboundChannelLineTs(JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: '2026-06-01T10:00:00.000Z', content: ' ' + CHANNEL }))).toBe(null)
+    // INFO 1 (b): a numeric timestamp is refused (the transcript writes ISO strings)
+    expect(inboundChannelLineTs(JSON.stringify({ type: 'user', timestamp: 1780000000000, message: { role: 'user', content: CHANNEL } }))).toBe(null)
+    expect(inboundChannelLineTs(JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: 1780000000000, content: CHANNEL }))).toBe(null)
     expect(inboundChannelLineTs('null')).toBe(null)
     expect(inboundChannelLineTs('{')).toBe(null)
   })
