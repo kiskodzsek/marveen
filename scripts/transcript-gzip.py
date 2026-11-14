@@ -8,9 +8,13 @@ Why (card c310dd1b, Klodel 21739, 2026-10-30): the session transcripts were
 6.9 GB of the full data volume (Dave 3.6, Pulzus 1.6). Gzipping the ones older
 than 7 days by hand gave back 3.0 GB; Klodel asked for the same every night.
 
-What is looked at: every *.jsonl under <install>/agents/*/.claude-config/projects
-and <home>/.claude/projects (the main agent's), each root once after symlinks are
-resolved. A directory named memory is never entered, and nothing but *.jsonl is
+What is looked at: every *.jsonl under <install>/agents/*/.claude-config/projects,
+<install>/.channels-config/projects and <home>/.claude/projects (the main agent's,
+isolated or shared config: the same candidates as mainConfigRoots in
+src/web/inbound-probe.ts), each root once after symlinks are resolved. The
+.channels-config root was missing until 2026-11-14 (card 443bbe06): the main
+agent's transcripts live there (4.3 GB measured, 3.2 GB older than 7 days, not
+one .gz), so they were never gzipped or expired. A directory named memory is never entered, and nothing but *.jsonl is
 touched (a session's subagent transcripts are *.jsonl under its directory too).
 
 A transcript is gzipped (`gzip -9`: the mtime stays, file.jsonl becomes
@@ -53,7 +57,8 @@ import time
 
 def roots(install, home):
     found, seen = [], set()
-    for path in sorted(glob.glob(os.path.join(install, "agents", "*", ".claude-config", "projects"))) + [os.path.join(home, ".claude", "projects")]:
+    main = [os.path.join(install, ".channels-config", "projects"), os.path.join(home, ".claude", "projects")]
+    for path in sorted(glob.glob(os.path.join(install, "agents", "*", ".claude-config", "projects"))) + main:
         resolved = os.path.realpath(path)
         if os.path.isdir(resolved) and resolved not in seen:
             seen.add(resolved)
