@@ -373,6 +373,7 @@ def script_cases():
             ("\"$BASH\" -c -o 'pipefail' 'echo hi'", d),
             ("bash -c $(echo -x) 'echo hi'", d),
             ("bash -c $(echo -x) 'echo hi'; grep -n 'x' notes.py", d),  # the marking ends at the ;
+            ("bash -c -o 'pipefail' 'echo hi'\necho \"python3 measure.py\"", d),  # and at a newline (Viktor 41917)
             ('sort -c "x"', d),
             ("bash x.sh -c 'notes.py'", d),  # no file named so is run by the payload rules: notes.py is clean
             ('bash -c -x ; echo "python3 measure.py"', d),  # the all-quotes rule ends at the shell's command
