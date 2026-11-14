@@ -129,6 +129,7 @@ def script_cases():
         w('list.py', "import subprocess\nsubprocess.run(['" + S + "', 'list-keychains'])\n")
         w('notes.py', "# the gate blocks find-generic-password in a shell\nprint('ok')\n")
         w('ok.js', "console.log('ok');\n")
+        w('runner.sh', 'python3 "$1"\n')  # runs its first argument: `source runner.sh m.py` runs m.py
         w('word.py', "print('the " + S + " team writes find-generic-password docs')\n")
         # a UI string table (web/lang/en.js): a capitalised label and button are not a subcommand
         w('labels.js', "module.exports = {\n  'settings.module." + S + "': '" + S.capitalize() + "',\n"
@@ -215,6 +216,108 @@ def script_cases():
             ('bash -c "./dump.sh"', d),
             ("bash -lc 'sub/deep.py --x'", d),
             ('sh -c "python3 measure.py"', d),
+            # Viktor 41790 LOW 1: payloads a quote opens after eval, watch, tmux new, `-c --` / `-c -x`, osascript's
+            # do shell script and a shell call inside inline code; a quoted interpreter name; a quoted cat file
+            ('eval "python3 measure.py"', d),
+            ("eval 'python3 measure.py'", d),
+            ('eval "./dump.sh"', d),
+            ('eval python3 measure.py', d),
+            ('eval "A=1 python3 measure.py"', d),  # the payload, not only the interpreter right after the quote
+            ('watch -n 1 "A=1 python3 measure.py"', d),
+            ('watch -n 1 python3 measure.py', d),
+            ('. -- ./dump.sh', d),
+            ("bash -c -- 'python3 measure.py'", d),
+            ("bash -c -x 'python3 measure.py'", d),
+            ("watch 'python3 measure.py'", d),
+            ("watch -n 1 'python3 measure.py'", d),
+            ("tmux new 'python3 measure.py'", d),
+            ("tmux new-session -d -s x 'python3 measure.py'", d),
+            ('osascript -e \'do shell script "python3 measure.py"\'', d),
+            ('osascript -e "do shell script \\"python3 measure.py\\""', d),  # an escaped quote opens it too
+            ('python3 -c \'import os; os.system("python3 measure.py")\'', d),
+            ('node -e \'require("child_process").execSync("./dump.sh")\'', d),
+            ("'python3' measure.py", d),
+            ('"python3" -I measure.py', d),
+            ('cat "measure.py" | python3', d),
+            ('cat list.py measure.py | python3', d),  # every cat file, not only the first
+            ('. dump.sh', d),
+            # Viktor 41831 LOW 1: source hands the rest to the sourced script, which may run it
+            ('source ./ok.js sub/deep.py', d),
+            ('source runner.sh measure.py', d),
+            ('source ok.js dump.sh', d),
+            ('. runner.sh measure.py', d),
+            ('source -- runner.sh measure.py', d),
+            # Viktor 41831 LOW 2: more words before the payload quote than PAYLOAD_OPEN reads; tmux new takes fourteen
+            ("bash -c -x -x -x -x -x 'python3 measure.py'", d),
+            ("bash -c" + " -x" * 8 + " 'python3 measure.py'", d),
+            ("watch -n 1 -d -t" + " -x" * 5 + " 'python3 measure.py'", d),
+            ("tmux new -d -s a -n b -x 1 -y 1 'python3 measure.py'", d),
+            ("tmux new-session -d -s x -c /tmp -e A=1 'python3 measure.py'", d),
+            ("tmux new" + " -e A=1" * 7 + " 'python3 measure.py'", d),  # fourteen words: still read
+            ("tmux new" + " -e A=1" * 8 + " 'python3 measure.py'", d),  # past the bound: the payload is read
+            ("watch -n 1 -d -t -x -x 'A=1 python3 measure.py'", d),  # past watch's bound, not a quoted interpreter
+            ("watch -n 1 -d -t -x 'A=1 python3 measure.py'", d),  # exactly five watch words
+            ("tmux new" + " -e A=1" * 7 + " -e 'python3 measure.py'", d),  # exactly fifteen tmux words
+            # Viktor 41859 B: options between a shell's -c and the payload, word arguments and + forms too
+            ("bash -c -o pipefail 'python3 measure.py'", d),
+            ("bash -c -x -o pipefail 'python3 measure.py'", d),
+            ("bash -c -O extglob \"./dump.sh\"", d),
+            ("bash -c +x 'python3 measure.py'", d),
+            ("bash -c +o pipefail 'A=1 python3 measure.py'", d),
+            ("zsh -c -o errexit 'python3 measure.py'", d),
+            ("/bin/bash -lc -o pipefail 'python3 measure.py'", d),
+            ("sudo sh -c -e 'cd sub2 && python3 only.py'", d),
+            ("bash -exec 'python3 measure.py'", d),  # bash reads -exec as -e -x -e -c (measured)
+            # Viktor 41893 LOW 1 (Klodel 41895: option a): a -c after ANY command opens a payload, as on the live gate
+            ("su -c 'python3 measure.py'", d),
+            ('sudo su -c "python3 measure.py"', d),
+            ("sudo -u x -c 'python3 measure.py'", d),
+            ("flock lockfile -c 'python3 measure.py'", d),
+            ("script -q -c 'python3 measure.py' /dev/null", d),
+            ("sg staff -c 'python3 measure.py'", d),
+            ("fish -c 'python3 measure.py'", d),
+            ("csh -c 'python3 measure.py'", d),
+            ("tcsh -c 'python3 measure.py'", d),
+            ("ash -c 'python3 measure.py'", d),
+            ("rbash -c 'python3 measure.py'", d),
+            ("pwsh -c 'python3 measure.py'", d),
+            ("bash5 -c 'python3 measure.py'", d),
+            ('"$SHELL" -c \'python3 measure.py\'', d),
+            ("$SHELL -c 'python3 measure.py'", d),
+            ("$0 -c 'python3 measure.py'", d),
+            ('"bash" -c \'python3 measure.py\'', d),
+            ("'bash' -c 'python3 measure.py'", d),
+            # Viktor 41893 LOW 2: a quoted option argument before the payload, after a shell's -c
+            ("bash -c -o 'pipefail' 'python3 measure.py'", d),
+            ('bash -c -o "pipefail" "python3 measure.py"', d),
+            ("bash -c -O 'extglob' \"./dump.sh\"", d),
+            ("bash -c \"-x\" 'python3 measure.py'", d),
+            ("bash -c $'-x' 'python3 measure.py'", d),
+            ('"bash" -c -o \'pipefail\' \'python3 measure.py\'', d),
+            ("$SHELL -c -o 'pipefail' 'python3 measure.py'", d),
+            ("bash5 -c -o 'pipefail' 'python3 measure.py'", d),  # a versioned shell is a shell
+            # Viktor 41893 INFO 3: ksh and dash are shells
+            ("ksh -c -o 'pipefail' 'python3 measure.py'", d),
+            ("dash -c -e 'x' 'python3 measure.py'", d),
+            # Viktor 41906 LOW 1: a quoted -c word opens the payload (bash runs it, measured)
+            ("bash '-c' 'python3 measure.py'", d),
+            ('bash "-c" "python3 measure.py"', d),
+            ("bash '-lc' 'python3 measure.py'", d),
+            ("su '-c' 'python3 measure.py'", d),
+            # Viktor 41906 LOW 2: $BASH is a shell word; an option argument from a $(...) does not end the marking
+            ('"$BASH" -c -o \'pipefail\' \'python3 measure.py\'', d),
+            ("${BASH} -c -o 'pipefail' 'python3 measure.py'", d),
+            ("$BASH -c -o 'pipefail' 'python3 measure.py'", d),
+            ("bash -c $(echo -x) 'python3 measure.py'", d),
+            ('bash -c -o $(echo pipefail) "python3 measure.py"', d),
+            ("bash -c \"$(echo -x)\" 'python3 measure.py'", d),
+            # accepted false positives, as on the live gate (Klodel 41895): a quoted interpreter call on a
+            # keychain-reading file after any -c
+            ('grep -c -i "python3 measure.py" notes.py', d),
+            ('bash -n x.sh; grep -c -i "python3 measure.py" notes.py', d),
+            ('wc -c "python3 measure.py"', d),
+            ("ssh -c aes128-ctr host 'python3 measure.py'", d),
+            ('bash -o "pipefail" -c \'python3 measure.py\'', d),  # the payload is the quote after -c, not before
         ] + [('python3 lit%d.py' % i, d) for i in range(len(LIT_FORMS))] + [
             ('ls; python3 "measure.py"', d),
             ('python3 -c "import subprocess; subprocess.run([\'' + S + '\', \'dump-keychain\'])"', d),
@@ -241,6 +344,49 @@ def script_cases():
             ("sed -n '1,5p' sub/deep.py", d),
             ('grep -n "x" "sub/deep.py"', d),
             ('echo "run" python3 measure.py', d),
+            ('grep -n "eval" sub/deep.py', d),  # a word that only names a payload command is not one
+            ("grep -n 'watch' sub/deep.py", d),
+            # prose after a ")": a sentence-ending "." is not `source` of a file named later in the sentence
+            # (an agent-msg heredoc blocked on the #275 gate, 2026-11-14)
+            ("cat <<'E'\nmerge-base egyezik). Egy commit, csak sub/deep.py es a teszt.\nE", d),
+            # source: the rest is judged only when the first word is a file (bash runs nothing otherwise)
+            ('source nonexist.sh sub/deep.py', d),
+            ('source ok.js list.py', d),
+            # inside the PAYLOAD_OPEN bounds and clean; a fifth flag with no quote after it
+            ("bash -c -x -x -x -x 'echo hi'", d),
+            ("tmux new-session -d -s a -n b -c /tmp -x 1 -y 1 'echo hi'", d),  # eleven words, a real call
+            ('grep -c -i -n -r -l -w pattern sub', d),
+            # Viktor 41859 A: a -c that is not a shell's, with a quote later, passes (1392cfac blocked them blind)
+            ('ls -c -l -a -h -t -r "my dir"', d),
+            ('ls -c -l -a -h -t -r "measure.py"', d),
+            ('rsync -c -a -v -z -h --progress "src dir" dest/', d),
+            ('git diff -c --stat --no-color --name-only -z --abbrev "measure.py"', d),
+            ('grep -c -i -n -r -w -H "x" measure.py', d),
+            ('watch -n 1 -d -t -x -x "date"', d),
+            ("tmux new" + " -e A=1" * 8 + ' "ls"', d),
+            ('tar -c -v -z -p -h -X "ex" x', d),
+            ("git log -c --stat -p --follow -M -C 'measure.py'", d),
+            ('find . -exec -a -b -c -d -e "x" ;', d),
+            ("bash -c -o pipefail 'echo hi'", d),
+            ("bash -c -o 'pipefail' 'echo hi'", d),
+            ("bash '-c' 'echo hi'", d),  # Viktor 41906: a quoted -c with a clean payload passes
+            ("\"$BASH\" -c -o 'pipefail' 'echo hi'", d),
+            ("bash -c $(echo -x) 'echo hi'", d),
+            ("bash -c $(echo -x) 'echo hi'; grep -n 'x' notes.py", d),  # the marking ends at the ;
+            ("bash -c -o 'pipefail' 'echo hi'\necho \"python3 measure.py\"", d),  # and at a newline (Viktor 41917)
+            ('sort -c "x"', d),
+            ("bash x.sh -c 'notes.py'", d),  # no file named so is run by the payload rules: notes.py is clean
+            ('bash -c -x ; echo "python3 measure.py"', d),  # the all-quotes rule ends at the shell's command
+            ('grep -c x f; echo "a" "python3 measure.py"', d),  # a non-shell -c: its first quote, in its command only
+            ('grep -c x f; echo "python3 measure.py"', d),  # no quote in the -c's command: nothing is marked
+            ('bash x.sh; grep -c x "a" "python3 measure.py"', d),  # a shell in an EARLIER command: first quote only
+            # the boundaries (Viktor 41790 INFO 2): -mMOD stops the walk, exactly MAX_ARGS words, a cat of 64 words,
+            # CAT_RX after a closing quote is not a command
+            ('python3 -mlist ' + 'a ' * 70, d),
+            ('python3 list.py ' + ' '.join(f'a{i}' for i in range(63)), d),
+            ('cat ' + 'x ' * 63 + 'list.py | python3', d),
+            ('echo "x" cat measure.py | python3', d),
+            ('python3 ' + 'A' * 4095, d),  # the window ends exactly at the end of the command: nothing unread
             ('python3 list.py ' + ' '.join(f'a{i}' for i in range(62)), d),  # 63 words: inside MAX_ARGS (64)
             ('python3 -c pass ' + 'a ' * 100, d),  # the walk stops at -c: the rest is not a script's words
             ('cd sub2 && cat only.py', d),  # no interpreter: reading a file is not running it
@@ -377,11 +523,63 @@ def script_cases():
             ('python3 ' + 'A' * 5000 + ' measure.py', d),
             ('python3 list.py ' + ' '.join(f'a{i}' for i in range(64)), d),
             ('cat ' + 'x ' * 70 + 'measure.py | python3', d),
+            ('cat ' + 'x ' * 64 + 'list.py | python3', d),  # 65 words
+            ('python3 ' + 'A' * 4096, d),  # one char past the window
         ]
         for cmd, cwd in too_many:
             code, err = bash_in(cmd, cwd)
             if code != 2 or 'script-too-many-args' not in err:
                 fails.append(f'script: past MAX_ARGS/ARGS_WINDOW should block (got {code}): {cmd[:60]!r}')
+        # Viktor 41790 INFO 3: the message says why (the word count and the limit, or the window)
+        _, err = bash_in('python3 list.py ' + ' '.join(f'a{i}' for i in range(69)), d)
+        if '70 szó' not in err or 'MAX_ARGS 64' not in err:
+            fails.append(f'script: too-many-args message should name 70 words and MAX_ARGS 64: {err[:200]!r}')
+        _, err = bash_in('python3 ' + 'A' * 5000, d)
+        if '4096' not in err:
+            fails.append(f'script: window message should name the 4096-char window: {err[:200]!r}')
+        # past the bound a clean payload passes (it is read, not blocked blind; Viktor 41859 A)
+        for cmd in ["bash -c" + " -x" * 5 + " 'echo hi'", "watch" + " -x" * 5 + " 'echo hi'",
+                    "tmux new" + " -e A=1" * 7 + " -e" + " 'echo hi'"]:  # the bounds + 1: 5, 5, 15
+            code, err = bash_in(cmd, d)
+            if code != 0:
+                fails.append(f'script: past the payload bound a clean payload should pass (got {code}): {cmd[:60]!r}')
+        for cmd in ["watch" + " -x" * 4 + " 'echo hi'", "tmux new" + " -e A=1" * 7 + " 'echo hi'"]:  # 4, 14
+            code, err = bash_in(cmd, d)
+            if code != 0:
+                fails.append(f'script: inside the payload bound should pass (got {code}): {cmd[:60]!r}')
+        # source past MAX_ARGS / ARGS_WINDOW with a real first file: the rest is not all read, so it blocks
+        for cmd in ['source runner.sh ' + 'a ' * 70 + 'measure.py', 'source runner.sh ' + 'A' * 5000]:
+            code, err = bash_in(cmd, d)
+            if code != 2 or 'script-too-many-args (source' not in err:
+                fails.append(f'script: source past MAX_ARGS/window should block (got {code}): {cmd[:40]!r}')
+            elif ('MAX_ARGS 64' if 'a a' in cmd else '4096') not in err:
+                fails.append(f'script: source too-many-args message should say why: {err[:200]!r}')
+        # past MAX_TRIES on the sourced file itself: blocks, not "no file, skip the rest" (32 directories x 124
+        # missing words + 1 = 4000 lookups, so runner.sh's first lookup crosses 4000)
+        code, err = bash_in('cd a && ' * 31 + ' ; '.join('python3 ' + ' '.join(f'm{j}' for j in range(62))
+                                                          for _ in range(2)) + ' ; python3 mx ; source runner.sh measure.py', d)
+        if code != 2 or 'script-too-many' not in err:
+            fails.append(f'script: past MAX_TRIES on a sourced file should block (got {code})')
+        code, _ = bash_in('source nonexist.sh ' + 'a ' * 70, d)
+        if code != 0:
+            fails.append(f'script: source of no file with many words should pass (got {code})')
+        # the new payload positions stay linear (Viktor 41790: his first try ran past 5 s on ' -exec' x 12 000)
+        payload_redos = [
+            # past the bound the payload is read, not blocked: a clean one passes, fast (Viktor 41859 A)
+            ('bash -c' + ' -x' * 20000 + " 'a'", 0), ('eval ' * 20000, 0), ('watch -n 1 ' * 10000, 0),
+            ('tmux new ' + 'a ' * 20000, 0), ('tmux new a ' * 10000, 0), (' -exec' * 12000, 0), ('-c ' * 30000, 0),
+            ('watch ' + '-n ' * 20000, 0), ('tmux new a ' * 3, 0), ('bash -c ' * 30000 + "'", 0),
+            # bash as an interpreter whose words run past the window: script-too-many-args, as on 980fb40a
+            ('bash ' * 30000, 2), ('bash' + ' -o x' * 20000 + " -c 'a'", 2), ("watch" + " -x" * 30000 + " 'a'", 0), ('tmux new ' * 20000 + "'", 0),
+            ('sh -c "' * 20000, 0), ('bash' + " -c 'a'" * 30000, 0), ('watch -x -x -x -x -x ' * 20000 + "'", 0), ('bash -c -o pipefail ' + "'a' " * 20000, 0), ('do shell script \\' * 20000, 0),
+            ('do shell script ' * 10000, 0), ('os.system(' * 20000, 0), ('"python3" ' * 20000, 2),  # past MAX_ARGS: blocks, fast
+        ]
+        for cmd, want in payload_redos:
+            t = _t.monotonic()
+            code, _ = bash_in(cmd, d)
+            took = _t.monotonic() - t
+            if code != want or took > 2:
+                fails.append(f'script: payload padding {cmd[:24]!r}: want rc {want} under 2 s, got {code} in {took:.1f} s')
         # Viktor 41756 INFO 4 (s1): past MAX_TRIES (4000) path lookups the gate blocks. 31 directories x 3 calls x
         # 60 missing words = 5580 lookups, no file found anywhere.
         code, err = bash_in('cd a && ' * 30 + ' ; '.join('python3 ' + ' '.join(f'm{j}' for j in range(60))
@@ -395,7 +593,7 @@ def script_cases():
         took = _t.monotonic() - t
         if took > 2:
             fails.append(f'script: 30 000 interpreter calls took {took:.1f} s (want under 2 s)')
-        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2
+        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos)
 
 
 def main():
