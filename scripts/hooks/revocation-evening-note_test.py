@@ -118,6 +118,34 @@ NOTE = [  # (command, the phrase the item must carry)
     # a chain longer than WRAP_PASSES is walked in one pass; an assignment with a quoted blank is skipped
     ('sudo -u a ' * 6 + 'gh auth logout', 'gh logout'),
     ('env -i A="x y" claude mcp logout higgsfield', 'claude mcp logout higgsfield'),
+    # Viktor 42360: a newline inside a quote is no command boundary, except where the quoted lines do run
+    ("bash -c 'cd /tmp\ngh auth logout'", 'gh logout'),
+    ('/bin/sh -lc "cd /tmp\nvercel logout"', 'vercel logout'),
+    ("eval 'cd /tmp\ngh auth logout'", 'gh logout'),
+    ('X="$(cd /tmp\ngh auth logout)"', 'gh logout'),
+    ('echo "a\nb"\ngh auth logout', 'gh logout'),  # after the closed quote the next line runs
+    ("echo 'unclosed\ngh auth logout", 'gh logout'),  # an unclosed quote is not trusted to hide a line
+    ("# don't\ngh auth logout\necho 'x'", 'gh logout'),  # an apostrophe in a comment opens no quote
+    ('X="`cd /tmp\ngh auth logout`"', 'gh logout'),  # a `...` inside "..." runs its lines
+    ("A='x' B=$HOME/y gh auth logout", 'gh logout'),
+    ('A="x"y\'z\' claude logout', 'claude logout'),
+    # Viktor 42397: every other way a shell runs a multi-line quote (the base noted these by accident)
+    ("echo 'x\ngh auth logout' | bash", 'gh logout'),
+    ("printf 'x\ngh auth logout' | sudo /bin/sh", 'gh logout'),
+    ("bash <<< 'x\nclaude logout'", 'claude logout'),
+    ("su -c 'x\ngh auth logout' root", 'gh logout'),
+    ("runuser -c 'x\ngh auth logout' u", 'gh logout'),
+    ("script -c 'x\ngh auth logout' /dev/null", 'gh logout'),
+    ("bash -c -- 'x\ngh auth logout'", 'gh logout'),
+    ("bash -c $'x\ngh auth logout'", 'gh logout'),
+    ("eval $'x\ngh auth logout'", 'gh logout'),
+    ("fish -c 'x\ngh auth logout'", 'gh logout'),
+    ("echo 'x\ngh auth logout' | fish", 'gh logout'),
+    # the surviving mutants of the 42397 round: each line is the one that kills one
+    ("(bash -c 'x\ngh auth logout')", 'gh logout'),
+    ("bash --noprofile --norc -o pipefail -o errexit -c 'x\ngh auth logout'", 'gh logout'),
+    ("true;# it's\ngh auth logout\n# x'", 'gh logout'),
+    ('X="' + 'a' * 40 + '" gh auth logout', 'gh logout'),
 ]
 QUIET = [
     'git commit -m "fix: gh auth logout docs"',
@@ -148,6 +176,24 @@ QUIET = [
     'python3 -c "print(\'gh auth logout\')"',
     'vercel --scope "my logout"',  # a flag's word never starts with a quote: the quoted text is no subcommand
     'sudo -u $(echo gh auth logout) ls',  # echo runs inside, sudo runs ls
+    # Viktor 42360 (the 11-14 05:14 probe put three false items in Patrik's evening block): a multi-line quoted
+    # value and an echo of multi-line quoted text name revocations on lines of their own; nothing runs them
+    'CMDS="probe\nclaude mcp logout higgsfield\nclaude mcp remove github-dave"\nfor c in $CMDS; do :; done',
+    "echo 'probe output:\nclaude mcp logout higgsfield\nclaude mcp logout github-dave'",
+    'echo "probe output:\ngh auth logout"',
+    'CMDS="probe claude mcp logout higgsfield"',  # an assignment's quoted value is one word, on one line too
+    "X='a gh auth logout'",
+    "echo $'a\\'\nclaude logout'",  # in $'...' a backslash escapes the quote: the string goes on
+    'echo "a\\"\ngh auth logout"',  # an escaped " does not close "..."
+    'echo "$(date)\nclaude logout"',  # a closed $(...) inside "..." gives the string back
+    # Viktor 42397: a pipe or here-string to anything that is no shell does not run the quote
+    "echo 'x\ngh auth logout' | grep foo",
+    "echo 'x\ngh auth logout' | sha256sum",  # sh then a word character: no shell
+    "echo 'x\ngh auth logout' | shfmt",
+    "echo 'x\ngh auth logout' | bash-completion",
+    "grep x <<< 'a\ngh auth logout'",
+    "cat <<E\nit's\nE\necho 'x\ngh auth logout'",  # an apostrophe in a heredoc body: the heredoc goes first
+    "'a\ngh auth logout'",  # a quoted command name is no shell
 ]
 
 
@@ -317,7 +363,10 @@ def main():
                     'eval ' * 30000, 'xargs -I a ' * 20000, '/' * 100000 + 'claude logout', 'a/' * 50000 + 'gh',
                     'gh' + ' --x y' * 20000 + ' auth logout', 'system("' * 20000, ';sudo' * 30000,
                     'sudo -u a; ' * 20000, 'sudo -u $(' * 20000, '$(sudo -u a ' * 20000 + 'x',
-                    'sudo -u "$(sudo -u a ' * 10000, 'sudo -u $(x) ' * 20000 + 'gh auth logout', '(' * 50000 + ')' * 50000]:
+                    'sudo -u "$(sudo -u a ' * 10000, 'sudo -u $(x) ' * 20000 + 'gh auth logout', '(' * 50000 + ')' * 50000,
+                    # Viktor 42360: the quote scan and the assignment value
+                    'a=b=c=d ' * 12000, 'a="b"c"d"e ' * 9000, 'a="' * 30000, '"a\n' * 30000 + '"',
+                    "bash -c '\n" * 20000, '"$(\n' * 20000]:
             n += 1
             t = time.monotonic()
             rc = run_hook(cmd, os.path.join(d, 'redos.json'))

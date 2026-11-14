@@ -19,7 +19,12 @@ the CLI and its subcommand (gh --hostname h auth logout) too):
   gcloud auth revoke, aws sso logout, security delete-generic-password|delete-internet-password [-s <service>],
   git credential[-osxkeychain] reject|erase, curl ... https://<host>/.../revoke|logout|signout.
   A CLAUDE_CONFIG_DIR=.../agents/<name>/... in the command names whose config it was.
-Not counted: the words inside a quoted argument (`git commit -m "gh auth logout"`), a heredoc body fed to anything
+Not counted: the words inside a quoted argument (`git commit -m "gh auth logout"`), the later lines of a multi-line
+quoted value or argument (`CMDS="probe<newline>claude mcp logout x"`, `echo '...<newline>gh auth logout'`: a newline
+inside a closed quote is no command boundary, and an assignment's quoted value is one word; Viktor 42360, the 11-14
+probe that put three false items in Patrik's block) unless a shell runs that quote (`bash -c '...'`, `eval "..."`,
+`su -c`, `bash -c -- $'...'`, `bash <<< '...'`, `'...' | bash`, a $(...) or `...` inside "..."; Viktor 42401 LOW 1),
+a heredoc body fed to anything
 but a shell (`cat <<'E'` notes), a revocation inside a script file the command runs (that script calls
 scripts/este-blokk-add.py itself), and a command that failed (PostToolUseFailure is not wired).
 Only the matched phrase is written, never the command (it may carry a secret). Never blocks: always exit 0.
@@ -41,7 +46,12 @@ Only the first MAX_CMD characters are read (an unterminated-heredoc flood was qu
 Known misses (after card 1a2eb541): the list form in inline code (subprocess.run(['gh', 'auth', 'logout'])), a
 string a wrapper splits itself (env -S 'gh auth logout', npx -c '...'), a wrapper not in WRAP_ARGS whose flag takes a
 word (su, runuser, ionice, taskset ...), a wrapper followed by more than MAX_ARGS words, a CLI named through a
-variable, alias or $(which gh), and a flag argument that starts with a quote (`gh --hostname "h" auth logout`).
+variable, alias or $(which gh), a flag argument that starts with a quote (`gh --hostname "h" auth logout`), and the
+later lines of a multi-line quoted string a shell other than `sh -c`/`eval` runs (`ssh host '...'`; it runs on
+another machine), and an assignment before the command past ASSIGN_VALUE's bounds (a bare run over 256, a quoted
+part over 2000, more than 8 quoted parts: no natural command; the bounds keep the regex linear; Viktor 42401 INFO 1).
+Known extra items (a needless line): a call position inside quoted text is still read as one
+(`echo 'os.system("gh auth logout")'`, a `$(gh auth logout)` inside '...'), as before.
 Wiring: .claude/settings.json PostToolUse, matcher "Bash" (every agent). Tests: revocation-evening-note_test.py.
 """
 import json
@@ -55,10 +65,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 # linear (the keychain gate's ReDoS lessons, card bc009036). A string handed to a call in inline code
 # (`python3 -c "import os; os.system('gh auth logout')"`, execSync(`...`)) is a command position too (Viktor 41840
 # LOW 4); a wrapper with flags (`sudo -u root`, `env -i`, `timeout -s KILL 5`) is read by wrap_marks() below.
+# An assignment's value is one word, a quoted part with its blanks included (`CMDS="probe claude mcp logout x"` is
+# no logout; Viktor 42360): bare characters and closed quotes, each bounded, a quote not closed on its line no value.
+# Bare runs never meet, so there is no backtracking between them (`a=b=c=d ` x 12 000 stays linear).
+ASSIGN_VALUE = r'[^\s;&|\'"]{0,256}(?:(?:"[^"\n]{0,2000}"|\'[^\'\n]{0,2000}\')[^\s;&|\'"]{0,256}){0,8}'
 POS = (r'(?:^|[;&|(\n`]|\$\(|[ \t]-[A-Za-z]*c[ \t]+[\'"]'
        r'|\b(?:system|popen|getoutput|getstatusoutput|check_output|check_call|call|run|Popen|execSync|spawnSync|exec)'
        r'\([ \t]*\[?[ \t]*[fbr]?[\'"`])[ \t]*'
-       r'(?:(?:\w+=[^\s;&|]*|env|sudo|npx|exec|command|nohup|timeout[ \t]+[\d.]+[smh]?)[ \t]+){0,6}')
+       r'(?:(?:\w+=' + ASSIGN_VALUE + r'|env|sudo|npx|exec|command|nohup|timeout[ \t]+[\d.]+[smh]?)[ \t]+){0,6}')
 PFX = r'(?:[\w.~/-]{0,256}/)?'  # a CLI by path: /usr/local/bin/claude, ~/.local/bin/claude (Viktor 41840 LOW 4)
 # flags between the CLI and its subcommand (`gh --hostname github.com auth logout`); an argument never starts with a
 # quote or a dash, so `claude -p "please logout"` is no logout
@@ -314,9 +328,109 @@ def strip_heredocs(cmd):
     return '\n'.join(out)
 
 
+SHELLS = {'bash', 'sh', 'zsh', 'dash', 'ksh', 'fish'}
+C_RUNNERS = SHELLS | {'su', 'runuser', 'script'}
+CMD_SEP = ';&|\n(`'
+PIPE_TO_SHELL = re.compile(r'[ \t]*\|[ \t]*(?:(?:sudo|env|exec|command|nohup)[ \t]+)*(?:\S*/)?(?:bash|sh|zsh|dash|ksh|fish)(?![\w-])')
+
+
+def runs_as_shell(text, q, end):
+    """True when the quote opening at q (closing at end) is a string a shell runs line by line: `bash -c '...'`,
+    `sh -lc "..."`, `eval '...'`, `bash -c $'...'`, `bash -c -- '...'`, `su -c '...'`, `bash <<< '...'`, `... | bash`.
+    Only the current simple command is looked at (back to the last ; & | newline ( `, at most 300 characters), and
+    only for a quote that spans a newline, so the cost stays small."""
+    if PIPE_TO_SHELL.match(text, end + 1):
+        return True
+    seg = text[max(0, q - 300):q]
+    if seg.endswith('$'):
+        seg = seg[:-1]
+    words = seg[max(seg.rfind(c) for c in CMD_SEP) + 1:].split()
+    if words and words[-1] == '--':
+        words.pop()
+    if not words:
+        return False
+    if words[-1] == 'eval':
+        return True
+    if words[-1] == '<<<':
+        return any(w.rsplit('/', 1)[-1] in SHELLS for w in words[:-1])
+    if not re.fullmatch(r'-[A-Za-z]*c', words[-1]):
+        return False
+    return any(w.rsplit('/', 1)[-1] in C_RUNNERS for w in words[:-1])
+
+
+def blank_quoted_newlines(text):
+    """text with every newline inside a closed '...', $'...' or "..." made a blank (same length, so positions still
+    compare): a quoted value is one word, its later lines are no command position (Viktor 42360 LOW: a multi-line
+    quoted value or `echo "..."` naming `claude mcp logout x` on a line of its own put a false item in Patrik's
+    evening block). Kept: a quote a shell runs (`bash -c '...'`, `eval "..."`: its lines are commands), a $(...) or
+    `...` inside "..." (it runs), and an unclosed quote (a missed revocation cost Patrik a login, a needless line
+    costs a line). One pass, a backslash escapes outside '...', a # at a word start is a comment to the line end."""
+    stack = []  # [kind, start, newline positions]; kind: sq ansi dq sub bt
+    blank = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        top = stack[-1][0] if stack else None
+        if top == 'sq':
+            if ch == "'":
+                kind, q, nl = stack.pop()
+                if nl and not runs_as_shell(text, q, i):
+                    blank.extend(nl)
+            elif ch == '\n':
+                stack[-1][2].append(i)
+            i += 1
+            continue
+        if ch == '\\':
+            i += 2
+            continue
+        if top in ('dq', 'ansi'):
+            closing = '"' if top == 'dq' else "'"
+            if ch == closing:
+                kind, q, nl = stack.pop()
+                if nl and not runs_as_shell(text, q, i):
+                    blank.extend(nl)
+            elif ch == '\n':
+                stack[-1][2].append(i)
+            elif top == 'dq' and ch == '$' and text.startswith('$(', i):
+                stack.append(['sub', i, []])
+                i += 2
+                continue
+            elif top == 'dq' and ch == '`':
+                stack.append(['bt', i, []])
+            i += 1
+            continue
+        # unquoted, or inside a $(...) / `...`: shell text
+        if ch == "'":
+            stack.append(['ansi' if i > 0 and text[i - 1] == '$' else 'sq', i, []])
+        elif ch == '"':
+            stack.append(['dq', i, []])
+        elif ch == '$' and text.startswith('$(', i):
+            stack.append(['sub', i, []])
+            i += 2
+            continue
+        elif ch == ')' and top == 'sub':
+            stack.pop()
+        elif ch == '`':
+            if top == 'bt':
+                stack.pop()
+            else:
+                stack.append(['bt', i, []])
+        elif ch == '#' and (i == 0 or text[i - 1] in ' \t\n;&|('):
+            j = text.find('\n', i)
+            i = n if j < 0 else j
+            continue
+        i += 1
+    if not blank:
+        return text
+    chars = list(text)
+    for k in blank:
+        chars[k] = ' '
+    return ''.join(chars)
+
+
 def phrases(cmd):
     """The revocations in a command, as short phrases (no command text beyond the match)."""
-    text = strip_heredocs(cmd[:MAX_CMD].replace('\\\n', ' '))
+    text = blank_quoted_newlines(strip_heredocs(cmd[:MAX_CMD].replace('\\\n', ' ')))
     marked = wrap_marks(text)
     out = []
     known = None
