@@ -9,7 +9,8 @@
 # Conditions: Viktor 41944.
 #
 # What it does: one `git ls-remote --symref https://github.com/<owner/repo>.git HEAD refs/pull/<n>/head`, with
-# every credential path shut. No system or global git config (the system config on the mini sets
+# every credential path shut (and the caller's TLS and proxy settings dropped: no proxy, verified TLS, the
+# system's CA store; a fleet egress proxy would make this fail closed, ERROR). No system or global git config (the system config on the mini sets
 # credential.helper=osxkeychain, which would hand a private repository the login keychain's GitHub credential),
 # credential.helper emptied, askpass a program that fails, no terminal prompt, https only, no redirect, HOME and
 # cwd an empty directory (no repository config, insteadOf or hook applies). There is no fallback: a failure is
@@ -36,6 +37,8 @@
 # PR_HEAD_TEST_ONLY_REMOTE_BASE: for the tests only. Replaces https://github.com with a file:/// path or an
 # http://127.0.0.1:<port> server; anything else is refused. Credentials are off either way.
 set -u
+# Byte-wise character classes: [A-Za-z] and [:print:] must not take in accented or other non-ASCII letters.
+export LC_ALL=C
 
 measured_at=$(date '+%Y-%m-%d %H:%M:%S %Z')
 repo=${1:-}; pr=${2:-}; expected=${3:-}
@@ -48,23 +51,27 @@ report() {  # report <result> <exit>
   exit "$2"
 }
 
-# Validation before anything runs. A rejected argument is shown as "-", never printed back.
+# Validation before anything runs, on the WHOLE string (bash [[ =~ ]]; a line-wise grep let "7<newline>text"
+# through, Viktor 41945 LOW 1). A rejected argument is shown as "-", never printed back.
 repo_ok=-; pr_ok=-; exp_ok=-
 bad() { repo=$repo_ok; pr=$pr_ok; expected=$exp_ok; report "ERROR usage: $1" 2; }
 [ $# -eq 3 ] || bad "pr-head.sh <owner/repo> <pr-number> <expected-sha-40-hex>"
-# owner: letters, digits, dashes, no leading dash; repo: letters, digits, dot, dash, underscore, no leading dot
-# or dash, no "..".
-if printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$' \
-   && ! case "$repo" in (*..*) true;; (*) false;; esac; then repo_ok=$repo; else bad "owner/repo"; fi
-if printf '%s' "$pr" | grep -Eq '^[1-9][0-9]{0,6}$'; then pr_ok=$pr; else bad "pr-number (1-7 digits)"; fi
-if printf '%s' "$expected" | grep -Eq '^[0-9a-f]{40}$'; then exp_ok=$expected; else bad "expected sha (exactly 40 lower-case hex)"; fi
+for a in "$repo" "$pr" "$expected"; do
+  case "$a" in (*[![:print:]]*|*' '*) bad "control character or space in an argument";; esac
+done
+# owner: letters, digits, dashes, no leading dash; repo: letters, digits, dot, dash, underscore, no leading dash,
+# not "." and no ".." anywhere (".github" is fine).
+if [[ $repo =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.][A-Za-z0-9_.-]{0,99}$ ]] && [[ $repo != *..* ]] \
+   && [[ $repo != */. ]]; then repo_ok=$repo; else bad "owner/repo"; fi
+if [[ $pr =~ ^[1-9][0-9]{0,6}$ ]]; then pr_ok=$pr; else bad "pr-number (1-7 digits)"; fi
+if [[ $expected =~ ^[0-9a-f]{40}$ ]]; then exp_ok=$expected; else bad "expected sha (exactly 40 lower-case hex)"; fi
 
 prefix=https://github.com; protocol=https
 if [ -n "${PR_HEAD_TEST_ONLY_REMOTE_BASE:-}" ]; then
   t=$PR_HEAD_TEST_ONLY_REMOTE_BASE
-  if printf '%s' "$t" | grep -Eq '^file:///[A-Za-z0-9_./-]+$' && ! case "$t" in (*..*) true;; (*) false;; esac; then
+  if [[ $t =~ ^file:///[A-Za-z0-9_./-]+$ ]] && [[ $t != *..* ]]; then
     prefix=${t%/}; protocol=file
-  elif printf '%s' "$t" | grep -Eq '^http://127\.0\.0\.1:[0-9]{1,5}$'; then
+  elif [[ $t =~ ^http://127\.0\.0\.1:[0-9]{1,5}$ ]]; then
     prefix=$t; protocol=http
   else
     report "ERROR usage: PR_HEAD_TEST_ONLY_REMOTE_BASE must be file:///<path> or http://127.0.0.1:<port>" 2
@@ -79,11 +86,15 @@ FAIL=/usr/bin/false; [ -x "$FAIL" ] || FAIL=/bin/false
 
 ( cd "$empty" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT \
     -u GIT_SSH -u GIT_SSH_COMMAND -u GIT_PROXY_COMMAND -u GIT_TRACE -u GIT_TRACE_CURL -u GIT_CURL_VERBOSE \
-    HOME="$empty" XDG_CONFIG_HOME="$empty" \
+    -u GIT_SSL_NO_VERIFY -u GIT_SSL_CAINFO -u GIT_SSL_CAPATH -u GIT_SSL_CERT -u GIT_SSL_KEY -u GIT_SSL_CERT_PASSWORD_PROTECTED \
+    -u SSL_CERT_FILE -u SSL_CERT_DIR -u CURL_CA_BUNDLE \
+    -u http_proxy -u https_proxy -u HTTPS_PROXY -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY \
+    HOME="$empty" XDG_CONFIG_HOME="$empty" LC_ALL=C LANG=C \
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null \
     GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$FAIL" SSH_ASKPASS="$FAIL" GCM_INTERACTIVE=never \
     GIT_ALLOW_PROTOCOL="$protocol" \
     git -c credential.helper= -c core.askPass="$FAIL" -c http.followRedirects=false \
+      -c http.sslVerify=true -c http.proxy= \
       -c http.lowSpeedLimit=1 -c http.lowSpeedTime=20 \
       ls-remote --symref "$url" HEAD "refs/pull/$pr/head" ) >"$out" 2>"$err"
 rc=$?

@@ -13,7 +13,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 S="$ROOT/scripts/pr-head.sh"
 [ -e "$S" ] || { echo "FATAL: the script under test is missing: $S" >&2; exit 2; }
 
-FAILS=0; DONE=0
+FAILS=0; DONE=0; NLC=0
 check() { DONE=$((DONE+1)); if [ "$2" = "0" ]; then echo "PASS  $1"; else echo "FAIL  $1${3:+  -- $3}"; FAILS=$((FAILS+1)); fi; }
 t() { "$@" && echo 0 || echo 1; }
 
@@ -71,7 +71,7 @@ while IFS='|' read -r a b c n; do
 done <<EOF
 acme/a..b|7|$PRH|
 acme/..|7|$PRH|
-acme/.x|7|$PRH|
+acme/x..|7|$PRH|
 -acme/tool|7|$PRH|
 acme|7|$PRH|
 acme/tool|0|$PRH|
@@ -82,6 +82,21 @@ acme/tool|7|$UPPER|
 acme/tool|7||
 acme/tool|7|$PRH|extra
 EOF
+# whole-string validation: a newline, tab, space or non-ASCII byte in any argument is a usage ERROR, before git runs
+# (Viktor 41945 LOW 1: a line-wise grep let "7<newline>text" through). The marker proves git never ran.
+NL=$'\n'; TAB=$'\t'
+for args in "acme/tool|7${NL}x|$PRH" "acme/tool${NL}x|7|$PRH" "acme/tool|7|$PRH${NL}x" "acme/tool|7${TAB}|$PRH" \
+            "acme/tool|7 |$PRH" "acme/tööl|7|$PRH" "acme/tool|7|${NL}$PRH"; do
+  IFS='|' read -r -d '' a b c <<<"$args"; c=${c%$'\n'}
+  rc=$(run "$a" "$b" "$c")
+  check "usage ERROR for a control/space/non-ASCII argument #$((++NLC))" "$([ "$rc" = 2 ] && grep -q '^result: ERROR usage' "$SB/o" && echo 0 || echo 1)" "rc=$rc $(grep result "$SB/o")"
+done
+# a leading dot is a valid repository name (".github"), "." is not
+rc=$(run acme/.github 7 "$PRH")
+check ".github passes validation (git then finds no such repo: ERROR, not usage)" "$([ "$rc" = 2 ] && ! grep -q '^result: ERROR usage' "$SB/o" && echo 0 || echo 1)" "$(grep result "$SB/o")"
+rc=$(run acme/. 7 "$PRH")
+check "acme/. is a usage ERROR" "$([ "$rc" = 2 ] && grep -q '^result: ERROR usage' "$SB/o" && echo 0 || echo 1)"
+
 rc=$(run 'acme/$(touch x)' 7 "$PRH")
 check "rejected repo is shown as -, not echoed" "$([ "$rc" = 2 ] && has "repo: -" && ! grep -q 'touch' "$SB/o" && echo 0 || echo 1)" "$(cat "$SB/o")"
 
@@ -146,7 +161,9 @@ cat > "$SB/bin/git" <<STUB
 { echo "ARGS \$*"; echo "PWD \$PWD"; echo "HOME \$HOME"; echo "NOSYSTEM \${GIT_CONFIG_NOSYSTEM:-}";
   echo "SYSTEM \${GIT_CONFIG_SYSTEM:-}"; echo "GLOBAL \${GIT_CONFIG_GLOBAL:-}"; echo "PROMPT \${GIT_TERMINAL_PROMPT:-}";
   echo "ASKPASS \${GIT_ASKPASS:-unset}"; echo "SSH_ASKPASS \${SSH_ASKPASS:-unset}"; echo "ALLOW \${GIT_ALLOW_PROTOCOL:-unset}";
-  echo "PARAMS \${GIT_CONFIG_PARAMETERS:-unset}"; } > "$SB/stub.log"
+  echo "PARAMS \${GIT_CONFIG_PARAMETERS:-unset}"; echo "SSLNOVERIFY \${GIT_SSL_NO_VERIFY:-unset}";
+  echo "CAINFO \${GIT_SSL_CAINFO:-unset}"; echo "PROXY \${https_proxy:-unset} \${HTTPS_PROXY:-unset} \${ALL_PROXY:-unset}";
+  echo "LCALL \${LC_ALL:-unset}"; } > "$SB/stub.log"
 case "\${STUB_MODE:-}" in
   private) echo "fatal: could not read Username for 'https://github.com': terminal prompts disabled LEAKME" >&2; exit 128 ;;
   net) echo "fatal: unable to access 'https://github.com/acme/tool.git/': Could not resolve host LEAKME" >&2; exit 128 ;;
@@ -155,7 +172,8 @@ STUB
 chmod +x "$SB/bin/git"
 stub() { STUB_MODE=$1 GIT_CONFIG_NOSYSTEM=0 GIT_CONFIG_SYSTEM="$SB/sys.cfg" GIT_CONFIG_GLOBAL="$SB/glob.cfg" \
   GIT_TERMINAL_PROMPT=1 GIT_ASKPASS=/bin/echo SSH_ASKPASS=/bin/echo GIT_ALLOW_PROTOCOL=https:ssh:file \
-  GIT_CONFIG_PARAMETERS="'credential.helper'='store'" PATH="$SB/bin:$PATH" bash "$S" acme/tool 7 "$PRH" >"$SB/o" 2>"$SB/e"; echo $?; }
+  GIT_CONFIG_PARAMETERS="'credential.helper'='store'" GIT_SSL_NO_VERIFY=1 GIT_SSL_CAINFO=/tmp/ca.pem \
+  https_proxy=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 LC_ALL=hu_HU.UTF-8 PATH="$SB/bin:$PATH" bash "$S" acme/tool 7 "$PRH" >"$SB/o" 2>"$SB/e"; echo $?; }
 L="$SB/stub.log"
 rc=$(stub private)
 check "private repo: ERROR exit 2" "$([ "$rc" = 2 ] && grep -q '^result: ERROR not readable anonymously' "$SB/o" && echo 0 || echo 1)" "rc=$rc"
@@ -172,6 +190,11 @@ check "GIT_ASKPASS fails" "$(t grep -Eqx 'ASKPASS (/usr)?/bin/false' "$L")" "$(g
 check "SSH_ASKPASS fails" "$(t grep -Eqx 'SSH_ASKPASS (/usr)?/bin/false' "$L")"
 check "https only" "$(t grep -qx 'ALLOW https' "$L")"
 check "caller's -c parameters dropped" "$(t grep -qx 'PARAMS unset' "$L")"
+check "caller's GIT_SSL_NO_VERIFY dropped" "$(t grep -qx 'SSLNOVERIFY unset' "$L")"
+check "caller's GIT_SSL_CAINFO dropped" "$(t grep -qx 'CAINFO unset' "$L")"
+check "caller's proxy variables dropped" "$(t grep -qx 'PROXY unset unset unset' "$L")"
+check "git runs with LC_ALL=C" "$(t grep -qx 'LCALL C' "$L")"
+check "TLS verification forced, proxy emptied" "$(grep -q -- '-c http.sslVerify=true -c http.proxy= ' "$L" && echo 0 || echo 1)"
 h=$(sed -n 's/^HOME //p' "$L"); p=$(sed -n 's/^PWD //p' "$L")
 check "HOME is not the user's home" "$([ -n "$h" ] && [ "$h" != "$HOME" ] && echo 0 || echo 1)" "HOME=$h"
 check "runs from the empty directory" "$([ "$(cd -P "$p" 2>/dev/null && pwd -P)" = "$(cd -P "$h" 2>/dev/null && pwd -P)" ] || [ "$p" = "$h" ] && echo 0 || echo 1)" "PWD=$p HOME=$h"
