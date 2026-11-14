@@ -157,7 +157,7 @@ const SCHEDULER_READ_RX = new RegExp(String.raw`(^|${SCHED_BOUNDARY}\s*)${SCHED_
 // boundary is a separate uid (H1).
 export const LAUNCHD_OPS_AGENTS = new Set(['pulzus'])
 export const LAUNCHD_KICKSTART_LABELS = new Set(['com.klodel.dashboard', 'hu.myshp.szamla.worker', 'hu.myshp.marabel-watchdog', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato'])
-export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo', 'com.marveen.host-restart-watchdog', 'com.marveen.host-monitor', 'com.marveen.daily-cleanup', 'com.marveen.mem-relief', 'com.marveen.konyveles-hydrate'])
+export const LAUNCHD_BOOT_LABELS = new Set(['hu.myshp.szamla.worker', 'hu.myshp.marabel-incident-passziv', 'hu.myshp.szamla.mozgato', 'hu.myshp.vesz-kapcsolo', 'com.marveen.host-restart-watchdog', 'com.marveen.host-monitor', 'com.marveen.daily-cleanup', 'com.marveen.mem-relief', 'com.marveen.konyveles-hydrate', 'local.bubek'])
 export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // K1 (Viktor 3423, card ad7d3eaa): the worker runs under sandbox-exec denying writes under
   // ~/Library/CloudStorage, plus the ~/Library and ~ directory nodes so a parent rename cannot
@@ -198,6 +198,13 @@ export const LAUNCHD_APPROVED_PLIST_SHA256 = {
   // this install. RunAtLoad + every hour; read-only towards OneDrive (downloads dataless files under
   // Könyvelés, never writes there). Bootstrap and bootout only, nothing kickstarts it.
   'com.marveen.konyveles-hydrate': new Set(['3c907d97d24bfa6fe7415ad2fd2c92f7f131fd27fccce3f872ba9fa4fc545e5d']),
+  // Card 8bd6d7b9 (Viktor 41744 4. and the sequence conditions, Klodel 41764): the Bubek core, the LaunchAgent that
+  // bubekai/bubek tools/install/cli.ts --apply --no-start writes for the release 67e40495 (tree d98fc269, Node.js
+  // 22.23.5 darwin-arm64) for the user klodel with the default data directory. It starts the read-only app copy
+  // app-d98fc26915f1, not the checkout. RunAtLoad + KeepAlive; bootstrap and bootout only, nothing kickstarts it.
+  // Before the bootstrap Pulzus checks that the written plist's sha256 equals this one and the dry run's. A new
+  // release (another tree or Node.js) changes the plist, so it needs a new hash here.
+  'local.bubek': new Set(['a9db25085762f2fc6daecb618a67bd34ca82f02737de2d791c03b22eb0a80c47']),
 }
 const LAUNCHD_BIN = String.raw`(?:/bin/)?launchctl`
 const LAUNCHD_KICKSTART_RX = new RegExp(String.raw`^${LAUNCHD_BIN}\s+kickstart(?:\s+-k)?\s+gui/(\d{1,10})/([A-Za-z0-9.-]{1,100})$`)
