@@ -204,13 +204,19 @@ for text in ['Kész. Nem mértem.', 'A poszt kint van, nem mértem.', '100 db k�
              'Élesben van. Ezt nem mértem le.', 'Kész, Pulzus sem mérte.',
              # other denied measurements (Viktor 41981 LOW 2)
              'Kész. Nincs mérve.', 'Kész. Nem mérve.', 'Kész. Még nincs mérve.', 'Kész. Mérés: nincs.',
-             'Kész. Mérés: nem történt.', 'Kész. Nem is mértem.', 'Kész. Nem  mértem.', 'Kész. Nem\nmértem.']:
+             'Kész. Mérés: nem történt.', 'Kész. Nem is mértem.', 'Kész. Nem  mértem.', 'Kész. Nem\nmértem.',
+             # "sem" / "se" with a word between, now that no lookbehind backs them up (Viktor 41984 INFO 2b)
+             'Kész. Pulzus sem is mérte.', 'Kész. Se én mértem, se Pulzus.', 'Kész. Pulzus sem\tis mérte.']:
     ok(f'a denied measurement is no source: {text!r} -> blocks', gate.unsourced(text, []) != [] and
        not gate.has_source(text, []), (gate.claims(text), gate.unsourced(text, [])))
 ok('a denied measurement is no site measurement', gate.unsourced('A marabel.hu leállt, nem mértem.', []) == [gate.SITE_LABEL])
 ok('a measurement still is one: "Pulzus mérte"', gate.has_source('Kész, Pulzus mérte.', []))
 for text in ['Kész. Nem mértem, de Pulzus mérte.', 'Kész. Nem sokat, de mértem.', 'Kész (mérve: HTTP 200).',
-             'Kész. Mérés: 200 OK.']:
+             'Kész. Mérés: 200 OK.',
+             # a denial ending one line does not reach a measurement on the next (Viktor 41984 INFO 1)
+             'Kész, nincs gond\nmérve: 200', 'Kész. Nem sürgős\nmérve: HTTP 200', 'Kész, nem kell\nPulzus mérte.',
+             # two words between the denial and the measurement: beyond the window (Viktor 41984 INFO 2c)
+             'Kész, nem kell Pulzus mérte.']:
     ok(f'a real measurement next to a denied one is still a source: {text!r}', gate.unsourced(text, []) == [],
        gate.unsourced(text, []))
 ok('site: "nincs mérve" is no measurement', gate.unsourced('A webshop alszik. Nincs mérve.', []) == [gate.SITE_LABEL])

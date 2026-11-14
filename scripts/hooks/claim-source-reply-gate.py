@@ -90,12 +90,12 @@ SITE_EXPLICIT = re.compile(r'\b(webshop|weboldal\w*|honlap\w*|' + PAGE + r')\b|\
 DOWN = re.compile(r'\b(alszik|alszanak|alvo\w*|aludt\w*|leallt\w*|le van allva|leallitva)\b')
 DEPT = re.compile(r'\b\w*reszleg\w*\b')  # reszleg, csapatreszleg (replay 2026-11-10: the correction itself blocked)
 MEASURED = [re.compile(rx) for rx in (
-    r'\bmerve\b|\bmeres\s*:|(?<!\bnem )(?<!\bsem )\bmert(e|em|uk|ek|ed)\b|\bmeresevel\b|\belo(ben)? meres',
+    r'\bmerve\b|\bmeres\s*:|\bmert(e|em|uk|ek|ed)\b|\bmeresevel\b|\belo(ben)? meres',
     r'\bhttp\s?[1-5]\d\d\b|\bstatusz(kod)?\s*:?\s*[1-5]\d\d\b|\bstatus\s*:?\s*[1-5]\d\d\b',
 )]
 SOURCES = [re.compile(rx) for rx in (
     r'(^|\n)\s*forras\s*:',
-    r'\bmerve\b|\bmeres\s*:|(?<!\bnem )(?<!\bsem )\bmert(e|em|uk|ek|ed)\b|\bmeresevel\b|\belo(ben)? meres',
+    r'\bmerve\b|\bmeres\s*:|\bmert(e|em|uk|ek|ed)\b|\bmeresevel\b|\belo(ben)? meres',
     r'\b\w+ szerint\b|\b\w+ jelzese\b|\bforrassal\b|\bforras\s*:',
     r'\bbecsles\s*\([^)]*szerint[^)]*\)',
     r'\bmsg[_ ]?(id)?[:= #]?\s?\d{3,}',
@@ -161,9 +161,12 @@ def claims(text):
 
 
 # A denied measurement is none ("nem mertem", "nem is mertem", "nincs merve", "nem merve", "meres: nincs"): cut it out
-# before the SOURCES / MEASURED patterns look (their lookbehind has a fixed width; \s+ here takes any run of spaces,
-# tabs or newlines, so the text keeps its lines for the "FORRÁS:" line rule). Viktor 41981 LOW 2.
-DENIED_MEAS = re.compile(r'\b(nem|sem|se|nincs)\b(?:\s+\w+)?\s+(mert\w*|merve)\b|\bmeres\s*:\s*(nincs|nem)\b')
+# before the SOURCES / MEASURED patterns look. A measurement right after the denial may follow any run of spaces,
+# tabs or newlines ("nem\nmertem"); the text keeps its lines for the "FORRÁS:" line rule. Viktor 41981 LOW 2.
+# One word between the denial and the measurement counts on the same line only: "Kész, nincs gond" + newline +
+# "mérve: 200" is a real measurement on its own line (Viktor 41984 INFO 1). This rule is the only denial filter: the
+# SOURCES / MEASURED patterns have no lookbehind of their own (Viktor 41984 INFO 2, they were dead code).
+DENIED_MEAS = re.compile(r'\b(nem|sem|se|nincs)\b(?:\s+|[^\S\n]+\w+[^\S\n]+)(mert\w*|merve)\b|\bmeres\s*:\s*(nincs|nem)\b')
 
 
 def _measure_text(text):
