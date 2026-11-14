@@ -1034,7 +1034,7 @@ describe('preCheck walk: launchers, embedded code, parsed imports (Viktor 42514)
   it.each([
     ['eval', 'x=$((1<<N))\neval "$CMD"'],
     ['eval', '(( y = 1 << SHIFT ))\neval x'],
-    ['heredoc', 'echo "cat <<EOF"\npython3 "$F"'],
+    ['heredoc', 'echo x; cat <<EOF\npython3 "$F"'],
     ['interpreter argument', 'echo "cat <<EOF"\npython3 "$F"'],
     ['heredoc', 'cat <<EOF\neval x'],
     ['eval', 'cat <<EOF\neval x'],
@@ -1085,6 +1085,72 @@ describe('preCheck walk: launchers, embedded code, parsed imports (Viktor 42514)
     const walk = wrap(d, 'bash -C "$(dirname "$0")/y.sh"')
     expect(walk.blockers).toEqual([])
     expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
+  // Viktor 42578 LOW A-D, INFO 1-3; 42560 LOW 5 (card 68fbcdb7)
+  it.each([
+    ['heredoc expands', 'cat <<EOF > out.txt\n$(./evilx)\nEOF'],
+    ['heredoc expands', 'cat <<EOF > out.txt\n`./evilx`\nEOF'],
+    ['interpreter -c', 'python3 -Ic "$CODE"'],
+    ['interpreter -c', `python3 "-Ic" 'import localmod'`],
+    ['launcher', '\\python3x python3 x.py'],
+  ])('Viktor 42578: %s is UNRESOLVED (%s)', (kind, body) => {
+    const d = dirWith('v78')
+    const walk = wrap(d, body)
+    expect(walk.blockers.some(b => b.startsWith(`UNRESOLVED ${join(d, 'w.sh')}#${kind}@`)), walk.blockers.join('|')).toBe(true)
+  })
+
+  it.each([
+    ['nested -c with escaped quotes (LOW B)', (d: string) => `bash -c "bash -c \\"python3 ${join(d, 'x.py')}\\""`],
+    ['a backslashed command word (LOW C)', (d: string) => `\\python3 "${join(d, 'x.py')}"`],
+    ['a here-string is no heredoc (LOW D)', (d: string) => `cat <<<'true'\npython3 "${join(d, 'x.py')}"\ntrue`],
+    ['a quoted <<EOF is no heredoc (LOW D)', (d: string) => `echo "cat <<EOF"\npython3 "${join(d, 'x.py')}"\nEOF`],
+    ['a <<EOF in a comment is no heredoc (LOW D)', (d: string) => `true # x <<EOF\npython3 "${join(d, 'x.py')}"\nEOF`],
+    ['a heredoc inside a quoted $( ) is a heredoc (fail-closed mask)', (d: string) => `cd "${d}"\nx="$(python3 - <<'EOF'\nimport localmod\nEOF\n)"`],
+    ['bash -lc (INFO 1)', (d: string) => `bash -lc 'python3 ${join(d, 'x.py')}'`],
+    ['sh -ec (INFO 1)', (d: string) => `sh -ec "python3 ${join(d, 'x.py')}"`],
+    ['python3 -Ic (INFO 1)', (d: string) => `cd "${d}" && python3 -Ic "import localmod"`],
+    ["python3 -c'...' joined (INFO 1)", (d: string) => `cd "${d}" && python3 -c'import localmod'`],
+    ['<<- strips the terminator tabs (INFO 2)', (d: string) => `cd "${d}"\npython3 - <<-'EOF'\nimport localmod\n\tEOF\necho ok`],
+    ['a trailing backslash continues the line (INFO 3)', (d: string) => `python3 \\\n  "${join(d, 'x.py')}"`],
+  ])('the script and its import are walked: %s', (_label, body) => {
+    const d = dirWith('v78ok')
+    const walk = wrap(d, body(d))
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
+  it('INFO 2: an embedding deeper than 3 levels is UNRESOLVED', () => {
+    const d = dirWith('v78deep')
+    let cmd = 'true'
+    for (let k = 0; k < 6; k++) cmd = `sh -c "${cmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+    const walk = wrap(d, cmd)
+    expect(walk.blockers.some(b => b.includes('#embedded depth@')), walk.blockers.join('|')).toBe(true)
+  })
+
+  it.each([
+    ['getattr on an imported module', "getattr(__import__('importlib'), 'import_module')('localmod')"],
+    ['a loader taken as a value', 'import importlib\nf = importlib.import_module\nf("localmod")'],
+    ['__import__ as a value', 'm = __import__\nm("localmod")'],
+    ['a loader fetched by a literal key', "import importlib\nimportlib.__dict__['import_module']('localmod')"],
+    ['getattr with a computed name on a loader module', "import importlib\nfor n in ['import_module']:\n    getattr(importlib, n)('localmod')"],
+    ['getattr with a loader name on an aliased module', "import importlib as lib\ngetattr(lib, 'import_module')('localmod')"],
+    ['an imported loader as a value', 'from importlib import import_module\ng = import_module\ng("localmod")'],
+    ['exec as a value', 'r = exec\nr("import localmod")'],
+  ])('LOW 5: %s is UNRESOLVED', (_label, src) => {
+    const d = dirWith('low5')
+    writeFileSync(join(d, 'x.py'), src + '\n')
+    const walk = wrap(d, 'python3 "$(dirname "$0")/x.py"')
+    expect(walk.blockers.some(b => b.startsWith(`UNRESOLVED ${join(d, 'x.py')}#`)), walk.blockers.join('|')).toBe(true)
+  })
+
+  it.each([
+    ['re.compile and a method named eval', "import re\npat = re.compile('a')\nc = re.compile\nm = model.eval"],
+    ['getattr on a plain object', 'class A: pass\nv = getattr(A(), name, None)'],
+  ])('LOW 5: ordinary code is no marker: %s', (_label, src) => {
+    const d = dirWith('low5ok')
+    writeFileSync(join(d, 'x.py'), src + '\n')
+    expect(wrap(d, 'python3 "$(dirname "$0")/x.py"').blockers).toEqual([])
   })
 
   // Viktor 42560 INFO 2 Q29 / Q30: the import parser runs isolated (-I), and its failure blocks.
