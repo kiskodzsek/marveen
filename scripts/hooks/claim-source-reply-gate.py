@@ -166,7 +166,9 @@ def claims(text):
 # One word between the denial and the measurement counts on the same line only: "Kész, nincs gond" + newline +
 # "mérve: 200" is a real measurement on its own line (Viktor 41984 INFO 1). This rule is the only denial filter: the
 # SOURCES / MEASURED patterns have no lookbehind of their own (Viktor 41984 INFO 2, they were dead code).
-DENIED_MEAS = re.compile(r'\b(nem|sem|se|nincs)\b(?:\s+|[^\S\n]+\w+[^\S\n]+)(mert\w*|merve)\b|\bmeres\s*:\s*(nincs|nem)\b')
+# A denial split by a line break inside ("Nem is" + newline + "mértem") is still one: the word may cross the line
+# when a verb form follows without a colon ("mérve: 200" on its own line stays a measurement). Viktor 42004 LOW 1.
+DENIED_MEAS = re.compile(r'\b(nem|sem|se|nincs)\b(?:\s+|[^\S\n]+\w+[^\S\n]+|[^\S\n]+\w+\s+(?=mert\w*\b(?!\s*:)))(mert\w*|merve)\b|\bmeres\s*:\s*(nincs|nem)\b')
 
 
 def _measure_text(text):
