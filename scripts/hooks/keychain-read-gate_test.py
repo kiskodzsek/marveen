@@ -236,6 +236,15 @@ BLOCK = [
     'HOME=/x > /dev/null git fetch origin',  # the target as a word of its own
     'HOME=/x &>/dev/null git fetch origin',  # the & before and after the operator (mutant, d868a616)
     'HOME=/x >& /dev/null git fetch origin',
+    # Viktor 42295 LOW 1: rows for his surviving mutants (the gate blocked them already; nothing guarded it)
+    'echo a | HOME=/x git fetch origin',  # a pipe ends the simple command (N02)
+    'true | env -i git fetch origin',
+    'echo a | GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'HOME=/x >| f git fetch origin',  # >| with its target as a word of its own (N04)
+    'env >| f HOME=/x git fetch origin',
+    'HOME=/x <<< x git fetch origin',  # << and <<< with the word apart (N05)
+    'HOME=/x << EOF git fetch origin',
+    'HOME=/x <<- EOF git fetch origin',  # the <<- heredoc (N06)
     # Viktor 42251 INFO 6: an expanded word may be the option (`N=-n`): no export
     'export $N GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
     'export `printf -- -n` GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
@@ -310,6 +319,12 @@ BLOCK = [
     'launchctl submit -l a -p /usr/bin/env -- x s3curity dump-keychain',
     'sudo launchctl submit -p /usr/bin/s3curity -l a -- x dump-keychain',
     'launchctl submit -l a -p /bin/echo -- echo hi',  # fail-closed: any -p blocks
+    # Viktor 42295 LOW 1: the p in any flag word, joined or bundled (N33, N34), and <<- before the call (N19)
+    'launchctl submit -l a -p/usr/bin/s3curity -- x dump-keychain',
+    'launchctl submit -lp a /usr/bin/s3curity -- x dump-keychain',
+    'launchctl submit -l a -pl /usr/bin/s3curity -- x dump-keychain',
+    'launchctl submit -l a -op x /usr/bin/s3curity -- x dump-keychain',
+    '<<- EOF s3curity dump-keychain',
     'echo a; >>log s3curity dump-keychain',
     'sudo -u root >/dev/null s3curity dump-keychain',
     'env >>log s3curity dump-keychain',
@@ -802,6 +817,9 @@ def script_cases():
             ('python3 list.py 2>&1 | head', d),
             ('python3 list.py > measure.py', d),  # truncated, not run
             ('echo a >|./measure.py', d),  # the target of >| is written, not run (mutant, d868a616)
+            # Viktor 42295 INFO 2: a | or & ends the interpreter's words; the next command's file is read, not run
+            ('python3 list.py | grep dump measure.py', d),
+            ('python3 list.py & grep dump measure.py', d),
             ('python3 notes.py', d),
             ('python3 word.py', d),
             ('node labels.js', d),
