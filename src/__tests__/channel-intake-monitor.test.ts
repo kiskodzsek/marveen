@@ -10,9 +10,9 @@
 // Inbound silence alone stays a suspicion and must never alert on its own: an
 // agent with nothing to do is legitimately silent for days.
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { homedir, tmpdir } from 'node:os'
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { MAIN_AGENT_ID } from '../config.js'
 import {
@@ -24,6 +24,13 @@ import {
   noTokenStateEntryFor,
   recoveryNoticeFor,
   seedMainStateFrom,
+  seedIntakeStateFromFile,
+  intakeStateSnapshot,
+  applyIntakeProbe,
+  isTokenRejection,
+  resetIntakeObservations,
+  startChannelIntakeMonitor,
+  SEED_MAX_STRETCH_MS,
   STATE_SEED_MAX_AGE_MS,
   INTAKE_ALERT_COOLDOWN_MS,
   unreachableRecoveredAfter,
@@ -438,5 +445,190 @@ describe('seedMainStateFrom: carry the main row over a restart, only when fresh 
     expect(seedMainStateFrom(file({ [MAIN_AGENT_ID]: { ...row, reachable: 'no' } }), NOW)).toBeNull()
     expect(seedMainStateFrom(file({ [MAIN_AGENT_ID]: { ...row, unreachableSince: row.at + 1 } }), NOW)).toBeNull()
     expect(seedMainStateFrom('null', NOW)).toBeNull()
+  })
+})
+
+// Card fe7f332b (Viktor 42107 INFO 3): every non-200 answer used to be read as
+// token-invalid, so a Telegram-side 502/429 or a proxy's HTML page would page the
+// owner about a "rejected token" and cut an outage stretch short.
+describe('parseIntakeProbe: only Telegram refusing the token is a token verdict', () => {
+  it('still reads 401 Unauthorized as a rejected token', () => {
+    expect(isTokenRejection(401, { ok: false, error_code: 401, description: 'Unauthorized' })).toBe(true)
+  })
+
+  it("reads a 404 carrying Telegram's own JSON as a rejected token", () => {
+    const r = parseIntakeProbe(404, { ok: false, error_code: 404, description: 'Not Found' })
+    expect(r.tokenOk).toBe(false)
+    expect(r.reachable).toBe(true)
+  })
+
+  it('NEGATIVE: a 502 from Telegram is not a token verdict and does not alert', () => {
+    const r = parseIntakeProbe(502, { ok: false, error_code: 502, description: 'Bad Gateway' })
+    expect(r).toEqual({ reachable: false, tokenOk: true, pendingUpdates: null, webhookUrl: null, lastErrorMessage: null })
+    const d = decideIntakeVerdict({ probe: r, prev: null, lastInboundAt: null, now: NOW, silenceThresholdMs: SILENCE_MS })
+    expect(d).toEqual({ verdict: 'unreachable', alert: false })
+  })
+
+  it('NEGATIVE: a 429 rate limit is not a token verdict', () => {
+    const r = parseIntakeProbe(429, { ok: false, error_code: 429, description: 'Too Many Requests: retry after 5', parameters: { retry_after: 5 } })
+    expect(r.tokenOk).toBe(true)
+    expect(r.reachable).toBe(false)
+  })
+
+  it("NEGATIVE: a proxy's HTML page (no JSON body) is not a token verdict, whatever its status", () => {
+    for (const status of [403, 404, 500, 502, 503]) {
+      const r = parseIntakeProbe(status, null)
+      expect(r.tokenOk, `status ${status}`).toBe(true)
+      expect(r.reachable, `status ${status}`).toBe(false)
+    }
+  })
+
+  it('NEGATIVE: a 200 without a usable body is not a token verdict', () => {
+    expect(parseIntakeProbe(200, { ok: true }).tokenOk).toBe(true)
+    expect(parseIntakeProbe(200, { ok: true }).reachable).toBe(false)
+    expect(parseIntakeProbe(200, null).tokenOk).toBe(true)
+  })
+
+  it('NEGATIVE: a 5xx in the middle of an outage keeps the stretch going instead of cutting it', () => {
+    const MIN = 60 * 1000
+    const first = intakeStateEntry(parseIntakeProbe(0, null), 'unreachable', NOW, null)
+    const mid = intakeStateEntry(parseIntakeProbe(502, { ok: false, error_code: 502 }), 'unreachable', NOW + 10 * MIN, first)
+    expect(mid.unreachableSince).toBe(NOW)
+  })
+})
+
+// Viktor 42111 LOW (W14, W15): the pure decisions were tested, their call sites were not.
+describe('applyIntakeProbe: the alerts at their call site', () => {
+  const MIN = 60 * 1000
+  const down = probe({ reachable: false, pendingUpdates: null })
+  type Sent = { key: string, text: string, cooldownMs: number }
+  const sender = () => {
+    const sent: Sent[] = []
+    return { sent, send: (key: string, text: string, opts: { cooldownMs: number }) => { sent.push({ key, text, cooldownMs: opts.cooldownMs }) } }
+  }
+  beforeEach(() => resetIntakeObservations())
+
+  it('sends exactly one outage-end notice for the main agent, with the 3 h cooldown', () => {
+    const { sent, send } = sender()
+    applyIntakeProbe(MAIN_AGENT_ID, down, null, NOW, send)
+    applyIntakeProbe(MAIN_AGENT_ID, down, null, NOW + 20 * MIN, send)
+    expect(sent).toEqual([])
+    applyIntakeProbe(MAIN_AGENT_ID, probe(), null, NOW + 35 * MIN, send)
+    applyIntakeProbe(MAIN_AGENT_ID, probe(), null, NOW + 40 * MIN, send)
+    expect(sent).toHaveLength(1)
+    expect(sent[0].key).toBe(`channel-intake:${MAIN_AGENT_ID}:unreachable-recovered`)
+    expect(sent[0].cooldownMs).toBe(INTAKE_ALERT_COOLDOWN_MS)
+    expect(sent[0].text).toContain('kb. 35 percig')
+  })
+
+  it('NEGATIVE: a sub-agent behind the same outage sends nothing', () => {
+    const { sent, send } = sender()
+    applyIntakeProbe('some-sub-agent', down, null, NOW, send)
+    applyIntakeProbe('some-sub-agent', probe(), null, NOW + 40 * MIN, send)
+    expect(sent).toEqual([])
+  })
+
+  it('NEGATIVE: a Telegram-side 502 outage ends in one outage notice and never a token alert', () => {
+    const { sent, send } = sender()
+    const bad = parseIntakeProbe(502, { ok: false, error_code: 502, description: 'Bad Gateway' })
+    for (let m = 0; m <= 35; m += 5) applyIntakeProbe(MAIN_AGENT_ID, bad, null, NOW + m * MIN, send)
+    applyIntakeProbe(MAIN_AGENT_ID, probe(), null, NOW + 40 * MIN, send)
+    expect(sent.map(x => x.key)).toEqual([`channel-intake:${MAIN_AGENT_ID}:unreachable-recovered`])
+  })
+
+  it('sends the deafness alert on a confirmed backlog, with the 3 h cooldown', () => {
+    const { sent, send } = sender()
+    applyIntakeProbe('some-sub-agent', probe({ pendingUpdates: 3 }), null, NOW, send)
+    expect(sent).toEqual([])
+    const d = applyIntakeProbe('some-sub-agent', probe({ pendingUpdates: 3 }), null, NOW + 5 * MIN, send)
+    expect(d.verdict).toBe('deaf-backlog')
+    expect(sent).toHaveLength(1)
+    expect(sent[0].key).toBe('channel-intake:some-sub-agent:deaf-backlog')
+    expect(sent[0].cooldownMs).toBe(INTAKE_ALERT_COOLDOWN_MS)
+  })
+
+  it('records the state row the next write will carry', () => {
+    const { send } = sender()
+    applyIntakeProbe(MAIN_AGENT_ID, probe({ pendingUpdates: 0 }), null, NOW, send)
+    expect(intakeStateSnapshot().get(MAIN_AGENT_ID)).toEqual({ at: NOW, verdict: 'unknown-inbound', reachable: true, tokenOk: true, pending: 0, unreachableSince: null })
+  })
+})
+
+// Viktor 42111 LOW (W07): the seed must actually run when the monitor starts.
+describe('startChannelIntakeMonitor carries the main row over a restart', () => {
+  const MIN = 60 * 1000
+  const row = { at: NOW - 5 * MIN, verdict: 'unreachable', reachable: false, tokenOk: true, pending: null, unreachableSince: NOW - 25 * MIN }
+  beforeEach(() => resetIntakeObservations())
+
+  function withStateFile(body: unknown, fn: (path: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), 'intake-seed-'))
+    vi.useFakeTimers({ now: NOW })
+    try {
+      const path = join(dir, 'channel-intake-state.json')
+      if (body !== undefined) writeFileSync(path, JSON.stringify(body))
+      fn(path)
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('seeds at start, and the first reachable reading reports the stretch from its ORIGINAL start', () => {
+    withStateFile({ writtenAt: row.at, agents: { [MAIN_AGENT_ID]: row } }, (path) => {
+      const timer = startChannelIntakeMonitor('/nonexistent-project-root', { stateFile: path })
+      clearInterval(timer)
+      expect(intakeStateSnapshot().get(MAIN_AGENT_ID)).toEqual(row)
+      const sent: string[] = []
+      applyIntakeProbe(MAIN_AGENT_ID, probe(), null, NOW + 10 * MIN, (_k, text) => { sent.push(text) })
+      expect(sent).toHaveLength(1)
+      expect(sent[0]).toContain('kb. 35 percig')
+      const since = new Date(row.unreachableSince).toLocaleTimeString('hu-HU', { timeZone: 'Europe/Budapest', hour: '2-digit', minute: '2-digit' })
+      expect(sent[0]).toContain(`(${since} óta)`)
+    })
+  })
+
+  it('NEGATIVE: a stale file seeds nothing at start', () => {
+    withStateFile({ writtenAt: 0, agents: { [MAIN_AGENT_ID]: { ...row, at: NOW - 16 * MIN } } }, (path) => {
+      clearInterval(startChannelIntakeMonitor('/nonexistent-project-root', { stateFile: path }))
+      expect(intakeStateSnapshot().has(MAIN_AGENT_ID)).toBe(false)
+    })
+  })
+
+  it('NEGATIVE: a missing file seeds nothing and does not throw', () => {
+    withStateFile(undefined, (path) => {
+      expect(seedIntakeStateFromFile(path, NOW)).toBe(false)
+      expect(intakeStateSnapshot().size).toBe(0)
+    })
+  })
+})
+
+// Viktor 42111 INFO 1 and 3: the seed's lower bound and the type checks are pinned.
+describe('seedMainStateFrom: lower bound and field types', () => {
+  const MIN = 60 * 1000
+  const row = { at: NOW - 5 * MIN, verdict: 'unreachable', reachable: false, tokenOk: true, pending: null, unreachableSince: NOW - 25 * MIN }
+  const file = (r: Record<string, unknown>) => JSON.stringify({ writtenAt: NOW, agents: { [MAIN_AGENT_ID]: r } })
+
+  it('pins the longest carried stretch at 7 days, inclusive', () => {
+    expect(SEED_MAX_STRETCH_MS).toBe(7 * DAY_MS)
+    expect(seedMainStateFrom(file({ ...row, unreachableSince: row.at - 7 * DAY_MS }), NOW)).not.toBeNull()
+  })
+
+  it('NEGATIVE: an older stretch, the epoch or a far-negative start is dropped (no "29910720 percig")', () => {
+    expect(seedMainStateFrom(file({ ...row, unreachableSince: row.at - 7 * DAY_MS - 1 }), NOW)).toBeNull()
+    expect(seedMainStateFrom(file({ ...row, unreachableSince: 0 }), NOW)).toBeNull()
+    expect(seedMainStateFrom(file({ ...row, unreachableSince: -1e15 }), NOW)).toBeNull()
+  })
+
+  it('NEGATIVE: an infinite start, a non-string verdict or a non-number pending is dropped (S07-S09)', () => {
+    const raw = file(row).replace(`"unreachableSince":${row.unreachableSince}`, '"unreachableSince":-1e999')
+    expect(raw).toContain('-1e999')
+    expect(seedMainStateFrom(raw, NOW)).toBeNull()
+    expect(seedMainStateFrom(file({ ...row, verdict: 7 }), NOW)).toBeNull()
+    expect(seedMainStateFrom(file({ ...row, pending: '3' }), NOW)).toBeNull()
+  })
+
+  it('says "kb." in every outage notice: the stretch is measured in 5-minute ticks', () => {
+    expect(formatUnreachableRecovered(MAIN_AGENT_ID, 40 * MIN, NOW)).toContain('a gép kb. 40 percig')
   })
 })

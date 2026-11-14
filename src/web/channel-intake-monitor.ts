@@ -70,7 +70,11 @@ const INITIAL_DELAY_MS = 100 * 1000
 const PROBE_TIMEOUT_MS = 8_000
 
 export interface IntakeProbe {
-  /** false only when OUR side failed to complete the call (network, timeout). */
+  /**
+   * false when no usable Telegram answer came back: our side failed (network,
+   * timeout), or something answered that is not a Telegram verdict on the token
+   * (5xx, 429, a proxy's HTML, a 200 without a usable body).
+   */
   reachable: boolean
   /** false when Telegram answered but rejected the token. */
   tokenOk: boolean
@@ -116,21 +120,35 @@ interface TelegramWebhookInfoBody {
  * `status === 0` is the caller's marker for "the HTTP call never completed",
  * which must NOT be read as a bad token: our own network being down would
  * otherwise page the owner about every agent at once.
+ *
+ * Only Telegram's own refusal is a token verdict: 401, or a 404 carrying
+ * Telegram's JSON (ok:false). Everything else that is not a healthy answer --
+ * 5xx, 429, a proxy's HTML page, a 200 without a usable body -- used to be read
+ * as token-invalid as well, which during a Telegram-side outage would page the
+ * owner about a "rejected token" and cut the outage stretch short (Viktor 42107
+ * INFO 3, card fe7f332b). It is now read like unreachable: no alert, and the
+ * stretch goes on.
  */
-export function parseIntakeProbe(status: number, body: unknown): IntakeProbe {
-  if (status === 0) {
-    return { reachable: false, tokenOk: true, pendingUpdates: null, webhookUrl: null, lastErrorMessage: null }
-  }
+export function isTokenRejection(status: number, body: unknown): boolean {
+  if (status === 401) return true
   const parsed = (body ?? {}) as TelegramWebhookInfoBody
-  if (status !== 200 || parsed.ok !== true || !parsed.result) {
+  return status === 404 && parsed !== null && typeof parsed === 'object' && parsed.ok === false
+}
+
+export function parseIntakeProbe(status: number, body: unknown): IntakeProbe {
+  const unusable: IntakeProbe = { reachable: false, tokenOk: true, pendingUpdates: null, webhookUrl: null, lastErrorMessage: null }
+  if (status === 0) return unusable
+  const parsed = (body ?? {}) as TelegramWebhookInfoBody
+  if (isTokenRejection(status, body)) {
     return {
       reachable: true,
       tokenOk: false,
       pendingUpdates: null,
       webhookUrl: null,
-      lastErrorMessage: parsed.description ?? null,
+      lastErrorMessage: typeof parsed.description === 'string' ? parsed.description : null,
     }
   }
+  if (status !== 200 || parsed.ok !== true || !parsed.result) return unusable
   const pending = parsed.result.pending_update_count
   return {
     reachable: true,
@@ -258,7 +276,9 @@ export function formatUnreachableRecovered(agentName: string, lengthMs: number, 
   const from = new Date(since).toLocaleTimeString('hu-HU', { timeZone: 'Europe/Budapest', hour: '2-digit', minute: '2-digit' })
   // The probe is the dashboard's own call, not the plugin's getUpdates: that the
   // bot was deaf too is an inference, so the sentence says so (Viktor 42107 LOW 2).
-  return `📶 ${agentName}: a gép ${Math.round(lengthMs / MINUTE_MS)} percig nem érte el a Telegramot (${from} óta). Ez alatt a bot valószínűleg befelé süket volt; ami közben jött, feltehetően most egyben érkezik.`
+  // "kb.": the stretch is measured in 5-minute ticks, and after a restart it also
+  // counts the dashboard's own downtime, which no probe saw (Viktor 42111 INFO 2).
+  return `📶 ${agentName}: a gép kb. ${Math.round(lengthMs / MINUTE_MS)} percig nem érte el a Telegramot (${from} óta). Ez alatt a bot valószínűleg befelé süket volt; ami közben jött, feltehetően most egyben érkezik.`
 }
 
 export interface RecoveryNotice {
@@ -294,6 +314,11 @@ export function recoveryNoticeFor(
 // older than this describes another moment and is not carried over.
 export const STATE_SEED_MAX_AGE_MS = 15 * MINUTE_MS
 
+// A carried-over stretch older than this is not an outage we measured: a
+// hand-edited or corrupt file (epoch 0 gave "29910720 percig", Viktor 42111
+// INFO 1) is dropped instead of reported.
+export const SEED_MAX_STRETCH_MS = 7 * DAY_MS
+
 /** Pure: the main agent's row from a previous run's state file, if it is fresh and well-formed; else null. */
 export function seedMainStateFrom(raw: string | null, now: number): IntakeStateEntry | null {
   if (raw == null) return null
@@ -308,6 +333,7 @@ export function seedMainStateFrom(raw: string | null, now: number): IntakeStateE
   if (typeof row.verdict !== 'string' || !numOrNull(row.pending) || !numOrNull(row.unreachableSince)) return null
   if (!boolOrNull(row.reachable) || !boolOrNull(row.tokenOk)) return null
   if (row.unreachableSince != null && row.unreachableSince > row.at) return null
+  if (row.unreachableSince != null && row.unreachableSince < row.at - SEED_MAX_STRETCH_MS) return null
   return {
     at: row.at,
     verdict: row.verdict as IntakeStateEntry['verdict'],
@@ -333,6 +359,28 @@ export function writeIntakeState(path: string, entries: ReadonlyMap<string, Inta
 const lastObservation = new Map<string, IntakeObservation>()
 const lastQuietLogAt = new Map<string, number>()
 const lastState = new Map<string, IntakeStateEntry>()
+
+/** Test seam: a copy of the per-agent state the next write would record. */
+export function intakeStateSnapshot(): Map<string, IntakeStateEntry> {
+  return new Map(lastState)
+}
+
+/**
+ * Carry the main agent's row over a restart (see seedMainStateFrom). Returns
+ * whether a row was carried. Exported so the call in startChannelIntakeMonitor
+ * is testable end to end (Viktor 42111 LOW, W07).
+ */
+export function seedIntakeStateFromFile(path: string, now: number): boolean {
+  try {
+    const seeded = seedMainStateFrom(existsSync(path) ? readFileSync(path, 'utf-8') : null, now)
+    if (!seeded) return false
+    lastState.set(MAIN_AGENT_ID, seeded)
+    return true
+  } catch (err) {
+    logger.debug({ err }, 'channel-intake-monitor: state seed read error')
+    return false
+  }
+}
 
 // A quiet channel is a standing condition, not an event; repeating it every
 // tick would bury the lines that matter in dashboard.log.
@@ -446,6 +494,24 @@ async function checkAgentIntake(agentName: string, projectRoot: string): Promise
   const probe = await probeIntake(token)
   const now = Date.now()
   const lastInboundAt = readLastIngestionTimestampAcross(transcriptDirsFor(agentName, projectRoot))
+  applyIntakeProbe(agentName, probe, lastInboundAt, now)
+}
+
+export type IntakeAlertSender = (key: string, text: string, opts: { cooldownMs: number }) => void
+
+/**
+ * Everything after the HTTP call: verdict, backlog history, state row, the
+ * outage-end notice and the deafness alert. Exported with an injectable sender
+ * so the call sites of both alerts are tested, not just the pure decisions
+ * (Viktor 42111 LOW, W14/W15).
+ */
+export function applyIntakeProbe(
+  agentName: string,
+  probe: IntakeProbe,
+  lastInboundAt: number | null,
+  now: number,
+  send: IntakeAlertSender = sendRoutineAlert,
+): IntakeDecision {
   const decision = decideIntakeVerdict({
     probe,
     prev: lastObservation.get(agentName) ?? null,
@@ -463,7 +529,7 @@ async function checkAgentIntake(agentName: string, projectRoot: string): Promise
   const notice = recoveryNoticeFor(agentName, prevState, probe, now)
   if (notice) {
     logger.warn({ agent: agentName, unreachableSince: prevState?.unreachableSince }, 'channel-intake-monitor: Telegram reachable again after a long outage')
-    sendRoutineAlert(notice.key, notice.text, { cooldownMs: notice.cooldownMs })
+    send(notice.key, notice.text, { cooldownMs: notice.cooldownMs })
   }
 
   const silentForMs = lastInboundAt == null ? null : now - lastInboundAt
@@ -482,22 +548,24 @@ async function checkAgentIntake(agentName: string, projectRoot: string): Promise
         'channel-intake-monitor: no inbound for a long while, but the intake is clean (not an alert on its own)',
       )
     }
-    return
+    return decision
   }
-  if (!decision.alert) return
+  if (!decision.alert) return decision
 
   logger.warn(
     { agent: agentName, verdict: decision.verdict, pending: probe.pendingUpdates, silentForMs },
     'channel-intake-monitor: channel intake is dead',
   )
-  sendRoutineAlert(
+  send(
     `channel-intake:${agentName}:${decision.verdict}`,
     formatIntakeAlert(agentName, decision, probe, silentForMs),
     { cooldownMs: INTAKE_ALERT_COOLDOWN_MS },
   )
+  return decision
 }
 
-export function startChannelIntakeMonitor(projectRoot: string): NodeJS.Timeout {
+export function startChannelIntakeMonitor(projectRoot: string, opts: { stateFile?: string } = {}): NodeJS.Timeout {
+  const stateFile = opts.stateFile ?? INTAKE_STATE_FILE
   let stateWriteWarned = false
   async function check(): Promise<void> {
     const names = [MAIN_AGENT_ID, ...listAgentNames().filter(n => n !== MAIN_AGENT_ID)]
@@ -515,7 +583,7 @@ export function startChannelIntakeMonitor(projectRoot: string): NodeJS.Timeout {
       }
     }
     try {
-      writeIntakeState(INTAKE_STATE_FILE, lastState, Date.now())
+      writeIntakeState(stateFile, lastState, Date.now())
       stateWriteWarned = false
     } catch (err) {
       // A lasting failure (full disk) would otherwise leave a stale file in silence (Viktor 42107 INFO 2).
@@ -524,12 +592,7 @@ export function startChannelIntakeMonitor(projectRoot: string): NodeJS.Timeout {
     }
   }
 
-  try {
-    const seeded = seedMainStateFrom(existsSync(INTAKE_STATE_FILE) ? readFileSync(INTAKE_STATE_FILE, 'utf-8') : null, Date.now())
-    if (seeded) lastState.set(MAIN_AGENT_ID, seeded)
-  } catch (err) {
-    logger.debug({ err }, 'channel-intake-monitor: state seed read error')
-  }
+  seedIntakeStateFromFile(stateFile, Date.now())
 
   // Offset past channel-monitor (30s) and channel-health-monitor (45s) so the
   // three do not share a tick.
