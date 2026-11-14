@@ -360,6 +360,7 @@ describe('Bash: the reject-dir words as prose (card 87aeff67)', () => {
     `A=('a ${V}'); cp -R \${A[@]} /tmp`,
     // pins for the scanner and the allowlist (Kernel's mutation run on Viktor's code: M1, M3, M4, M6-M8, M11, M13)
     `grep -n foo x.md # it's\ncp -R ${V} /tmp/v\necho 'x'`,
+    `grep -n foo x.md # it's\ncp -R ${V} /tmp/v\ngrep -c 'a' y.md # don't`,
     `grep -n $'it\\'s' x ; cp -R ${V} /tmp/v ; echo 'a b'`,
     `grep -n "$(cp -R a ${V} /tmp/v)" x.md`,
     `grep -r foo \${X:-'a ${V}'}`,
