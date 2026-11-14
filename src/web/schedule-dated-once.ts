@@ -13,7 +13,7 @@
 // use this form (it is switched off after its first day); a weekday cron
 // (`... * * 1`) or a month-day cron (`... 15 * *`) is never touched.
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { readJsonObjectForWrite } from './agent-config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { SCHEDULED_TASKS_DIR, type ScheduledTask } from './scheduled-tasks-io.js'
@@ -58,7 +58,13 @@ export function isExpiredDatedTask(
 }
 
 /** Switch one task off on disk. Re-reads the config: a task already off, or gone, is left as it is. */
-export function disableScheduledTaskOnDisk(name: string, dir: string = SCHEDULED_TASKS_DIR): boolean {
+export function disableScheduledTaskOnDisk(
+  name: string,
+  dir: string = SCHEDULED_TASKS_DIR,
+  expect?: { schedule?: string; createdAt?: number },
+): boolean {
+  // task.name can come from the SKILL.md frontmatter, not from the directory: only a plain directory name is written to
+  if (!name || basename(name) !== name || name.startsWith('.')) return false
   const configPath = join(dir, name, 'task-config.json')
   // a task removed meanwhile is not re-created as a bare {enabled:false}
   if (!existsSync(configPath)) return false
@@ -69,6 +75,8 @@ export function disableScheduledTaskOnDisk(name: string, dir: string = SCHEDULED
     return false
   }
   if (config.enabled === false) return false
+  // the config that is on disk must be the one the expiry was decided on (a frontmatter name can point at another task)
+  if (expect && (config.schedule !== expect.schedule || config.createdAt !== expect.createdAt)) return false
   config.enabled = false
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
   return true
@@ -84,12 +92,13 @@ export function disableExpiredDatedTasks(
   nowMs: number,
   marginMs: (task: Pick<ScheduledTask, 'type' | 'catchUpMaxAgeMinutes'>) => number,
   pending: (name: string) => boolean = () => false,
-  disable: (name: string) => boolean = disableScheduledTaskOnDisk,
+  disable: (name: string, expect?: { schedule?: string; createdAt?: number }) => boolean =
+    (name, expect) => disableScheduledTaskOnDisk(name, SCHEDULED_TASKS_DIR, expect),
 ): string[] {
   const off: string[] = []
   for (const task of tasks) {
     if (!isExpiredDatedTask(task, nowMs, marginMs(task)) || pending(task.name)) continue
-    if (disable(task.name)) off.push(task.name)
+    if (disable(task.name, { schedule: task.schedule, createdAt: task.createdAt })) off.push(task.name)
   }
   return off
 }

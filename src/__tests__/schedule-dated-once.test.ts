@@ -101,6 +101,15 @@ describe('disableExpiredDatedTasks', () => {
   it('a write that changed nothing is not reported', () => {
     expect(disableExpiredDatedTasks(tasks, ms(2026, 11, 15), () => 0, () => false, () => false)).toEqual([])
   })
+
+  it('hands the listed schedule and createdAt to the write, so the config on disk must match them', () => {
+    const seen: unknown[] = []
+    disableExpiredDatedTasks(tasks, ms(2026, 11, 15), () => 3 * HOUR, () => false, (n, e) => { seen.push([n, e]); return true })
+    expect(seen).toEqual([
+      ['over', { schedule: '55 10 9 11 *', createdAt: sec(2026, 11, 8) }],
+      ['over-pending', { schedule: '0 12 9 11 *', createdAt: sec(2026, 11, 8) }],
+    ])
+  })
 })
 
 describe('disableScheduledTaskOnDisk', () => {
@@ -129,5 +138,39 @@ describe('disableScheduledTaskOnDisk', () => {
     put('c', { schedule: '0 9 1 1 *', enabled: false })
     expect(disableScheduledTaskOnDisk('c', dir)).toBe(false)
     expect(disableScheduledTaskOnDisk('no-such-task', dir)).toBe(false)
+  })
+
+  // Viktor 42609 LOW: task.name may come from the SKILL.md frontmatter, not from the directory.
+  it.each(['../outside/x', '../outside', 'outside/x', '..', '.', '.hidden', ''])(
+    'a name that is not a plain directory name (%j) writes nothing, even where a config exists', name => {
+      const root = mkdtempSync(join(tmpdir(), 'dated-once-trav-'))
+      const tasks = join(root, 'tasks')
+      try {
+        for (const d of [join(tasks, 'outside', 'x'), join(root, 'outside', 'x'), join(root, 'outside'), join(tasks, '.hidden')]) {
+          mkdirSync(d, { recursive: true })
+          writeFileSync(join(d, 'task-config.json'), JSON.stringify({ schedule: '0 9 1 1 *', enabled: true, keep: 1 }))
+        }
+        writeFileSync(join(tasks, 'task-config.json'), JSON.stringify({ schedule: '0 9 1 1 *', enabled: true, keep: 1 }))
+        expect(disableScheduledTaskOnDisk(name, tasks)).toBe(false)
+        for (const f of [join(tasks, 'outside', 'x'), join(root, 'outside', 'x'), join(root, 'outside'), join(tasks, '.hidden'), tasks]) {
+          expect(JSON.parse(readFileSync(join(f, 'task-config.json'), 'utf8'))).toEqual({ schedule: '0 9 1 1 *', enabled: true, keep: 1 })
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+
+  it('a frontmatter name pointing at another task: that task is left on (its schedule differs)', () => {
+    put('victim', { schedule: '*/5 * * * *', agent: 'kernel', enabled: true, createdAt: 1794000000 })
+    expect(disableScheduledTaskOnDisk('victim', dir, { schedule: '55 10 9 11 *', createdAt: 1794165626 })).toBe(false)
+    expect(read('victim').enabled).toBe(true)
+  })
+
+  it('same schedule but another createdAt: left on; both equal: switched off', () => {
+    put('twin', { schedule: '55 10 9 11 *', enabled: true, createdAt: 1794000000 })
+    expect(disableScheduledTaskOnDisk('twin', dir, { schedule: '55 10 9 11 *', createdAt: 1794165626 })).toBe(false)
+    expect(read('twin').enabled).toBe(true)
+    expect(disableScheduledTaskOnDisk('twin', dir, { schedule: '55 10 9 11 *', createdAt: 1794000000 })).toBe(true)
+    expect(read('twin').enabled).toBe(false)
   })
 })

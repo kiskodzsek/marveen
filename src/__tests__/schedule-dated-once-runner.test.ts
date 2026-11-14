@@ -146,4 +146,15 @@ describe('schedule runner: a dated one-off cron is switched off after its day', 
     await runOneTick()
     expect(writesTo(o.name)).toHaveLength(0)
   })
+
+  // Viktor 42609 LOW: the listed name comes from the SKILL.md frontmatter. A planted
+  // task whose frontmatter names a live guard (or a path outside the task dir) and
+  // whose own cron is an expired dated one must not switch that other config off.
+  it('a frontmatter name pointing at a live task or outside the task dir writes nothing', async () => {
+    mkdirSync(join(H.dir, 'live-guard'), { recursive: true })
+    writeFileSync(join(H.dir, 'live-guard', 'task-config.json'), JSON.stringify({ schedule: '*/5 * * * *', agent: 'kernel', enabled: true, createdAt: CREATED - 86_400 }))
+    mockListScheduledTasks.mockReturnValue([task({ name: 'live-guard' }), task({ name: '../outside/x' })])
+    await runOneTick()
+    expect(mockWrite.mock.calls.filter(c => String(c[0]).endsWith('task-config.json'))).toHaveLength(0)
+  })
 })
