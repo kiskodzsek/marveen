@@ -504,17 +504,22 @@ export function screeningPipesAllowed(command) {
 // SCREENINGPROSE1114 (card 87aeff67, Klodel 42354): Mira's two old reject dirs are named with ordinary
 // Hungarian words (visszavonva = "withdrawn"), so a message, a grep pattern or a card title that merely says
 // the word stopped the whole Bash call (measured 11-11 twice, 11-13). Only for these two names, and only for
-// the per-segment rule, a PROSE occurrence is blanked:
-//   - inside a MULTI-WORD literal quoted string ('...', or "..." without $( or a backtick), not touching a
-//     slash, a quote, a letter or a dash;
-//   - inside the inline code of python/node -c/-e/-p, by the IMAGESAFETYPROSE1110 rule for code bodies: no
+// the per-segment rule, a PROSE occurrence is blanked. Quotes are paired the way the shell pairs them
+// (scanProseLiterals: backslash, `#` comment, '..', "..", and no blanking at all for $'..' / $".." or an
+// unterminated quote; Viktor 42377 MEDIUM 1: a comment with an apostrophe shifted a regex pairing and let a
+// bare `cp -R <word>` through). Only a literal of a command known to carry it as DATA is blanked (an allowlist,
+// Viktor 42377 LOW 2; proseLiteralKind):
+//   - 'text': the grep family, curl, gh, jq, read-only git (no -c / --config), a script operand -- inside a
+//     MULTI-WORD literal, not touching a slash, a quote, a letter or a dash, and not an assignment value;
+//   - 'code': the inline code of python/node -c/-e/-p, by the IMAGESAFETYPROSE1110 rule for code bodies: no
 //     exec primitive (BODY_EXEC_RX) and no path form or exactly quoted token anywhere in the code.
-// The bare rule stays (review B3) for: the underscore dirs and quarantine-meta; a path form; an exactly quoted
-// single word ('visszavonva' is a path argument); an assignment value (X='a visszavonva', then $X splits); and
-// the WHOLE command when something can turn a string back into words or code: $( ` <( >(, xargs, parallel,
-// eval, for, select, read, while, until, mapfile, readarray, set --, find -exec/-ok, awk, ssh, watch, and any
-// other interpreter's inline code (sh/bash/zsh/ruby/perl/php/osascript -c/-e). The pipe rule and the
-// sh -c / eval recursion keep reading the unblanked text, so `echo 'a visszavonva' | xargs cp` still denies.
+// The bare rule stays (review B3) for: the underscore dirs and quarantine-meta; every other command; a path
+// form; an exactly quoted single word ('visszavonva' is a path argument); and the WHOLE command when something
+// can turn a string back into words or code: $( ` <( >( outside single quotes, an array literal or a ${X:-..}
+// default, xargs, parallel, eval, for, select, read, while, until, mapfile, readarray, trap, set --,
+// find -exec/-ok, awk, ssh, watch, and another interpreter's inline code (sh/bash/zsh/csh/tcsh/fish/busybox,
+// ruby/perl/php/osascript/lua/tclsh/deno/bun -c/-e/-E/-r). The pipe rule and the sh -c / eval recursion keep
+// reading the unblanked text, so `echo 'a visszavonva' | xargs cp` still denies.
 // Residual, by design an accident layer like the rest: a script run with the prose as an argument
 // (`bash x.sh 'a visszavonva'`) is not followed into the script.
 const PROSE_WORD_DIR_NAMES = ['visszavonva', 'panna-elvetett']
@@ -522,33 +527,134 @@ const PROSE_WORD_ANY_RX = new RegExp(dirAlt(PROSE_WORD_DIR_NAMES), 'i')
 const PROSE_WORD_RX = new RegExp(String.raw`(?<![\/'"\x60\w-])(?:${dirAlt(PROSE_WORD_DIR_NAMES)})(?![\/'"\x60\w-])`, 'gi')
 const PROSE_CODE_WORD_RX = new RegExp(String.raw`(?<![\/\w-])(?:${dirAlt(PROSE_WORD_DIR_NAMES)})(?![\/\w-])`, 'gi')
 const PROSE_SUBST_RX = /\$\(|`|[<>]\(/
+// An array literal (`A=('a x')`) and a `${X:-'a x'}` style default both hand a quoted string to a later unquoted use.
+const PROSE_EXPANSION_RX = /=\(|\$\{[^}]*[-=+?]/
 const PROSE_RESPLIT_RX = new RegExp(
-  String.raw`(?:^|[\s;&|(])(?:\S*\/)?(?:xargs|parallel|eval|for|select|read|while|until|mapfile|readarray|awk|gawk|mawk|nawk|ssh|watch)(?=[\s;&|)]|$)` +
+  String.raw`(?:^|[\s;&|(])(?:\S{0,100}\/)?(?:xargs|parallel|eval|for|select|read|while|until|mapfile|readarray|awk|gawk|mawk|nawk|ssh|watch|trap)(?=[\s;&|)]|$)` +
   String.raw`|(?:^|[\s;&|(])set\s+--|(?:^|\s)-(?:exec|execdir|ok|okdir)(?=\s|$)` +
-  String.raw`|(?:^|[\s;&|(])(?:\S*\/)?(?:ruby|perl|php|osascript|lua|tclsh|deno|bun|(?:ba|z|da|k)?sh)\s+(?:-\S+\s+)*-[A-Za-z]*[ceE]\b`,
+  String.raw`|(?:^|[\s;&|(])(?:\S{0,100}\/)?(?:ruby|perl|php|osascript|lua|tclsh|deno|bun|(?:ba|z|da|k|c|tc|fi)?sh|busybox)\s+(?:\S+\s+){0,6}?-[A-Za-z]*[ceEr]\b`,
 )
-const PROSE_INLINE_CODE_OWNER_RX = /(?:^|[\s;&|(])(?:\S*\/)?(?:python[0-9.]*|node|nodejs)\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*[cep]\s*$/
-const PROSE_QUOTED_LITERAL_RX = /'[^']*'|"(?:[^"\\]|\\.)*"/g
+const PROSE_SCRIPT_EXT_RX = /\.(?:sh|mjs|cjs|js|ts|py)$/
+const PROSE_TEXT_CMD_RX = /^(?:grep|egrep|fgrep|rg|ag|curl|gh|jq)$/
+const PROSE_GIT_TEXT_SUBS = new Set(['log', 'grep', 'show', 'commit', 'tag', 'notes', 'diff', 'blame', 'status'])
+const PROSE_CODE_CMD_RX = /^(?:python[0-9.]*|node|nodejs)$/
+const PROSE_PASS_WORDS = new Set(['env', 'time', 'nice', 'nohup', 'command', 'exec', '-i'])
+
+// The shell's own pairing of quotes: a backslash escapes, a `#` at a word start opens a comment, '..' is literal,
+// ".." honours backslash. $'..' / $".." (ANSI-C, locale) and an unterminated quote make the pairing ambiguous
+// -> null, and the caller blanks nothing. Each literal also carries the command it belongs to (first word of its
+// segment, after env/VAR= prefixes), the token just before it and whether a script operand came earlier.
+function scanProseLiterals(s) {
+  const out = []
+  const n = s.length
+  let tokens = []
+  let cur = ''
+  let scriptSeen = false
+  const endWord = () => {
+    if (cur === '') return
+    tokens.push(cur)
+    if (PROSE_SCRIPT_EXT_RX.test(cur)) scriptSeen = true
+    cur = ''
+  }
+  let i = 0
+  while (i < n) {
+    const c = s[i]
+    if (c === '\\') { cur += s.slice(i, i + 2); i += 2; continue }
+    if (c === '#' && cur === '' && (i === 0 || /[\s;&|(]/.test(s[i - 1]))) {
+      const nl = s.indexOf('\n', i)
+      if (nl === -1) break
+      i = nl
+      continue
+    }
+    if (c === '$' && (s[i + 1] === "'" || s[i + 1] === '"')) return null
+    if (c === "'" || c === '"') {
+      let j
+      if (c === "'") {
+        j = s.indexOf("'", i + 1)
+        if (j === -1) return null
+      } else {
+        j = i + 1
+        while (j < n && s[j] !== '"') j += s[j] === '\\' ? 2 : 1
+        if (j >= n) return null
+      }
+      let k = 0
+      while (k < tokens.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[k]) || PROSE_PASS_WORDS.has(tokens[k]))) k++
+      out.push({
+        start: i, end: j, q: c,
+        cmd: (tokens[k] ?? '').replace(/^.*\//, ''),
+        prev: cur === '' ? (tokens[tokens.length - 1] ?? '') : '',
+        scriptSeen,
+        tokens: tokens.length,
+        git: tokens[k] === 'git' ? tokens.slice(k + 1) : null,
+      })
+      cur += '\u0001'
+      i = j + 1
+      continue
+    }
+    if (c === ' ' || c === '\t') { endWord(); i++; continue }
+    if (c === '\n' || c === ';' || c === '&' || c === '|' || c === '(' || c === ')') {
+      endWord(); tokens = []; scriptSeen = false; i++; continue
+    }
+    cur += c
+    i++
+  }
+  return out
+}
+
+// What the literal is: 'text' (a program that takes it as data: grep family, curl, gh, jq, read-only git, a script
+// operand), 'code' (python/node inline code), or null (anything else: the bare rule stays).
+function proseLiteralKind(L) {
+  const { cmd } = L
+  if (PROSE_TEXT_CMD_RX.test(cmd)) return 'text'
+  if (L.git) {
+    const sub = L.git.find((w) => !w.startsWith('-'))
+    return PROSE_GIT_TEXT_SUBS.has(sub ?? '') && !L.git.some((w) => w === '-c' || w.startsWith('--config') || w.startsWith('-c')) ? 'text' : null
+  }
+  if (PROSE_CODE_CMD_RX.test(cmd) && /^-[A-Za-z]*[cep]$/.test(L.prev)) return 'code'
+  if (L.scriptSeen && (PROSE_CODE_CMD_RX.test(cmd) || /^(?:ba|z|da)?sh$/.test(cmd) || PROSE_SCRIPT_EXT_RX.test(cmd))) return 'text'
+  if (PROSE_SCRIPT_EXT_RX.test(cmd)) return 'text'
+  return null
+}
 
 export function blankScreeningProseWords(text) {
   const s = String(text ?? '')
-  if (!PROSE_WORD_ANY_RX.test(s) || PROSE_SUBST_RX.test(s)) return s
-  if (PROSE_RESPLIT_RX.test(s.replace(PROSE_QUOTED_LITERAL_RX, "''"))) return s
+  if (!PROSE_WORD_ANY_RX.test(s)) return s
+  const lits = scanProseLiterals(s)
+  if (!lits) return s
+  let outside = ''
+  let emptied = ''
+  let last = 0
+  for (const L of lits) {
+    outside += s.slice(last, L.start) + (L.q === "'" ? "''" : s.slice(L.start, L.end + 1))
+    emptied += s.slice(last, L.start) + "''"
+    last = L.end + 1
+  }
+  outside += s.slice(last)
+  emptied += s.slice(last)
+  if (PROSE_SUBST_RX.test(outside) || PROSE_EXPANSION_RX.test(emptied)) return s
+  if (PROSE_RESPLIT_RX.test(emptied)) return s
   // A heredoc body an interpreter runs is still in the text here; its rule is IMAGESAFETYPROSE1110 (and the
   // bare rule for ruby/perl/php), so nothing in such a command is blanked.
   for (const m of s.matchAll(/<<-?\s*['"]?[A-Za-z_][A-Za-z0-9_]*/g)) {
     if (heredocOwnerRunsBody(s.slice(0, m.index), { screening: true })) return s
   }
-  return s.replace(PROSE_QUOTED_LITERAL_RX, (q, offset) => {
+  let res = ''
+  last = 0
+  for (const L of lits) {
+    const q = s.slice(L.start, L.end + 1)
     const body = q.slice(1, -1)
-    if (PROSE_INLINE_CODE_OWNER_RX.test(s.slice(0, offset))) {
-      if (BODY_EXEC_RX.test(body) || bodyNamesScreening(body)) return q
-      return q[0] + body.replace(PROSE_CODE_WORD_RX, 'x') + q[q.length - 1]
+    const kind = proseLiteralKind(L)
+    let rep = q
+    if (kind === 'code') {
+      if (!(BODY_EXEC_RX.test(body) || bodyNamesScreening(body))) rep = q[0] + body.replace(PROSE_CODE_WORD_RX, 'x') + q[q.length - 1]
+    } else if (kind === 'text') {
+      // a single word is a path argument; X='...' / --opt='...' splits again at $X
+      if (/\s/.test(body.trim()) && !(L.start > 0 && s[L.start - 1] === '=')) rep = q[0] + body.replace(PROSE_WORD_RX, 'x') + q[q.length - 1]
     }
-    if (!/\s/.test(body.trim())) return q // a single word is a path argument
-    if (offset > 0 && s[offset - 1] === '=') return q // X='...' splits again at $X
-    return q[0] + body.replace(PROSE_WORD_RX, 'x') + q[q.length - 1]
-  })
+    res += s.slice(last, L.start) + rep
+    last = L.end + 1
+  }
+  return res + s.slice(last)
 }
 
 export function screeningBashSegmentAllowed(seg) {

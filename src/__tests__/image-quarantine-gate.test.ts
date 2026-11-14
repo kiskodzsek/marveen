@@ -302,6 +302,11 @@ describe('Bash: the reject-dir words as prose (card 87aeff67)', () => {
     `grep -c '${V} lett' a.md && echo ok`,
     // a path form elsewhere in the command still needs its own reader to deny
     `ls final/${V}/ && grep -n 'ez ${V} lett' notes.md`,
+    // Viktor 42377: a markdown message in single quotes, an escaped quote, the '\'' apostrophe form
+    `bash tools/kernel-msg.sh klodel 'a \`kód\` és $(x) ${V} lett'`,
+    `bash tools/kernel-msg.sh klodel "a \\"kártya\\" ${V} lett"`,
+    `grep -n 'it'\\''s a ${V} ok' x.md`,
+    `python3 -X utf8 -c 'print("${V} lett")'`,
   ])('allows: %s', (command) => {
     expect(decide('Bash', { command })).toEqual({ deny: false })
   })
@@ -330,6 +335,29 @@ describe('Bash: the reject-dir words as prose (card 87aeff67)', () => {
     `find . -name 'x ${V}' -exec cp -R {} /tmp \\;`,
     `ssh box 'cp -R a ${V} /tmp'`,
     `set -- 'a ${V}'; cp -R $2 /tmp`,
+    // Viktor 42377 MEDIUM 1: the shell pairs quotes, a regex did not (comment, backslash, '\'')
+    `# don't copy\ncp -R ${V} /tmp/v\necho 'done'`,
+    `# the "x\ncp -R ${V} /tmp/v\necho "a b"`,
+    `# it's the dir\ncd ${V} && cat *\necho 'ok'`,
+    `# it's\ngrep -r foo ${V}\ngrep 'a b' x`,
+    `# it's\nfind ${V} -type f\necho 'x'`,
+    `# it's\nopen ${V}\ncat <<'EOF'\nx\nEOF`,
+    `cp -R it\\'s ${V} that\\'s /tmp/v`,
+    `echo 'it'\\''s' ; cd ${V} ; echo 'a b'`,
+    // Viktor 42377 LOW 3: rows the first version did not pin
+    `cp -R 'My Dir/${V}' /tmp/v`,
+    `cat '${V}/a b.jpg'`,
+    `source <(echo 'cp -R a ${V} /tmp/v')`,
+    `node -p 'require("child_process").execSync("cp -R a ${V} /tmp")'`,
+    `nodejs -e 'require("child_process").execSync("cp -R a ${V} /tmp")'`,
+    `echo 'cp -R a ${V} /tmp/v' | bash`,
+    // Viktor 42377 LOW 2: programs that run or re-split their own quoted argument
+    `php -r 'system("cp -R a ${V} /tmp");'`,
+    `bash -o pipefail -c 'cp -R a ${V} /tmp/v'`,
+    `python3 -X utf8 -c 'import os; os.system("cp -R a ${V} /tmp")'`,
+    `env -S 'cp -R a ${V} /tmp/v'`,
+    `trap 'cp -R a ${V} /tmp/v' EXIT`,
+    `A=('a ${V}'); cp -R \${A[@]} /tmp`,
     // the underscore dirs keep the bare rule, prose or not
     `grep -n 'a _quarantine b' x.md`,
     `bash tools/kernel-msg.sh klodel 'moved to _unscreened today'`,
