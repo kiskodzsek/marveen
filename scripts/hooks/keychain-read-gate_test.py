@@ -170,6 +170,95 @@ BLOCK = [
     'git config --system --add cr3dential.helper osxkeychain',
     'GIT_CONFIG_PARAMETERS="\'cr3dential.helper\'=\'osxkeychain\'" git fetch',
     'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=cr3dential.helper GIT_CONFIG_VALUE_0=osxkeychain git fetch',
+    # card 49d58372 (Viktor 42039 MEDIUM 1): the ~/.gitconfig helper reset taken away before git, or rewritten
+    'HOME=/tmp/x git fetch',
+    'GIT_CONFIG_GLOBAL=/dev/null git ls-remote origin',
+    'GIT_CONFIG_SYSTEM=/tmp/s git fetch',
+    'env HOME=/tmp/x git fetch',
+    'env -i git fetch',
+    'env -i PATH=/usr/bin /usr/bin/git ls-remote origin',
+    'env -u HOME git fetch',
+    'env --unset=HOME git fetch',
+    'env --unset HOME git fetch',
+    'env - git fetch',
+    'sudo -u a HOME=/x git fetch',
+    'timeout 5 env -u HOME git fetch',
+    'xcrun env -i git fetch',
+    'cd /tmp && HOME=$PWD git fetch',
+    'export HOME=/tmp/x; git fetch',
+    'export GIT_CONFIG_GLOBAL=/dev/null && git push',
+    'HOME=/tmp/x; git fetch',
+    'unset HOME; git fetch',
+    'HOME="/tmp/x y" git fetch',
+    "HOME=/x bash -c 'git fetch'",
+    'env -i bash -c "git ls-remote origin"',
+    'git -c include.path=/tmp/e.cfg fetch',
+    'git -c "include.path=/tmp/e.cfg" fetch',
+    'git -c includeIf.gitdir:/x/.path=/tmp/e.cfg fetch',
+    'git --config-env=cr3dential.helper=H fetch',
+    'git --config-env cr3dential.helper=H fetch',
+    'git --config-env=include.path=F fetch',
+    'GIT_CONFIG_PARAMETERS="\'include.path\'=\'/tmp/e.cfg\'" git fetch',
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path GIT_CONFIG_VALUE_0=/tmp/e.cfg git fetch',
+    'git -c cr3dential.https://github.com.helper=osxkeychain fetch',
+    'git config cr3dential.https://github.com.helper osxkeychain',
+    "git config --global cr3dential.helper ''",
+    'git config --global --unset-all cr3dential.helper',
+    'git config --global --unset cr3dential.helper',
+    'git config --system cr3dential.helper x',
+    'git config --global --remove-section cr3dential',
+    'git config --global --rename-section cr3dential old',
+    'git config --global -e',
+    'git config --global --edit',
+    'git config edit --global',
+    'git config set --global cr3dential.helper x',
+    'git config unset --global cr3dential.helper',
+    "git config --file ~/.gitconfig cr3dential.helper ''",
+    'git config --file=/Users/x/.gitconfig cr3dential.helper x',
+    'git config -f /Users/x/.gitconfig --unset cr3dential.helper',
+    'git config --global cr3dential.https://github.com.helper x',
+    'git config include.path /tmp/e.cfg',
+    'git config --local include.path /tmp/e.cfg',
+    'git config --global includeIf.gitdir:~/x/.path /tmp/e.cfg',
+    'git -C /tmp/r config --global --unset-all cr3dential.helper',
+    'GIT_CONFIG_NOSYSTEM=0 GIT_CONFIG_GLOBAL=/dev/null git fetch',  # 0 keeps the system helper (measured)
+    'GIT_CONFIG_NOSYSTEM=1 env -u GIT_CONFIG_NOSYSTEM HOME=/x git fetch',
+    'export GIT_CONFIG_NOSYSTEM=1; unset GIT_CONFIG_NOSYSTEM; HOME=/x git fetch',
+    'HOME=/x git -c cr3dential.helper=foo fetch',  # a helper added, the system one kept
+    'HOME=/x git -c cr3dential.helper= -c cr3dential.helper=osxkeychain fetch',
+    'HOME=/x node -e "require(\'child_process\').execSync(\'git fetch\')"',
+    'HOME=/x python3 -c "import os; os.system(\'git fetch\')"',  # the ; is inside the quotes: same command
+    'HOME=/x git -C /r config --unset user.name',
+    'env -i git config --global cr3dential.helper x',
+    'if HOME=/x git fetch; then :; fi',  # a chain word between the prefix and git
+    '! HOME=/x git fetch',
+    'env --ignore-environment git fetch',
+    # Viktor 42207 M1: NOSYSTEM does not cover a config FILE or a HOME the call names (it can name the helper itself)
+    'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/tmp/f git fetch origin',
+    'GIT_CONFIG_NOSYSTEM=1 HOME=/tmp/h git fetch origin',
+    'export GIT_CONFIG_NOSYSTEM=1; export GIT_CONFIG_GLOBAL=/tmp/f; git fetch origin',
+    # Viktor 42207 M2: a NOSYSTEM that is not exported is a shell variable only (measured: the system helper is back)
+    'GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch origin',
+    'GIT_CONFIG_NOSYSTEM=1 && env -u HOME git fetch',
+    'GIT_CONFIG_NOSYSTEM=1\nGIT_CONFIG_GLOBAL=/dev/null git fetch',
+    'declare GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch',
+    'readonly GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch',
+    'f() { local GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch; }; f',
+    'export GIT_CONFIG_NOSYSTEM=1; declare GIT_CONFIG_NOSYSTEM=0; GIT_CONFIG_GLOBAL=/dev/null git fetch',
+    # Viktor 42207 M3: a declaration longer than MAX_ARGS words is read to its end
+    'f() { local HOME; git fetch; }; f',  # a local without a value: HOME unset in the function (measured)
+    'f() { declare HOME; git fetch; }; f',
+    "K=cr3dential.helper; git config --global $K ''",  # an expanded word can be any key or scope
+    "git config --global \"$K\" ''",
+    "git config $(echo --global) cr3dential.helper ''",
+    "git config --global `echo cr3dential.helper` ''",
+    "git config --global cr3dential.{helper,x} ''",
+    'git config $K /tmp/e.cfg',
+    "git config --global ${K} ''",
+    "git config --global cr3d$(echo ential.helper) ''",
+    "git config --global$(echo) cr3dential.helper ''",
+    "git config --global cr3dential.h* ''",
+    'HOME=/x git -ccr3dential.helper= ls-remote x',  # joined: no git option (git: unknown option), not a reset
     # accepted false positive, the class above
     "grep -n 'git cr3dential fill' notes.md",
 ]
@@ -206,6 +295,13 @@ for _w, (_short, _whole, _pos) in WRAP_SPEC.items():
         BLOCK.append(f'{_w}{_tail}')
 BLOCK += ['/usr/bin/' + w + ' s3curity dump-keychain' for w in ('setsid', 'command', 'builtin')]  # path only (nohup above)
 
+BLOCK += ['export ' + 'A ' * k + 'HOME=/x; git fetch origin' for k in (63, 64, 65, 200)]
+BLOCK += ['declare -x ' + 'A ' * 100 + 'HOME=/x; git fetch', 'unset ' + 'A ' * 100 + 'HOME; git fetch',
+          'export ' + 'A=1 ' * 100 + 'GIT_CONFIG_GLOBAL=/dev/null; git fetch']
+# Viktor 42207 mutation survivors: the git call's own words past MAX_ARGS are not read (fail-closed: a reset after
+# them is not seen); a backtick starts a command
+BLOCK += ['HOME=/x git ' + '-C . ' * 40 + '-c cr3dential.helper= ls-remote x', 'echo `HOME=/x git fetch`']
+
 ALLOW = [
     'ls -la',
     's3curity list-keychains',
@@ -238,6 +334,68 @@ ALLOW = [
     "git commit -m 'note: the system config sets cr3dential.helper=osxkeychain'",  # prose in a message
     'xcrun --find clang',
     'xcrun -f git-cr3dential-osxkeychain',  # -f only prints the path
+    # card 49d58372: reading the config, other variables, a prefix of another program, a local helper of one's own
+    'HOME=/tmp/t npm test',
+    'HOME=/tmp/t npm test && git status',  # a program, not a shell, takes the prefix: its own git is a script's
+    'env -i PATH=/usr/bin python3 -I t.py',
+    'env -u VISUAL git commit',
+    'env -u PATHi git status',
+    'env -ui git status',  # -u takes "i": nothing about HOME
+    'GIT_CONFIG_NOSYSTEM=1 git fetch',
+    'XDG_CONFIG_HOME=/tmp/x git fetch',  # read before ~/.gitconfig: its reset still holds (measured)
+    'GIT_DIR=/x/.git git status',
+    'home=/x git fetch',  # not the variable git reads
+    'ls $HOME && git status',
+    'echo HOME=/tmp/x git fetch',
+    'grep -rn GIT_CONFIG_GLOBAL docs',
+    'git log --grep include.path',
+    'git config --global --get cr3dential.helper',
+    'git config --global --get-all cr3dential.helper',
+    'git config --show-origin --get-all cr3dential.helper',
+    'git config --global --list',
+    'git config -l',
+    'git config get --global cr3dential.helper',
+    'git config --get include.path',
+    'git config --global user.name x',
+    "git config --local cr3dential.helper '!/x/bin/git-cr3dential-dave.sh'",
+    'git config user.email a@b.test',
+    'cat ~/.gitconfig',
+    # no system helper (GIT_CONFIG_NOSYSTEM true), the call's own empty helper, a config that only reads (measured)
+    'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git ls-remote https://github.com/o/r',
+    'GIT_CONFIG_NOSYSTEM=true HOME=/nonexistent git -c cr3dential.helper= ls-remote x',
+    'HOME=/nonexistent git -c cr3dential.helper= ls-remote x',
+    "HOME=/nonexistent git -c 'cr3dential.helper=' ls-remote x",
+    'HOME="$S/h" git -c cr3dential.helper= ls-remote x',
+    'export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; git commit -m x',
+    'env -i HOME=/x PATH=/usr/bin git config --show-origin --get-all cr3dential.helper',
+    'env -i GIT_CONFIG_NOSYSTEM=1 git fetch',
+    'HOME=/x node --test t.ts; git status',  # node's command ends at the ;
+    'env -i PATH=/usr/bin HOME=/x node t.js && git diff',
+    'HOME=/x git config --global --get cr3dential.helper',
+    'HOME=/x git config get cr3dential.helper',  # git 2.46+ verb form, reads only
+    'env -i; git fetch',  # env -i alone: the next command has its HOME
+    'git config --get-all $K',  # an expanded word in a call that only reads
+    'git config --global --get "$K"',
+    # Viktor 42207: NOSYSTEM exported (export, declare -x, typeset -gx) with no config file named; TRUE / On (git takes any case)
+    'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git init -q a',
+    'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL= git fetch',
+    'GIT_CONFIG_NOSYSTEM=1 env -u HOME git fetch',
+    'declare -x GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch',
+    'typeset -gx GIT_CONFIG_NOSYSTEM=1; GIT_CONFIG_GLOBAL=/dev/null git fetch',
+    'GIT_CONFIG_NOSYSTEM=TRUE GIT_CONFIG_GLOBAL=/dev/null git init -q a',
+    'GIT_CONFIG_NOSYSTEM=On GIT_CONFIG_GLOBAL=/dev/null git init -q a',
+    'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL="/dev/null" git init -q a',
+    'GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/tmp/s GIT_CONFIG_GLOBAL=/dev/null git fetch',  # NOSYSTEM: the file is not read (measured)
+    "echo 'measured: `git config --show-scope --show-origin`, `find . -name x`'",  # prose that names config
+    'node -e "assert.match(config, /key: `${X}`/)"',
+    'git config user.email "$E"',  # the value expands, the key is read
+    "python3 -c \"subprocess.run(['git','-C',d,'config','--local','--get-regexp','^remote[.].*[.]url$'])\"",
+    'echo "config telegram.devFakes { baseUrl }"',  # a brace after a blank: no key cut at it
+    'git config core.editor vi{m,}',  # the brace in the value
+    'node -e "f(config ,{a:1})"',
+    'echo "run `git config user.name` first"',  # an attached backtick: prose, not judged
+    'grep -n "^# \\`git config\\` writing" x.py',
+    'HOME=/x grep -n "git fetch" notes.md',  # grep is no shell: the quoted words are its argument
     # card 3085a683: the wrapped command is judged, not the wrapper's words
     'sudo -u root ls',
     'sudo -u s3curity ls',  # a user named so: the command is ls
@@ -845,7 +1003,15 @@ def main():
                   ('sudo -p "a b" ' * 16000 + 'z', 0), ('sudo -u "a b" ' * 4000 + sec, 2),
                   # card 04d67b39: git and xcrun are walked and always marked
                   ('git ' * 30000 + 'status', 0), ('git -c a=b ' * 10000 + fix('cr3dential fill'), 2),
-                  ('xcrun git ' * 15000 + 'status', 0), ('git' + ' -c a' * 20000 + ' status', 2),
+                  ('xcrun git ' * 15000 + 'status', 0), 
+                  # card 49d58372: one walk per simple command, one window per config call
+                  ('HOME=/x ' * 20000 + 'git fetch', 2), ('export HOME=/x; ' * 20000 + 'ls', 0), ('HOME=/x ls; ' * 20000 + 'git fetch', 0),
+                  ('git config ' * 20000, 0), ('(config ' * 20000, 0), ('env -u A ' * 20000 + 'git fetch', 2), ('a=b ' * 70 + 'HOME=/x git fetch', 2), ('a=b ' * 70 + 'ls', 0),
+                  (('GIT_CONFIG_PARAMETERS=' + 'x' * 100 + ' ') * 20000, 0),  # each value read once (main: 6 s watchdog)
+                  ('GIT_CONFIG_PARAMETERS=x ' * 20000 + 'include.path=/e git fetch', 2),
+                  ('HOME=/x git -c x= ; ' * 20000, 2), ('HOME=/x git -c y ' + "'a' " * 20000, 2),
+                  ("HOME=/x git -c y '" * 20000, 2), ('HOME=/x bash -c "' + 'a; ' * 20000 + 'git fetch"', 2), ('git -c include.pat ' * 20000, 0),
+                  ('git' + ' -c a' * 20000 + ' status', 2),
                   ('sudo' + ' -u a' * 32 + ' ls', 0), ('sudo' + ' -u a' * 32 + ' -E ls', 2),
                   ('sudo -u a; ' * 20000, 0), ('(sudo -u a ' * 20000, 0), ('sudo -u a ' * 20000 + 'python3 x.py', 0),
                   ('ssh h ' * 20000 + sec, 2), ('nice -n 5 sudo -u a ' * 10000 + sec, 2)]

@@ -28,6 +28,15 @@ the osxkeychain helper called directly (`git credential-osxkeychain get`, `git-c
 and choosing it (`git -c credential.helper=osxkeychain ...`, `git config ... credential.helper osxkeychain`,
 GIT_CONFIG_PARAMETERS / GIT_CONFIG_VALUE_<n>), with git's own options before the subcommand (`git -C d -c a=b`) and
 behind xcrun. Plain `git fetch` / `git push` pass. These read the command text, not a script file's (GIT_RULES).
+And what takes away the ~/.gitconfig helper reset (card 49d58372, Viktor 42039 MEDIUM 1): GIT_CONFIG_GLOBAL=,
+GIT_CONFIG_SYSTEM=, HOME= before git or set in the shell before a later git (export, unset, a bare assignment), env -i /
+env -u HOME before git; an include (`-c include.path=`, `--config-env=`, GIT_CONFIG_PARAMETERS, GIT_CONFIG_KEY_<n>,
+`git config include.path ...` in any scope), `--config-env=credential.helper=VAR`, a URL-scoped helper naming
+osxkeychain; `git config --global` / `--system` / `--file` writing the credential helper or its section, or `-e`;
+a writing `git config` whose scope or key the shell still expands (`$K`, `$(...)`, `credential.{helper,x}`).
+Passes: reading (`git config --get ...`, `--list`), GIT_CONFIG_NOSYSTEM=1 (no system helper), the call's own
+`-c credential.helper=` (it empties the list last). A git that a program other than a shell runs (`HOME=/x npm
+test`) is not seen, nor a write to ~/.gitconfig by an editor or a Write tool (a path hook's job).
 Not seen: everything listed above under "does not see"; a wrapper not in WRAP_ARGS whose flag takes a word (su,
 runuser, ionice, taskset, unbuffer ...), and a quoted string that starts with a wrapped call blocks like one that
 starts with the call (`git commit -m "sudo -u root security dump-keychain"`).
@@ -160,6 +169,10 @@ RULES = [
 # These rules read the COMMAND text (inline code in it too), not a script file's text: scripts/gh-pr.mjs runs
 # `git credential fill` with the helper list reset to the clone's own helpers (the keychain helper never asked) and
 # names it in a comment and a string, both of which read as a command position.
+# A URL-scoped helper (`credential.https://github.com.helper`) is a helper too; an include names a file of config
+# (`include.path`, `includeIf.gitdir:~/x/.path`). Bounded runs: one way to read a word, no rescan of a long one.
+HELPER_SCOPE = r'(?:\.[^\s=\'"]{1,200})?'
+INCLUDE_KEY = r'include(?:if\.[^\s=\'"]{1,300})?\.path'
 GIT_RULES = [
     ('git-credential', re.compile(POSITION + r'credential[ \t]+(?:fill|approve|reject)(?![\w-])', re.I)),
     ('git-credential-helper', re.compile(POSITION + r'\\?[\'"]?(?:' + WORD + r'*/)?(?:git-)?credential-osxkeychain'
@@ -167,12 +180,326 @@ GIT_RULES = [
     # choosing the helper: `git -c credential.helper=osxkeychain ...`, `git config [flags] credential.helper
     # osxkeychain`, GIT_CONFIG_PARAMETERS / GIT_CONFIG_VALUE_<n>; not the words in prose (a commit message that says
     # "the system config sets credential.helper=osxkeychain" passes: two of 19 861 replayed commands were such)
-    ('git-credential-helper', re.compile(r'(?<![\w-])-c[ \t]+[\'"]?credential\.helper=[\'"]?!?[^\s\'";|&]*osxkeychain',
+    ('git-credential-helper', re.compile(r'(?<![\w-])-c[ \t]+[\'"]?credential' + HELPER_SCOPE + r'\.helper=[\'"]?!?'
+                                         r'[^\s\'";|&]*osxkeychain', re.I)),
+    ('git-credential-helper', re.compile(POSITION + r'config(?:[ \t]+-' + WORD + r'*)*[ \t]+[\'"]?credential'
+                                         + HELPER_SCOPE + r'\.helper[\'"]?[ \t]+[\'"]?!?[^\s\'";|&]*osxkeychain',
                                          re.I)),
-    ('git-credential-helper', re.compile(POSITION + r'config(?:[ \t]+-' + WORD + r'*)*[ \t]+[\'"]?credential\.helper'
-                                         r'[\'"]?[ \t]+[\'"]?!?[^\s\'";|&]*osxkeychain', re.I)),
-    ('git-credential-helper', re.compile(r'(?<![\w-])GIT_CONFIG_(?:PARAMETERS|VALUE_\d+)=[^\n;&|]*osxkeychain', re.I)),
+    # (GIT_CONFIG_PARAMETERS / GIT_CONFIG_VALUE_<n> naming osxkeychain: env_value_hit below, linear)
+    # card 49d58372 (Viktor 42039 MEDIUM 1): a config the command names by indirection brings the helper back, the
+    # name of osxkeychain in a file the rules cannot read: `-c include.path=<file>`, `--config-env=credential.helper=
+    # VAR` / `--config-env=include.path=VAR`, an include in GIT_CONFIG_PARAMETERS / GIT_CONFIG_KEY_<n> (all measured
+    # on git 2.54, Apple Git-157: the helper of the named file or variable is called after the ~/.gitconfig reset)
+    ('git-config-override', re.compile(r'(?<![\w-])-c[ \t]+[\'"]?' + INCLUDE_KEY + r'=', re.I)),
+    ('git-config-override', re.compile(r'(?<![\w-])--config-env(?:=|[ \t]+)[\'"]?(?:credential' + HELPER_SCOPE
+                                       + r'\.helper|' + INCLUDE_KEY + r')=', re.I)),
+    ('git-config-override', re.compile(r'(?<![\w-])GIT_CONFIG_KEY_\d+=[\'"]?' + INCLUDE_KEY + r'(?![\w.-])', re.I)),
 ]
+
+# card 49d58372 (Viktor 42039 MEDIUM 1): ~/.gitconfig empties the helper list (card 7e47b573), so the system
+# osxkeychain helper is not asked. Measured on git 2.54 (Apple Git-157), these take the reset away before git runs:
+# GIT_CONFIG_GLOBAL=<other file or /dev/null>, HOME=<other dir>, `env -i` / `env -u HOME` (no HOME: no global
+# config). GIT_CONFIG_SYSTEM does not (the system layer is read before the global reset; Viktor asked for it, and it
+# has no use here). Blocked: such a prefix of the git call (`HOME=/x git fetch`, `env -i git ...`, `sudo -u a
+# HOME=/x git`); a shell-level one before a later git (`export HOME=/x; git fetch`, `unset HOME && git ...`); one on
+# a shell or an interpreter whose own command runs git (`HOME=/x bash -c 'git fetch'`), up to that command's end
+# (the first ; & | or newline outside quotes). Not blocked, each measured: GIT_CONFIG_NOSYSTEM=1 / true / yes / on
+# in force (no system layer, no helper at all), the git call's own `-c credential.helper=` (it empties the list
+# last; a helper named after it that is osxkeychain blocks by the rule above), and a git config that only reads
+# (`git config --get-all credential.helper`). A git inside some other program the prefix starts (`HOME=/x npm test`)
+# is not seen: a script's git, as everywhere in this gate.
+OVERRIDE_VARS = {'HOME', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM'}
+_DECL = {'export', 'declare', 'typeset', 'readonly', 'local', 'unset'}
+_CHAIN_WORDS = set(re.findall(r'[a-z-]+', WRAPPERS)) | {'!'}
+_CARRY = {'bash', 'sh', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh', 'ash', 'rbash', 'pwsh', 'python', 'node', 'perl',
+          'ruby', 'osascript', 'deno', 'bun', 'tsx', 'php', 'swift', 'eval', 'source', '.'}
+# a simple command starts after these (the secret rules' positions: an opening quote too, `bash -c "..."`)
+_SEG_RX = re.compile(r'\$\(|[;&|(){}\n`\'"]')
+_ASSIGN_RX = re.compile(r'([A-Za-z_]\w*)=(.*)', re.S)
+_TRUE = {'1', 'true', 'yes', 'on'}
+
+
+def _env_flags(words, i, name, st):
+    """Skip the flags and positional words of wrapper `name` from words[i]; return the next index. For env, note in
+    st what it does to HOME (-i / --ignore-environment / - / -u HOME / --unset HOME: 'sets') and to
+    GIT_CONFIG_NOSYSTEM (-i or -u it: 'nosys' False)."""
+    short, whole, positional = WRAP_ARGS[name]
+    flags_done = False
+    env = name == 'env'
+
+    def unset(var):
+        if var == 'HOME':
+            st['sets'] = True
+        elif var == 'GIT_CONFIG_NOSYSTEM':
+            st['nosys'] = False
+    while i < len(words):
+        t = strip_quotes(words[i])
+        if not flags_done and t == '--':
+            flags_done = True
+        elif not flags_done and env and t == '-':
+            st['sets'], st['nosys'] = True, False
+        elif not flags_done and t.startswith('--'):
+            key, eq, val = t.partition('=')
+            if env and key == '--ignore-environment':
+                st['sets'], st['nosys'] = True, False
+            if key in whole and not eq:
+                i += 1
+                val = strip_quotes(words[i]) if i < len(words) else ''
+            if env and key == '--unset':
+                unset(val)
+        elif not flags_done and t.startswith('-') and len(t) > 1:
+            for k, ch in enumerate(t[1:], 1):
+                if env and ch == 'i':
+                    st['sets'], st['nosys'] = True, False
+                if ch in short:
+                    arg = t[k + 1:]
+                    if not arg:
+                        i += 1
+                        arg = strip_quotes(words[i]) if i < len(words) else ''
+                    if env and ch == 'u':
+                        unset(arg)
+                    break
+        elif positional:
+            positional -= 1
+        else:
+            break
+        i += 1
+    return i
+
+
+def _assign(st, name, value):
+    if name in OVERRIDE_VARS:
+        st['sets'] = True
+        # a config file the git call reads: it can name a helper itself (an empty value or /dev/null: no global
+        # config at all, measured on git 2.54)
+        if strip_quotes(value) not in (('',) if name == 'HOME' else ('', '/dev/null')) and name != 'GIT_CONFIG_SYSTEM':
+            st['file'] = True
+    elif name == 'GIT_CONFIG_NOSYSTEM':
+        st['nosys'] = value.lower() in _TRUE
+
+
+def _segment(seg):
+    """One simple command: {'sets': one of OVERRIDE_VARS set or HOME cleared, 'nosys': GIT_CONFIG_NOSYSTEM in force
+    (None: not touched), 'cmd': the command word (None: a shell-level assignment, export, unset), 'rest': its words}."""
+    every = seg.split()
+    words = every[:MAX_ARGS]
+    st = {'sets': False, 'file': False, 'nosys': None, 'cmd': None, 'rest': [], 'bare_nosys': False}
+    wrapper = None
+    bare_nosys = False
+    i = 0
+    while i < len(words):
+        w = strip_quotes(words[i])
+        base = w.rsplit('/', 1)[-1].lower()
+        a = _ASSIGN_RX.match(w)
+        if a:
+            _assign(st, a.group(1), a.group(2))
+            bare_nosys |= a.group(1) == 'GIT_CONFIG_NOSYSTEM'
+            i += 1
+        elif base in WRAP_ARGS and base != 'git':
+            wrapper = base
+            i = _env_flags(words, i + 1, base, st)
+        elif base in _CHAIN_WORDS or w.startswith('-') or re.fullmatch(r'[+.]?\d[\w.]*', w):
+            wrapper = wrapper or base
+            i += 1
+        elif base in _DECL:  # export HOME=/x, unset HOME: the shell's own, for what runs after it
+            tail = [strip_quotes(x) for x in every[i + 1:]]  # every word, not the MAX_ARGS slice (Viktor 42207 M3)
+            # only export, or declare / typeset / local with -x, exports: `declare GIT_CONFIG_NOSYSTEM=1` and
+            # `readonly ...` leave git the system helper (measured, bash; Dave on Viktor 42207 M2)
+            exports = base == 'export' or any(re.fullmatch(r'-[a-zA-Z]*x[a-zA-Z]*', x) for x in tail)
+            for x in tail:
+                name, eq, value = x.partition('=')
+                if base == 'unset':
+                    if name in OVERRIDE_VARS:
+                        st['sets'] = True
+                    elif name == 'GIT_CONFIG_NOSYSTEM':
+                        st['nosys'] = False
+                elif name == 'GIT_CONFIG_NOSYSTEM' and not exports:
+                    st['nosys'] = False if eq and value.lower() not in _TRUE else st['nosys']
+                elif eq or name in OVERRIDE_VARS:  # `export HOME` after `HOME=/x;` counts too
+                    _assign(st, name, value)
+            return st
+        else:
+            st['cmd'], st['rest'] = base, [strip_quotes(x) for x in words[i + 1:]]
+            return st
+    if len(every) > MAX_ARGS and any(strip_quotes(x).rsplit('/', 1)[-1].lower() == 'git' for x in every[i:]):
+        # a prefix past MAX_ARGS words is not read: with a git after it, fail closed
+        st['sets'], st['cmd'] = True, 'git'
+    elif wrapper:
+        st['cmd'] = wrapper  # a wrapper with nothing after it (`env -i`) changes nothing for later commands
+    st['bare_nosys'] = bare_nosys
+    return st
+
+
+def _git_resets(rest):
+    """The git call itself takes the helper away: its own `-c credential.helper=` (empty), or it only reads config."""
+    short, whole, _ = WRAP_ARGS['git']
+    reset = False
+    i = 0
+    while i < len(rest):
+        t = rest[i]
+        if t in whole or t in ('-C', '-c'):
+            arg = rest[i + 1] if i + 1 < len(rest) else ''
+            reset |= t == '-c' and arg.lower() == 'credential.helper='
+            i += 2
+            continue
+        if not t.startswith('-'):  # a joined `-ccredential.helper=` is no git option (unknown option, measured)
+            if t.lower() == 'config':
+                low = [x.lower() for x in rest[i + 1:]]
+                verb = next((x for x in low if not x.startswith('-')), '')
+                return reset or verb in ('get', 'list') or any(x in _CONFIG_READ for x in low)
+            return reset
+        i += 1
+    return reset
+
+
+_TOKEN_RX = re.compile(r'[ \t]*((?:[^\s\'";&|]+|\'[^\']*\'|"[^"]*")+)')
+
+
+def _rest_words(text, pos):
+    """The words of the command from pos up to its end (a ; & | newline outside quotes), quotes taken off as the
+    shell does, after the first word that is git: `git -c 'credential.helper=' ...` keeps its empty value. At most
+    MAX_ARGS words and ARGS_WINDOW characters are read (a bounded walk per git call)."""
+    words = []
+    end = min(len(text), pos + ARGS_WINDOW)
+    while len(words) < MAX_ARGS:
+        m = _TOKEN_RX.match(text, pos, end)
+        if not m:
+            break
+        words.append(re.sub(r'\'([^\']*)\'|"([^"]*)"', lambda q: q.group(1) or q.group(2) or '', m.group(1)))
+        pos = m.end()
+    i = next((j for j, w in enumerate(words) if w.rsplit('/', 1)[-1].lower() == 'git'), None)
+    return None if i is None else words[i + 1:]
+
+
+def config_override(text):
+    """True when git runs with the ~/.gitconfig reset taken away (see OVERRIDE_VARS)."""
+    shell_sets, shell_nosys, shell_file = False, None, False  # set by the shell itself: holds to the end of the text
+    carry, open_q = False, None  # a prefix on a shell or an interpreter: holds to its command's end
+    pos = 0
+    for m in list(_SEG_RX.finditer(text)) + [None]:
+        seg = text[pos:m.start()] if m else text[pos:]
+        st = _segment(seg)
+        cmd = st['cmd']
+        nosys = st['nosys'] if st['nosys'] is not None else shell_nosys
+        if cmd == 'git' and (st['sets'] or shell_sets or carry) and not (nosys and not (st['file'] or shell_file)):
+            rest = _rest_words(text, pos)
+            if not _git_resets(st['rest'] if rest is None else rest):
+                return True
+        if cmd is None:
+            shell_sets |= st['sets']
+            shell_file |= st['file']
+            # `GIT_CONFIG_NOSYSTEM=1;` alone (the statement ends at ; & | or a newline) is a shell variable, not
+            # exported: a later git does not see it (measured: the system helper comes back)
+            if not (st['bare_nosys'] and (m is None or m.group(0) in ';&|\n')):
+                shell_nosys = st['nosys'] if st['nosys'] is not None else shell_nosys
+        elif st['sets'] and re.sub(r'[\d.]+$', '', cmd) in _CARRY:
+            carry, open_q = True, None
+        if m is None:
+            break
+        sep = m.group(0)
+        if carry:
+            if sep in '\'"':
+                open_q = None if open_q == sep else (open_q or sep)
+            elif sep in ';&|\n' and open_q is None:
+                carry = False
+        pos = m.end()
+    return False
+
+
+# `git config` writing the helper of the global or system config (or of a file named with -f), its credential
+# section, or an include in any scope (a local include is read after the global reset too); one whose scope or key
+# is still expanded by the shell (_unread_key). Reading passes (`--get`, `--get-all`, `--list`, `git config get ...`).
+_CONFIG_RX = re.compile(POSITION + r'config(?![\w.-])', re.I)
+_HELPER_KEY_RX = re.compile(r'credential' + HELPER_SCOPE + r'\.helper', re.I)
+_INCLUDE_KEY_RX = re.compile(INCLUDE_KEY, re.I)
+_SECTION_RX = re.compile(r'(?:credential|include(?:if)?)(?:\..*)?', re.I)
+_CONFIG_END_RX = re.compile(r'[;&|\n)`({}]|\$\(')
+_EXPANDS_RX = re.compile(r'[$*?\[]')  # (a brace or a backtick ends the window: never in a word)
+_KEYLIKE_RX = re.compile(r'[\w.$*?\[\]-]+')
+
+
+def _unread_key(rest, stop, words, low):
+    """A writing `git config` whose scope or key the shell still expands, so it can be any of them:
+    `K=credential.helper; git config --global $K ''`, `git config $(echo --global) ...`, `git config --global
+    credential.{helper,x} ''`. Only the flags and the key are read (a value's `$E` is the value), only a word shaped
+    like a key, and a `$(` or a backtick only after a blank: prose and code that name `config` (`git config --list`,
+    in backticks; `assert.match(config, /{...}/)`) are no such call (measured on the replay)."""
+    key_i = next((i for i, w in enumerate(low) if not w.startswith('-')), None)
+    head = words if key_i is None else words[:key_i + 1]
+    if any(_KEYLIKE_RX.fullmatch(w) and _EXPANDS_RX.search(w) for w in head):
+        return True
+    if not stop:
+        return False
+    at, sep = stop.start(), stop.group(0)
+    before = rest[at - 1:at]  # at 0: right after `config` (`` `git config` `` in prose), attached
+    if (sep == '$(' or (sep == '`' and before.isspace())) and key_i is None:
+        return True  # the scope or the key comes from a substitution
+    # `cred$(echo ential).helper`, `credential.{helper,x}`: the key cut at a substitution or a brace attached to it
+    # (an attached backtick is not judged: prose writes `git config user.name` in backticks)
+    return sep in ('$(', '{') and not before.isspace() and key_i is not None and key_i == len(words) - 1 \
+        and _KEYLIKE_RX.fullmatch(words[key_i]) is not None
+
+
+_CONFIG_READ = {'--get', '--get-all', '--get-regexp', '--get-urlmatch', '-l', '--list', '--get-color',
+                '--get-colorbool'}
+
+
+def config_write(text):
+    for m in _CONFIG_RX.finditer(text):
+        rest = text[m.end():m.end() + ARGS_WINDOW]
+        stop = _CONFIG_END_RX.search(rest)  # the command ends, or another one starts: `(config (config ...` read once
+        words = [strip_quotes(w) for w in rest[:stop.start() if stop else len(rest)].split()[:MAX_ARGS]]
+        low = [w.lower() for w in words]
+        verb = next((w for w in low if not w.startswith('-')), '')
+        if verb in ('get', 'list') or any(w in _CONFIG_READ for w in low):
+            continue
+        if _unread_key(rest, stop, words, low):
+            return True
+        scoped = any(w in ('--global', '--system', '--file', '-f') or w.startswith('--file=') for w in low)
+        if any(_INCLUDE_KEY_RX.fullmatch(w) for w in words):
+            return True
+        if scoped and (any(_HELPER_KEY_RX.fullmatch(w) for w in words)
+                       or (any(w in ('--remove-section', '--rename-section', 'remove-section', 'rename-section')
+                               for w in low) and any(_SECTION_RX.fullmatch(w) for w in words))
+                       or any(w in ('-e', '--edit', 'edit') for w in low)):
+            return True
+    return False
+
+
+# A GIT_CONFIG_PARAMETERS / GIT_CONFIG_VALUE_<n> value up to the end of its command, each value read once: the
+# pattern `GIT_CONFIG_PARAMETERS=[^\n;&|]*osxkeychain` rescanned the rest of the line from every assignment
+# (20 000 x `GIT_CONFIG_PARAMETERS=x...` ran into the 6 s watchdog on main c08e49fc too, measured 2026-11-14).
+_PARAMS_RX = re.compile(r'(?<![\w-])GIT_CONFIG_(?:PARAMETERS|VALUE_\d+)=', re.I)
+_ONLY_PARAMS_RX = re.compile(r'(?<![\w-])GIT_CONFIG_PARAMETERS=', re.I)
+_VALUE_END_RX = re.compile(r'[\n;&|]')
+_OSXKEYCHAIN_RX = re.compile(r'osxkeychain', re.I)
+_INCLUDE_NAMED_RX = re.compile(INCLUDE_KEY + r'(?![\w.-])', re.I)
+
+
+def env_value_hit(text, var_rx, needle_rx):
+    reach = 0
+    for m in var_rx.finditer(text):
+        if m.end() < reach:  # inside a value already read from an earlier assignment of the same command
+            continue
+        e = _VALUE_END_RX.search(text, m.end())
+        reach = e.start() if e else len(text)
+        if needle_rx.search(text, m.end(), reach):
+            return True
+    return False
+
+
+class FnRule:
+    """A rule judged by a function (the same `search(text)` call as a compiled pattern). plain: judged on the
+    command text only (and with its quotes taken off), not on the text with the wrapped commands' bounds: the
+    function walks the wrappers itself, and a bound inside `git;config ...` would cut git from its own options."""
+    def __init__(self, fn, plain=False):
+        self.search, self.plain = fn, plain
+
+
+GIT_RULES += [('git-credential-helper', FnRule(lambda t: env_value_hit(t, _PARAMS_RX, _OSXKEYCHAIN_RX))),
+              ('git-config-override', FnRule(lambda t: env_value_hit(t, _ONLY_PARAMS_RX, _INCLUDE_NAMED_RX))),
+              ('git-config-override', FnRule(config_override, plain=True)),
+              ('git-config-override', FnRule(config_write))]
 
 
 def normalise(cmd):
@@ -197,8 +524,9 @@ def hits(cmd, script=False):
     texts = [text] if bounded == text else [text, bounded]
     texts += [re.sub(r'[\'"\\]', '', t) for t in texts]
     found = []
+    plain = [text, re.sub(r'[\'"\\]', '', text)]
     for name, rx in RULES + ([] if script else GIT_RULES):
-        if name not in found and any(rx.search(t) for t in texts):
+        if name not in found and any(rx.search(t) for t in (plain if getattr(rx, 'plain', False) else texts)):
             found.append(name)
     return found
 
