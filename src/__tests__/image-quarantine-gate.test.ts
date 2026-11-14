@@ -284,6 +284,100 @@ describe('Bash: prose in a python/node heredoc body', () => {
 
 // Review P2 (Klodel 9186): the main agent does not run self-pace-gate.mjs, so the
 // same decision runs from its own hook, wired in the repo-shipped settings.
+// SCREENINGPROSE1114 (card 87aeff67, Klodel 42354): Mira's two reject dirs are ordinary Hungarian words; a
+// message, a grep pattern or a card title that says the word is prose. The bare rule stays for paths, single
+// quoted words, assignments, re-splitting constructs, other interpreters' inline code and the underscore dirs.
+describe('Bash: the reject-dir words as prose (card 87aeff67)', () => {
+  const V = 'visszavonva'
+  const P = 'panna-elvetett'
+  it.each([
+    `grep -n 'VISSZAVONVA a 37874 leállítás' shared/hibanaplo.md`,
+    `grep -i '${V} lett' x.md`,
+    `bash tools/kernel-msg.sh klodel 'a kártya ${V}, tárgytalan'`,
+    `bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel "${V} a 37874 leállítás"`,
+    `node tools/card.mjs 87aeff67 "Panna-Elvetett kép: tárgytalan"`,
+    `python3 -c 'print("VISSZAVONVA a 37874")'`,
+    `curl -s localhost:3420/api/kanban | python3 -c 'import json,sys; print([c for c in json.load(sys.stdin) if "${V} lett" in c["title"]])'`,
+    `python3 -I -c "print('${P} mappa: csak lista')"`,
+    `grep -c '${V} lett' a.md && echo ok`,
+    // a path form elsewhere in the command still needs its own reader to deny
+    `ls final/${V}/ && grep -n 'ez ${V} lett' notes.md`,
+    // Viktor 42377: a markdown message in single quotes, an escaped quote, the '\'' apostrophe form
+    `bash tools/kernel-msg.sh klodel 'a \`kód\` és $(x) ${V} lett'`,
+    `bash tools/kernel-msg.sh klodel "a \\"kártya\\" ${V} lett"`,
+    `grep -n 'it'\\''s a ${V} ok' x.md`,
+    `python3 -X utf8 -c 'print("${V} lett")'`,
+  ])('allows: %s', (command) => {
+    expect(decide('Bash', { command })).toEqual({ deny: false })
+  })
+
+  it.each([
+    `cd ${V}`,
+    `cd final && cp -R ${V} /tmp/v`,
+    `cp -R '${V}' /tmp/v`,
+    `cp -R "Visszavonva" /tmp/v`,
+    `cat 'final dir/${V}/a.jpg'`,
+    `cat "a b" final/${V}/a.jpg`,
+    `X='a ${V}'; cp -R $X /tmp/v`,
+    `for d in 'a ${V}'; do cp -R $d /tmp; done`,
+    `echo 'a ${V}' | xargs cp -R -t /tmp`,
+    `printf '%s\\n' 'a ${V}' | while read a b; do cp -R "$b" /tmp; done`,
+    `sh -c 'cp -R a ${V} /tmp/v'`,
+    `eval 'cp -R a ${V} /tmp/v'`,
+    `cp -R $(echo 'a ${V}') /tmp`,
+    `cp -R \`echo 'a ${V}'\` /tmp`,
+    `python3 -c 'import os; os.system("cp -R a ${V} /tmp")'`,
+    `python3 -c 'import shutil; shutil.copytree("${V}", "/tmp/v")'`,
+    `python3 -c 'open("a/${V}/x.jpg","rb").read()'`,
+    `node -e 'require("child_process").execSync("cp -R a ${V} /tmp")'`,
+    `ruby -e 'system("cp -R a ${V} /tmp")'`,
+    `awk 'BEGIN{system("cp -R a ${V} /tmp")}'`,
+    `find . -name 'x ${V}' -exec cp -R {} /tmp \\;`,
+    `ssh box 'cp -R a ${V} /tmp'`,
+    `set -- 'a ${V}'; cp -R $2 /tmp`,
+    // Viktor 42377 MEDIUM 1: the shell pairs quotes, a regex did not (comment, backslash, '\'')
+    `# don't copy\ncp -R ${V} /tmp/v\necho 'done'`,
+    `# the "x\ncp -R ${V} /tmp/v\necho "a b"`,
+    `# it's the dir\ncd ${V} && cat *\necho 'ok'`,
+    `# it's\ngrep -r foo ${V}\ngrep 'a b' x`,
+    `# it's\nfind ${V} -type f\necho 'x'`,
+    `# it's\nopen ${V}\ncat <<'EOF'\nx\nEOF`,
+    `cp -R it\\'s ${V} that\\'s /tmp/v`,
+    `echo 'it'\\''s' ; cd ${V} ; echo 'a b'`,
+    // Viktor 42377 LOW 3: rows the first version did not pin
+    `cp -R 'My Dir/${V}' /tmp/v`,
+    `cat '${V}/a b.jpg'`,
+    `source <(echo 'cp -R a ${V} /tmp/v')`,
+    `node -p 'require("child_process").execSync("cp -R a ${V} /tmp")'`,
+    `nodejs -e 'require("child_process").execSync("cp -R a ${V} /tmp")'`,
+    `echo 'cp -R a ${V} /tmp/v' | bash`,
+    // Viktor 42377 LOW 2: programs that run or re-split their own quoted argument
+    `php -r 'system("cp -R a ${V} /tmp");'`,
+    `bash -o pipefail -c 'cp -R a ${V} /tmp/v'`,
+    `python3 -X utf8 -c 'import os; os.system("cp -R a ${V} /tmp")'`,
+    `env -S 'cp -R a ${V} /tmp/v'`,
+    `trap 'cp -R a ${V} /tmp/v' EXIT`,
+    `A=('a ${V}'); cp -R \${A[@]} /tmp`,
+    // pins for the scanner and the allowlist (Kernel's mutation run on Viktor's code: M1, M3, M4, M6-M8, M11, M13)
+    `grep -n foo x.md # it's\ncp -R ${V} /tmp/v\necho 'x'`,
+    `grep -n foo x.md # it's\ncp -R ${V} /tmp/v\ngrep -c 'a' y.md # don't`,
+    `grep -n $'it\\'s' x ; cp -R ${V} /tmp/v ; echo 'a b'`,
+    `grep -n "$(cp -R a ${V} /tmp/v)" x.md`,
+    `grep -r foo \${X:-'a ${V}'}`,
+    `grep -rn foo '${V}'`,
+    `su -c 'cp -R a ${V} /tmp/v'`,
+    // Viktor 42390 INFO 1: only the re-split check stops this (no pipe; the literal belongs to jq, a text command)
+    `jq -n '"a ${V} b"' > /tmp/x; xargs cp -R /tmp/v < /tmp/x`,
+    `node 'a ${V}'`,
+    // the underscore dirs keep the bare rule, prose or not
+    `grep -n 'a _quarantine b' x.md`,
+    `bash tools/kernel-msg.sh klodel 'moved to _unscreened today'`,
+    `grep -n 'quarantine-meta is here' x.md`,
+  ])('denies: %s', (command) => {
+    expect(decide('Bash', { command })).toEqual(DENY)
+  })
+})
+
 describe('main-agent hook (scripts/hooks/image-quarantine-gate.mjs)', () => {
   const HOOK = join(__dirname, '..', '..', 'scripts', 'hooks', 'image-quarantine-gate.mjs')
   const run = (stdin: string) => spawnSync(process.execPath, [HOOK], { input: stdin, encoding: 'utf-8' })
