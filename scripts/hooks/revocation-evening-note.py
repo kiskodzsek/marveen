@@ -21,13 +21,16 @@ but a shell (`cat <<'E'` notes), a revocation inside a script file the command r
 scripts/este-blokk-add.py itself), and a command that failed (PostToolUseFailure is not wired).
 Only the matched phrase is written, never the command (it may carry a secret). Never blocks: always exit 0.
 No secret in the phrase either (Viktor 41840 LOW 1; the item reaches Patrik's chat):
-  - curl: the host only, and no host at all when the URL carries userinfo (https://KEY:@host/...);
+  - curl: the host only when it has a dot and does not look like a key, and no host at all when the URL carries
+    userinfo (https://KEY:@host/...);
   - security -s <service>: a known service name, or [A-Za-z0-9._-] up to 32 that does not look like a key, else
     '-s <megadva>';
   - claude mcp <name>: a server name found in the MCP configs (.mcp.json of the install and the agents,
     ~/.claude.json, $CLAUDE_CONFIG_DIR/.claude.json), or [a-z][a-z0-9-] up to 24 that does not look like a key, else
     '<név nem ismert>' (after `claude mcp remove` the name is gone from the config, so the shape rule is the fallback).
   Looks like a key: a run of 4+ digits, upper+lower+digit mixed, or a known token prefix (sk_, ghp_, xox, AKIA, eyJ...).
+  The shape rule is a fallback, not a proof: an all-lowercase key of up to 24 (mcp) / 32 (service) letters passes it
+  (Viktor 41865 D); the names the configs know are the exact protection.
 The agent: $CLAUDE_CONFIG_DIR's agents/<name> first (a sub-agent's own folder), the cwd only as a fallback (Viktor
 41840 LOW 5: a sub-agent working in another agent's folder was named after the folder). A failure of the hook and a
 parked item (a broken block) go to store/hook-errors.log (hook_errlog), not only to stderr nobody reads (LOW 3).
@@ -133,8 +136,10 @@ AGENT_RX = re.compile(r'/agents/([a-z0-9_-]{1,40})(?:/|$)')
 
 
 def strip_heredocs(cmd):
-    """Drop heredoc bodies, except one fed to a shell (`bash <<'E' ... E` runs its lines). An unterminated heredoc's
-    body is the rest of the text (as in bash). Line by line, the next terminator looked up in an index: a lazy regex
+    """Drop heredoc bodies, except one fed to a shell (`bash <<'E' ... E` runs its lines). A `<<` with no terminator
+    line after it is kept as text: it is often no heredoc at all (`$((1<<4))`, `echo "see <<EOF doc"`,
+    `python3 -c "print(1<<2)"`), and dropping the rest hid a revocation after it (Viktor 41865 A; a needless item
+    costs a line, a missed one cost Patrik a login). Line by line, the next terminator looked up in an index: a lazy regex
     from every `<<` to its terminator was quadratic on unterminated ones (Viktor 41840 INFO 6: 20 000 took 7.6 s).
     One heredoc per line is read (`cat <<A <<B` drops A's body only)."""
     import bisect
@@ -153,7 +158,11 @@ def strip_heredocs(cmd):
             continue
         ends = where.get(m.group(2), [])
         e = bisect.bisect_right(ends, i)
-        j = ends[e] if e < len(ends) else len(lines)  # no terminator: the body runs to the end
+        if e >= len(ends):  # no terminator: not read as a heredoc, the line stays
+            out.append(ln)
+            i += 1
+            continue
+        j = ends[e]
         if SHELL_FEED_RX.search(ln[:m.start()]):
             out.extend(lines[i:j + 1])
         else:
@@ -180,9 +189,16 @@ def phrases(cmd):
                 svc = m.group(2) or m.group(3)
                 p = f'security {m.group(1)}' + (f' -s {safe_service(svc)}' if svc else '')
             elif kind == 'http-revoke':
-                # userinfo in the URL (https://KEY:@host): no host either, the key may sit right before it
-                p = f'HTTP {m.group(3)} (' + ('host rejtve: belépési adat az URL-ben' if m.group(1) is not None
-                                              else m.group(2)) + ')'
+                # userinfo in the URL (https://KEY:@host): no host either, the key may sit right before it. A host
+                # is written only with a dot and not key-like: a userinfo with a "/" (https://KEY/x:@host) read its
+                # first part as the host, and a host label can be a key (Viktor 41865 B)
+                host = m.group(2)
+                if m.group(1) is not None:
+                    p = f'HTTP {m.group(3)} (host rejtve: belépési adat az URL-ben)'
+                elif '.' not in host or secretish(host):
+                    p = f'HTTP {m.group(3)} (host rejtve)'
+                else:
+                    p = f'HTTP {m.group(3)} ({host})'
             elif kind == 'git-credential':
                 p = f'git credential {m.group(1)}'
             else:

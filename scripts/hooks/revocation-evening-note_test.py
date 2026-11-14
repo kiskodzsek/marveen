@@ -21,6 +21,7 @@ ERRLOG = os.path.join(tempfile.mkdtemp(), 'hook-errors.log')  # never the instal
 # the fake key in the secret cases, assembled at run time
 KEY = 'sk_' + 'live_' + 'Ab12Cd34Ef56Gh78'
 KEY2 = 'Xq7' + 'Lm2Pz9'  # mixed case and digits, no known prefix, no 4-digit run
+KEY3 = 'sk_' + 'live_AbC/def'  # a key with a "/" in the userinfo (Viktor 41865 B)
 
 NOTE = [  # (command, the phrase the item must carry)
     ('CLAUDE_CONFIG_DIR=agents/dave/.claude-config claude mcp logout higgsfield', 'claude mcp logout higgsfield'),
@@ -46,6 +47,7 @@ NOTE = [  # (command, the phrase the item must carry)
     ('cd /tmp\nnpm logout', 'npm logout'),
     ('gh \\\n  auth logout', 'gh logout'),
     ('cat <<< hi\ngh auth logout', 'gh logout'),  # a here-string is not a heredoc: the next line runs
+    ('cat <<< hi\ngh auth logout\nhi', 'gh logout'),  # not even when a later line equals its word
     ("cat <<'E'\nnotes\nE\nclaude logout", 'claude logout'),  # after the terminator the commands run again  # backslash-newline joins the line
     # Viktor 41840 LOW 1: no secret in the phrase
     ('security delete-generic-password -s "free text with spaces"', 'delete-generic-password -s <megadva>'),
@@ -54,6 +56,25 @@ NOTE = [  # (command, the phrase the item must carry)
     ('security delete-generic-password -s ' + KEY, 'delete-generic-password -s <megadva>'),
     ('security delete-generic-password -s ' + KEY2, 'delete-generic-password -s <megadva>'),
     ('claude mcp logout github-dave', 'claude mcp logout github-dave'),
+    # Viktor 41865 A: a "<<" with no terminator line is no heredoc to drop; the revocation after it is noted
+    ('cat <<E\nnotes\ngh auth logout', 'gh logout'),
+    ('echo $((1<<4))\nclaude mcp logout higgsfield', 'claude mcp logout higgsfield'),
+    ('echo "see <<EOF doc"\nclaude mcp logout higgsfield', 'claude mcp logout higgsfield'),
+    ('python3 -c "print(1<<2)"\nclaude mcp logout higgsfield', 'claude mcp logout higgsfield'),
+    ("cat <<'E'\nnotes\n  E\nclaude logout", 'claude logout'),  # an indented terminator ends it
+    # Viktor 41865 B: a host is written only with a dot and not key-like
+    ('curl -X POST https://' + KEY3 + ':@api.example.test/v1/x/revoke', 'HTTP revoke (host rejtve'),
+    ('curl -X POST https://' + KEY + '.example.test/revoke', 'HTTP revoke (host rejtve)'),
+    ('curl -X POST https://localhost/revoke', 'HTTP revoke (host rejtve)'),
+    ('curl -X POST https://@api.example.test/revoke', 'HTTP revoke (host rejtve: belépési adat'),  # empty userinfo
+    # Viktor 41865 C: the bounds of the shape rules
+    ('security delete-generic-password -s ' + 'a' * 32, 'delete-generic-password -s ' + 'a' * 32),
+    ('security delete-generic-password -s ' + 'a' * 33, 'delete-generic-password -s <megadva>'),
+    ('security delete-generic-password -s svc123', 'delete-generic-password -s svc123'),
+    ('security delete-generic-password -s svc1234', 'delete-generic-password -s <megadva>'),
+    ('claude mcp remove ' + 'a' * 24, 'claude mcp remove ' + 'a' * 24),
+    ('claude mcp remove ' + 'a' * 25, 'claude mcp remove <név nem ismert>'),
+    ('claude mcp remove abc1234', 'claude mcp remove <név nem ismert>'),
 ]
 QUIET = [
     'git commit -m "fix: gh auth logout docs"',
@@ -67,7 +88,7 @@ QUIET = [
     'git credential fill',
     'curl -s https://api.example.test/v1/logouts.json',
     'ls -la',
-    'cat <<E\nnotes\ngh auth logout',  # an unterminated heredoc: its body is the rest of the text (as in bash)
+    "cat <<'E'\ngh auth logout\n  E",  # a heredoc with an indented terminator: its body is not run
     'x' * 100000 + '\ngh auth logout',  # past MAX_CMD: not read (documented limit, keeps the hook fast)
 ]
 
@@ -115,13 +136,13 @@ def main():
             if rc != 0 or items(path):
                 fails.append(f'should stay quiet: {cmd[:60]!r} -> rc {rc}, {items(path)!r}'[:300])
         # Viktor 41840 LOW 1: the fake key never reaches the file, in any of its forms
-        for cmd in [c for c, _ in NOTE if KEY in c or KEY2 in c] + ['curl https://u:' + KEY + '@h.example.test/revoke',
+        for cmd in [c for c, _ in NOTE if KEY in c or KEY2 in c or KEY3 in c] + ['curl https://u:' + KEY + '@h.example.test/revoke',
                                                        "security delete-internet-password -s '" + KEY + "'"]:
             n += 1
             path = os.path.join(d, 'k%d.json' % n)
             run_hook(cmd, path)
             body = open(path, encoding='utf-8').read() if os.path.exists(path) else ''
-            if 'live' in body or 'Ab12' in body or KEY2 in body or not body:
+            if 'live' in body or 'Ab12' in body or KEY2 in body or 'AbC' in body or not body:
                 fails.append(f'key leaked or item missing: {cmd[:40]!r} -> {body[:200]!r}')
         # a server name the configs know is written even when its shape is not the safe one; others are not
         n += 1
@@ -287,8 +308,38 @@ def drain_cases(d, fails):
         saved = json.load(open(path + '.utolso-drain.json', encoding='utf-8'))
     except (OSError, ValueError):
         saved = {}
-    if saved.get('tetelek') != [{'tema': 'kézi'}]:
-        fails.append(f'the drained items should be kept in .utolso-drain.json: {saved!r}'[:200])
+    if saved.get('tetelek') != [{'tema': 'kézi'}] or saved.get('olvashatatlan_sorok') != ['nem json', '[1]']:
+        fails.append(f'the drained items and unreadable lines should be kept in .utolso-drain.json: {saved!r}'[:200])
+    n += 1  # Viktor 41865 C (n25): the copy has the block's mode
+    if os.stat(path + '.utolso-drain.json').st_mode & 0o777 != 0o640:
+        fails.append(f'the copy should have the block mode: {oct(os.stat(path + ".utolso-drain.json").st_mode & 0o777)}')
+    n += 1  # Viktor 41865 E: the copy before stays as .prev, the unreadable lines never reach the CLI output
+    if 'olvashatatlan_sorok' in out:
+        fails.append('unreadable lines should stay in the copy, not in the drain output')
+    este_blokk.add_item('t', 'második', 'f', path=path)
+    este_blokk.drain(path)
+    try:
+        prev = json.load(open(path + '.utolso-drain.prev.json', encoding='utf-8'))
+        cur = json.load(open(path + '.utolso-drain.json', encoding='utf-8'))
+    except (OSError, ValueError):
+        prev, cur = {}, {}
+    if prev.get('tetelek') != [{'tema': 'kézi'}] or [x.get('mi') for x in cur.get('tetelek', [])] != ['második']:
+        fails.append(f'the copy before should be kept as .prev: {prev!r} / {cur!r}'[:300])
+    n += 1  # Viktor 41865 C (n29): the drain CLI exits 1 on an error and the block stays as it was
+    ro = os.path.join(d, 'drro')
+    os.makedirs(ro)
+    rop = os.path.join(ro, 'b.json')
+    with open(rop, 'w', encoding='utf-8') as f:
+        json.dump([{'mi': 'marad'}], f)
+    open(rop + '.lock', 'a').close()
+    os.chmod(ro, 0o500)
+    try:
+        p = subprocess.run([sys.executable, '-I', DRAIN], capture_output=True, text=True, timeout=20,
+                           env={'PATH': '/usr/bin:/bin', 'ESTE_BLOKK_PATH': rop})
+        if p.returncode != 1 or items(rop) != [{'mi': 'marad'}]:
+            fails.append(f'drain CLI on a read-only folder: want rc 1 and the block unchanged, got {p.returncode} {items(rop)!r}')
+    finally:
+        os.chmod(ro, 0o700)
     n += 1  # an empty block: nothing taken, nothing written
     p = subprocess.run([sys.executable, '-I', DRAIN], capture_output=True, text=True, env=env, timeout=20)
     if p.returncode != 0 or json.loads(p.stdout).get('tetelek') != []:

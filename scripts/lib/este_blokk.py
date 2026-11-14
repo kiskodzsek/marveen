@@ -101,7 +101,9 @@ def add_item(tipus, mi, forras, agens=None, javaslat=None, path=None, now=None):
 def drain(path=None):
     """Take every item out, under the writers' lock: the file is emptied to [] atomically, the parked items of
     <file>.hiba.jsonl are returned too (each marked 'parkolt': True) and that file is removed. A copy of what was
-    taken goes to <file>.utolso-drain.json first, so a run that dies after the drain loses nothing.
+    taken goes to <file>.utolso-drain.json first (the one before it kept as .utolso-drain.prev.json, and the
+    unreadable .hiba.jsonl lines, cut to 200 characters, in the copy only), so a run that dies after the drain
+    loses nothing (Viktor 41865 E).
     A block that is not a JSON list is left untouched ('hibas_fajl': True): a person has to look at it.
     Returns {'tetelek': [...], 'parkolt': [...], 'hibas_fajl': bool, 'olvashatatlan_sor': int}."""
     path = path or blokk_path()
@@ -122,6 +124,7 @@ def drain(path=None):
                 out['hibas_fajl'] = True
         hiba = path + '.hiba.jsonl'
         has_hiba = os.path.exists(hiba)
+        bad_lines = []
         if has_hiba:
             with open(hiba, encoding='utf-8') as f:
                 for line in f:
@@ -131,13 +134,19 @@ def drain(path=None):
                         item = json.loads(line)
                     except ValueError:
                         out['olvashatatlan_sor'] += 1
+                        bad_lines.append(line.rstrip('\n')[:200])
                         continue
                     if isinstance(item, dict):
                         out['parkolt'].append({**item, 'parkolt': True})
                     else:
                         out['olvashatatlan_sor'] += 1
+                        bad_lines.append(line.rstrip('\n')[:200])
         if out['tetelek'] or out['parkolt'] or out['olvashatatlan_sor']:
-            _atomic_write(path + '.utolso-drain.json', out, mode_of=path if exists else None)
+            copy = path + '.utolso-drain.json'
+            if os.path.exists(copy):
+                os.replace(copy, path + '.utolso-drain.prev.json')
+            _atomic_write(copy, {**out, 'olvashatatlan_sorok': bad_lines} if bad_lines else out,
+                          mode_of=path if exists else None)
         if exists and not out['hibas_fajl'] and out['tetelek']:
             _atomic_write(path, [])
         if has_hiba:
