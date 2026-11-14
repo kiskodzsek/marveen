@@ -6,6 +6,7 @@ import { resolveFromPath } from '../platform.js'
 import { listAgentNames } from './agent-config.js'
 import { isAgentRunning, capturePane, startAgentProcess } from './agent-process.js'
 import { isRestartInFlight } from './restart-lock.js'
+import { isLoginInFlight, loginInFlightAgeMin } from './login-in-flight.js'
 import { quarantineFleetTokenIfDead } from './claude-credentials-guard.js'
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
@@ -70,6 +71,14 @@ export interface ReauthHealerInput {
    * restart -- startAgentProcess re-seeds hasCompletedOnboarding.
    */
   isFirstRunGate?: boolean
+  /**
+   * An operator started an interactive /login for this sub-agent through the
+   * dashboard less than LOGIN_IN_FLIGHT_MS ago (login-in-flight.ts). The
+   * sign-in screen is then a human's live login, not a first-run gate: a
+   * restart kills it and voids the authorize link (2026-11-11, dave). Hold all
+   * actions and do not count the probe; the mark expires on its own.
+   */
+  loginInFlight?: boolean
   prev: ReauthHealerState
   nowMs: number
 }
@@ -97,10 +106,16 @@ export const NO_REAUTH_STATE: ReauthHealerState = { consecutiveDead: 0, lastActi
  * into the session every tick) and never fires for the main agent.
  */
 export function decideReauthAction(input: ReauthHealerInput, t: ReauthHealerThresholds): ReauthHealerDecision {
-  const { isDeadToken, sessionAlive, isMain, canInteractiveLogin, isFirstRunGate, prev, nowMs } = input
+  const { isDeadToken, sessionAlive, isMain, canInteractiveLogin, isFirstRunGate, loginInFlight, prev, nowMs } = input
 
   // Clean / not-applicable: end the spell, allow a fresh alert next time.
   if (!isDeadToken || !sessionAlive) {
+    return { sendKeys: false, restartAgent: false, restartMain: false, escalate: false, next: NO_REAUTH_STATE }
+  }
+
+  // A human is logging this sub-agent in right now: no restart, no /login
+  // keys, no alert, and the spell starts over once the mark expires.
+  if (loginInFlight === true && !isMain) {
     return { sendKeys: false, restartAgent: false, restartMain: false, escalate: false, next: NO_REAUTH_STATE }
   }
 
@@ -285,10 +300,15 @@ function checkSession(label: string, session: string, isMain: boolean, quiet: bo
   // The reasons produced by the two first-run-gate markers in reauth-detect.
   const isFirstRunGate = /onboarding picker|sign-in screen/i.test(reauth.reason ?? '')
 
+  const loginInFlight = !isMain && isLoginInFlight(label)
   const decision = decideReauthAction(
-    { isDeadToken: reauth.needsReauth, sessionAlive, isMain, canInteractiveLogin: hostCanInteractiveLogin(), isFirstRunGate, prev, nowMs: Date.now() },
+    { isDeadToken: reauth.needsReauth, sessionAlive, isMain, canInteractiveLogin: hostCanInteractiveLogin(), isFirstRunGate, loginInFlight, prev, nowMs: Date.now() },
     { threshold: DEAD_PROBE_THRESHOLD, cooldownMs: ESCALATION_COOLDOWN_MS },
   )
+  // The hold must be visible (Viktor 38639 L2): one line per sweep while it mutes the heal.
+  if (loginInFlight && reauth.needsReauth && sessionAlive) {
+    logger.info({ label, session, reason: reauth.reason, minutes: loginInFlightAgeMin(label) }, 'reauth-healer: held -- operator login in flight')
+  }
 
   if (decision.next.consecutiveDead === 0) {
     watchState.delete(session)

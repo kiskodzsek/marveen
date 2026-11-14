@@ -170,6 +170,7 @@ import { readAgentTranscript, isTranscriptAllowed } from '../agent-transcript.js
 import { configDirFor } from '../main-transcript-root.js'
 import { kindAllowed, FORBIDDEN_KIND } from './auth.js'
 import { isValidModelId, InvalidModelIdError } from '../../model-id.js'
+import { markLoginInFlight, clearLoginInFlight } from '../login-in-flight.js'
 
 // Which credential kinds may read a transcript. NAMED principals only: a
 // logged-in human, or a key enrolled to that human's own device. Deliberately
@@ -2189,6 +2190,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const session = agentSessionName(name)
     const host = readAgentRemoteHost(name)
     try {
+      // A human is about to authorize: keep the reauth-healer off this agent (login-in-flight.ts).
+      markLoginInFlight(name)
       await sendPromptToSession(session, '/login', host)
       // Wait for Claude Code to render the auth URL (typically 3-6s)
       let authUrl: string | null = null
@@ -2210,6 +2213,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         json(res, { ok: false, error: 'Auth URL nem jelent meg 12 másodpercen belül. Próbáld újra, vagy nézd a tmux session-t.' })
       }
     } catch (err) {
+      // No live login after a failed start: do not keep the healer muted (Viktor 38639 L1).
+      clearLoginInFlight(name)
       logger.error({ err, name }, 'Auth init failed')
       json(res, { error: 'Auth flow indítása sikertelen' }, 500)
     }
