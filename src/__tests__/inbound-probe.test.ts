@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, mkdirSync, rmdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmdirSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { shouldTriggerDeafnessRespawn, readLastIngestionTimestamp, readLastIngestionTimestampAcross, mainTranscriptDirs, mainConfigRoots, TRANSCRIPT_DIR } from '../web/inbound-probe.js'
+import { shouldTriggerDeafnessRespawn, readLastIngestionTimestamp, readLastIngestionTimestampAcross, inboundChannelLineTs, INGESTION_READ_DEFAULTS, mainTranscriptDirs, mainConfigRoots, TRANSCRIPT_DIR } from '../web/inbound-probe.js'
 import { projectsDirFor } from '../web/active-model.js'
 import { PROJECT_ROOT } from '../config.js'
 
@@ -10,12 +10,24 @@ import { PROJECT_ROOT } from '../config.js'
 // AC coverage map (channel-watchdog-prompt.md D3 + wolf-swarm-trial.md #3)
 //
 //   AC-D3-1: shouldTriggerDeafnessRespawn — exact probeTimeoutMs boundary
-//   AC-D3-2: readLastIngestionTimestamp — large file (>256KB) tail-read finds
-//            a <channel source= line near the END of the file
-//   AC-D3-3: readLastIngestionTimestamp — large file (>256KB) tail-read MISSES
-//            a <channel source= line that lives ONLY in the first 10KB
-//            (documents the known limitation of the 256KB tail window)
+//   AC-D3-2: readLastIngestionTimestamp — large file (>256KB): an inbound line
+//            near the END of the file is found
+//   AC-D3-3: readLastIngestionTimestamp — large file (>256KB): an inbound line
+//            that lives ONLY in the first 10KB is found too (card 194e7ada: the
+//            reader walks backward under a byte budget, no fixed tail window)
 // ---------------------------------------------------------------------------
+
+// Real transcript line shapes (measured 2026-11-14 on the main agent's
+// transcripts, card 194e7ada). Only inboundLine and enqueueLine are ingestions.
+const CHANNEL = '<channel source="plugin:telegram:telegram" chat_id="1" user="u">hi</channel>'
+const inboundLine = (ts: string, text = 'hello') =>
+  JSON.stringify({ type: 'user', timestamp: ts, message: { role: 'user', content: CHANNEL.replace('hi', text) } })
+const enqueueLine = (ts: string) =>
+  JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: ts, sessionId: 's', content: CHANNEL })
+const mcpDeltaLine = (ts: string) =>
+  JSON.stringify({ type: 'attachment', timestamp: ts, attachment: { type: 'mcp_instructions_delta', addedNames: ['telegram'], addedBlocks: ['Messages arrive as <channel source="telegram" chat_id="..."> ...'], removedNames: [] } })
+const systemBlobLine = () =>
+  JSON.stringify({ type: 'api-request-blob', message: { role: 'system', content: [{ type: 'text', text: 'The sender reads <channel source="telegram"> blocks.' }] } })
 
 // ---------------------------------------------------------------------------
 // shouldTriggerDeafnessRespawn
@@ -114,6 +126,17 @@ describe('readLastIngestionTimestamp', () => {
     return d
   }
 
+  function writeSession(dir: string, name: string, lines: string[], mtime?: string): string {
+    const p = join(dir, name)
+    writeFileSync(p, lines.join('\n') + '\n', 'utf-8')
+    if (mtime) utimesSync(p, new Date(mtime), new Date(mtime))
+    return p
+  }
+
+  // ~100-byte line with no marker
+  const filler = (n: number, ts = '2026-06-01T09:00:00.000Z') =>
+    Array.from({ length: n }, () => JSON.stringify({ type: 'assistant', timestamp: ts, message: { role: 'assistant', content: 'x'.repeat(60) } }))
+
   it('returns null for an empty directory (no JSONL files)', () => {
     const dir = makeTmpDir()
     expect(readLastIngestionTimestamp(dir)).toBe(null)
@@ -121,35 +144,35 @@ describe('readLastIngestionTimestamp', () => {
 
   it('returns null when no lines contain <channel source=', () => {
     const dir = makeTmpDir()
-    const lines = [
-      JSON.stringify({ timestamp: '2026-06-01T10:00:00.000Z', content: 'some message' }),
-      JSON.stringify({ timestamp: '2026-06-01T10:01:00.000Z', content: 'another message' }),
-    ].join('\n')
-    writeFileSync(join(dir, 'session.jsonl'), lines, 'utf-8')
+    writeSession(dir, 'session.jsonl', [
+      JSON.stringify({ type: 'user', timestamp: '2026-06-01T10:00:00.000Z', message: { role: 'user', content: 'some message' } }),
+      JSON.stringify({ type: 'user', timestamp: '2026-06-01T10:01:00.000Z', message: { role: 'user', content: 'another message' } }),
+    ])
     expect(readLastIngestionTimestamp(dir)).toBe(null)
   })
 
-  it('returns the timestamp of the last <channel source= line', () => {
+  it('returns the timestamp of the last inbound channel message', () => {
     const dir = makeTmpDir()
-    const ts1 = '2026-06-01T10:00:00.000Z'
     const ts2 = '2026-06-01T10:05:00.000Z'
-    const lines = [
-      JSON.stringify({ timestamp: ts1, content: '<channel source=telegram> hello' }),
-      JSON.stringify({ timestamp: '2026-06-01T10:03:00.000Z', content: 'no channel here' }),
-      JSON.stringify({ timestamp: ts2, content: '<channel source=telegram> world' }),
-    ].join('\n')
-    writeFileSync(join(dir, 'session.jsonl'), lines, 'utf-8')
+    writeSession(dir, 'session.jsonl', [
+      inboundLine('2026-06-01T10:00:00.000Z', 'hello'),
+      JSON.stringify({ type: 'user', timestamp: '2026-06-01T10:03:00.000Z', message: { role: 'user', content: 'no channel here' } }),
+      inboundLine(ts2, 'world'),
+    ])
     expect(readLastIngestionTimestamp(dir)).toBe(new Date(ts2).getTime())
+  })
+
+  it('counts a queue-operation enqueue (the message arrived while busy)', () => {
+    const dir = makeTmpDir()
+    const ts = '2026-06-01T10:07:00.000Z'
+    writeSession(dir, 'session.jsonl', [inboundLine('2026-06-01T10:00:00.000Z'), enqueueLine(ts)])
+    expect(readLastIngestionTimestamp(dir)).toBe(new Date(ts).getTime())
   })
 
   it('skips malformed JSON lines without aborting', () => {
     const dir = makeTmpDir()
     const ts = '2026-06-01T11:00:00.000Z'
-    const lines = [
-      'this is not json <channel source=telegram>',
-      JSON.stringify({ timestamp: ts, content: '<channel source=telegram> ok' }),
-    ].join('\n')
-    writeFileSync(join(dir, 'session.jsonl'), lines, 'utf-8')
+    writeSession(dir, 'session.jsonl', [inboundLine(ts, 'ok'), 'this is not json <channel source=telegram>'])
     expect(readLastIngestionTimestamp(dir)).toBe(new Date(ts).getTime())
   })
 
@@ -157,50 +180,132 @@ describe('readLastIngestionTimestamp', () => {
     expect(readLastIngestionTimestamp('/tmp/nonexistent-inbound-probe-dir-' + Date.now())).toBe(null)
   })
 
-  // AC-D3-2: tail-read finds a <channel source= line near the END of a >256KB file.
-  //
-  // The implementation reads only the last 256 KB (TAIL_BYTES = 262144) to avoid
-  // blocking on large transcripts. A channel ingestion line near the end of a
-  // large file MUST be found.
-  //
-  // Construction:
-  //   - Write >256 KB of filler lines (no <channel source=) before the target line.
-  //   - Append the known <channel source= line with a known timestamp at the very end.
-  //   - The function must return that timestamp.
-  it('tail-read: finds <channel source= line near the END of a >256KB file (AC-D3-2)', () => {
+  // NEGATIVE (card 194e7ada): the marker inside a non-inbound line is not an
+  // ingestion. Every real session file starts with an mcp_instructions_delta
+  // attachment stamped with the SESSION START time, plus the system prompt blob;
+  // before the fix a fresh file under 256 KB returned the start time as inbound.
+  it('ignores the mcp_instructions_delta attachment, the system-prompt blob and a queue remove', () => {
+    const dir = makeTmpDir()
+    writeSession(dir, 'session.jsonl', [
+      mcpDeltaLine('2026-06-01T12:00:00.000Z'),
+      systemBlobLine(),
+      JSON.stringify({ type: 'queue-operation', operation: 'remove', timestamp: '2026-06-01T12:02:00.000Z', content: CHANNEL }),
+      JSON.stringify({ type: 'user', timestamp: '2026-06-01T12:03:00.000Z', message: { role: 'user', content: [{ type: 'tool_result', content: CHANNEL }] } }),
+      JSON.stringify({ type: 'assistant', timestamp: '2026-06-01T12:04:00.000Z', message: { role: 'assistant', content: CHANNEL } }),
+      JSON.stringify({ type: 'user', timestamp: '2026-06-01T12:05:00.000Z', message: { role: 'user', content: 'quoted: ' + CHANNEL } }),
+    ])
+    expect(readLastIngestionTimestamp(dir)).toBe(null)
+  })
+
+  it('a later non-inbound marker line does not shadow an earlier real inbound', () => {
+    const dir = makeTmpDir()
+    const real = '2026-06-01T11:30:00.000Z'
+    writeSession(dir, 'session.jsonl', [inboundLine(real), mcpDeltaLine('2026-06-01T12:00:00.000Z'), systemBlobLine()])
+    expect(readLastIngestionTimestamp(dir)).toBe(new Date(real).getTime())
+  })
+
+  // AC-D3-2: an inbound line near the END of a >256KB file is found.
+  it('finds an inbound line near the END of a >256KB file (AC-D3-2)', () => {
     const dir = makeTmpDir()
     const knownTs = '2026-06-01T15:00:00.000Z'
-    // Build filler: each line is a JSON object without <channel source= (~100 bytes each).
-    // 262144 / 100 = ~2621 lines. Use 3000 lines to ensure we exceed 256 KB.
-    const fillerLine = JSON.stringify({ timestamp: '2026-06-01T09:00:00.000Z', content: 'x'.repeat(80) })
-    const filler = Array.from({ length: 3000 }, () => fillerLine).join('\n')
-    const targetLine = JSON.stringify({ timestamp: knownTs, content: '<channel source=telegram> tail-test' })
-    writeFileSync(join(dir, 'session.jsonl'), filler + '\n' + targetLine, 'utf-8')
+    writeSession(dir, 'session.jsonl', [...filler(3000), inboundLine(knownTs, 'tail-test')])
     expect(readLastIngestionTimestamp(dir)).toBe(new Date(knownTs).getTime())
   })
 
-  // AC-D3-3: tail-read MISSES a <channel source= line that exists ONLY in the
-  // first 10 KB of a >256 KB file.
-  //
-  // The 256 KB tail window is a deliberate trade-off (avoid blocking I/O on
-  // large transcripts). When the only matching line is far before the tail
-  // window, the function returns null — this is the documented limitation.
-  // The test locks the behavior so any future change to the tail strategy is
-  // intentional and visible in the diff.
-  it('tail-read: returns null when the only <channel source= line is in the first 10KB of a >256KB file (AC-D3-3, known limitation)', () => {
+  // AC-D3-3 (was a locked known limitation, card 194e7ada): the only inbound
+  // line in the first 10 KB of a >256KB file IS found now -- the reader walks
+  // backward past the old 256 KB tail window.
+  it('finds the only inbound line in the first 10KB of a >256KB file (AC-D3-3)', () => {
     const dir = makeTmpDir()
-    // Put the target line first (within the first 10 KB).
     const earlyTs = '2026-06-01T08:00:00.000Z'
-    const earlyLine = JSON.stringify({ timestamp: earlyTs, content: '<channel source=telegram> early-line' })
-    // Filler: >256 KB of lines without <channel source= to push the target line
-    // far beyond the 256 KB tail window. Each filler line is ~100 bytes.
-    // 262144 / 100 = ~2621 lines minimum; use 3000.
-    const fillerLine = JSON.stringify({ timestamp: '2026-06-01T09:00:00.000Z', content: 'y'.repeat(80) })
-    const filler = Array.from({ length: 3000 }, () => fillerLine).join('\n')
-    writeFileSync(join(dir, 'session.jsonl'), earlyLine + '\n' + filler, 'utf-8')
-    // The tail window starts at the last 256 KB — the earlyLine is NOT in it.
-    // The function must return null (the line is beyond the tail window).
-    expect(readLastIngestionTimestamp(dir)).toBe(null)
+    writeSession(dir, 'session.jsonl', [inboundLine(earlyTs, 'early-line'), ...filler(3000)])
+    expect(readLastIngestionTimestamp(dir)).toBe(new Date(earlyTs).getTime())
+  })
+
+  it('a line split across a chunk boundary is read whole', () => {
+    const dir = makeTmpDir()
+    const ts = '2026-06-01T08:30:00.000Z'
+    const lines = [inboundLine(ts, 'z'.repeat(300)), ...filler(5)]
+    writeSession(dir, 'session.jsonl', lines)
+    // every chunk size from 7 to 97 bytes puts the boundary at a different place in the target line
+    for (let chunkBytes = 7; chunkBytes < 100; chunkBytes += 10) {
+      expect(readLastIngestionTimestamp(dir, { chunkBytes })).toBe(new Date(ts).getTime())
+    }
+  })
+
+  it('a line longer than one chunk is read whole', () => {
+    const dir = makeTmpDir()
+    const ts = '2026-06-01T08:40:00.000Z'
+    writeSession(dir, 'session.jsonl', [inboundLine(ts, 'w'.repeat(5000)), ...filler(2)])
+    expect(readLastIngestionTimestamp(dir, { chunkBytes: 512 })).toBe(new Date(ts).getTime())
+  })
+
+  it('falls back to an older file when the newest has no inbound (a restart opened a new file)', () => {
+    const dir = makeTmpDir()
+    const ts = '2026-06-01T07:00:00.000Z'
+    writeSession(dir, 'old.jsonl', [inboundLine(ts), ...filler(3)], '2026-06-01T07:05:00.000Z')
+    writeSession(dir, 'new.jsonl', [mcpDeltaLine('2026-06-01T08:00:00.000Z'), systemBlobLine(), ...filler(3)], '2026-06-01T08:10:00.000Z')
+    expect(readLastIngestionTimestamp(dir)).toBe(new Date(ts).getTime())
+  })
+
+  it('takes the newest inbound across files, not the first file that has one', () => {
+    const dir = makeTmpDir()
+    // mtime order is a proxy; a resumed older file can hold the later line
+    const later = '2026-06-01T09:30:00.000Z'
+    writeSession(dir, 'a.jsonl', [inboundLine('2026-06-01T09:00:00.000Z')], '2026-06-01T09:40:00.000Z')
+    writeSession(dir, 'b.jsonl', [inboundLine(later)], '2026-06-01T09:35:00.000Z')
+    expect(readLastIngestionTimestamp(dir)).toBe(new Date(later).getTime())
+  })
+
+  it('stops at a file whose mtime is older than the match already found', () => {
+    const dir = makeTmpDir()
+    const ts = '2026-06-01T09:00:00.000Z'
+    writeSession(dir, 'new.jsonl', [inboundLine(ts)], '2026-06-01T09:05:00.000Z')
+    // an older file can hold no later line; a (corrupt) later stamp in it must not win
+    writeSession(dir, 'old.jsonl', [inboundLine('2026-06-01T23:00:00.000Z')], '2026-06-01T08:00:00.000Z')
+    expect(readLastIngestionTimestamp(dir)).toBe(new Date(ts).getTime())
+  })
+
+  it('honours maxFiles: an inbound only in a file beyond the limit is not read', () => {
+    const dir = makeTmpDir()
+    writeSession(dir, 'old.jsonl', [inboundLine('2026-06-01T07:00:00.000Z')], '2026-06-01T07:00:00.000Z')
+    writeSession(dir, 'mid.jsonl', filler(2), '2026-06-01T08:00:00.000Z')
+    writeSession(dir, 'new.jsonl', filler(2), '2026-06-01T09:00:00.000Z')
+    expect(readLastIngestionTimestamp(dir, { maxFiles: 2 })).toBe(null)
+    expect(readLastIngestionTimestamp(dir, { maxFiles: 3 })).toBe(new Date('2026-06-01T07:00:00.000Z').getTime())
+  })
+
+  it('honours maxBytes: the budget is shared across files and bounds the read', () => {
+    const dir = makeTmpDir()
+    const ts = '2026-06-01T07:00:00.000Z'
+    writeSession(dir, 'old.jsonl', [inboundLine(ts)], '2026-06-01T07:00:00.000Z')
+    const newer = writeSession(dir, 'new.jsonl', filler(3000), '2026-06-01T09:00:00.000Z')
+    const newerSize = statSync(newer).size
+    expect(readLastIngestionTimestamp(dir, { maxBytes: newerSize })).toBe(null)
+    expect(readLastIngestionTimestamp(dir, { maxBytes: newerSize + 4096 })).toBe(new Date(ts).getTime())
+  })
+
+  it('the default budget is bounded (B1: no unbounded synchronous read)', () => {
+    expect(INGESTION_READ_DEFAULTS.maxBytes).toBeLessThanOrEqual(32 * 1024 * 1024)
+    expect(INGESTION_READ_DEFAULTS.maxFiles).toBeLessThanOrEqual(16)
+  })
+})
+
+describe('inboundChannelLineTs', () => {
+  it('accepts exactly the two inbound shapes', () => {
+    const ts = '2026-06-01T10:00:00.000Z'
+    expect(inboundChannelLineTs(inboundLine(ts))).toBe(new Date(ts).getTime())
+    expect(inboundChannelLineTs(enqueueLine(ts))).toBe(new Date(ts).getTime())
+  })
+
+  it('rejects the non-inbound shapes and a bad timestamp', () => {
+    expect(inboundChannelLineTs(mcpDeltaLine('2026-06-01T10:00:00.000Z'))).toBe(null)
+    expect(inboundChannelLineTs(systemBlobLine())).toBe(null)
+    expect(inboundChannelLineTs(JSON.stringify({ type: 'user', timestamp: 'not a date', message: { role: 'user', content: CHANNEL } }))).toBe(null)
+    expect(inboundChannelLineTs(JSON.stringify({ type: 'user', message: { role: 'user', content: CHANNEL } }))).toBe(null)
+    expect(inboundChannelLineTs(JSON.stringify({ type: 'user', timestamp: '2026-06-01T10:00:00.000Z', message: null }))).toBe(null)
+    expect(inboundChannelLineTs('null')).toBe(null)
+    expect(inboundChannelLineTs('{')).toBe(null)
   })
 })
 
@@ -239,7 +344,7 @@ describe('transcript roots across config dirs', () => {
   function writeIngestion(dir: string, ts: string): void {
     writeFileSync(
       join(dir, 'session.jsonl'),
-      JSON.stringify({ timestamp: ts, content: '<channel source=telegram> hello' }),
+      inboundLine(ts),
       'utf-8',
     )
   }

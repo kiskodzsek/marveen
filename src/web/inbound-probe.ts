@@ -186,78 +186,151 @@ export function shouldTriggerDeafnessRespawn(opts: {
 }
 
 /**
- * Scan the newest JSONL session file for the most recent inbound-channel
- * ingestion. Returns the timestamp (ms since epoch) of the last line
- * containing `<channel source=`, or null if none found.
+ * Find the most recent inbound-channel ingestion in a transcript directory.
+ * Returns its timestamp (ms since epoch), or null if none is found within the
+ * read budget.
  *
- * The "newest" file is determined by mtime: stat all *.jsonl under
- * transcriptDir, pick the one with the highest mtime. This is the main
- * session's active log. Returns null when the directory does not exist or
- * no JSONL files are present.
+ * WHAT COUNTS (card 194e7ada, measured 2026-11-14 on the main agent's 337
+ * transcripts): only a line that IS an inbound channel message --
+ *   - type "user" whose message.content is a string starting with
+ *     `<channel source=` (the delivered turn), or
+ *   - type "queue-operation", operation "enqueue", whose content starts with
+ *     `<channel source=` (the message arrived while the session was busy).
+ * A bare substring match is NOT enough: every session file carries the marker
+ * in non-inbound lines too -- the "attachment" line of type
+ * mcp_instructions_delta (the channel plugin's own instructions, stamped with
+ * the SESSION START time) and the system-prompt "api-request-blob". Before this
+ * fix a fresh session file under 256 KB returned its start time as the "last
+ * inbound", which could warm store/.channel-keepalive with no real traffic.
  *
- * NOTE: Do NOT log line contents — JSONL lines may contain full Telegram
- * message text (PII). Only the extracted timestamp is ever logged.
+ * WHERE IT LOOKS: the newest files by mtime (at most `maxFiles`), each read
+ * BACKWARD in `chunkBytes` chunks, with one shared `maxBytes` budget per call.
+ * The old reader looked only at the last 256 KB of the newest file; every
+ * restart opens a new file, and the large inter-agent/tool traffic pushes the
+ * last inbound out of a fixed tail window, so it returned null for every agent
+ * (all 5 intake rows "unknown-inbound" on 2026-11-14). The budget keeps the
+ * synchronous read bounded (B1: do not block the event loop on 100s of MB);
+ * a null now means "no inbound within the budget", not "never".
+ *
+ * Files are visited newest-first; once a match is found, a file whose mtime is
+ * older than that match cannot hold a later line, so the scan stops there.
+ *
+ * NOTE: Do NOT log line contents -- JSONL lines may contain full Telegram
+ * message text (PII). Only the extracted timestamp is ever returned.
  */
-export function readLastIngestionTimestamp(transcriptDir: string): number | null {
+// Sized on 2026-11-14 (measured): the main agent restarts several times a
+// day (a new file each time); after a quiet night its last inbound sat in the
+// 15th newest file, about 23 MB back. With these limits the live run found it,
+// and a dir with NO inbound (the worst case, the whole budget read) took
+// 7-14 ms per call. A longer silence than that reads as null ("unknown"). Called once a minute (keepalive)
+// and once per agent every 5 minutes (intake monitor).
+export const INGESTION_READ_DEFAULTS = {
+  maxFiles: 16,
+  maxBytes: 32 * 1024 * 1024,
+  chunkBytes: 256 * 1024,
+}
+
+const CHANNEL_MARKER = '<channel source='
+const CHANNEL_MARKER_BYTES = Buffer.from(CHANNEL_MARKER, 'utf-8')
+
+/** The timestamp (ms) of a transcript line that is an inbound channel message, else null. */
+export function inboundChannelLineTs(line: string): number | null {
+  let obj: unknown
+  try { obj = JSON.parse(line) } catch { return null }
+  if (!obj || typeof obj !== 'object') return null
+  const o = obj as {
+    type?: unknown
+    operation?: unknown
+    content?: unknown
+    timestamp?: unknown
+    message?: { role?: unknown; content?: unknown } | null
+  }
+  let inbound = false
+  if (o.type === 'user') {
+    const m = o.message
+    inbound = !!m && typeof m === 'object' && typeof m.content === 'string' && m.content.startsWith(CHANNEL_MARKER)
+  } else if (o.type === 'queue-operation') {
+    inbound = o.operation === 'enqueue' && typeof o.content === 'string' && o.content.startsWith(CHANNEL_MARKER)
+  }
+  if (!inbound || typeof o.timestamp !== 'string') return null
+  const ts = new Date(o.timestamp).getTime()
+  return Number.isFinite(ts) ? ts : null
+}
+
+// The last inbound line in one file, read backward chunk by chunk. `budget.left`
+// is shared across the files of one call and decremented by the bytes read.
+function lastInboundInFile(path: string, size: number, chunkBytes: number, budget: { left: number }): number | null {
+  const fd = openSync(path, 'r')
+  try {
+    let pos = size
+    let carry: Buffer = Buffer.alloc(0) // the (partial) first line of the later chunk
+    while (pos > 0 && budget.left > 0) {
+      const len = Math.min(chunkBytes, pos, budget.left)
+      pos -= len
+      budget.left -= len
+      const buf = Buffer.allocUnsafe(len)
+      // A short read (the file shrank under us) would splice two lines: give up on this file.
+      if (readSync(fd, buf, 0, len, pos) !== len) break
+      const data = carry.length ? Buffer.concat([buf, carry]) : buf
+      let complete: Buffer
+      if (pos > 0) {
+        // The first line may start before this chunk: keep it for the next round.
+        const nl = data.indexOf(0x0a)
+        if (nl < 0) { carry = data; continue }
+        carry = data.subarray(0, nl)
+        complete = data.subarray(nl + 1)
+      } else {
+        carry = Buffer.alloc(0)
+        complete = data
+      }
+      // Newest first: walk the marker occurrences backward.
+      let from = complete.length
+      while (from > 0) {
+        const at = complete.lastIndexOf(CHANNEL_MARKER_BYTES, from - 1)
+        if (at < 0) break
+        const start = complete.lastIndexOf(0x0a, at) + 1
+        let end = complete.indexOf(0x0a, at)
+        if (end < 0) end = complete.length
+        const ts = inboundChannelLineTs(complete.subarray(start, end).toString('utf-8'))
+        if (ts != null) return ts
+        from = start - 1
+      }
+    }
+    return null
+  } finally {
+    closeSync(fd)
+  }
+}
+
+export function readLastIngestionTimestamp(
+  transcriptDir: string,
+  opts: Partial<typeof INGESTION_READ_DEFAULTS> = {},
+): number | null {
+  const { maxFiles, maxBytes, chunkBytes } = { ...INGESTION_READ_DEFAULTS, ...opts }
   try {
     if (!existsSync(transcriptDir)) return null
-    const entries = readdirSync(transcriptDir).filter(f => f.endsWith('.jsonl'))
-    if (entries.length === 0) return null
-
-    // Pick the newest file by mtime.
-    let newestFile = ''
-    let newestMtime = 0
-    for (const entry of entries) {
-      const fullPath = join(transcriptDir, entry)
+    const files: { path: string; mtimeMs: number; size: number }[] = []
+    for (const entry of readdirSync(transcriptDir)) {
+      if (!entry.endsWith('.jsonl')) continue
+      const path = join(transcriptDir, entry)
       try {
-        const st = statSync(fullPath)
-        if (st.mtimeMs > newestMtime) {
-          newestMtime = st.mtimeMs
-          newestFile = fullPath
-        }
+        const st = statSync(path)
+        if (st.isFile()) files.push({ path, mtimeMs: st.mtimeMs, size: st.size })
       } catch {
-        // file disappeared between readdir and stat — skip
+        // file disappeared between readdir and stat -- skip
       }
     }
-    if (!newestFile) return null
-
-    // B1 fix: tail-read only the last 256 KB to avoid blocking the event loop
-    // on a transcript that has grown to 100s of MB.
-    const TAIL_BYTES = 262144 // 256 KB
-    const fd = openSync(newestFile, 'r')
-    let rawText: string
-    try {
-      const fileSize = statSync(newestFile).size
-      const readOffset = Math.max(0, fileSize - TAIL_BYTES)
-      const readLength = fileSize - readOffset
-      const buf = Buffer.allocUnsafe(readLength)
-      readSync(fd, buf, 0, readLength, readOffset)
-      rawText = buf.toString('utf-8')
-    } finally {
-      // fd is always closed — openSync never leaves a dangling descriptor
-      closeSync(fd)
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    const budget = { left: maxBytes }
+    let best: number | null = null
+    for (const f of files.slice(0, maxFiles)) {
+      if (budget.left <= 0) break
+      if (best != null && f.mtimeMs < best) break // nothing in it can be later
+      let ts: number | null = null
+      try { ts = lastInboundInFile(f.path, f.size, chunkBytes, budget) } catch { /* unreadable -- skip */ }
+      if (ts != null && (best == null || ts > best)) best = ts
     }
-
-    // Drop a possibly-partial first line when we started mid-file.
-    const firstNewline = rawText.indexOf('\n')
-    const trimmed = firstNewline > 0 ? rawText.slice(firstNewline + 1) : rawText
-    const lines = trimmed.split('\n')
-    let lastTs: number | null = null
-    for (const line of lines) {
-      if (!line.includes('<channel source=')) continue
-      try {
-        const obj = JSON.parse(line) as { timestamp?: string }
-        if (typeof obj.timestamp === 'string') {
-          const ts = new Date(obj.timestamp).getTime()
-          if (Number.isFinite(ts)) {
-            lastTs = ts
-          }
-        }
-      } catch {
-        // malformed line — skip, do not abort
-      }
-    }
-    return lastTs
+    return best
   } catch {
     return null
   }
