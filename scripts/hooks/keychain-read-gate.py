@@ -41,9 +41,11 @@ Passes: reading (`git config --get ...`, `--list`), GIT_CONFIG_NOSYSTEM=1 (no sy
 test`) is not seen, nor a write to ~/.gitconfig by an editor or a Write tool (a path hook's job).
 The macOS wrappers that run a command after their own words are walked too (Viktor 41970 LOW 4, card 15896271):
 `sandbox-exec -p <profile> cmd`, `lockf -t 5 <file> cmd`, `launchctl asuser <uid> cmd` (any launchctl subcommand's
-third word is read as a command: fail-closed), `login -fp <user> cmd`.
-Not seen: everything listed above under "does not see"; a wrapper not in WRAP_ARGS whose flag takes a word (su,
-runuser and the like are not on this machine), and a quoted string that starts with a wrapped call blocks like one that
+third word is read as a command: fail-closed; `launchctl submit -l <label> [-o|-e <file>] -- cmd`; with `-p` it blocks),
+`login -fp <user> cmd`.
+Not seen: everything listed above under "does not see"; a wrapper not in WRAP_ARGS whose flag takes a word, and a
+program that runs a command from its own script language (`expect -c 'spawn ...'`; su's `-c` and `script <file> cmd`
+block, measured by Viktor 42251), and a quoted string that starts with a wrapped call blocks like one that
 starts with the call (`git commit -m "sudo -u root security dump-keychain"`).
 Allowed: every other `security` subcommand (list-keychains, find-identity, find-certificate, show-keychain-info,
 verify-cert ...) and the word in plain text (`grep find-generic-password notes.md`, `git commit -m "fix: security"`).
@@ -121,14 +123,15 @@ WORD = r'[^\s;&|(){}`\'"]'
 # A redirection is a token too (`>/dev/null security ...`, `2> err`, `>&2`; Viktor 41970 INFO 5). Its target never
 # starts with < or >, so `>>x` reads one way only (`>>` + `x`, not `>` + `>x`): two ways per token backtracked
 # exponentially (the 30044 lesson).
-REDIR = r'\d*(?:&?>>?|<)&?[ \t]*[^\s;&|(){}`\'"<>]' + WORD + r'*'
+REDIR = r'\d*(?:&?>>?\|?|<{1,3}-?)&?[ \t]*[^\s;&|(){}`\'"<>]' + WORD + r'*'
 # An & is a position only as a command end: in `>&2`, `<&3`, `&>x` it belongs to a redirection (bash reads it so),
 # and with REDIR in CHAIN every such & rescanned the rest of a `>&2 >&2 ...` run (2 000 x ">&2 " ran into the 6 s
 # watchdog, measured 2026-11-14; card 15896271).
 AMP = r'(?<![<>])&(?!>)'
+PIPE = r'(?<!>)\|'  # a | right after > is the noclobber redirection `>|f`, no command end
 CHAIN = (r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|' + REDIR + r'|[+.]?\d[\w.]*|\w+='
          + WORD + r'*)[ \t]+)*')
-POSITION = r'(?:^|[;|(){}\n`\'"]|' + AMP + r'|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*' + CHAIN
+POSITION = r'(?:^|[;(){}\n`\'"]|' + PIPE + r'|' + AMP + r'|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*' + CHAIN
 # The script rules below (an interpreter, a path run directly, cat into an interpreter) take a quote as a command
 # position only where a shell -c payload opens (`bash -c "./x.sh"`, `bash -lc '...'`). With every quote a position, the
 # word after a CLOSING quote looked like a command: `grep -n "for x" scripts/hooks/keychain-read-gate.py` read the
@@ -163,7 +166,7 @@ SHELL_RX = re.compile(r'(?:^|(?<=[\s;&|(){}`\'"/]))(?:(?:bash|sh|zsh|dash|ksh|fi
                       r'|\$\{?(?:SHELL|BASH)\}?|\$0)[\'"]?(?=[ \t])')
 C_WORD_RX = re.compile(r'(?<=[ \t])[\'"]?-[A-Za-z]*c[\'"]?(?=[ \t])')
 QUOTE_RX = re.compile(r'[\'"]')
-SCRIPT_POSITION = r'(?:^|[;|(){}\n`]|' + AMP + r'|\$\(|\s-(?:exec|execdir|ok)(?=\s)|' + PAYLOAD_OPEN + r')[ \t]*' + CHAIN
+SCRIPT_POSITION = r'(?:^|[;(){}\n`]|' + PIPE + r'|' + AMP + r'|\$\(|\s-(?:exec|execdir|ok)(?=\s)|' + PAYLOAD_OPEN + r')[ \t]*' + CHAIN
 BINARY = r'(?:' + WORD + r'*/)?security'
 OPTIONS = r'(?:\s+-\S+)*'
 SECRET_SUB = r'(?:find-generic-password|find-internet-password|dump-keychain|export)'
@@ -228,7 +231,8 @@ _CHAIN_WORDS = set(re.findall(r'[a-z-]+', WRAPPERS)) | {'!'}
 _CARRY = {'bash', 'sh', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh', 'ash', 'rbash', 'pwsh', 'python', 'node', 'perl',
           'ruby', 'osascript', 'deno', 'bun', 'tsx', 'php', 'swift', 'eval', 'source', '.'}
 # a simple command starts after these (the secret rules' positions: an opening quote too, `bash -c "..."`)
-_SEG_RX = re.compile(r'\$\(|[;&|(){}\n`\'"]')
+_SEG_RX = re.compile(r'\$\(|[;(){}\n`\'"]|' + PIPE + r'|' + AMP)  # the & and | of a redirection do not split
+_REDIR_WORD_RX = re.compile(r'\d*(?:&?>>?\|?|<{1,3}-?)&?(\S+)?')
 _ASSIGN_RX = re.compile(r'([A-Za-z_]\w*)=(.*)', re.S)
 _TRUE = {'1', 'true', 'yes', 'on'}
 
@@ -305,7 +309,10 @@ def _segment(seg):
         w = strip_quotes(words[i])
         base = w.rsplit('/', 1)[-1].lower()
         a = _ASSIGN_RX.match(w)
-        if a:
+        rd = _REDIR_WORD_RX.fullmatch(w)
+        if rd:  # a redirection before the command: `HOME=/x 2>&1 git fetch`, `env >/dev/null HOME=/x git ...`
+            i += 1 if rd.group(1) else 2
+        elif a:
             _assign(st, a.group(1), a.group(2))
             bare_nosys |= a.group(1) == 'GIT_CONFIG_NOSYSTEM'
             i += 1
@@ -321,15 +328,17 @@ def _segment(seg):
             # `readonly ...` leave git the system helper (measured, bash; Dave on Viktor 42207 M2)
             # Only the LEADING option words count (a bash `declare NAME=1 -x` takes -x for a name), `export -n` and
             # `declare +x` take the export away, `readonly` never exports (measured, bash 3.2 and zsh; Viktor 42224 LOW 1)
-            opts = []
+            opts, expands = [], False
             for x in tail:
                 if not re.fullmatch(r'[-+][a-zA-Z]+', x):  # a name, a value, or `--` ends the options
+                    # `export $N NAME=1`: $N may be -n (a backtick or a quote never reaches here: _SEG_RX cuts there)
+                    expands = '$' in x and '=' not in x
                     break
                 opts.append(x)
             # Only x, g, r keep an export (Dave on Viktor 42224, measured bash 3.2 and zsh): any other letter either
             # takes it away (`export -n`) or is an invalid option there (`declare -nx`, `export -q`, `export -f`: the
             # whole declaration fails, nothing is set), so it does not count as one; rare valid ones (-ix, -tx) block.
-            unexport = any(o[0] == '+' and 'x' in o or o[0] == '-' and set(o[1:]) - set('xgr') for o in opts)
+            unexport = expands or any(o[0] == '+' and 'x' in o or o[0] == '-' and set(o[1:]) - set('xgr') for o in opts)
             exports = not unexport and base != 'readonly' and (
                 base == 'export' or any(o[0] == '-' and 'x' in o for o in opts))
             for x in tail:
@@ -678,8 +687,11 @@ class SourceGroup:
         self.first, self.rest, self.over = first, rest, over
 
 
-# `>`, `2>>` alone (target next) or with it. & and | end the words (CMD_END): `&>`, `>&2`, `>|` never reach here.
-OUT_REDIR_RX = re.compile(r'\d*>>?(\S+)?$')
+# `>`, `2>>`, `>&`, `&>`, `>|` alone (target next) or with it; the & and | of a redirection no longer end the words
+# (_CALL_END_RX, Viktor 42251 LOW 2), so `python3 2>&1 ./x.py` and `python3 >& out.txt x.py` read x.py.
+OUT_REDIR_RX = re.compile(r'(?:\d*>>?[&|]?|&>>?)(\S+)?$')
+# the end of an interpreter call's words: a ; newline ) backtick, a | or & that is no part of a redirection (`>&2`, `2>&1`, `&>f`, `>|f`)
+_CALL_END_RX = re.compile(r'[;\n)`]|' + PIPE + r'|' + AMP)
 
 
 def interp_groups(text):
@@ -690,7 +702,8 @@ def interp_groups(text):
         python = 'python' in m.group(0).lower()
         name = re.split(r'[\s;&|(){}`\'"/\\]', m.group(0).rstrip('\'"\\'))[-1]
         rest = text[m.end():m.end() + ARGS_WINDOW]  # a window, not the rest: 6 000 calls x the rest was quadratic
-        cut = min([i for i in (rest.find(ch) for ch in CMD_END) if i >= 0] or [len(rest)])
+        end = _CALL_END_RX.search(rest)
+        cut = end.start() if end else len(rest)
         all_words = rest[:cut].split()
         # the window ended inside this command: what follows it is not read
         clipped = cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text)
@@ -923,6 +936,9 @@ def wrap_command_start(text, i, name, qualified=False):
     past 5 s; stopping unread would let the command behind 65 flags through). A backslash takes the next character
     into the word: `sudo -p a\\ b` is one word, as for the shell (Viktor 41970 LOW 1)."""
     short, whole, positional = WRAP_ARGS[name]
+    submit = name == 'launchctl' and re.match(r'[ \t]*submit(?=[ \t])', text[i:i + 24])
+    if submit:
+        short, positional = 'loe', 1  # launchctl submit -l label [-p prog] [-o out] [-e err] -- command args
     n = len(text)
     need_arg = flags_done = False
     skipped = name in WRAP_ALWAYS
@@ -951,6 +967,8 @@ def wrap_command_start(text, i, name, qualified=False):
             flags_done = True
             continue
         if not flags_done and t.startswith('-'):
+            if submit and 'p' in t[1:]:  # `-p prog -- argv0 args` runs prog with any argv0: the words after `--`
+                return -1  # are not the command, so it is not read (blocks; Dave on Viktor 42251 LOW 4)
             if t in whole:
                 need_arg = True
             elif not t.startswith('--'):  # -uroot carries its word, -Eu takes the next one
