@@ -157,6 +157,31 @@ for text in CAP_HEDGED:
 ok('a guess label does not clear a state claim', gate.unsourced('Kész a film (tipp).', []) == ['kész'],
    gate.unsourced('Kész a film (tipp).', []))
 ok('"tippet" is no label', gate.unsourced('Ki tudjuk emelni, kérek tippet.', []) == ['képesség'])
+# The guess label counts in the capability's own sentence, and a denied label is none (Viktor 41287 LOW 1).
+CAP_LABEL_ELSEWHERE = [
+    'Ki tudjuk emelni. Egyébként a tipp: holnap szólok.',      # Viktor's case: the label in another sentence
+    'Ki tudjuk emelni! Ez nem tipp, ez biztos.',               # Viktor's case: a denied label, another sentence
+    'Ki tudjuk emelni, ez nem tipp.',                          # a denied label in the same sentence
+    'Ki tudjuk emelni, és ez sem tipp.',
+    'Ki tudjuk emelni, ez nem egy tipp.',
+    'Ki tudjuk emelni (tipp). A feltöltés is működik.',       # two capabilities, only the first one labelled
+]
+for text in CAP_LABEL_ELSEWHERE:
+    ok(f'capability, no label in its own sentence: {text!r} -> blocks', gate.unsourced(text, []) == ['képesség'],
+       (gate.claims(text), gate.unsourced(text, [])))
+for text in ['Ki tudjuk emelni (tipp). Holnap szólok.', 'Ki tudjuk emelni (tipp). A feltöltés is működik (tipp).',
+             'Holnap szólok. Ki tudjuk emelni, de ez csak tipp.']:
+    ok(f'every capability sentence labelled: {text!r} -> passes', gate.unsourced(text, []) == [],
+       (gate.claims(text), gate.unsourced(text, [])))
+ok('a source anywhere still clears every capability sentence',
+   gate.unsourced('Ki tudjuk emelni. A feltöltés is működik. Mira mérte, msg 41144.', []) == [])
+# Boundary cases (Viktor 41287 INFO 3/4): the "tud ... -ni" window takes up to two words between, not three; the
+# -hetem form is a capability too.
+for text in ['Tudjuk a posztot kiemelni.', 'Tudjuk majd emelni.', 'Kiemelhetem a posztot.']:
+    ok(f'capability boundary: {text!r} -> blocks', gate.unsourced(text, []) == ['képesség'],
+       (gate.claims(text), gate.unsourced(text, [])))
+ok('three words between "tud" and the infinitive: no capability (the window is {0,2})',
+   'képesség' not in gate.claims('Tudjuk majd a posztot kiemelni.'), gate.claims('Tudjuk majd a posztot kiemelni.'))
 ok('an attached file is the source', gate.has_source('Kész a papás film.', ['/x/papa.mp4']))
 ok('"mert" (because) is not "mérte"', not gate.has_source('Kész, mert Dave megcsinálta.', []))
 ok('"szerintem" is not an attribution', not gate.has_source('Szerintem kész van.', []))
