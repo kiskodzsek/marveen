@@ -405,6 +405,8 @@ window._i18n.en = {
   'tasks.approve.too_long':      'This task text is {n} characters, more than can be shown here ({max}). It cannot be approved in one click: the editor opens, read the full text there and save to approve. If the task also sets a field the editor does not show (e.g. command, preCheck), saving does not approve it.',
   'tasks.approve.unreadable':    'This task text has {lines} lines or contains hidden control characters, so it cannot be shown reliably here ({max} lines at most, no hidden characters). It cannot be approved in one click: the editor opens, read the full text there.',
   'tasks.approve.runs_bash':     'RUNS bash:',
+  'tasks.approve.precheck_blocked': 'The preCheck chain has {n} marker(s) the system cannot follow or read; it cannot be approved like this. Fix the script first:',
+  'tasks.approve.precheck_files': 'preCheck chain: {n} file(s) (the approval covers their current content)',
   'tasks.btn.toggle_pause':      'Pause',
   'tasks.btn.toggle_resume':     'Resume',
   'tasks.btn.history':           'Run history',

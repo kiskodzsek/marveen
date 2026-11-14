@@ -1,4 +1,4 @@
-import { join, isAbsolute } from 'node:path'
+import { join } from 'node:path'
 import { checkTaskMcpRequirements } from './schedule-mcp-precheck.js'
 import { collectHeartbeatMetricsBlock } from './heartbeat-metrics-inject.js'
 import {
@@ -93,6 +93,7 @@ import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { ownerRecentlyActive } from './owner-activity.js'
 import { runCommandTask } from './command-task.js'
 import { scheduleTrustOf, isOwnerTrusted, alertScheduleTrust, ensureScheduleTrustBaseline, alertSafeId } from './schedule-trust.js'
+import { resolvePreCheckPath } from './precheck-path.js'
 import { trackDetachedGroup } from './detached-groups.js'
 import { decideQuotaAction, type QuotaWorkClass } from '../quota-gate.js'
 import { readQuotaSnapshot } from '../quota-snapshot.js'
@@ -1078,17 +1079,9 @@ export function quotaWorkClass(task: Pick<ScheduledTask, 'type'>): QuotaWorkClas
   return 'owner-facing'
 }
 
-// Where a task's preCheck script lives. Relative -> beside the task's SKILL.md;
-// absolute -> as given; a leading {{PROJECT_ROOT}} / {{INSTALL_DIR}} -> the
-// install root. The placeholder form exists for SHIPPED tasks that gate on a
-// repo script: the node seeder copies task-config.json without template
-// rendering, and update.sh's seed refresh never adds a new file to an existing
-// task dir, so neither a hard-coded path nor a script beside the SKILL.md would
-// reach every install.
-export function resolvePreCheckPath(taskName: string, preCheck: string): string {
-  const rooted = preCheck.replace(/^\{\{(PROJECT_ROOT|INSTALL_DIR)\}\}(?=\/)/, PROJECT_ROOT)
-  return isAbsolute(rooted) ? rooted : join(SCHEDULED_TASKS_DIR, taskName, rooted)
-}
+// Where a task's preCheck script lives: precheck-path.ts (PRECHECKTRUST1114),
+// shared with schedule-trust.ts, so the path run and the path pinned cannot differ.
+export { resolvePreCheckPath }
 
 export type PreCheckResult = { skip: boolean; prefix?: string }
 

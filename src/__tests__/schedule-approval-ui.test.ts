@@ -26,6 +26,8 @@ const strings: Record<string, string> = {
   'tasks.approve.too_long': 'TOO LONG {n}/{max}',
   'tasks.approve.unreadable': 'UNREADABLE {lines}/{max}',
   'tasks.approve.runs_bash': 'RUNS BASH',
+  'tasks.approve.precheck_blocked': 'PC BLOCKED {n}',
+  'tasks.approve.precheck_files': 'PC FILES {n}',
 }
 const tStub = (key: string) => strings[key] ?? key
 function decl(rx: RegExp, name: string): string {
@@ -128,5 +130,27 @@ describe('scheduleApprovalView', () => {
       }
       expect(src).toMatch(/'tasks\.approve\.too_long':\s+'[^']*\{n\}[^']*\{max\}/)
     }
+  })
+})
+
+// PRECHECKTRUST1114 (Viktor 42472 INFO ii): the 16 hex alone shows nothing, so
+// the owner sees how many files the approval covers, and a chain with a
+// blocking marker is not one-click approvable at all.
+describe('scheduleApprovalView: the preCheck chain', () => {
+  it('shows the number of files the approval covers', () => {
+    const v = view({ ...base, preCheck: '/x/w.sh', trustPreCheck: { files: 4, blockers: [] } })
+    expect(v.blocked).toBe(false)
+    expect(v.text).toContain('PC FILES 4')
+  })
+
+  it('a chain with a blocking marker is blocked and lists the markers', () => {
+    const v = view({ ...base, preCheck: '/x/w.sh', trustPreCheck: { files: 2, blockers: ['UNRESOLVED /x/m.py#exec@3', 'MISSING /x/gone.py'] } })
+    expect(v.blocked).toBe(true)
+    expect(v.text).toContain('PC BLOCKED 2')
+    expect(v.text).toContain('UNRESOLVED /x/m.py#exec@3')
+  })
+
+  it('no trustPreCheck (no preCheck, or an older server): no extra line', () => {
+    expect(view(base).text).not.toContain('PC FILES')
   })
 })

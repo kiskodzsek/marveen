@@ -1064,6 +1064,21 @@ export function initDatabase(dbPathOverride?: string): void {
       task_count INTEGER NOT NULL
     )
   `)
+  // PRECHECKTRUST1114 (Viktor 42462 MEDIUM, Klodel 42464/42469): the CONTENT of
+  // a task's preCheck script and of the files it directly calls, pinned at
+  // approval (src/web/schedule-trust.ts preCheckContentHash). NULL = not pinned:
+  // for a task with a preCheck that is a mismatch, except for the one-time pin
+  // below. The definition hash in `hash` is unchanged by this column.
+  try { db.exec('ALTER TABLE schedule_trust ADD COLUMN precheck_hash TEXT') } catch { /* already exists */ }
+  // The one-time pin of the preCheck content of the tasks that were trusted when
+  // PRECHECKTRUST1114 shipped (the legacy-baseline pattern, Klodel 39006/42469).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schedule_trust_precheck_pin (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      at INTEGER NOT NULL,
+      task_count INTEGER NOT NULL
+    )
+  `)
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS background_tasks (
@@ -4502,18 +4517,55 @@ export interface ScheduleTrustRow {
   hash: string
   set_by: string
   set_at: number
+  /** PRECHECKTRUST1114: the pinned preCheck content hash; null = not pinned. */
+  precheck_hash: string | null
 }
 
 export function getScheduleTrust(taskName: string): ScheduleTrustRow | undefined {
-  return db.prepare('SELECT task_name, status, hash, set_by, set_at FROM schedule_trust WHERE task_name = ?')
+  return db.prepare('SELECT task_name, status, hash, set_by, set_at, precheck_hash FROM schedule_trust WHERE task_name = ?')
     .get(taskName) as ScheduleTrustRow | undefined
 }
 
-export function setScheduleTrust(taskName: string, status: 'approved' | 'legacy', hash: string, setBy: string, now: number): void {
+export function setScheduleTrust(taskName: string, status: 'approved' | 'legacy', hash: string, setBy: string, now: number, precheckHash: string | null = null): void {
   db.prepare(`
-    INSERT INTO schedule_trust (task_name, status, hash, set_by, set_at) VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(task_name) DO UPDATE SET status = excluded.status, hash = excluded.hash, set_by = excluded.set_by, set_at = excluded.set_at
-  `).run(taskName, status, hash, setBy, now)
+    INSERT INTO schedule_trust (task_name, status, hash, set_by, set_at, precheck_hash) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(task_name) DO UPDATE SET status = excluded.status, hash = excluded.hash, set_by = excluded.set_by, set_at = excluded.set_at, precheck_hash = excluded.precheck_hash
+  `).run(taskName, status, hash, setBy, now, precheckHash)
+}
+
+export function scheduleTrustPreCheckPinDone(): boolean {
+  return db.prepare('SELECT 1 FROM schedule_trust_precheck_pin WHERE id = 1').get() !== undefined
+}
+
+/**
+ * PRECHECKTRUST1114 one-time pin: each entry's row gets its preCheck content
+ * hash, ONLY while the row still holds the definition hash the caller checked
+ * (`hash`) and has no pin yet; then the pin row is written, in ONE transaction.
+ * Returns the number of rows pinned, or null when the pin was already done
+ * (then nothing is written: a later run must never pin a changed script).
+ */
+export function pinScheduleTrustPreChecks(entries: Array<{ name: string; hash: string; precheckHash: string }>, now: number): number | null {
+  return db.transaction((): number | null => {
+    if (db.prepare('SELECT 1 FROM schedule_trust_precheck_pin WHERE id = 1').get() !== undefined) return null
+    const upd = db.prepare(`UPDATE schedule_trust SET precheck_hash = ? WHERE task_name = ? AND hash = ? AND precheck_hash IS NULL AND status IN ('approved', 'legacy')`)
+    let n = 0
+    for (const e of entries) n += upd.run(e.precheckHash, e.name, e.hash).changes
+    db.prepare('INSERT INTO schedule_trust_precheck_pin (id, at, task_count) VALUES (1, ?, ?)').run(now, n)
+    return n
+  })()
+}
+
+/**
+ * PRECHECKTRUST1114 upstream re-pin (Viktor 42476 (2) 4): ONLY precheck_hash is
+ * written, and only while the row is trusted, still holds the definition hash
+ * the caller checked, and still holds the pin the caller read (`from`, null =
+ * never pinned). Returns whether the row was updated.
+ */
+export function repinScheduleTrustPreCheck(taskName: string, hash: string, from: string | null, to: string): boolean {
+  return db.prepare(`
+    UPDATE schedule_trust SET precheck_hash = ?
+    WHERE task_name = ? AND hash = ? AND precheck_hash IS ? AND status IN ('approved', 'legacy')
+  `).run(to, taskName, hash, from).changes === 1
 }
 
 export function deleteScheduleTrust(taskName: string): boolean {
