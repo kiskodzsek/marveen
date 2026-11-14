@@ -279,8 +279,10 @@ class Wrapper(unittest.TestCase):
             with open(os.path.join(PRECHECKS, f'kernel-{mode}-precheck.sh'), encoding='utf-8') as f:
                 calls = [l for l in f.read().splitlines() if not l.lstrip().startswith('#') and 'python3' in l]
             self.assertEqual(len(calls), 1, mode)
-            self.assertIn('python3 -I -X pycache_prefix=/dev/null/x "$(dirname "$0")/kernel_heartbeat_precheck.py" '
-                          + mode + ' ', calls[0], mode)
+            # the WHOLE line (Viktor 42502 INFO 1): a substring check passed with the flags only in a trailing
+            # comment (B6), a second call after || (B1), /usr/bin/python3 (B4) or stderr let through (B5)
+            self.assertEqual(calls[0].strip(), 'python3 -I -X pycache_prefix=/dev/null/x "$(dirname "$0")/'
+                             'kernel_heartbeat_precheck.py" ' + mode + ' 2>/dev/null || true', mode)
 
     def test_unknown_mode_never_skips(self):
         r = subprocess.run(['python3', '-I', MODULE, 'bogus'], capture_output=True, text=True, timeout=20)
