@@ -33,15 +33,18 @@ file a command runs is read and judged too:
     hatch run), every one of its following words that is an existing regular file, its arguments included (an
     innocent first file, `node -r ./ok.js m.js`, does not hide the script; Viktor 41756 LOW 2), up to MAX_ARGS
     words: more words, or a command running past ARGS_WINDOW, blocks unread ('script-too-many-args', LOW 1); after
-    -c / -e or `-` the code is inline or on stdin; source and `.` run their first word only (the rest are that
-    script's arguments); python -m mod: the files
+    -c / -e or `-` the code is inline or on stdin; source and `.` judge their first word, and the rest only when
+    that first word is an existing regular file (the sourced script gets them as $1...: `source runner.sh m.py`,
+    Viktor 41831 LOW 1; a sentence-ending "." in prose is followed by a word that is no file); python -m mod: the files
     the module runs from the cwd, mod.py, mod/__init__.py, mod/__main__.py and each dotted parent); when an
     interpreter runs, also a `< file` redirect and the files of a `cat` (`cat m.py | python3`, quoted too); and a
     path in command position run directly (`./x.py`, `/abs/x.sh`, `tools/x.py`). A quoted interpreter name counts
     (`'python3' m.py`, `os.system("python3 m.py")`). For these script rules a quote is a command position only where
     a payload opens (`bash -c "./x.sh"`, `bash -c -- '...'`, `eval "..."`, `watch -n 1 '...'`, `tmux new '...'`,
     `do shell script "..."`; Viktor 41790 LOW 1), so the word after a closing quote (`grep -n "x" f.py`) is not a
-    command. A relative path is resolved against the
+    command. Past the bound on the words before such a quote (PAYLOAD_OVER_RX: a fifth flag after -c, a fifth
+    watch word, a fifteenth tmux new word) a quote later in the same command blocks unread
+    ('script-payload-too-many-words', Viktor 41831 LOW 2), as does a command running past ARGS_WINDOW there. A relative path is resolved against the
     payload cwd and the directory after each `cd` in order, a relative cd on top of the one before; `~`, `$HOME` and
     variables assigned in the command itself (`F=m.py; python3 $F`) are expanded (Viktor 41715 LOW). The first
     MAX_SCRIPT_BYTES of each file. Fail-closed: more than MAX_SCRIPTS files, MAX_BASES directories or MAX_TRIES
@@ -91,13 +94,20 @@ POSITION = (r'(?:^|[;&|(){}\n`\'"]|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*'
 # word after a CLOSING quote looked like a command: `grep -n "for x" scripts/hooks/keychain-read-gate.py` read the
 # gate's own source as a script it runs and blocked (measured 2026-11-14 on the #275 gate; card 7427e6f4).
 # Payloads a quote opens (Viktor 41790 LOW 1): after `-c` and up to four more flags (`bash -c -- '...'`, `-c -x`),
-# after eval, watch (its flags and numbers), tmux new / new-session (up to six words), osascript's `do shell script`;
+# after eval, watch (its flags and numbers), tmux new / new-session (up to fourteen words), osascript's `do shell script`;
 # an escaped quote too (`do shell script \"...\"`). Each run of words is bounded ({0,4}, {0,6}): an unbounded one
-# rescanned " -exec" runs (Viktor's first try ran past 5 s on 12 000 x " -exec"). A call in inline code,
+# rescanned " -exec" runs (Viktor's first try ran past 5 s on 12 000 x " -exec"). Past the bound the run is not
+# allowed (Viktor 41831 LOW 2: `bash -c` with five -x, watch with five -x, tmux new with seven words let the payload
+# through): PAYLOAD_OVER_RX finds one word more than the bound, and a quote later in the same command blocks.
+# tmux new takes fourteen words (six stopped `tmux new-session -d -s a -x 1 -y 1 '...'`, a real call; with -n and
+# -c a real call has eleven). A find -exec is not a -c flag: 12 000 x " -exec" read as one blocked. A call in inline code,
 # os.system("python3 m.py"), opens at the "(" position with the quote before the interpreter (INTERP_RX below).
 PAYLOAD_OPEN = (r'(?:[ \t]-[A-Za-z]*c(?:[ \t]+-' + WORD + r'*){0,4}'
                 r'|(?<![\w-])(?:eval|watch(?:[ \t]+(?:-' + WORD + r'*|\d[\w.]*)){0,4}'
-                r'|tmux[ \t]+new(?:-session)?(?:[ \t]+' + WORD + r'+){0,6}|do[ \t]+shell[ \t]+script))[ \t]+\\?[\'"]')
+                r'|tmux[ \t]+new(?:-session)?(?:[ \t]+' + WORD + r'+){0,14}|do[ \t]+shell[ \t]+script))[ \t]+\\?[\'"]')
+PAYLOAD_OVER_RX = re.compile(r'[ \t]-(?!exec(?=\s))[A-Za-z]*c(?:[ \t]+-' + WORD + r'*){5}'
+                             r'|(?<![\w-])watch(?:[ \t]+(?:-' + WORD + r'*|\d[\w.]*)){5}'
+                             r'|tmux[ \t]+new(?:-session)?(?:[ \t]+' + WORD + r'+){15}')
 SCRIPT_POSITION = (r'(?:^|[;&|(){}\n`]|\$\(|\s-(?:exec|execdir|ok)(?=\s)|' + PAYLOAD_OPEN + r')[ \t]*'
                    r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|[+.]?\d[\w.]*|\w+=' + WORD
                    + r'*)[ \t]+)*')
@@ -238,6 +248,13 @@ class TooManyArgs(Exception):
     """An interpreter call with words the gate does not read (past MAX_ARGS or ARGS_WINDOW): the caller blocks."""
 
 
+class SourceGroup:
+    """`source f a b`: the rest (a, b) is judged only when f is an existing regular file; `over` names why the rest
+    is not all read (past MAX_ARGS or ARGS_WINDOW), and then such a call blocks."""
+    def __init__(self, first, rest, over):
+        self.first, self.rest, self.over = first, rest, over
+
+
 def interp_groups(text):
     """For each interpreter call: the words that may be its script, in order (every existing file is judged).
     Raises TooManyArgs when a call's words run past MAX_ARGS or ARGS_WINDOW and the walk did not stop before."""
@@ -248,15 +265,23 @@ def interp_groups(text):
         rest = text[m.end():m.end() + ARGS_WINDOW]  # a window, not the rest: 6 000 calls x the rest was quadratic
         cut = min([i for i in (rest.find(ch) for ch in CMD_END) if i >= 0] or [len(rest)])
         all_words = rest[:cut].split()
-        if name in ('.', 'source'):
-            # source runs its first word; the rest are that script's arguments. Prose after a ")" made a sentence-
-            # ending "." read as source of a file named later in the sentence (an agent-msg heredoc, 2026-11-14).
-            first = [strip_quotes(w) for w in all_words[:2] if not w.startswith('-')][:1]  # `. -- f.sh` too
-            if first and first[0]:
-                groups.append(first)
-            continue
         # the window ended inside this command: what follows it is not read
         clipped = cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text)
+        if name in ('.', 'source'):
+            # source runs its first word and hands it the rest as $1...: a runner.sh that runs its $1 would hide
+            # m.py in `source runner.sh m.py` (Viktor 41831 LOW 1). The rest is judged only when the first word is an
+            # existing file (script_paths): prose after a ")" made a sentence-ending "." read as source of a file
+            # named later in the sentence (an agent-msg heredoc, 2026-11-14), and there the next word is no file.
+            idx = next((i for i, w in enumerate(all_words[:2]) if not w.startswith('-')), None)  # `. -- f.sh` too
+            first = strip_quotes(all_words[idx]) if idx is not None else ''
+            if first:
+                tail = all_words[idx + 1:]
+                over = clipped or len(all_words) > MAX_ARGS
+                groups.append(SourceGroup(first, [strip_quotes(w) for w in tail[:MAX_ARGS] if not w.startswith('-')],
+                                          f'source: {len(all_words)} szó, MAX_ARGS {MAX_ARGS}' if len(all_words) > MAX_ARGS
+                                          else (f'source: a parancs hosszabb a {ARGS_WINDOW} karakteres ablaknál'
+                                                if over else '')))
+            continue
         words = [strip_quotes(w) for w in all_words[:MAX_ARGS]]
         group = []
         stopped = False
@@ -305,26 +330,60 @@ def script_paths(cmd, cwd):
     if groups and len(bases) > MAX_BASES:
         return [''] * (MAX_SCRIPTS + 1)
     out = []
-    tries = 0
-    for group in groups:
-        for c in group:
-            c = os.path.expanduser(c)
-            if c in ('-', '--'):
+    tries = [0]
+
+    def resolve(c):
+        """Add the existing regular files word c names; True if there was one. None: past MAX_TRIES."""
+        c = os.path.expanduser(c)
+        if not c or c in ('-', '--'):
+            return False
+        found = False
+        for t in ([c] if os.path.isabs(c) else [os.path.join(b, c) for b in bases]):
+            tries[0] += 1
+            if tries[0] > MAX_TRIES:
+                return None
+            real = os.path.realpath(t)
+            try:
+                st = os.stat(real)
+            except OSError:
                 continue
-            for t in ([c] if os.path.isabs(c) else [os.path.join(b, c) for b in bases]):
-                tries += 1
-                if tries > MAX_TRIES:
-                    return [''] * (MAX_SCRIPTS + 1)
-                real = os.path.realpath(t)
-                try:
-                    st = os.stat(real)
-                except OSError:
-                    continue
-                if stat.S_ISREG(st.st_mode) and real not in out:
+            if stat.S_ISREG(st.st_mode):
+                found = True
+                if real not in out:
                     out.append(real)
+        return found
+
+    for group in groups:
+        if isinstance(group, SourceGroup):
+            first = resolve(group.first)
+            if first is None:
+                return [''] * (MAX_SCRIPTS + 1)
+            if first:  # bash runs it and hands it the rest
+                if group.over:
+                    raise TooManyArgs(group.over)
+                group = group.rest
+            else:
+                group = []
+        for c in group:
+            if resolve(c) is None:
+                return [''] * (MAX_SCRIPTS + 1)
         if len(out) > MAX_SCRIPTS:
             break
     return out
+
+
+def payload_over(cmd):
+    """Why a payload past the PAYLOAD_OPEN bound goes unread ('' if none): a quote later in the same command, or the
+    command running past ARGS_WINDOW after the bound (Viktor 41831 LOW 2)."""
+    text = normalise(cmd)
+    for m in PAYLOAD_OVER_RX.finditer(text):
+        rest = text[m.end():m.end() + ARGS_WINDOW]
+        cut = min([i for i in (rest.find(ch) for ch in CMD_END) if i >= 0] or [len(rest)])
+        if '"' in rest[:cut] or "'" in rest[:cut]:
+            return 'a payload-nyitó előtt több szó áll, mint a korlát (-c után 4 flag, watch után 4, tmux new után 14)'
+        if cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text):
+            return f'a payload-nyitó korlát után a parancs hosszabb a {ARGS_WINDOW} karakteres ablaknál'
+    return ''
 
 
 def script_hits(cmd, cwd):
@@ -332,6 +391,9 @@ def script_hits(cmd, cwd):
     found = []
     if INTERP_RX.search(normalise(cmd)) and literal_hit(cmd):
         found.append('script-inline')
+    over = payload_over(cmd)
+    if over:  # not "allow past the bound": the payload behind it would not be read (fail-closed, like MAX_ARGS)
+        return found + [f'script-payload-too-many-words ({over})']
     try:
         paths = script_paths(cmd, cwd)
     except TooManyArgs as e:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
