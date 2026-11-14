@@ -40,7 +40,9 @@ const PINS: Record<string, Pin> = {
 }
 
 const EXTS = new Set(['.sh', '.ts', '.mjs', '.js', '.cjs', '.py', '.ps1'])
-const isTest = (rel: string) => rel.includes('__tests__/') || /\.test\.[a-z]+$/.test(rel)
+// A Python hook's test sits beside it as <name>_test.py (scripts/hooks/keychain-read-gate_test.py: its rows quote
+// `PATH=` commands as data, it builds no launch PATH; Kernel 42488).
+const isTest = (rel: string) => rel.includes('__tests__/') || /\.test\.[a-z]+$/.test(rel) || /_test\.py$/.test(rel)
 
 function walk(dir: string, out: string[]): void {
   for (const name of readdirSync(dir)) {
