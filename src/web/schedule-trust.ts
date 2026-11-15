@@ -212,6 +212,10 @@ def main():
     # a literal key (globals()['exec'], importlib.__dict__['import_module']) or through getattr on a loader
     # module / with a loader name is followed by nothing: dynamic.
     called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    parent = {}
+    for p in ast.walk(tree):
+        for ch in ast.iter_child_nodes(p):
+            parent[id(ch)] = p
     def dotted(x):
         if isinstance(x, ast.Name):
             return x.id
@@ -219,17 +223,83 @@ def main():
             b = dotted(x.value)
             return b + '.' + x.attr if b else None
         return None
+    # Viktor 42593 RES 4: the names a loader module is bound to (import importlib as il, import importlib.util,
+    # from importlib import util), so a computed-key access on it is caught under any name.
+    bound = {}
     for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                # a plain 'import importlib' / 'import importlib.util' needs no binding: the name is the module
+                if a.asname and a.name in MODS:
+                    bound.setdefault(a.asname, set()).add(a.name)
+        elif isinstance(n, ast.ImportFrom) and n.module:
+            for a in n.names:
+                if n.module + '.' + a.name in MODS:
+                    bound.setdefault(a.asname or a.name, set()).add(n.module + '.' + a.name)
+    def mod_of(x):
+        if isinstance(x, ast.Subscript) and dotted(x.value) == 'sys.modules':
+            return lit(x.slice) if lit(x.slice) in MODS else None
+        d = dotted(x)
+        if d is None:
+            return None
+        head, _, rest = d.partition('.')
+        # a name can be bound to more than one module (m = runpy; m = importlib): any of them counts
+        for r in sorted(b + ('.' + rest if rest else '') for b in bound[head]) if head in bound else [d]:
+            if r in MODS:
+                return r
+        return None
+    def is_mod(x):
+        return mod_of(x) is not None
+    # m = importlib: a plain name for the module is one more binding, not a hand-off (the q14 case)
+    def plain_alias(n, p):
+        return isinstance(p, ast.Assign) and p.value is n and all(isinstance(t, ast.Name) for t in p.targets) and not isinstance(parent.get(id(p)), ast.ClassDef)
+    # A worklist to the fixed point (Viktor 42645 LOW 1: a round cap only moved the edge of a reversed chain): an
+    # assignment is looked at again only when the name its value starts with gets bound, so any chain length binds
+    # in time linear in the number of assignments.
+    aliasing = [a for a in ast.walk(tree) if isinstance(a, ast.Assign) and all(isinstance(t, ast.Name) for t in a.targets)]
+    waiting = {}
+    for a in aliasing:
+        waiting.setdefault((dotted(a.value) or '').partition('.')[0], []).append(a)
+    work = list(aliasing)
+    while work:
+        a = work.pop()
+        m = mod_of(a.value)
+        if m is None:
+            continue
+        for t in a.targets:
+            if m not in bound.get(t.id, ()):
+                bound.setdefault(t.id, set()).add(m)
+                work.extend(waiting.get(t.id, ()))
+    def names_loader(v):
+        return v is None or any(part in CANON or part in ('__dict__', '__getattribute__') for part in v.split('.'))
+    for n in ast.walk(tree):
+        p = parent.get(id(n))
         if isinstance(n, (ast.Name, ast.Attribute)) and id(n) not in called and isinstance(getattr(n, 'ctx', None), ast.Load):
             nm = n.id if isinstance(n, ast.Name) else n.attr
-            # as an attribute, compile / eval / exec are common method names (re.compile, model.eval)
-            if nm in aliases or (nm in CANON and (isinstance(n, ast.Name) or nm not in ('exec', 'eval', 'compile'))):
+            # as an attribute, compile / eval / exec are common method names (re.compile, model.eval), but not
+            # on a loader module (builtins.exec)
+            if nm in aliases or (nm in CANON and (isinstance(n, ast.Name) or nm not in ('exec', 'eval', 'compile') or is_mod(n.value))):
                 dyn.append(['loader value', n.lineno])
-        elif isinstance(n, ast.Subscript) and lit(n.slice) in CANON:
+            elif isinstance(n, ast.Attribute) and nm in ('__dict__', '__getattribute__') and is_mod(n.value):
+                dyn.append(['loader access', n.lineno])
+            elif is_mod(n) and not (isinstance(p, ast.Attribute) and p.value is n) and not plain_alias(n, p):
+                # the module itself handed on (m = importlib; f(importlib)): what is done with it is not followed
+                dyn.append(['loader module value', n.lineno])
+            elif dotted(n) == 'sys.modules' and not (isinstance(p, ast.Subscript) and p.value is n and lit(p.slice) is not None):
+                dyn.append(['loader access', n.lineno])
+        elif isinstance(n, ast.Subscript) and isinstance(n.value, ast.Attribute) and n.value.attr == '__dict__' and lit(n.slice) in CANON:
             dyn.append(['loader key', n.lineno])
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ('globals', 'locals', 'vars') and not n.args:
+            # the namespace dicts: only a plain literal key that is no loader is followed
+            if not (isinstance(p, ast.Subscript) and p.value is n and not names_loader(lit(p.slice)) and lit(p.slice) != '__builtins__'):
+                dyn.append(['loader key', n.lineno])
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'vars' and n.args and is_mod(n.args[0]):
+            dyn.append(['loader access', n.lineno])
+        elif isinstance(n, ast.Call) and (dotted(n.func) or '').split('.')[-1] in ('attrgetter', 'methodcaller') and any(names_loader(lit(a)) for a in n.args[:1]):
+            dyn.append(['loader access', n.lineno])
         elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == 'getattr' and n.args:
             tgt = n.args[0]
-            on_mod = dotted(tgt) in MODS or (isinstance(tgt, ast.Call) and isinstance(tgt.func, ast.Name) and tgt.func.id in ('__import__', 'import_module'))
+            on_mod = is_mod(tgt) or (isinstance(tgt, ast.Call) and isinstance(tgt.func, ast.Name) and tgt.func.id in ('__import__', 'import_module'))
             if on_mod or (len(n.args) > 1 and lit(n.args[1]) in CANON):
                 dyn.append(['getattr', n.lineno])
     for n in ast.walk(tree):
@@ -262,6 +332,9 @@ def main():
             else:
                 paths.append([v, n.lineno])
         elif aliased and canon in ('exec', 'eval', 'compile'):
+            dyn.append([canon, n.lineno])
+        elif canon in ('exec', 'eval', 'compile') and isinstance(f, ast.Attribute) and is_mod(f.value) and (not n.args or lit(n.args[0]) is None):
+            # builtins.exec(code): the regex skips a dotted call, and the code is not in this file
             dyn.append([canon, n.lineno])
     print(json.dumps({'imports': imports, 'dynamic': dyn, 'paths': paths}))
 main()
@@ -478,25 +551,49 @@ function pyReferences(file: string, text: string, out: PreCheckRefs, add: (p: st
 }
 
 /** Shell: the words after the dirname idiom is replaced, split at command boundaries. */
-/** One shell word starting at `at` in `line` (a quoted string or a bare word); null when unterminated. */
+/**
+ * One shell word starting at `at` in `line`, as the shell joins it: bare, '...' and "..." parts glued together,
+ * a backslash keeps the next character (Viktor 42593 RES 3: `bash -c python3\ ./x` hands ONE word to bash).
+ * null when a quote is unterminated or there is no word. `expands`: a $ or ` outside single quotes.
+ */
 function shWordAt(line: string, at: number): { text: string; end: number; expands: boolean } | null {
-  const q = line[at]
-  if (q === "'") {
-    const e = line.indexOf("'", at + 1)
-    return e < 0 ? null : { text: line.slice(at + 1, e), end: e + 1, expands: false }
-  }
-  if (q === '"') {
-    for (let i = at + 1; i < line.length; i++) {
-      if (line[i] === '\\') { i++; continue }
-      if (line[i] === '"') {
-        const text = line.slice(at + 1, i)
-        return { text: text.replace(/\\(["\\])/g, '$1'), end: i + 1, expands: /[$`]/.test(text) }
-      }
+  let text = ''
+  let expands = false
+  let i = at
+  while (i < line.length) {
+    const c = line[i]
+    if (c === "'") {
+      const e = line.indexOf("'", i + 1)
+      if (e < 0) return null
+      text += line.slice(i + 1, e)
+      i = e + 1
+      continue
     }
-    return null
+    if (c === '"') {
+      let k = i + 1
+      let part = ''
+      for (; k < line.length && line[k] !== '"'; k++) {
+        if (line[k] === '\\' && k + 1 < line.length) { part += /["\\$`]/.test(line[k + 1]) ? line[k + 1] : '\\' + line[k + 1]; k++; continue }
+        part += line[k]
+      }
+      if (k >= line.length) return null
+      if (/[$`]/.test(line.slice(i + 1, k))) expands = true
+      text += part
+      i = k + 1
+      continue
+    }
+    if (c === '\\') {
+      if (i + 1 >= line.length) return null
+      text += line[i + 1]
+      i += 2
+      continue
+    }
+    if (/[\s;&|()<>]/.test(c)) break
+    if (c === '$' || c === '`') expands = true
+    text += c
+    i++
   }
-  const m = /^[^\s;&|()<>]+/.exec(line.slice(at))
-  return m ? { text: m[0], end: at + m[0].length, expands: /[$`]/.test(m[0]) } : null
+  return i === at ? null : { text, end: i, expands }
 }
 
 // Viktor 42560 INFO 1: a short-flag cluster ending in c (-lc, -ec, -Ic) is a -c too, and the body may follow the
@@ -523,34 +620,55 @@ function shEmbedded(file: string, lang: string, body: string, out: PreCheckRefs,
 }
 
 /**
- * Which characters of a shell line are code: false inside quotes and in a comment. Fail-closed: from a
- * `$(` or a backtick inside double quotes on, everything counts as code (a command substitution runs).
+ * Which characters of a shell line are code: false inside quotes, for a backslash-escaped character, and in a
+ * comment. A command substitution `$( )` / backtick inside double quotes is code again until it closes, then
+ * the quotes go on (Viktor 42593 RES 5: `"$(true)" '<<EOF'` is a quoted word, no heredoc). `$'..'` takes
+ * backslash escapes (the g07 false positive). `start` is the quoting still open from the previous line (a
+ * string over several lines, Viktor 42593 RES 1); `open` is what is open at the end of this one.
  */
-function shCodeMask(s: string): boolean[] {
+function shCodeMask(s: string, start: readonly string[] = []): { code: boolean[]; open: string[] } {
   const code = new Array<boolean>(s.length).fill(true)
-  let q: string | null = null
+  const st = [...start]
   for (let k = 0; k < s.length; k++) {
     const c = s[k]
-    if (q === "'") { code[k] = false; if (c === "'") q = null; continue }
-    if (q === '"') {
-      if ((c === '$' && s[k + 1] === '(') || c === '`') break
+    const top = st[st.length - 1]
+    if (top === "'") { code[k] = false; if (c === "'") st.pop(); continue }
+    if (top === "$'") {
       code[k] = false
       if (c === '\\') { if (k + 1 < s.length) code[k + 1] = false; k++; continue }
-      if (c === '"') q = null
+      if (c === "'") st.pop()
       continue
     }
-    if (c === '\\') { k++; continue }
-    if (c === "'" || c === '"') { q = c; continue }
+    if (top === '"') {
+      if (c === '$' && s[k + 1] === '(') { st.push('$('); k++; continue }
+      if (c === '`') { st.push('`'); continue }
+      code[k] = false
+      if (c === '\\') { if (k + 1 < s.length) code[k + 1] = false; k++; continue }
+      if (c === '"') st.pop()
+      continue
+    }
+    // code: the top level, or inside $( ), ( ) or backticks
+    // Viktor 42593 RES 2: `echo \<<EOF` -- the escaped < is a literal, so no heredoc starts there
+    if (c === '\\') { if (k + 1 < s.length) code[k + 1] = false; k++; continue }
+    if (c === "'") { st.push("'"); continue }
+    if (c === '"') { st.push('"'); continue }
+    if (c === '$' && s[k + 1] === "'") { st.push("$'"); k++; continue }
+    if (c === '$' && s[k + 1] === '(') { st.push('$('); k++; continue }
+    if (c === '`') { if (top === '`') st.pop(); else st.push('`'); continue }
+    if (c === '(') { if (st.length > 0) st.push('('); continue }
+    if (c === ')') { if (top === '$(' || top === '(') st.pop(); continue }
     if (c === '#' && (k === 0 || /[\s;&|(]/.test(s[k - 1]))) { for (; k < s.length; k++) code[k] = false; break }
   }
-  return code
+  return { code, open: st }
 }
 
 function shReferences(file: string, body: string, out: PreCheckRefs, bases: string[], add: (p: string) => void, depth = 0): void {
   const lines = body.split('\n')
+  // the quoting open at the end of the previous line (Viktor 42593 RES 1)
+  let open: string[] = []
   for (let i = 0; i < lines.length; i++) {
     let raw = lines[i]
-    if (/^\s*#/.test(raw)) continue
+    if (open.length === 0 && /^\s*#/.test(raw)) continue
     const where = `@${i + 1}`
     // Viktor 42578 INFO 3: a trailing backslash continues the command on the next line (the next line is
     // emptied, so the line numbers of what follows stay).
@@ -564,7 +682,9 @@ function shReferences(file: string, body: string, out: PreCheckRefs, bases: stri
     let heredocLang: string | null = null
     const scan = raw.replace(SH_ARITH_RX, m => ' '.repeat(m.length))
     // not a here-string (<<<), not inside quotes, not in a comment (Viktor 42578 LOW D)
-    const code = shCodeMask(scan)
+    const mask = shCodeMask(scan, open)
+    const code = mask.code
+    open = mask.open
     const marks = [...scan.matchAll(SH_HEREDOC_RX)].filter(m => scan[(m.index ?? 0) - 1] !== '<' && code[m.index ?? 0])
     // Viktor 42560 LOW 4: a second heredoc on the line is not followed (its body would be read as shell).
     if (marks.length > 1) out.unresolved.push('heredoc multiple' + where)
