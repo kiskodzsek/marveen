@@ -9,7 +9,7 @@ import type { ScheduledTask } from '../web/scheduled-tasks-io.js'
 // Harness copied from schedule-runner-fire-current-def.test.ts.
 
 const mockAppendTaskRun = vi.fn()
-const mockRemove = vi.fn()
+const mockRemove = vi.fn((_n: string, _e: unknown) => true)
 const mockListScheduledTasks = vi.fn(() => [] as ScheduledTask[])
 const sentPrompts: Array<{ session: string; prompt: string }> = []
 
@@ -48,7 +48,7 @@ vi.mock('../channel-provider.js', async (importOriginal) => {
 vi.mock('../web/scheduled-tasks-io.js', () => ({
   listScheduledTasks: () => mockListScheduledTasks(),
   readScheduledTask: (n: string) => mockListScheduledTasks().find(t => t.name === n) ?? null,
-  removeScheduledTaskDir: (n: string) => mockRemove(n),
+  removeScheduledTaskDir: (n: string, e: unknown) => mockRemove(n, e),
   SCHEDULED_TASKS_DIR: '/tmp/marveen-once-runner-no-tasks-dir',
   SCHEDULED_TASK_INLINE_MAX_CHARS: 1_500,
   SCHEDULED_TASK_BODY_WARN_CHARS: 20_000,
@@ -114,7 +114,8 @@ describe('schedule runner: one-shot (runAt) tasks', () => {
     mockListScheduledTasks.mockReturnValue([task({ name: 'once-due', runAt: NOW, targetSession: 'once-session' })])
     await runOneTick()
     expect(sentPrompts.filter(p => p.session === 'once-session')).toHaveLength(1)
-    expect(mockRemove).toHaveBeenCalledWith('once-due')
+    // c453361b: the listed runAt goes with the name, the dir is removed only if its config still carries it
+    expect(mockRemove).toHaveBeenCalledWith('once-due', expect.objectContaining({ runAt: NOW }))
     expect(mockAppendTaskRun).toHaveBeenCalledWith('once-due', 'curagent', expect.stringMatching(/^fired/))
   })
 
@@ -130,7 +131,7 @@ describe('schedule runner: one-shot (runAt) tasks', () => {
     await runOneTick()
     expect(sentPrompts).toHaveLength(0)
     expect(mockAppendTaskRun).toHaveBeenCalledWith('once-stale', 'curagent', 'missed')
-    expect(mockRemove).toHaveBeenCalledWith('once-stale')
+    expect(mockRemove).toHaveBeenCalledWith('once-stale', expect.objectContaining({ runAt: NOW - 6 * 60 * 60_000 }))
   })
 
   it('control: a plain cron task fires and is not removed', async () => {

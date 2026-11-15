@@ -1721,8 +1721,11 @@ async function attemptFireTask(
     // 'starting' result returns before this line and the retry row keeps the
     // task alive until it is delivered.
     if (task.runAt != null) {
-      removeScheduledTaskDir(task.name)
-      logger.info({ task: task.name, agent: agentName, originMsgId: task.originMsgId }, 'One-shot task delivered and removed')
+      if (removeScheduledTaskDir(task.name, task)) {
+        logger.info({ task: task.name, agent: agentName, originMsgId: task.originMsgId }, 'One-shot task delivered and removed')
+      } else {
+        logger.warn({ task: task.name }, 'One-shot task delivered, but its directory was not removed (name not a plain task directory, or its config no longer matches)')
+      }
     }
 
     // Register the injection in the post-fire timeout watchdog. The watchdog
@@ -2877,7 +2880,7 @@ export function startScheduleRunner(): NodeJS.Timeout {
         for (const agentName of missedTargets) appendTaskRun(task.name, agentName, 'missed')
         // ONCE: a stale one-shot has no later occurrence, so it would sit in
         // the task list forever. The 'missed' run above is its record.
-        if (task.runAt != null) removeScheduledTaskDir(task.name)
+        if (task.runAt != null) removeScheduledTaskDir(task.name, task)
         continue
       }
       const lateCatchUpMs = decision === 'catch-up' ? ageMs : undefined
@@ -2950,7 +2953,7 @@ export function startScheduleRunner(): NodeJS.Timeout {
         // ONCE: lastRun now covers its only occurrence; left in place it
         // would never fire and never leave the list. The API only creates
         // type 'task' once-tasks (not quota-gated); this is the hand-edit case.
-        if (task.runAt != null) removeScheduledTaskDir(task.name)
+        if (task.runAt != null) removeScheduledTaskDir(task.name, task)
         continue
       }
 
