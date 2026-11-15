@@ -547,8 +547,67 @@ def normalise(cmd):
     return cmd
 
 
-def hits(cmd, script=False):
+# card d11364a4 (Viktor f526b8c6 verdict, pre-existing LOW): a quoted or escaped command name where a shell -c payload
+# starts (`bash -c "\"security\" dump-..."`, `sh -c 'sec""urity ...'`, `bash -c "\\security ..."`) was in no pass:
+# the outer quote's escaping (\" \\) hid the name from the first, and the quote-free second pass loses the payload's
+# command position. The payload is now taken out with bash's own quote rules and judged as a command of its own.
+PAYLOAD_DEPTH = 3     # a payload in a payload in a payload; deeper is judged on the outer passes only
+MAX_PAYLOADS = 64     # distinct payloads read again per text; past it the gate blocks ('payload-unread')
+PAYLOAD_QUOTED = re.compile(r'[\'"\\]')
+_DQ_BODY = re.compile(r'(?:[^"\\]|\\.)*', re.S)               # up to the closing " (or the end: judged anyway)
+_DQ_UNESCAPE = re.compile(r'\\([\\"$`])|\\\n')                # what bash takes off inside "..."
+
+
+def payload_texts(text):
+    """The text of each payload a quote opens (payload_quotes(), PAYLOAD_OPEN): '...' as written, "..." with \\ \" \\$
+    \\` and backslash-newline unescaped, as bash reads it. An escaped opening quote (`do shell script \\"...\\"`) is
+    left to the payload around it. A quote inside an earlier payload belongs to it, so the walk is linear. Only a
+    payload with a quote or a backslash in it is returned: one without stands verbatim after its opening quote (a
+    command position) in the text the outer passes judge already, so reading it again adds nothing (and 30 000
+    `-c 'a'` paddings stay fast). Each distinct text once; None past MAX_PAYLOADS."""
+    starts = set(payload_quotes(text))
+    starts.update(m.end() - 1 for m in re.finditer(PAYLOAD_OPEN, text))
+    out, seen, last = [], set(), -1
+    for q in sorted(starts):
+        if q <= last or (q > 0 and text[q - 1] == '\\'):
+            continue
+        if text[q] == "'":
+            e = text.find("'", q + 1)
+            e = len(text) if e < 0 else e
+            p = text[q + 1:e]
+        else:
+            e = _DQ_BODY.match(text, q + 1).end()
+            p = _DQ_UNESCAPE.sub(lambda m: m.group(1) or '', text[q + 1:e])
+        last = e
+        if p in seen or not PAYLOAD_QUOTED.search(p):
+            continue
+        if len(out) == MAX_PAYLOADS:
+            return None
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def hits(cmd, script=False, _depth=0):
     """Rule names the text matches; a script file's text (script=True) is not judged by GIT_RULES."""
+    found = _hits(cmd, script)
+    if _depth < PAYLOAD_DEPTH:
+        # A hook past its timeout does not block. Reading a payload again costs about what the outer text cost, so it
+        # starts only inside half the budget; past it (or past the budget during the payloads) the gate blocks.
+        slow = found + ([] if 'payload-too-slow' in found else ['payload-too-slow'])
+        if time.monotonic() - T0 > script_budget() / 2:
+            return slow if PAYLOAD_QUOTED.search(cmd) and payload_texts(cmd) != [] else found
+        payloads = payload_texts(cmd)
+        if payloads is None:
+            return found + ([] if 'payload-unread' in found else ['payload-unread'])
+        for p in payloads:
+            if time.monotonic() - T0 > script_budget():
+                return slow
+            found += [n for n in hits(p, script, _depth + 1) if n not in found]
+    return found
+
+
+def _hits(cmd, script=False):
     text = normalise(cmd)
     # `sudo -u root security ...` (card 3085a683): the text with the wrapped commands' boundaries is judged TOO, not
     # instead: a wrong mark (a flag the table reads as taking a word that it does not) could split a call the plain
