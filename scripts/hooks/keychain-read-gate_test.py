@@ -718,6 +718,10 @@ def script_cases():
         w('ok.js', "console.log('ok');\n")
         w('runner.sh', 'python3 "$1"\n')  # runs its first argument: `source runner.sh m.py` runs m.py
         w('word.py', "print('the " + S + " team writes find-generic-password docs')\n")
+        # card 31045f4d (Klodel 43233, Viktor 43235): a data file whose text names the blocked call (the error
+        # register), and a script that only counts its lines
+        w('regiszter.jsonl', '{"ts":"11-14","cmd":"' + S + ' find-generic-password -s x -w"}\n')
+        w('stat.py', "import sys\nprint(sum(1 for _ in open(sys.argv[1])))\n")
         # a UI string table (web/lang/en.js): a capitalised label and button are not a subcommand
         w('labels.js', "module.exports = {\n  'settings.module." + S + "': '" + S.capitalize() + "',\n"
                        "  'skills.btn.export': 'Export',\n};\n")
@@ -750,8 +754,116 @@ def script_cases():
             f.write("SEC = '" + S + "'\nimport subprocess; subprocess.run([SEC, 'dump-keychain'])\n")
         # card 15896271: a run's output that quotes the blocked call (a negative test run's log)
         w('out.txt', "FAIL should block: '/usr/bin/env " + S + " dump-keychain'\n")
+        cf_curl = ('curl -s -X POST localhost:3420/api/kanban/x/comments -H "Content-Type: application/json" '
+                   '-H "Authorization: Bearer $(cat store/.dashboard-token)" --data-binary @- ')
         block = [
             ('python3 measure.py', d),
+            # card 31045f4d (A): the first non-option word is the script only after options the gate knows; node -r,
+            # source, bash, ruby -r, perl -I, an unknown python flag and stdin keep the old walk (every file judged)
+            ('python3 -I measure.py regiszter.jsonl', d),
+            ('node -r ./measure.py stat.py', d),
+            ('source runner.sh measure.py', d),
+            ('bash runner.sh measure.py', d),
+            ('python3 --foo stat.py measure.py', d),
+            ('python3 -Q x stat.py measure.py', d),
+            ('python3 -QWx measure.py stat.py', d),
+            ('ruby -r ./measure.py stat.py', d),
+            ('perl -I. stat.py measure.py', d),
+            ('cat regiszter.jsonl | python3 -', d),  # Viktor 43235 G: cat into an interpreter stays a script read
+            ('python3 stat.py x; python3 measure.py', d),
+            ('python3' + ' -u' * 70 + ' stat.py', d),  # the script past MAX_ARGS: unread, blocks
+            # only a plain word is the script: an unset $X vanishes (python3 runs measure.py), a glob may be another
+            # file, ~ and a backslash are not read here; then every word is judged, as before
+            ('python3 $X measure.py', d),
+            ('python3 "$X" measure.py', d),
+            ('python3 *.nope measure.py', d),
+            ('python3 ~/nope.py measure.py', d),
+            # mutation a10: after a non-plain word the walk stays the old one ($X may be -W / -X: then measure.py runs)
+            ('python3 $X stat.py measure.py', d),
+            ('python3 "$X" stat.py measure.py', d),
+            ('python3 *.nope stat.py measure.py', d),
+            ('python3 mainpkg regiszter.jsonl', d),  # a directory as the script runs its __main__.py
+            # an attached -W / -X argument is no code flag: `-Wignore` ends in "e" and stopped the walk (main: allow)
+            ('python3 -Wignore measure.py', d),
+            ('python3 -Xdev -Wignore measure.py', d),
+            ('python3 -uWerror measure.py', d),
+            ('python3 -W ignore measure.py', d),
+            # card 31045f4d (B): in a non-shell heredoc only a "(" after a blank stops being a command position
+            ("python3 - <<'PY'\nimport os\nos.system('./measure.py')\nPY", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"(./measure.py)\")\nPY", d),
+            ("python3 - <<'PY'\nx = 1; (./measure.py)\nPY", d),
+            ("python3 - <<'PY'\nx = 1 && (./measure.py)\nPY", d),
+            # Viktor 43324 LELET 2: after a reserved word, zsh's repeat N, a line start or a "!" the "(" runs a
+            # subshell (real bash / sh / zsh ran the stub); only a "(" right after an ordinary word is prose
+            ("python3 - <<'PY'\nimport os\nos.system(\"time (./measure.py)\")\nPY", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"if (./measure.py); then :; fi\")\nPY", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"! (./measure.py)\")\nPY", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"repeat 1 (./measure.py)\")\nPY", d),
+            ("perl - <<'PL'\nsystem(\"while (./measure.py); do break; done\");\nPL", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"\"\"\n (./measure.py)\"\"\")\nPY", d),
+            # mutations r14 / r15: python turns \n into a line break (the "(" then starts a line), and time -p runs
+            # the subshell (both measured: /bin/sh ran it)
+            ("python3 - <<'PY'\nimport os\nos.system(\"true\\n (./measure.py)\")\nPY", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"time -p (./measure.py)\")\nPY", d),
+            # Viktor 43324 LELET 1: expand() reads any VAR=value in the text; the real $X may be empty (a comment, an
+            # echo argument, unset, an env prefix), and then python3 runs the next word: a text with an expanded
+            # variable keeps the old walk
+            ('X=nosuch python3 $X ./measure.py', d),
+            ('python3 $X ./measure.py  # X=nosuch', d),
+            ('echo X=nosuch >/dev/null; python3 $X ./measure.py', d),
+            ('X=nosuch; unset X; python3 $X ./measure.py', d),
+            ('X=nosuch; X=$(true); python3 $X ./measure.py', d),
+            # Viktor 43324 LELET 4: a directory change cd_bases does not follow (pushd, cd $(..), cd ${PWD}/.., env -C):
+            # "this agent-msg.sh is ours everywhere" is not known, d's look-alike runs its words
+            ('pushd ' + d + ' >/dev/null; bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
+            ('cd $(echo ' + d + '); bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
+            ('env -C ' + d + ' bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
+            # mutation r2: the expanded text reads `bash scripts/agent-msg.sh .../measure.py`, but the real $X is empty
+            # (an env prefix is not this shell's, unset drops it): bash runs measure.py, so the old walk judges it
+            ('X=scripts/agent-msg.sh bash $X ' + d + '/measure.py', AM_ROOT),
+            ('X=scripts/agent-msg.sh; unset X; bash $X ' + d + '/measure.py', AM_ROOT),
+            ("perl - <<'PL'\nqx(./measure.py);\nPL", d),
+            ("ruby - <<'RB'\n%x(./measure.py)\nRB", d),
+            ("bash <<'SH'\necho a (./measure.py)\nSH", d),  # a shell body: unchanged
+            ("python3 - <<PY\nx = ' (./measure.py)'\nPY", d),  # an unquoted delimiter: unchanged
+            ("python3 - <<'PY'\n./measure.py\nPY", d),
+            ("X=1 python3 - <<'PY'\nx = ' (./measure.py)'\nPY", d),  # not the command's first word: unchanged
+            # card 31045f4d (C): the lexer's data heredocs, and what stays outside them
+            ('curl -H "A: $(./measure.py)" --data-binary @- <<\'J\'\nx\nJ', d),
+            ('T=$(./measure.py)\ncurl -H "$T" --data-binary @- <<\'J\'\nx\nJ', d),
+            # mutation c1: REDEF_RX reads the code, a subshell's too (conservative: what comes before the first top
+            # step is not walked)
+            ("( curl() { bash; } )\ncurl --data-binary @- <<'J'\n./measure.py\nJ", d),
+            (cf_curl + "<<'J'\nx\nJ\npython3 - <<'PY'\n./measure.py\nPY", d),
+            ('PATH=/tmp curl --data-binary @- <<\'J\'\n./measure.py\nJ', d),
+            ('alias curl=bash\ncurl -H "$(cat t)" --data-binary @- <<\'J\'\n./measure.py\nJ', d),
+            ('f() { bash; }\ncurl -H "$(cat t)" --data-binary @- <<\'J\'\n./measure.py\nJ', d),
+            ('TT="x"\ncurl -H "$TT" --data-binary @- <<\'J\'\n./measure.py\nJ', d),
+            ('export T=x\ncurl -H "$T" --data-binary @- <<\'J\'\n./measure.py\nJ', d),
+            ('T=x y\ncurl -H "$T" --data-binary @- <<\'J\'\n./measure.py\nJ', d),  # T=x as an env prefix of y
+            ('ls\ncurl -H "$(cat t)" --data-binary @- <<\'J\'\n./measure.py\nJ', d),
+            ('T=x; python3 - <<\'PY\'\n./measure.py\nPY', d),
+            ('curl -H "$(cat t)" --data-binary @- <<J\n./measure.py\nJ', d),
+            ('curl -H "$(cat t)" --data-binary @- <<\'J\' | bash\n./measure.py\nJ', d),
+            ('curl -H "$(cat t)" --data-binary @- <<\'J\' <<\'K\'\n./measure.py\nJ\n./measure.py\nK', d),
+            ('echo "$(cat t)" <<\'J\'\n./measure.py\nJ', d),
+            ("curl -d @- <<'J'\nx\nJ\nbash -s <<'S'\n./measure.py\nS", d),
+            ("cd /tmp\nbash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            ('T="$(cat t)"\nbash agent-msg.sh dave v - <<\'M\'\n./measure.py\nM', d),  # the look-alike
+            ('echo x > y\ncurl -H "$(cat t)" --data-binary @- <<\'J\'\n./measure.py\nJ', d),  # echo with a redirection
+            # agent-msg's words are data only for THIS repo's script, from every directory the command may run in
+            ('bash agent-msg.sh dave v "x" ' + d + '/measure.py', d),  # the look-alike runs its words
+            ('bash agent-msg.sh dave v ' + 'a ' * 70 + 'measure.py', d),  # look-alike past MAX_ARGS: unread
+            ('cd ' + d + ' && bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),  # both dirs
+            ('bash scripts/agent-msg.sh dave v "x"; ' + d + '/measure.py', AM_ROOT),  # a real separator
+            ('bash scripts/agent-msg.sh dave v "$(' + d + '/measure.py)"', AM_ROOT),  # a substitution runs
+            ('bash -x scripts/agent-msg.sh dave v "(' + d + '/measure.py"', AM_ROOT),  # an option: the old reading
+            ('bash scripts/agent-msg.sh dave v "(' + d + '/measure.py" > ' + d + '/o.txt; ' + d + '/measure.py',
+             AM_ROOT),
+            (cf_curl + "<<'J'\nx\nJ\nls\n" + cf_curl + "<<'K'\n./measure.py\nK", d),  # a non-step ends the walk
+            # accepted, still a block (card 31045f4d): a quoted path after "(" in a python body is read as run, since
+            # open('x') and exec(open('x').read()) look alike there; the data path as argv passes (A above)
+            ("python3 -I - <<'PY'\nfor l in open('" + d + "/regiszter.jsonl'):\n    pass\nPY", d),
             ('python3 -I ./measure.py', d),
             # card 15896271: a redirection before the interpreter; an output target skipped, the script still read
             ('>/dev/null python3 measure.py', d),
@@ -811,7 +923,6 @@ def script_cases():
             ('node -r ./ok.js read.mjs', d),
             ('node --require ./ok.js read.mjs', d),
             ('python3 -W ./notes.py measure.py', d),
-            ('python3 list.py measure.py', d),  # was allowed ("the rest are its arguments"); an argument is read too
             ('cd sub2 && python3 twin.py', d),  # a clean ./twin.py in the cwd does not hide sub2/twin.py
             # a shell -c payload: its opening quote is a command position for the script rules
             ('bash -c "./dump.sh"', d),
@@ -1011,8 +1122,7 @@ def script_cases():
             ("cd " + d + " & git commit -F - <<'MSG'\n./measure.py\nMSG", d),  # a lone & is no join
             (d + "/bin/bash " + AM + " dave v - <<'M'\n./measure.py\nM", d),  # the caller's own bash
             ("./bin/bash " + AM + " dave v - <<'M'\n./measure.py\nM", d),
-            # only the first heredoc: a later one may sit in a state the regex cannot see
-            ("git commit -F - <<'A'\nx\nA\ngit commit -F - <<'B'\n./measure.py\nB", d),
+            # (card 31045f4d: a later heredoc is data too when the lexer reads the text: in the allow list now)
             # Viktor 42695 HIGH 1: normalise() joins backslash-newline, bash does not inside a quoted-delimiter body. A
             # body line ending in a backslash and then the terminator line: bash ends the body there and runs what
             # follows; the joined text had no terminator until a LATER one, so the lines between were blanked
@@ -1091,8 +1201,55 @@ def script_cases():
             ("echo $(awk 'BEGIN{system(\"./measure.py\")}')", d),
             ("echo \"$(awk 'BEGIN{system(\"./measure.py\")}')\"", d),
         ]
+        prose = 'mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
         allow = [
             ('python3 list.py', d),
+            # card 31045f4d (A, Klodel 43233): a data file after the script is its sys.argv, not run
+            ('python3 stat.py regiszter.jsonl', d),
+            ('python3 -I -B -u stat.py regiszter.jsonl', d),
+            ('python3 -W ignore stat.py regiszter.jsonl', d),
+            ('python3 -IW ignore stat.py regiszter.jsonl', d),
+            ('python3 -Wignore stat.py regiszter.jsonl', d),
+            ('python3 -Xdev stat.py measure.py', d),
+            ('python3 -W measure.py stat.py', d),  # a warning filter, never run
+            ('python3 stat.py measure.py', d),  # Viktor 43235 B/C: the same boundary as a path in the script
+            ('/usr/bin/python3 stat.py regiszter.jsonl 2>/dev/null', d),
+            ('python3 stat.py ' + ' '.join('a%d' % i for i in range(80)), d),  # argv past MAX_ARGS: data
+            ('python3 -c pass -Wignore measure.py', d),  # -c first: inline code, the rest is its argv
+            # Viktor 43235 point 1: python's words after the script are its sys.argv (this was a block row: "an
+            # argument is read too"; node -r, source and bash keep that reading)
+            ('python3 list.py measure.py', d),
+            # a later data heredoc after an earlier one (was a block row: "only the first heredoc"); the lexer
+            # reads the state the regex could not
+            ("git commit -F - <<'A'\nx\nA\ngit commit -F - <<'B'\n./measure.py\nB", d),
+            # card 31045f4d (B, Pulzus 43167): prose in a python / node heredoc string
+            ("python3 -I - <<'PY'\nr = ('" + prose + "')\nprint(r)\nPY", d),
+            ("node - <<'JS'\nconsole.log('" + prose + "')\nJS", d),
+            # mutation r12: a "(" at a line start with no word before it (a tuple on a continuation line) is read
+            # quietly, not as an error
+            ("python3 - <<'PY'\nrows = [\n (1, 2),\n]\nprint(rows)\nPY", d),
+            # card 31045f4d (C, Klodel 43233): the fleet's curl and agent-msg forms
+            (cf_curl + "<<'JSON'\n{\"content\":\"" + prose + "\"}\nJSON", d),
+            ('T="Authorization: Bearer $(cat store/.dashboard-token)"\n' + cf_curl.replace(
+                '"Authorization: Bearer $(cat store/.dashboard-token)"', '"$T"') + "<<'JSON'\n" + prose + "\nJSON", d),
+            ('cd ' + d + '; S=/tmp/x; T="x"; ' + cf_curl + "<<'JSON'\n" + prose + "\nJSON", d),
+            (cf_curl + "<<'JSON'\n" + prose + "\nJSON\nbash scripts/agent-msg.sh dave klodel - <<'M'\n" + prose
+             + "\nM", AM_ROOT),
+            (cf_curl + "<<'JSON'\n" + prose + " the --source and eval words\nJSON", d),  # REDEF_RX reads code only
+            ('true | ' + cf_curl + "<<'JSON'\n" + prose + "\nJSON", d),
+            # card 31045f4d: this repo's agent-msg.sh with the message as an argument (Klodel 17:51, the same call)
+            ('bash scripts/agent-msg.sh klodel dave "' + prose + '; ' + d + '/measure.py | x"', AM_ROOT),
+            ('cd ' + AM_ROOT + '; bash scripts/agent-msg.sh klodel viktor "' + prose + ' ' + 'szó ' * 80 + '"', os.path.join(d, 'sub2')),  # (d has a look-alike scripts/agent-msg.sh)
+            ('bash ' + AM + ' klodel dave "(' + d + '/measure.py)"', d),
+            # Klodel's blocked call (main transcript 2026-11-15 17:51 UTC, its shape; the prose made to name the fixture):
+            # an assignment, a comment, a memory PUT, a bare echo, a second comment
+            ('cd ' + d + '; T="Authorization: Bearer $(cat store/.dashboard-token)"\n'
+             'curl -s -X POST localhost:3420/api/kanban/d9/comments -H "Content-Type: application/json" -H "$T" '
+             "--data-binary @- <<'JSON'\n{\"content\":\"" + prose + "\"}\nJSON\n"
+             'curl -s -X PUT localhost:3420/api/memories/1 -H "Content-Type: application/json" -H "$T" '
+             "-H \"X-Agent-Id: klodel\" --data-binary @- <<'JSON'\n{\"content\":\"" + prose + "\"}\nJSON\necho\n"
+             'curl -s -X POST localhost:3420/api/kanban/ae/comments -H "Content-Type: application/json" -H "$T" '
+             "--data-binary @- <<'JSON'\n{\"content\":\"" + prose + "\"}\nJSON", d),
             # card 15896271: an output redirection's target is written, not run
             ('python3 list.py > out.txt', d),
             ('python3 list.py >out.txt', d),
@@ -1381,7 +1538,7 @@ def script_cases():
         timed = [
             ('python3 x ; echo ' + '=/' * 50000, 0),
             ('python3 x ; echo ' + '=' * 100000, 0),
-            ('python3 x ' + '=/' * 50000, 2),
+            ('node x ' + '=/' * 50000, 2),  # python3: x is the script, the rest data (31045f4d)
             ('python3 x ' + '=/' * 60000 + ' ; ' + S + ' dump-keychain', 2),
             ('python3 eq.py', 0), ('python3 eqs.py', 0), ('node min.js', 0), ('python3 big.py', 2),
         ]
@@ -1413,9 +1570,9 @@ def script_cases():
         # Viktor 41756 LOW 1: words past MAX_ARGS (64), or a command past ARGS_WINDOW, block instead of going unread
         too_many = [
             ('python3 ' + '-B ' * 64 + 'measure.py', d),
-            ('python3 ' + '-B ' * 12 + 'measure.py ' + 'a ' * 60, d),
+            ('node ' + '-B ' * 12 + 'measure.py ' + 'a ' * 60, d),
             ('python3 ' + 'A' * 5000 + ' measure.py', d),
-            ('python3 list.py ' + ' '.join(f'a{i}' for i in range(64)), d),
+            ('node list.py ' + ' '.join(f'a{i}' for i in range(64)), d),  # python3: argv data (31045f4d)
             ('cat ' + 'x ' * 70 + 'measure.py | python3', d),
             ('cat ' + 'x ' * 64 + 'list.py | python3', d),  # 65 words
             ('python3 ' + 'A' * 4096, d),  # one char past the window
@@ -1425,7 +1582,7 @@ def script_cases():
             if code != 2 or 'script-too-many-args' not in err:
                 fails.append(f'script: past MAX_ARGS/ARGS_WINDOW should block (got {code}): {cmd[:60]!r}')
         # Viktor 41790 INFO 3: the message says why (the word count and the limit, or the window)
-        _, err = bash_in('python3 list.py ' + ' '.join(f'a{i}' for i in range(69)), d)
+        _, err = bash_in('node list.py ' + ' '.join(f'a{i}' for i in range(69)), d)
         if '70 szó' not in err or 'MAX_ARGS 64' not in err:
             fails.append(f'script: too-many-args message should name 70 words and MAX_ARGS 64: {err[:200]!r}')
         _, err = bash_in('python3 ' + 'A' * 5000, d)
@@ -1450,7 +1607,7 @@ def script_cases():
                 fails.append(f'script: source too-many-args message should say why: {err[:200]!r}')
         # past MAX_TRIES on the sourced file itself: blocks, not "no file, skip the rest" (32 directories x 124
         # missing words + 1 = 4000 lookups, so runner.sh's first lookup crosses 4000)
-        code, err = bash_in('cd a && ' * 31 + ' ; '.join('python3 ' + ' '.join(f'm{j}' for j in range(62))
+        code, err = bash_in('cd a && ' * 31 + ' ; '.join('node ' + ' '.join(f'm{j}' for j in range(62))
                                                           for _ in range(2)) + ' ; python3 mx ; source runner.sh measure.py', d)
         if code != 2 or 'script-too-many' not in err:
             fails.append(f'script: past MAX_TRIES on a sourced file should block (got {code})')
@@ -1466,7 +1623,7 @@ def script_cases():
             # bash as an interpreter whose words run past the window: script-too-many-args, as on 980fb40a
             ('bash ' * 30000, 2), ('bash' + ' -o x' * 20000 + " -c 'a'", 2), ("watch" + " -x" * 30000 + " 'a'", 0), ('tmux new ' * 20000 + "'", 0),
             ('sh -c "' * 20000, 0), ('bash' + " -c 'a'" * 30000, 0), ('watch -x -x -x -x -x ' * 20000 + "'", 0), ('bash -c -o pipefail ' + "'a' " * 20000, 0), ('do shell script \\' * 20000, 0),
-            ('do shell script ' * 10000, 0), ('os.system(' * 20000, 0), ('"python3" ' * 20000, 2),  # past MAX_ARGS: blocks, fast
+            ('do shell script ' * 10000, 0), ('os.system(' * 20000, 0), ('"node" ' * 20000, 2),  # past MAX_ARGS: blocks, fast
             # card fae0712e: the lexer's bounds (LEX_MAX_SUBSTS, LEX_MAX_WORK). Just inside them the lexer path runs
             # (and masks the data command's quotes), past them the old path; both fast. 64 nested unclosed `f(` before
             # 10 000 chars took 2.5 s in segments_of() unbounded, 1 000 x `f(` 255 s.
@@ -1481,7 +1638,7 @@ def script_cases():
                 fails.append(f'script: payload padding {cmd[:24]!r}: want rc {want} under 2 s, got {code} in {took:.1f} s')
         # Viktor 41756 INFO 4 (s1): past MAX_TRIES (4000) path lookups the gate blocks. 31 directories x 3 calls x
         # 60 missing words = 5580 lookups, no file found anywhere.
-        code, err = bash_in('cd a && ' * 30 + ' ; '.join('python3 ' + ' '.join(f'm{j}' for j in range(60))
+        code, err = bash_in('cd a && ' * 30 + ' ; '.join('node ' + ' '.join(f'm{j}' for j in range(60))
                                                           for _ in range(3)), d)
         if code != 2 or 'script-too-many' not in err:
             fails.append(f'script: past MAX_TRIES lookups should block (got {code})')
@@ -1537,6 +1694,10 @@ def main():
         code, err = bash(cmd)
         if code != 0:
             fails.append(f'should allow (got {code}): {cmd!r} {err[:120]}')
+    # card 31045f4d (Klodel, aeee72df): the deny says what to do with a false positive
+    code, err = bash(fix(BLOCK[0]))
+    if 'Ha hamis pozitív' not in err or 'állj meg és szólj' not in err:
+        fails.append('the block message lacks the false-positive rule (Klodel, card aeee72df)')
     # Not a Bash call / malformed input: allowed, never crashes.
     for payload in ['', 'not json', json.dumps({'tool_input': None}), json.dumps({'tool_input': {'command': None}}),
                     json.dumps({'tool_input': {'file_path': '/tmp/x'}}), json.dumps([1, 2])]:
@@ -1625,7 +1786,7 @@ def main():
             fails.append(f'gh-pr.mjs should pass (got {code}): {err[:160]}')
     script_fails, script_n = script_cases()
     fails += script_fails
-    total = len(BLOCK) + len(ALLOW) + 6 + 11 + len(wrap_timed) + 1 + script_n
+    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(wrap_timed) + 1 + script_n
     for f in fails:
         print('FAIL', f)
     print(f'{total - len(fails)}/{total} passed')
