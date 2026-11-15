@@ -978,10 +978,55 @@ def _argv_option(w, python):
     return 1
 
 
+def backtick_openers(text):
+    """Card 217f551b: {start: end} of the backtick substitutions that OPEN at a position of text, from the shared
+    lexer; None when text has a backtick the lexer did not read (not loaded, past its bounds, a problem)."""
+    if '`' not in text:
+        return {}
+    if shell_lex is None:
+        return None
+    try:
+        lx = shell_lex.lex(text)
+    except Exception:  # LexTooBig, or a lexer bug
+        return None
+    if lx['problems']:
+        return None
+    return {s['start']: s['end'] for s in lx['substs'] if s['kind'] == '`'}
+
+
+def _call_end(rest, base, openers):
+    """The end of an interpreter call's words in rest (rest starts at text index base). Card 217f551b: a backtick that
+    OPENS a substitution is part of a word, not the end of the call: bash runs `true` in `python3 \x60true\x60 m.py`,
+    pastes its (empty) output and runs m.py; the old reader stopped at the backtick and judged nothing. A backtick that
+    closes the substitution the call stands in (`x=\x60python3 m.py\x60`) still ends it. An escaped backtick (after an
+    odd run of backslashes) is a character of a word, or inside a backtick substitution a nested one, which the lexer
+    does not list (`x=\x60python3 \\\x60true\\\x60 m.py\x60` runs m.py): it never ends a call. Without the lexer's
+    reading (openers None) no backtick ends a call: more words are judged, never fewer."""
+    pos = 0
+    while True:
+        end = _CALL_END_RX.search(rest, pos)
+        if end is None:
+            return len(rest)
+        k = end.start()
+        if rest[k] != '`':
+            return k
+        j = k
+        while j > 0 and rest[j - 1] == '\\':
+            j -= 1
+        if openers is None or (k - j) % 2:
+            pos = end.end()
+            continue
+        close = openers.get(base + end.start())
+        if close is None:
+            return end.start()
+        pos = max(end.end(), close - base)
+
+
 def interp_groups(text, expanded=False):
     """For each interpreter call: the words that may be its script, in order (every existing file is judged).
     Raises TooManyArgs when a call's words run past MAX_ARGS or ARGS_WINDOW and the walk did not stop before."""
     groups = []
+    openers = backtick_openers(text)
     for m in INTERP_RX.finditer(text):
         python = 'python' in m.group(0).lower()
         name = re.split(r'[\s;&|(){}`\'"/\\]', m.group(0).rstrip('\'"\\'))[-1]
@@ -989,8 +1034,7 @@ def interp_groups(text, expanded=False):
         # (expanded: expand() read a VAR=value anywhere in the text as this shell's assignment; the real value may be empty
         # (X=a python3 $X m.py, unset X, a comment) and the script the second word: such a text keeps the old walk)
         rest = text[m.end():m.end() + ARGS_WINDOW]  # a window, not the rest: 6 000 calls x the rest was quadratic
-        end = _CALL_END_RX.search(rest)
-        cut = end.start() if end else len(rest)
+        cut = _call_end(rest, m.end(), openers)
         all_words = rest[:cut].split()
         # the window ended inside this command: what follows it is not read
         clipped = cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text)
