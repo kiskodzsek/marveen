@@ -19,7 +19,7 @@ import { json } from './web/http-helpers.js'
 import { detectLanIp } from './web/network-info.js'
 import { AGENTS_BASE_DIR, listAgentNames, listAllAgentNames } from './web/agent-config.js'
 import { ensureRotationHeartbeatTask } from './web/claude-rotation-heartbeat.js'
-import { ensureAgentHooks, ensureProjectRootInClaudeMd, ensureAgentStalenessHook, ensureAgentProvenanceHook, ensureEgressGate, ensureBashEgressDeny, ensureBashEgressParser, ensureImageQuarantineGate, ensureKeychainReadGate, ensureProdTreeWriteGate, ensureRevocationNote, ensureGovernanceGateCommands, ensureTelegramCopyGate, ensureQuarantineReader, watchEgressAllowlistForReaderRender, ensureDefaultScheduledTasks, agentSettingsPath, ensureAutonomySection, ensureSkillsPathTrapSection, ensureSystemDirectiveAuthSection, ensureAgentIdHeaderSection, ensureMemorySearchLabelSection, ensureFleetAuthSection, ensureEvidenceSection, ensureMcpListChannelSection, ensureMessageCloseSection } from './web/agent-scaffold.js'
+import { ensureAgentHooks, ensureProjectRootInClaudeMd, ensureAgentStalenessHook, ensureAgentProvenanceHook, ensureEgressGate, ensureBashEgressDeny, ensureBashEgressParser, ensureImageQuarantineGate, ensureKeychainReadGate, ensureProdTreeWriteGate, ensureRevocationNote, ensureNoHookKillSwitch, ensureGovernanceGateCommands, ensureTelegramCopyGate, ensureQuarantineReader, watchEgressAllowlistForReaderRender, ensureDefaultScheduledTasks, agentSettingsPath, ensureAutonomySection, ensureSkillsPathTrapSection, ensureSystemDirectiveAuthSection, ensureAgentIdHeaderSection, ensureMemorySearchLabelSection, ensureFleetAuthSection, ensureEvidenceSection, ensureMcpListChannelSection, ensureMessageCloseSection } from './web/agent-scaffold.js'
 import { shouldRegisterHooks, pruneStaleHooksFromSettingsFile } from './web/hook-registration-guard.js'
 import { mainAgentConfigDirIfSeparate } from './web/agent-process.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
@@ -647,6 +647,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
       const keychainPatched: string[] = []
       const prodTreeGatePatched: string[] = []
       const revokeNotePatched: string[] = []
+      const killSwitch: Array<{ agent: string; path: string; result: string }> = []
       const govPatched: string[] = []
       const copyGatePatched: string[] = []
       const pruned: string[] = []
@@ -685,6 +686,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
         if (ensureKeychainReadGate(agentName)) keychainPatched.push(agentName)
         if (ensureProdTreeWriteGate(agentName)) prodTreeGatePatched.push(agentName)
         if (ensureRevocationNote(agentName)) revokeNotePatched.push(agentName)
+        for (const k of ensureNoHookKillSwitch(agentName)) killSwitch.push({ agent: agentName, ...k })
         if (ensureGovernanceGateCommands(agentName)) govPatched.push(agentName)
         if (ensureTelegramCopyGate(agentName)) copyGatePatched.push(agentName)
         ensureQuarantineReader(agentName)
@@ -714,6 +716,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
       if (quarantinePatched.length) logger.info({ patched: quarantinePatched }, 'image-quarantine-gate hook wired onto every file-opening tool in agent settings.json (IMAGESAFETY1020)')
       if (keychainPatched.length) logger.info({ patched: keychainPatched }, 'keychain-read-gate hook wired onto Bash in agent settings.json (c1921b55)')
       if (prodTreeGatePatched.length) logger.info({ patched: prodTreeGatePatched }, 'prod-tree-write-gate hook wired onto Write|Edit|MultiEdit|NotebookEdit|Bash in agent settings.json (11c4a5fe)')
+      if (killSwitch.length) logger.warn({ killSwitch }, 'disableAllHooks found in sub-agent settings: removed where the file is the agent\'s own, reported otherwise (d4180ec8)')
       if (revokeNotePatched.length) logger.info({ patched: revokeNotePatched }, 'revocation-evening-note hook wired onto Bash PostToolUse in agent settings.json (7702bb13)')
       if (bashParserPatched.length) logger.info({ patched: bashParserPatched }, 'bash-egress-parser Bash hook backfilled into agent settings.json (EGRESSPARSER923)')
       if (govPatched.length) logger.info({ patched: govPatched }, 'governance gate hook commands upgraded to absolute node path in agent settings.json')
