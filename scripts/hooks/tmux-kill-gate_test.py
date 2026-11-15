@@ -177,6 +177,47 @@ BLOCK = [
     'find . -okdir tmux kill-server \\;',
     'tmux kill-session -t @1',
     'tmux kill-session -t %1',
+    # Viktor 43301 LOW 1: an outer xargs replace string inside a nested sh -c / eval payload
+    "echo agent-dave | xargs -I X sh -c 'tmux kill-session -t X'",
+    'echo agent-dave | xargs -I NAME bash -c "tmux kill-session -t NAME"',
+    "echo agent-dave | xargs -iQ zsh -c 'tmux kill-session -t Q'",
+    'echo agent-dave | xargs -I X eval tmux kill-session -t X',
+    "echo agent-dave | xargs -I X sh -c 'tmux kill-session -t X;'",
+    "echo agent-dave | xargs -I X sh -c 'echo a; tmux kill-session -t X'",
+    "echo agent-dave | xargs -I X sh -c 'echo a | xargs tmux ls; tmux kill-session -t X'",
+    # Viktor 43301 LOW 2: a quoted redirection target before the command word
+    '>"/tmp/x" tmux kill-server',
+    '2>"/tmp/e" tmux kill-session -t agent-dave',
+    ">'/tmp/x' tmux kill-server",
+    ">/tmp/'x y' tmux kill-server",
+    'cd /tmp && 2>"/tmp/e" tmux kill-server',
+    'echo x; >"/tmp/x" tmux kill-server',
+    "bash -c '>\"/tmp/x\" tmux kill-server'",
+    # Viktor 43301 LOW 3: xargs tmux with its input from a redirection, not a pipe
+    'xargs -n1 tmux kill-session -t < names.txt',
+    'xargs tmux kill-session -t <<< work',
+    "xargs -n1 tmux kill-session -t < <(tmux ls -F '#S')",
+    # Viktor 43301 test gaps (M03, M12, M25, M27; work/tkg3-cases4.txt)
+    'xargs -I X tmux kill-session -t X < names.txt',
+    'xargs -I XX tmux kill-session -t pre-XX < names.txt',
+    'xargs -J QQ tmux kill-session -t QQ',
+    'script -q -t 0 /dev/null tmux kill-server',
+    'script -t 0 /dev/null tmux kill-server',
+    'script -T x /dev/null tmux kill-server',
+    "python3 - <<'E'\nrun(['tmux','-L','x','kill-server']); run(['tmux','kill-server'])\nE",
+    "python3 - <<'E'\nsubprocess.run(['tmux','-L','iso','kill-session','-t','x'])\nsubprocess.run(['tmux','kill-server'])\nE",
+    ("python3 - <<'E'\nrun(['tmux','-L','i','ls'])\nrun(['tmux','has-session','-t','" + 'a' * 60 +
+     "','kill-server'])\nE"),
+    # Viktor 43301 INFO, modelled now: {fd}> redirection, coproc, env -S inside a cluster, script -qt cluster
+    '{fd}>/tmp/f tmux kill-server',
+    'coproc tmux kill-server',
+    'coproc P { tmux kill-server; }',
+    "env -iS 'tmux kill-server'",
+    "env -vS'tmux kill-server'",
+    'script -qt 0 /dev/null tmux kill-server',
+    # macOS script -F is a flag (man script), so /tmp/p is the FILE and tmux kill-server runs (#326 let it pass)
+    'script -F /tmp/p tmux kill-server',
+    'script -qF /tmp/p tmux kill-server',
 ]
 # Viktor 43177 MEDIUM 1: compound-command keywords, for three kill forms each
 for _k in ('tmux kill-server', 'tmux kill-session -t agent-x', 'pkill tmux'):
@@ -266,6 +307,14 @@ ALLOW = [
     '<<< x tmux ls',
     # an xargs replace string belongs to its own segment only
     'ls | xargs -I s echo s; tmux kill-session -t scratch',
+    # Viktor 43301 round: the isolated and harmless forms stay open
+    "echo scratch | xargs -I X sh -c 'tmux -L iso kill-session -t X'",
+    'xargs tmux ls < names.txt',
+    'xargs -n1 tmux -L iso kill-session -t < names.txt',
+    '>"/tmp/x" tmux ls',
+    "python3 - <<'E'\nrun(['tmux','-L','iso','ls'])\nk = 'kill-server'\nE",
+    'coproc tmux ls',
+    "env -iS 'tmux ls'",
 ]
 
 bad = 0

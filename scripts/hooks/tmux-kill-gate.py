@@ -22,12 +22,14 @@ $TMUX (measured). So:
 
 Read through the shared lexer (scripts/lib/shell_lex.py, card fae0712e): quotes, $( ), backticks, ;, &&, |, and
 heredoc bodies are separated the way bash does. Followed: VAR=value prefixes, a redirection before the command word
-(>/dev/null tmux ...), function definitions (function f { ...; f() { ...), compound-command keywords (if/then/
-elif/else/while/until/do/{/!, case patterns), env (-S, -S'...', --split-string=)/command/exec/nohup/nice/time/sudo/
-timeout/xargs/caffeinate/setsid/arch/sandbox-exec/stdbuf/screen/script wrappers (getopt-style values: screen -dmS x,
-stdbuf -oL), find -exec/-execdir/-ok/-okdir, sh/bash/zsh -c payloads, eval, a heredoc, a here-string or a pipe fed
-to a shell (also cat <<EOF | sh: the producer's heredoc), xargs tmux (the fed words appended or put in place of the
--I/-J string), tmux -c, the arguments of every tmux subcommand (send-keys "tmux kill-server" Enter would run it in a
+(>/dev/null tmux ..., quoted >"/tmp/x" and {fd}>f too), function definitions (function f { ...; f() { ...), coproc,
+compound-command keywords (if/then/elif/else/while/until/do/{/!, case patterns), env (-S, -S'...', -iS clusters,
+--split-string=)/command/exec/nohup/nice/time/sudo/timeout/xargs/caffeinate/setsid/arch/sandbox-exec/stdbuf/screen/
+script wrappers (getopt-style values: screen -dmS x, stdbuf -oL, script -qt 0), find -exec/-execdir/-ok/-okdir,
+sh/bash/zsh -c payloads, eval, a heredoc, a here-string or a pipe fed to a shell (also cat <<EOF | sh: the producer's
+heredoc), xargs tmux (the fed words appended or put in place of the -I/-J string; with no pipe in front, the input
+is a redirection or the terminal and stands for a run-time word; an outer replace string stays visible inside a
+nested sh -c / eval payload), tmux -c, the arguments of every tmux subcommand (send-keys "tmux kill-server" Enter would run it in a
 pane), read as tmux commands too for if-shell/confirm-before/command-prompt/bind-key/set-hook, and a ';' glued to a
 tmux argument (kill-server\\;) as tmux's separator. With both -S and -L, -S counts (tmux uses
 it whatever the order, measured); an -L label with a path part (-L ../tmux-<uid>/default) is live. A window/pane
@@ -44,7 +46,8 @@ file).
 NOT MODELLED (an ACCIDENT guard, not a boundary: same uid): a script file written in an EARLIER command and run
 later, or one that builds the tmux arguments at run time; the tmux library of an interpreter; kill <pid> of the
 server; a value built at run time and passed as the command word ($T kill-server is blocked only because the
-subcommand is literal); awk system(), ssh, and other programs that run a command string; tmux source-file; a tmux
+subcommand is literal); awk system(), ssh, GNU parallel (not installed on the fleet machine, 2026-11-15), and other
+programs that run a command string; xargs tmux whose subcommand itself comes from the input; tmux source-file; a tmux
 config or hook set up outside the command; more than 64 nested wrappers raise (blocked through main() when tmux or
 kill is named). Known false positive: a loop variable as a target (for s in klodel-worker ...; tmux respawn-pane -k
 -t $s) is read as live (Viktor 43177 replay, 1 in 14 days); since klodel-* is protected, the literal names are
@@ -365,9 +368,9 @@ def tmux_reasons(words, depth):
 # Viktor 43177 MEDIUM 1: the lexer hands a compound command's keyword over as the segment's first word
 # (then tmux kill-server; do tmux ...; { tmux ...; ! tmux ...).
 RESERVED = {'if', 'then', 'elif', 'else', 'while', 'until', 'do', '{', '!'}
-# a redirection word at the head of a command (>/dev/null, 2>&1, &>>, < in, <<EOF, <<< x): skipped with its target
-# word when the target is not glued to it (bash runs the command after it; <<EOF tmux kill-server kills)
-REDIR_RX = re.compile(r'^([0-9]*|&)(<<<|<<-|<<|>>|>\||>&|<&|<>|>|<)(.*)$')
+# a redirection word at the head of a command (>/dev/null, 2>&1, &>>, < in, <<EOF, <<< x, {fd}>f): skipped with its
+# target word when the target is not glued to it (bash runs the command after it; <<EOF tmux kill-server kills)
+REDIR_RX = re.compile(r'^(\{[A-Za-z_][A-Za-z0-9_]*\}|[0-9]*|&)(<<<|<<-|<<|>>|>\||>&|<&|<>|>|<)(.*)$')
 # options taking a value, per wrapper
 WRAPPER_ARGS = {
     'command': '', 'builtin': '', 'nohup': '', 'time': '', 'caffeinate': '-t -w', 'noglob': '', 'stdbuf': '-i -o -e',
@@ -390,9 +393,14 @@ def strip_wrappers(words):
         if not w['quoted'] and w['text'] in RESERVED:
             i += 1
             continue
-        m = REDIR_RX.match(w['text']) if not w['quoted'] else None
+        # quoted too: the lexer hands >"/tmp/x" over as one quoted word '>/tmp/x' (Viktor 43301 LOW 2)
+        m = REDIR_RX.match(w['text'])
         if m:  # >/dev/null tmux ..., 2> err tmux ... (Viktor 43205 LOW 3)
             i += 1 if m.group(3) else 2
+            continue
+        if not w['quoted'] and w['text'] == 'coproc':
+            # coproc tmux ... / coproc NAME { tmux ...; } (Viktor 43301 INFO)
+            i += 2 if i + 2 < len(words) and words[i + 2]['text'] == '{' else 1
             continue
         if not w['quoted'] and w['text'] == 'function':
             i += 2  # function NAME { ... (Viktor 43205 INFO 1)
@@ -406,7 +414,11 @@ def strip_wrappers(words):
         if name == 'script':  # script [-aq ...] FILE CMD ... (Viktor 43205 INFO 1)
             i += 1
             while i < len(words) and words[i]['text'].startswith('-'):
-                i += 2 if words[i]['text'] in ('-t', '-T', '-F') else 1
+                t = words[i]['text']
+                # -t (and the playback -T) take a value, also at the end of a cluster (script -qt 0; Viktor 43301
+                # INFO). -F is a FLAG on macOS (man script: "Immediately flush output after each write"): with it read
+                # as taking a value, script -F /tmp/p tmux kill-server passed (#326)
+                i += 2 if not t.startswith('--') and len(t) > 1 and t[-1] in 'tT' else 1
             i += 1
             continue
         if not w['quoted'] and w['text'] == 'case':
@@ -423,12 +435,14 @@ def strip_wrappers(words):
             i += 1
             while i < len(words):
                 t = words[i]['text']
-                glued = (t.startswith('-S') and len(t) > 2) or t.startswith('--split-string=')
-                if glued or (t in ('-S', '--split-string') and i + 1 < len(words)):
+                # -S inside a short-option cluster too (env -iS '...', -vS'...'; Viktor 43301 INFO)
+                spos = t.find('S') if t.startswith('-') and not t.startswith('--') else -1
+                glued = (spos > 0 and len(t) > spos + 1) or t.startswith('--split-string=')
+                if glued or ((spos > 0 or t == '--split-string') and i + 1 < len(words)):
                     # env -S 'tmux kill-server' (or -S'...' / --split-string=... glued): the value is split into the
                     # command line (Viktor 43177 LOW 4, 43205 INFO 1)
                     L = lexer()
-                    val = (t.split('=', 1)[1] if t.startswith('--') else t[2:]) if glued else words[i + 1]['text']
+                    val = (t.split('=', 1)[1] if t.startswith('--') else t[spos + 1:]) if glued else words[i + 1]['text']
                     lx = L.lex(val)
                     head = L.words(val, lx, lx['segments'][0]) if lx['segments'] else []
                     words = head + words[i + (1 if glued else 2):]
@@ -483,7 +497,10 @@ def skip_wrapper_opts(name, words, i):
 
 
 def segment_reasons(words, depth):
-    _PLACEHOLDERS[-1].clear()
+    # Viktor 43301 LOW 1: only the outermost level starts a segment afresh; a nested payload (xargs -I X sh -c 'tmux
+    # kill-session -t X', eval ...) keeps the outer replace strings (stricter across its own segments)
+    if depth == 0:
+        _PLACEHOLDERS[-1].clear()
     words = strip_wrappers(words)
     if not words:
         return []
@@ -560,6 +577,23 @@ def piped_into_runner(text, lx, segwords, idx):
                 os.path.basename(sw[0]['text']) in SHELLS | {'tmux'})
 
 
+def xargs_tmux(ws):
+    """(the words from tmux on, the segment's own xargs replace strings) when the segment is `xargs ... tmux ...`
+    (after VAR= prefixes), else ([], set()). The replace strings go to a fresh set: the caller's level is untouched."""
+    raw = [w for w in ws if not (ASSIGN_RX.match(w['text']) and not w['quoted'])]
+    if not raw or os.path.basename(raw[0]['text']) != 'xargs':
+        return [], set()
+    _PLACEHOLDERS.append(set())
+    try:
+        sw = strip_wrappers(ws)
+        own = set(_PLACEHOLDERS[-1])
+    finally:
+        _PLACEHOLDERS.pop()
+    if sw and os.path.basename(sw[0]['text']) == 'tmux':
+        return sw, own
+    return [], set()
+
+
 def decide_text(text, depth=0):
     if depth > MAX_DEPTH or not text or ('tmux' not in text and 'kill' not in text and 'eval' not in text):
         return [] if depth <= MAX_DEPTH else ['nesting too deep to read']
@@ -591,14 +625,36 @@ def decide_text(text, depth=0):
                 for h in lx['heredocs']:
                     if prev['start'] <= h['op'] < prev['end']:
                         reasons += decide_text(text[h['bodyStart']:h['bodyEnd']], depth + 1)
-                # xargs tmux ...: the fed words are appended, or replace the -I/-J string (Viktor 43205 LOW 1)
-                _PLACEHOLDERS[-1].clear()
-                sw = strip_wrappers(ws)
-                if sw and os.path.basename(sw[0]['text']) == 'tmux':
+                # xargs tmux ...: the fed words are appended, or replace the -I/-J string (Viktor 43205 LOW 1). This
+                # segment's own replace strings are read into a fresh set, so a nested level keeps the outer ones.
+                sw, own = xargs_tmux(ws)
+                if sw:
                     line = ' '.join(w['text'] for w in sw)
-                    phs = [ph for ph in _PLACEHOLDERS[-1] if ph and ph in line]
+                    phs = [ph for ph in own if ph and ph in line]
                     line = line.replace(phs[0], fed) if phs else line + ' ' + fed
                     _PLACEHOLDERS.append(set())
+                    try:
+                        reasons += decide_text(line, depth + 1)
+                    finally:
+                        _PLACEHOLDERS.pop()
+            else:
+                # xargs tmux with no pipe in front: its input is a redirection (< names.txt, <<< x, < <(tmux ls)) or
+                # the terminal, and the fed words are not known before run time (Viktor 43301 LOW 3): the redirection
+                # words are dropped, and a run-time word stands for what xargs appends
+                sw, own = xargs_tmux(ws)
+                if sw:
+                    keep, k = [], 0
+                    while k < len(sw):
+                        m = REDIR_RX.match(sw[k]['text'])
+                        if m:
+                            k += 1 if m.group(3) else 2
+                            continue
+                        keep.append(sw[k]['text'])
+                        k += 1
+                    line = ' '.join(keep)
+                    if not any(ph and ph in line for ph in own):
+                        line += ' $__XARGS_INPUT'
+                    _PLACEHOLDERS.append(set(own))
                     try:
                         reasons += decide_text(line, depth + 1)
                     finally:
