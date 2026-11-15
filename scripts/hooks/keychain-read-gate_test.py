@@ -421,8 +421,98 @@ BLOCK += ['tmux new -d "' + _dq('"s3curity" dump-keychain') + '"',
           "osascript -e 'do shell script \"" + _dq('"s3curity" dump-keychain') + "\"'",
           'eval "' + _dq('bash -c "' + _dq('"s3curity" dump-keychain') + '"') + '"',
           "eval \\'x ; bash -c '\"s3curity\" dump-keychain'"]
+# card aeee72df (Viktor 42941, pre-existing on main; each form ran under a real bash 3.2 with a proxy rule,
+# work/aeee72df/probe.py). LOW 1: a payload past PAYLOAD_DEPTH with a payload still in it blocks ('payload-too-deep')
+# instead of going unread: a 4-deep nested quoted name ran and passed.
+def _nest(d, inner, q=_dq):
+    for _ in range(d):
+        inner = 'bash -c "' + q(inner) + '"'
+    return inner
+
+
+BLOCK += [_nest(d, '"s3curity" dump-keychain') for d in (4, 5, 6)]
+BLOCK += [_nest(4, "'s3curity' find-generic-password -w"), _nest(4, '\\s3curity dump-keychain'),
+          _nest(4, 's3c""urity export'), 'eval "' + _dq(_nest(3, '"s3curity" dump-keychain')) + '"',
+          _nest(4, 'echo "hi"')]  # fail-closed: the 4th level is not read, whatever it says
+# LOW 2: the payload is the whole shell word: bash goes on after the closing quote ('\'' sq-in-sq, a quote right
+# after a quote, $'...' and $"..." pieces), so the first piece alone ('' or a half name) read nothing
+BLOCK += ["bash -e -c ''\\''s3curity'\\'' dump-keychain # c'", "bash -c ''\\''s3curity'\\'' find-generic-password -w'",
+          "nohup bash -c 's3c'\\'''\\''urity dump-keychain'", "env bash -c 's3c'\\''urity'\\'' export'",
+          "sh -c ''\\''s3curity'\\'' dump-keychain'", "su x -c ''\\''s3curity'\\'' dump-keychain'",
+          "bash -c 's3curity'' dump-keychain'", "bash -c 's3curity'\" dump-keychain\"",
+          "bash -c \"s3c\"urity' 'dump-keychain", "bash -c 's3c'urity\\ dump-keychain",
+          "bash -c $'\\x22s3curity\\x22 dump-keychain'", "bash -c $'\\163ecurity dump-keychain'",
+          "bash -c $'s3c\\'urity\\' dump-keychain'", "bash -c 's3c'$'urity dump-keychain'",
+          "bash -c $\"s3curity\"' dump-keychain'", "bash -c 'x' a's3curity'' dump-keychain'",
+          "bash -c 's3c'\"\"'urity '\\''dump-keychain'\\'"]
+# LOW 4: what a shell reads on stdin is a payload too: a pipeline into a shell (wrappers and a path before it), and
+# the word after a <<< in a command with a shell word in it (before or after the <<<)
+BLOCK += ["echo '\"s3curity\" dump-keychain' | bash", "bash <<< '\"s3curity\" dump-keychain'",
+          'echo "\\"s3curity\\" find-generic-password -w" | sh', "echo ''\\''s3curity'\\'' dump-keychain' | bash",
+          "printf '%s\\n' '\"s3curity\" export' | zsh", "echo '\"s3curity\" dump-keychain' | bash -s",
+          "echo '\"s3curity\" dump-keychain' | /bin/bash", "echo '\"s3curity\" dump-keychain' | env bash",
+          "echo '\"s3curity\" dump-keychain' | sudo -n bash", "echo '\"s3curity\" dump-keychain' |bash",
+          "echo '\"s3curity\" dump-keychain' | tr a a | bash", "echo 'a ; b'; echo '\"s3curity\" export' | bash",
+          "echo 'a | b' '\"s3curity\" dump-keychain' | bash", "bash<<<'\"s3curity\" dump-keychain'",
+          "bash -s <<< '\"s3curity\" dump-keychain'", 'sh <<< "\\"s3curity\\" dump-keychain"',
+          "bash <<< $'\"s3curity\" dump-keychain'", "bash <<< ''\\''s3curity'\\'' dump-keychain'",
+          'bash <<< \\"s3curity\\"\\ dump-keychain', "<<< '\"s3curity\" dump-keychain' bash",
+          "cat <<< '\"s3curity\" dump-keychain' | bash", "bash -c 'echo \"\\\"s3curity\\\" dump-keychain\" | bash'",
+          "echo '\"s3curity\" dump-keychain' | \"bash\"", "echo '\"s3curity\" dump-keychain' | $SHELL"]
+# a heredoc into a shell was read already (a body line is a command position; the second pass drops the quotes)
+BLOCK += ["bash <<'EOF'\n\"s3curity\" dump-keychain\nEOF", "bash <<EOF\n's3curity' export\nEOF",
+          "sh <<-'EOF'\n\t\\s3curity dump-keychain\n\tEOF"]
+# MAX_PAYLOADS counts the stdin words too: a 65th distinct quoted word into a shell blocks ('payload-unread')
+BLOCK += ['echo ' + ' '.join("'\"a%d\"'" % i for i in range(65)) + ' | bash']
+# pinned for the mutation round (work/aeee72df): $'...' in the stdin walk, a word of pieces with no quote left in its
+# value, backslash-newline inside the word, an octal escape past 0377 (bash keeps the low byte: \563 is s, measured),
+# |& (zsh runs it, measured), an escaped quote opens no word in the stdin walk either, and a depth-3 payload past
+# MAX_PAYLOADS is unread too
+BLOCK += ["echo $'\\x22s3curity\\x22 dump-keychain' | bash", "echo 's3c'\"urity dump-keychain\" | bash",
+          "bash -c 's3c'\\\nurity' dump-keychain'", "bash -c $'\\563ecurity dump-keychain'",
+          "echo '\\\"s3curity\\\" dump-keychain' |& bash", "echo \\' '\\\"s3curity\\\" dump-keychain' | bash",
+          _nest(3, 'bash -c ' + ' '.join("'\"a%d\"'" % i for i in range(65)))]
+# the same stdin and $"..." shapes with a split name, which main's script-inline literal rule does not see (a quoted
+# whole name there blocks already): wrappers, a path and a pipeline stage before the shell, $"..." as the first piece
+BLOCK += ["echo '\"s3c\"urity dump-keychain' | tr a a | bash", "echo '\"s3c\"urity dump-keychain' | sudo -n bash",
+          "echo '\"s3c\"urity dump-keychain' | /bin/bash", "bash -c $\"s3c\"'urity dump-keychain'",
+          "echo '\"s3c\"urity dump-keychain' | ${SHELL}", "echo '\"s3c\"urity dump-keychain' | 'bash'",
+          "echo '\"s3c\"urity dump-keychain' | \"sh\"", "echo '\"s3c\"urity dump-keychain' |\tbash",
+          "echo '\"s3c\"urity dump-keychain' | bash -s", "bash <<<\t'\"s3c\"urity dump-keychain'",
+          "(echo '\"s3c\"urity dump-keychain' | bash)", "echo '\"s3c\"urity dump-keychain' | bash>/dev/null"]
+# $'...' escapes as bash 3.2 reads them (each measured with the proxy rule): one hex digit before a non-hex, two octal
+# digits, hex letters in both cases
+BLOCK += ["bash -c $'s3curity\\x9\\x20dump-keychain'", "bash -c $'s3curity\\11dump-keychain'",
+          "bash -c $'s3curity dump-\\x6beychain'", "bash -c $'s3curity dump-\\x6Beychain'",
+          # a $"..." piece after the first one, and a $'...' piece that ends before the next $'...' (mutation round)
+          "bash -c 's3c'$\"urity dump-keychain\"", "bash -c $'s3c'u$'\\x72ity dump-keychain'"]
 
 ALLOW = [
+    # card aeee72df: the new payloads stay allowed when they read no secret; a pipe or a here-string into a program
+    # that is not a shell is not read as a script; a 4-deep payload with nothing quoted left in it passes
+    "echo '\"hello\" world' | bash", "bash <<< 'echo \"hi\"'", "bash -c ''\\''echo'\\'' hi'",
+    "echo '\"s3curity\" dump-keychain' | cat", "grep x <<< '\"s3curity\" dump-keychain'",
+    "echo '\"s3curity\" dump-keychain' >| bash",
+    "echo '\"s3curity\" dump-keychain' | bashful", "bash -c 'a'\\''b'\\'' c'", "bash -c $'echo \\x22hi\\x22'",
+    _nest(4, 'echo hi'), _nest(3, 'echo "hi"'),
+    'echo ' + ' '.join("'\"a%d\"'" % i for i in range(64)) + ' | bash',  # MAX_PAYLOADS stdin words: all read
+    "cat notes.txt | grep -v '\"draft\"' | sed 's/\"x\"/y/' | sort | uniq -c | awk '{print $1}' | bash -s",
+    "echo x |",
+    # only the pipeline that feeds the shell is its stdin (not an earlier command, not a later one), only the command
+    # with a shell word in it reads a here-string, a quote inside a "..." word opens nothing, and a plain one-piece
+    # word is not counted against MAX_PAYLOADS (-c or stdin)
+    "echo '\\\"s3curity\\\" dump-keychain'; echo hi | bash", "echo '\\\"s3curity\\\" dump-keychain'\necho hi | bash",
+    "echo '\\\"s3curity\\\" dump-keychain' && echo hi | bash", "echo hi | bash; echo '\\\"s3curity\\\" dump-keychain'",
+    "echo bash; grep x <<< '\\\"s3curity\\\" dump-keychain'", "grep x <<< '\\\"s3curity\\\" dump-keychain'; echo bash",
+    '; '.join('bash <<< w%d' % i for i in range(70)),  # a plain here-string word is no payload (MAX_PAYLOADS)
+    # a shell word stands alone (no word character, dot or dash glued to it): these are other programs
+    "echo '\\\"s3curity\\\" dump-keychain' | bash.x", "echo '\\\"s3curity\\\" dump-keychain' | bash-x",
+    "grep xbash <<< '\\\"s3curity\\\" dump-keychain'", "grep x.bash <<< '\\\"s3curity\\\" dump-keychain'",
+    "grep x-bash <<< '\\\"s3curity\\\" dump-keychain'", "grep bashx <<< '\\\"s3curity\\\" dump-keychain'",
+    "grep bash.x <<< '\\\"s3curity\\\" dump-keychain'", "grep bash-x <<< '\\\"s3curity\\\" dump-keychain'",
+"echo \"x '\\\"s3curity\\\" dump-keychain'\" | bash",
+    'echo ' + ' '.join("'\"a%d\"'" % i for i in range(64)) + ' ' + ' '.join("'b%d'" % i for i in range(10)) + ' | bash',
+    'bash -c ' + ' '.join("'\"a%d\"'" % i for i in range(64)) + ' ' + ' '.join("'b%d'" % i for i in range(10)),
     'ls -la',
     # card d11364a4: a payload taken out and judged on its own stays allowed when it reads no secret
     'bash -c "echo \\"s3curity\\" find-generic-password"',
@@ -1259,6 +1349,17 @@ def script_cases():
                            env={'PATH': '/usr/bin:/bin'})
         if p.stdout.strip() != 'True True True':
             fails.append(f'script: the shared lexer is not loaded or not fail-closed: {p.stdout.strip()!r} {p.stderr[-200:]!r}')
+        # card aeee72df: hits() itself, where the hook blocks on another rule (script-inline after ||, the 4096
+        # window): a <<< with no word after it raises nothing, || is no pipe into a shell, |& is one (zsh, bash 4)
+        S3 = fix('s3curity')
+        for cmd, want in [('bash <<< ', '-'), ('bash <<< ' * 20000, '-'), ('bash <<< "' + 'a\\"b ' * 100000 + '"', '-'),
+                          ("echo '\"%s\" dump-keychain' || bash" % S3, '-'),
+                          ("echo '\"%s\" dump-keychain' | bash" % S3, 'secret-read'),
+                          ("echo '\"%s\" dump-keychain' |& bash" % S3, 'secret-read')]:
+            p = subprocess.run([sys.executable, '-I', '-c', inproc, HOOK, cmd], capture_output=True, text=True,
+                               timeout=20, env={'PATH': '/usr/bin:/bin'})
+            if p.stdout.strip() != want:
+                fails.append(f'script: hits({cmd[:40]!r}) -> {p.stdout.strip()[:60]!r} {p.stderr[-80:]!r}, want {want}')
         # more directories than MAX_BASES (32) before a script: blocks instead of leaving the rest unresolved
         code, err = bash_in('cd a && ' * 40 + 'python3 list.py', d)
         if code != 2 or 'script-too-many' not in err:
@@ -1393,7 +1494,7 @@ def script_cases():
             fails.append(f'script: 30 000 interpreter calls took {took:.1f} s (want under 2 s)')
         corpus_fails, corpus_n = corpus_cases(d)
         fails += corpus_fails
-        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos) + corpus_n + 1
+        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos) + 6 + corpus_n + 1
 
 
 def corpus_cases(d):
@@ -1493,6 +1594,17 @@ def main():
                   ('sudo' + ' -u a' * 32 + ' ls', 0), ('sudo' + ' -u a' * 32 + ' -E ls', 2),
                   ('sudo -u a; ' * 20000, 0), ('(sudo -u a ' * 20000, 0), ('sudo -u a ' * 20000 + 'python3 x.py', 0),
                   ('ssh h ' * 20000 + sec, 2), ('nice -n 5 sudo -u a ' * 10000 + sec, 2)]
+    # card aeee72df: the word join and the stdin walk are linear (each quote and each word once), and a <<< at the
+    # very end has no word (an IndexError there blocked every such command before it was caught). The two `<<<`
+    # runs past 4096 characters block on the script rules ('script-too-many-args', main too): timed here, their
+    # hits() is pinned in script_cases()
+    qsec = '"' + fix('s3curity') + '" dump-keychain'
+    wrap_timed += [("echo " + "'a''b'" * 100000 + " | bash", 0), ("bash -c " + "'a'\\''b'" * 100000, 0),
+                   ("echo " + "'a''b'" * 100000 + " '" + qsec + "' | bash", 2), ("bash <<< " * 20000, 2),
+                   ("echo 'x' | bash; " * 20000, 0), ("'\"" * 50000 + ' | bash', 0), ('<<<' * 50000 + ' bash', 0),
+                   ("bash -c " + "''\\''a'\\'' " * 20000 + "''\\''" + qsec.replace('"', '') + "'", 2),
+                   ("echo '\"a\"' | " + "sudo -u a " * 20000 + "bash", 0), ('bash <<< "' + 'a\\"b ' * 100000 + '"', 2),
+                   (_nest(6, qsec), 2), ("bash -c " + "$'\\x41' " * 40000, 0)]
     for cmd, want in wrap_timed:
         try:
             p = subprocess.run([sys.executable, '-I', HOOK], capture_output=True, text=True, timeout=5,
