@@ -119,6 +119,64 @@ BLOCK = [
     "env -S 'tmux kill-server'",
     # Viktor 43177 LOW 5: the subcommand in a literal variable
     'x=kill-server; tmux $x',
+    # Viktor 43205 LOW 1: an xargs/find placeholder as the target, and xargs tmux fed the subcommand
+    'echo agent-kernel | xargs -I{} tmux kill-session -t {}',
+    "tmux ls -F '#S' | grep agent | xargs -I {} tmux kill-session -t {}",
+    'find . -exec tmux kill-session -t {} \\;',
+    'echo agent-x | xargs -J X tmux kill-session -t X',
+    'echo agent-x | xargs -i tmux kill-session -t {}',
+    'echo kill-server | xargs tmux',
+    'echo agent-dave | xargs tmux kill-session -t',
+    # Viktor 43205 LOW 2: a producer's heredoc piped into a shell
+    "cat <<'EOF' | sh\ntmux kill-server\nEOF",
+    "cat <<EOF | bash\ntmux kill-session -t agent-dave\nEOF",
+    # Viktor 43205 LOW 3: a redirection before the command word
+    '>/dev/null tmux kill-server',
+    '2>/dev/null tmux kill-server',
+    '2> /tmp/err tmux kill-server',
+    '&>/dev/null tmux kill-server',
+    '2>&1 tmux kill-server',
+    '< in.txt tmux kill-server',
+    '<<< x tmux kill-server',
+    '<<<x tmux kill-server',
+    '<<EOF tmux kill-server\nhello\nEOF',
+    '<< EOF tmux kill-server\nhello\nEOF',
+    # own mutation round (mutate2.py): a custom xargs -i string, the -I string as the subcommand, a function body
+    # without a kill-* word (the run-time command-word fallback does not cover it)
+    'echo agent-x | xargs -iQ tmux kill-session -t Q',
+    'echo kill-server | xargs -I{} tmux {}',
+    'f() { pkill tmux; }; f',
+    # Viktor 43205 LOW 4: one isolated call in the body must not clear a second, live one
+    ('python3 -c "import subprocess; subprocess.run([\'tmux\',\'-L\',\'x\',\'new-session\']); '
+     'subprocess.run([\'tmux\',\'kill-server\'])"'),
+    # Viktor 43205 INFO 1: function definitions, glued/split wrapper values, script, screen, tmux-command arguments
+    'function f { tmux kill-server; }; f',
+    'f() { tmux kill-server; }; f',
+    'f () { tmux kill-server; }; f',
+    "env -S'tmux kill-server'",
+    "env --split-string='tmux kill-server'",
+    'stdbuf -o 0 tmux kill-server',
+    'stdbuf -oL tmux kill-server',
+    'script -q /dev/null tmux kill-server',
+    'screen -dmS x tmux kill-server',
+    'watch -d tmux kill-server',
+    'tmux kill-server\\;',
+    'tmux new -d -s x \\; kill-server\\;',
+    'tmux if-shell true kill-server',
+    'tmux if true "kill-session -t agent-dave"',
+    'tmux confirm-before kill-server',
+    'tmux bind-key X kill-server',
+    'tmux set-hook -g session-created kill-server',
+    # Viktor 43205 INFO 2: every klodel-* session is the fleet's
+    'tmux kill-session -t klodel-worker',
+    'tmux kill-session -t klodel-worker-fast',
+    'tmux respawn-pane -k -t klodel-worker',
+    # Viktor 43205 mutation survivors N15, N40: find -execdir/-ok/-okdir, @ and % ids
+    'find . -execdir tmux kill-server {} +',
+    'find . -ok tmux kill-server \\;',
+    'find . -okdir tmux kill-server \\;',
+    'tmux kill-session -t @1',
+    'tmux kill-session -t %1',
 ]
 # Viktor 43177 MEDIUM 1: compound-command keywords, for three kill forms each
 for _k in ('tmux kill-server', 'tmux kill-session -t agent-x', 'pkill tmux'):
@@ -186,6 +244,28 @@ ALLOW = [
     'find . -name "*.py" -exec grep -l tmux {} \\;',
     'setsid tmux -L iso kill-server',
     "env -S 'tmux ls'",
+    # Viktor 43205 follow-up: the new readings keep the isolated and harmless forms open
+    'echo scratch | xargs -I{} tmux -L iso kill-session -t {}',
+    'echo a | xargs -0 tmux display -p',
+    "cat <<'EOF' | sh\ntmux ls\nEOF",
+    "cat <<'EOF' | sh\ntmux -L iso kill-server\nEOF",
+    '>/dev/null tmux ls',
+    '2>/dev/null tmux -L iso kill-server',
+    ('python3 -c "import subprocess; subprocess.run([\'tmux\',\'-L\',\'x\',\'kill-server\']); '
+     'subprocess.run([\'tmux\',\'ls\'])"'),
+    'function f { tmux ls; }; f',
+    'screen -dmS x tmux -L iso kill-server',
+    'stdbuf -oL tmux ls',
+    'watch -d tmux ls',
+    'tmux kill-session -t scratch\\;',
+    'tmux if-shell true "display hi"',
+    'tmux -L iso if-shell true kill-server',
+    'tmux bind-key X display hi',
+    'env ' * 30 + 'tmux ls',
+    "bash <<< 'tmux ls'",
+    '<<< x tmux ls',
+    # an xargs replace string belongs to its own segment only
+    'ls | xargs -I s echo s; tmux kill-session -t scratch',
 ]
 
 bad = 0
@@ -201,6 +281,28 @@ for c in ALLOW:
         print(f'FAIL (blocked, should allow): {c!r} -> {r}')
 print(f'decide: {len(BLOCK)} block + {len(ALLOW)} allow cases, {bad} failed')
 
+# Viktor 43205 mutation survivors N48, N49: past the text limit and past the nesting limit -> block
+_long = 'tmux ls ' + 'x' * 210_000
+if g.decide(_long) != ['command too long to read']:
+    bad += 1
+    print('FAIL limits: a 210 000 character command naming tmux is not blocked as too long')
+import shlex  # noqa: E402
+_nest = 'tmux ls'
+for _ in range(8):
+    _nest = 'sh -c ' + shlex.quote(_nest)
+if 'nesting too deep to read' not in g.decide(_nest):
+    bad += 1
+    print('FAIL limits: 8 nested sh -c levels are not blocked')
+# Viktor 43205 INFO 1: more nested wrappers than the loop reads raise (main() turns that into a block when the
+# command names tmux or kill)
+try:
+    g.decide('env ' * 70 + 'tmux kill-server')
+    bad += 1
+    print('FAIL limits: 70 nested env wrappers did not raise')
+except RuntimeError:
+    pass
+print('limits: done')
+
 # Viktor 43177 INFO 1 (mutant M16 survived): an internal error blocks when the command mentions tmux or kill, and
 # allows otherwise. In process: decide() is made to raise, main() reads the hook JSON from a replaced stdin.
 import io  # noqa: E402
@@ -212,9 +314,12 @@ def _boom(_cmd):
 
 
 _real_decide, _real_stdin, _real_stderr = g.decide, sys.stdin, sys.stderr
-g.decide = _boom
+# _fake: decide() raises (Viktor 43177 INFO 1); otherwise the real decide past the wrapper limit (Viktor 43205 INFO 1):
+# tmux or kill named -> 2, not named -> 0.
 try:
-    for _cmd, _want in (('tmux kill-server', 2), ('kill 1234', 2), ('ls -la', 0)):
+    for _cmd, _want, _fake in (('tmux kill-server', 2, True), ('kill 1234', 2, True), ('ls -la', 0, True),
+                               ('env ' * 70 + 'tmux kill-server', 2, False), ('env ' * 70 + 'ls', 0, False)):
+        g.decide = _boom if _fake else _real_decide
         sys.stdin = io.StringIO(json.dumps({'tool_name': 'Bash', 'tool_input': {'command': _cmd}}))
         sys.stderr = io.StringIO()
         _orig_log = g.log_deny
@@ -226,7 +331,7 @@ try:
             signal.setitimer(signal.ITIMER_REAL, 0)
         if _rc != _want:
             bad += 1
-            _real_stderr.write(f'FAIL exception path: {_cmd!r} -> rc {_rc}, want {_want}\n')
+            _real_stderr.write(f'FAIL exception path: {_cmd[:60]!r} -> rc {_rc}, want {_want}\n')
 finally:
     g.decide, sys.stdin, sys.stderr = _real_decide, _real_stdin, _real_stderr
 print('exception path: done')
@@ -266,7 +371,10 @@ if rc != 0:
     bad += 1
     print(f'FAIL hook: plain ls blocked (rc {rc})')
 logf = os.path.join(tree, 'store', 'tmux-kill-gate', 'gate.jsonl')
-lines = open(logf).read().splitlines() if os.path.exists(logf) else []
+lines = []
+if os.path.exists(logf):
+    with open(logf) as fh:
+        lines = fh.read().splitlines()
 if len(lines) != 1 or 'kill-server' not in lines[0] or 'TMUX_TMPDIR' in lines[0]:
     bad += 1
     print(f'FAIL hook: expected exactly one deny line without the command text, got {lines}')
@@ -275,5 +383,27 @@ p = subprocess.run([sys.executable, '-I', GATE], input='not json', capture_outpu
 if p.returncode != 0:
     bad += 1
     print('FAIL hook: malformed stdin blocked')
+# Viktor 43205 N41: the deny log never follows a symlink (O_NOFOLLOW): the block stands, the link target stays empty
+victim = os.path.join(tree, 'victim.txt')
+open(victim, 'w').close()
+os.remove(logf)
+os.symlink(victim, logf)
+rc, err = hook('tmux kill-server', env)
+if rc != 2 or os.path.getsize(victim) != 0:
+    bad += 1
+    print(f'FAIL hook: log symlink followed or block lost (rc {rc}, victim {os.path.getsize(victim)} bytes)')
+# Viktor 43205 N26: the watchdog -- a decide() slower than the limit blocks when tmux/kill is named, allows otherwise
+WD = ("import importlib.util, sys, time\n"
+      "spec = importlib.util.spec_from_file_location('g', sys.argv[1]); g = importlib.util.module_from_spec(spec)\n"
+      "spec.loader.exec_module(g)\n"
+      "g.WATCHDOG_S = 0.2\n"
+      "g.decide = lambda c: (time.sleep(5), [])[1]\n"
+      "sys.exit(g.main())\n")
+for _cmd, _want in (('tmux ls', 2), ('ls -la', 0)):
+    p = subprocess.run([sys.executable, '-I', '-c', WD, GATE], capture_output=True, text=True, env=env, timeout=30,
+                       input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': _cmd}}))
+    if p.returncode != _want or (_want == 2 and 'TMUX-KAPU' not in p.stderr):
+        bad += 1
+        print(f'FAIL watchdog: {_cmd!r} -> rc {p.returncode}, want {_want} {p.stderr!r}')
 print('hook protocol: done')
 sys.exit(1 if bad else 0)
