@@ -3,9 +3,11 @@
 // it works from the project settings.json, settings.local.json and the config dir's settings.json. The scaffold
 // removes it from the files that are the agent's own, at spawn and at every dashboard start.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   agentHookKillSwitchFiles,
   agentSettingsPath,
@@ -101,6 +103,44 @@ describe('ensureNoHookKillSwitch', () => {
     symlinkSync(target, local)
     expect(ensureNoHookKillSwitch(TEST_AGENT, cfg)).toEqual([{ path: local, result: 'outside' }])
     expect(read(target)).toEqual({ disableAllHooks: true })
+  })
+
+  // Viktor 42983 MEDIUM 1: Claude Code reads a \u-escaped key and a leading BOM as the same kill switch (measured
+  // there: 0 hooks fired), so the key is looked up in the parsed object, never in the raw text.
+  it('an escaped key spelling and a leading BOM are removed too', () => {
+    writeFileSync(project, '{"\\u0064isableAllHooks": true, "a": 1}')
+    writeFileSync(local, '﻿{"disableAllHooks": true}')
+    writeFileSync(user, '{"disable\\u0041llHooks": true}')
+    expect(ensureNoHookKillSwitch(TEST_AGENT, cfg).map((r) => r.result)).toEqual(['removed', 'removed', 'removed'])
+    expect(read(project)).toEqual({ a: 1 })
+    expect(read(local)).toEqual({})
+    expect(read(user)).toEqual({})
+  })
+
+  it('a trailing comma or a comment (Claude Code does not load such a file) is reported, not rewritten', () => {
+    writeFileSync(project, '{"disableAllHooks": true,}')
+    writeFileSync(local, '// x\n{"disableAllHooks": true}')
+    expect(ensureNoHookKillSwitch(TEST_AGENT, cfg).map((r) => r.result)).toEqual(['unreadable', 'unreadable'])
+  })
+
+  // Viktor 42983 MEDIUM 2: the dashboard reads these files synchronously on its main thread, so a FIFO or a device in
+  // the agent's own folder must be refused before the read. Run in a child process with a timeout: a regression
+  // would block the synchronous read, and with it this test worker.
+  it.skipIf(process.platform === 'win32')('a FIFO or a symlink to a device is reported at once, without blocking', () => {
+    execFileSync('mkfifo', [local])
+    symlinkSync('/dev/zero', user)
+    const mod = join(dirname(fileURLToPath(import.meta.url)), '..', 'web', 'agent-scaffold.ts')
+    const t0 = Date.now()
+    const r = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+      `import { ensureNoHookKillSwitch } from ${JSON.stringify(mod)}; ` +
+      `process.stdout.write(JSON.stringify(ensureNoHookKillSwitch(process.argv[1], process.argv[2])))`, TEST_AGENT, cfg],
+    { encoding: 'utf-8', timeout: 20000 })
+    expect(r.signal).toBeNull()
+    expect(JSON.parse(r.stdout.trim().split('\n').pop() ?? 'null')).toEqual([
+      { path: local, result: 'unreadable' },
+      { path: user, result: 'unreadable' },
+    ])
+    expect(Date.now() - t0).toBeLessThan(15000)
   })
 
   it('a file that is not a JSON object is reported, and not rewritten', () => {

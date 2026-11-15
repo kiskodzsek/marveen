@@ -1825,15 +1825,21 @@ export function ensureNoHookKillSwitch(name: string, configDir?: string | null):
   const own = agentDir(name)
   for (const path of agentHookKillSwitchFiles(name, configDir)) {
     if (!existsSync(path)) continue
+    // Resolve and stat BEFORE reading: a FIFO (mkfifo) or a device (a symlink to /dev/zero) in the agent's own folder
+    // would block or exhaust the dashboard process, which reads these files synchronously.
+    let real: string
+    try { real = realpathSync(path) } catch { out.push({ path, result: 'unreadable' }); continue }
+    let size = 0
+    try { const st = statSync(real); if (!st.isFile()) throw new Error('not a regular file'); size = st.size } catch { out.push({ path, result: 'unreadable' }); continue }
+    if (size > 1_000_000) { out.push({ path, result: 'unreadable' }); continue }
     let text: string
-    try { text = readFileSync(path, 'utf-8') } catch { out.push({ path, result: 'unreadable' }); continue }
-    if (!text.includes(HOOK_KILL_SWITCH_KEY)) continue
+    // Claude Code strips a leading BOM and decodes \uXXXX escapes in keys: both spell the same key, so the text is
+    // parsed first and the key is looked up in the parsed object, never in the raw text.
+    try { text = readFileSync(real, 'utf-8').replace(/^\uFEFF/, '') } catch { out.push({ path, result: 'unreadable' }); continue }
     let settings: Record<string, unknown>
     try { settings = JSON.parse(text) } catch { out.push({ path, result: 'unreadable' }); continue }
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) { out.push({ path, result: 'unreadable' }); continue }
     if (!Object.prototype.hasOwnProperty.call(settings, HOOK_KILL_SWITCH_KEY)) continue
-    let real: string
-    try { real = realpathSync(path) } catch { out.push({ path, result: 'unreadable' }); continue }
     let ownReal = own
     try { ownReal = realpathSync(own) } catch { /* keep the nominal path */ }
     if (!real.startsWith(ownReal + '/')) { out.push({ path, result: 'outside' }); continue }
