@@ -83,3 +83,27 @@ export function checkConfigPutFields(body: unknown, knownFields: readonly string
       `Known fields: ${knownFields.join(', ')}.`,
   }
 }
+
+// Card a8944247: claudeMd, soulMd and mcpJson of PUT /api/agents/:name are an agent's instructions (CLAUDE.md, SOUL.md)
+// and the MCP servers it starts (.mcp.json). The seal (card 17901b47) does not cover them, and every sub-agent holds
+// the shared dashboard token, so one sub-agent could rewrite another's instructions or give it a new MCP server.
+// The same caller rule as sealedWriteRefusal (card ec665017): a token caller that names a sub-agent in X-Agent-Id is
+// refused, whichever agent it targets (its own files too); the dashboard UI (a session), a token caller without the
+// header and the main agent are not. Caller survey 2026-11-16: no recorded token call wrote these fields; the UI's
+// wizard and editor do, as a session. X-Agent-Id is self-declared, so this stops an honest sub-agent's mistake, not
+// a sub-agent that leaves the header out: an accident-level gate, like the seal's.
+export const AGENT_FILE_FIELDS = ['claudeMd', 'soulMd', 'mcpJson'] as const
+
+export function agentFileWriteRefusal(
+  auth: { kind: string; agent?: string } | undefined | null,
+  mainAgentId: string,
+  body: Record<string, unknown>,
+): string | null {
+  const fields = AGENT_FILE_FIELDS.filter(f => body[f] !== undefined)
+  if (!fields.length) return null
+  if (auth?.kind === 'token' && auth.agent && auth.agent !== mainAgentId) {
+    return `${fields.join(', ')} (an agent's CLAUDE.md, SOUL.md, .mcp.json) is written by the dashboard or the main ` +
+      `agent, not by ${auth.agent.slice(0, 64)}; ask the main agent (card a8944247).`
+  }
+  return null
+}
