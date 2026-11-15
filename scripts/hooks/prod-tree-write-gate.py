@@ -36,19 +36,25 @@ WHAT IS DENIED for a sub-agent:
   - Bash fallback (K2, 1a): a write target that cannot be resolved (`$VAR`, `$(...)`), a lexer error or a path
     resolution error = deny when the RAW command text (casefolded) names a protected path in any form (absolute,
     ~/, $HOME/, the firmlink form, relative to a prod cwd, ../ from inside the tree, the root followed by a closer of
-    a substitution or quote, and -- when the cwd's repository is the prod checkout -- a `$(...)`, backtick or
-    `$VAR` directly in front of a protected part); otherwise allow + an `unresolved-allow` log line.
+    a substitution or quote, and -- when the cwd's repository is the prod checkout -- a `... rev-parse
+    --show-toplevel` substitution directly in front of a protected part); otherwise allow + an `unresolved-allow`
+    log line. A variable or a substitution of another form in front of a protected part is NOT a raw match (the E1
+    replay: every agent home is inside the prod repo, so it gave false denies).
   `cd`, `pushd`, `git -C`, `bash -c`, `sh -c`, `eval`, `$(...)`, backticks, process substitution and a heredoc fed to
   a shell are followed; `sudo`, `env`, `nice`, `nohup`, `time`, `command`, `exec`, `timeout`, `xargs` are unwrapped.
-  A brace group `{ ...; }` is a command list like `( ... )` (its first command too; Viktor 42855 M1); the bash
-  keyword `time` takes inline assignments like `env` (`time GIT_DIR=... git reset --hard`; L1).
+  A brace group `{ ...; }` is a command list like `( ... )` (its first command too; Viktor 42855 M1); a brace
+  expansion is one word across a quoted or escaped space (`../{CLAUDE.md,"x y"}`); the bash keyword `time` takes
+  inline assignments like `env` (`time GIT_DIR=... git reset --hard`; L1), and `time !`, `time { ...; }`,
+  `function NAME { ...; }` are followed (Viktor v2 delta).
   NOT MODELLED (Viktor 42855 INFO 1, a documented limit of an accident guard): writers outside the list above, e.g.
   sort -o, ex/vi -c, sed 'w file', split, git archive -o, git bundle create, git diff/log --output,
   git format-patch -o, git merge-file; xargs fed from a variable or a pipe; while-read loops; a command piped to a
   shell (`echo cmd | bash`) and `source <(...)`; interpreters (-c/-e) and script files run by a shell. Only the
   raw-text rule can catch these, when the target is not resolved by the gate.
   Values the gate tracks inside one command: literal and prefix-known assignments (X=lit, B=dir/m-$(date)),
-  $(mktemp), $(pwd), $(dirname X), ${X%pat}, for-loop word lists, repos created by worktree add / clone / init.
+  $(mktemp), $(pwd), $(dirname X), ${X%pat}, $(git [-C d] rev-parse --show-toplevel [2>/dev/null]) = the
+  repository root of that directory, $(echo LIT), $(printf %s LIT), for-loop word lists, repos created by
+  worktree add / clone / init.
 
 RAW-TEXT RULE AFTER A SUCCESSFUL ANALYSIS (narrowed by the E1 replay, Viktor 42816 E1): the executed command and the
 script path given to an interpreter (`python3 -I <prod>/scripts/x.py > "$OUT"`) are removed from the text first, and
@@ -402,7 +408,13 @@ def read_word(s, i, subs):
             # search to the next '}' anywhere took a group opener `{ rm ../x; }` for an expansion (Viktor 42855 M1)
             j = i + 1
             while j < n and s[j] not in META and s[j] != '}':
-                j += 1
+                if s[j] == '\\':
+                    j += 2
+                elif s[j] in '\'"':      # a quoted piece may hold a metacharacter: the brace word goes on after it
+                    k = s.find(s[j], j + 1)
+                    j = n if k < 0 else k + 1
+                else:
+                    j += 1
             if j < n and s[j] == '}' and (',' in s[i:j] or '..' in s[i:j]):
                 parts.append(('glob', '{'))
         add_lit(parts, c)
@@ -627,6 +639,37 @@ def sub_value(text, st, cwd):
         return cwd
     if t.startswith('mktemp'):
         return '/private/tmp/prod-tree-write-gate-mktemp'
+    if (t.startswith('git ') or t.startswith('echo ') or t.startswith('printf ')) and len(t) < 1000:
+        try:
+            toks, subs = lex(t)
+        except LexError:
+            return None
+        if subs:
+            return None
+        ws, ok = [], True
+        for x in toks:
+            if x[0] == 'w':
+                ws.append(x[1])
+            elif x[0] == 'r' and x[1] in ('>', '2>', '>&') and x[2] is not None and x[2].literal() in ('/dev/null', '1', '2'):
+                continue
+            else:
+                ok = False
+        lits = [w.literal() for w in ws]
+        if ok and None not in lits:
+            if lits[0] == 'echo' and len(lits) == 2:
+                return lits[1]
+            if lits[0] == 'printf' and len(lits) == 3 and lits[1] == '%s':
+                return lits[2]
+            if lits[:1] == ['git']:
+                g = lits[1:]
+                gcwd = cwd
+                if len(g) >= 2 and g[0] == '-C':
+                    kind, gp = word_path(ws[2], st, cwd)
+                    gcwd = gp if kind == 'path' else None
+                    g = g[2:]
+                if g == ['rev-parse', '--show-toplevel'] and gcwd:
+                    return find_repo(gcwd)
+        return None
     if t.startswith('dirname ') and len(t) < 1000:
         try:
             toks, _ = lex(t)
@@ -885,6 +928,10 @@ def analyze_simple(cmd, st, depth):
         st.vars[words[1].literal()] = None
         return
     while words and words[0].literal() in RESERVED:
+        if words[0].literal() == 'function' and len(words) > 1:     # `function NAME [()] { cmd; }`
+            words.pop(0)
+            words.pop(0)
+            continue
         words.pop(0)
     # leading assignments
     while words:
@@ -918,6 +965,9 @@ def analyze_simple(cmd, st, depth):
                 if t is None:
                     break
                 # `env A=x cmd`, and the bash keyword form `time A=x cmd` (Viktor 42855 L1)
+                if name == 'time' and t in ('!', '{'):     # `time ! cmd`, `time { cmd; }`
+                    rest = rest[1:]
+                    continue
                 if name in ('env', 'time') and ASSIGN.match(rest[0].raw):
                     m = ASSIGN.match(rest[0].raw)
                     env[m.group(1)] = assign_value(Word(strip_assign(rest[0], m.group(1)), ''), st)

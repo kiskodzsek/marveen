@@ -279,6 +279,43 @@ class Run(unittest.TestCase):
         self.assertEqual([r['decision'] for r in rows], ['seen', 'deny'])
         self.assertEqual(rows[1]['agent'], 'kernel')
 
+    def test_viktor_delta_v2(self):
+        """Viktor v2 delta (card 11c4a5fe): quoted brace expansion, time/function group forms, exact rev-parse root."""
+        A, AX = P + '/agents', P + '/agents/x'
+        deny = [  # brace expansion with a quoted / escaped space is still one expansion word
+            ('rm ../../{CLAUDE.md,"x y"}', AX), ("rm ../../{CLAUDE.md,'x y'}", AX), ('rm ../../{CLAUDE.md,x\\ y}', AX),
+            ('rm ../../{CLAUDE.md,x" "y}', AX), ('chmod 600 ' + P + '/{scripts,"a b"}/x.py', '/'),
+            ('echo x > ../../{CLAUDE.md,"a b"}', AX),
+            # time / function keyword forms of a command or a group
+            ('time ! rm ../../CLAUDE.md', AX), ('time -p ! rm ../../CLAUDE.md', AX), ('time { rm ../../CLAUDE.md; }', AX),
+            ('time ! GIT_WORK_TREE=' + P + ' git checkout .', '/'), ('function f { rm ../../CLAUDE.md; }; f', AX),
+            ('function f() { rm ../../CLAUDE.md; }; f', AX), ('function f { { rm ../../CLAUDE.md; }; }; f', AX),
+            # the repository root of the cwd, resolved exactly (not only as the direct prefix of a protected part)
+            ('cd "$(git rev-parse --show-toplevel)" && echo x > CLAUDE.md', AX),
+            ('cd $(git rev-parse --show-toplevel) && rm CLAUDE.md', AX),
+            ('R=$(git rev-parse --show-toplevel); echo x > $R/CLAUDE.md', AX),
+            ('R=$(git rev-parse --show-toplevel); echo x > "$R/.mcp.json"', AX),
+            ('echo x > $(git rev-parse --show-toplevel 2>/dev/null)/CLAUDE.md', AX),
+            ('echo x > $(git -C .. rev-parse --show-toplevel)/CLAUDE.md', AX),
+            ('echo x > $(echo ' + P + ' )/CLAUDE.md', '/'),
+            # Viktor v2 delta L4: the closers between the root and the protected part, with an UNRESOLVED
+            # substitution (the raw rule, not the exact resolution, has to catch these)
+            ('echo x > "$(cat /x; echo ' + P + ')"/scripts/a', '/'), ('echo x > `cat /x; echo ' + P + '`/scripts/a', '/'),
+            ("echo x > \"$(cat /x; echo '" + P + "')\"/scripts/a", '/'), ('echo x > $(cat /x; echo ' + P + ')/.mcp.json', '/'),
+        ]
+        allow = [
+            ('time ! git status', P), ('time { echo x; }', P), ('function f { echo x; }; f', P),
+            ('echo x > $(git rev-parse --show-toplevel)/agents/x/a.txt', AX),
+            ('R=$(git rev-parse --show-toplevel); echo x > $R/README.md', AX),
+            ('cd "$(git rev-parse --show-toplevel)" && git status', AX),
+            ('cd "$(git rev-parse --show-toplevel)" && echo x > agents/x/a.txt', AX),
+            ('echo x > $(git rev-parse --show-toplevel)/scripts/a', WT),
+            ('cat $(git rev-parse --show-toplevel)/CLAUDE.md', AX),
+        ]
+        bad = [(c, w, r) for c, w in deny for r in [gate.decide(bash(c, w), P, HOME)] if r[0] != 'deny']
+        bad += [(c, w, r) for c, w in allow for r in [gate.decide(bash(c, w), P, HOME)] if r[0] != 'allow']
+        self.assertEqual(bad, [])
+
     def test_unresolved_allow_logged(self):
         """Viktor 42855 L2: an allowed write with an unresolved target leaves an unresolved-allow row (sub-agent)."""
         self.assertEqual(run(bash('echo x > $UNSET/foo', '/tmp')), '')
