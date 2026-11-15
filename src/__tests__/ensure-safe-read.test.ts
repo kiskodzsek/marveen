@@ -146,7 +146,7 @@ describe('source pin', () => {
   it('agent-scaffold.ts reads settingsPath / projectScope / claudeMdPath / destPath only through readRegularFileSync', () => {
     const src = readFileSync(scaffoldSrc, 'utf-8')
     expect(src.match(/readFileSync\((settingsPath|projectScope|claudeMdPath|destPath)\b/g) ?? []).toEqual([])
-    expect((src.match(/readRegularFileSync\((settingsPath|projectScope|claudeMdPath|destPath)\)/g) ?? []).length).toBe(29)
+    expect((src.match(/readRegularFileSync\((settingsPath|projectScope|claudeMdPath|destPath)\)/g) ?? []).length).toBe(30)
     // A write to the reader copy goes through the atomic rename, never a plain write that a FIFO would block.
     expect(src).not.toMatch(/[^c]writeFileSync\(destPath\b/)
   })
