@@ -7,6 +7,7 @@ import {
 } from '../../db.js'
 import { MAIN_AGENT_ID, ALLOWED_CHAT_ID, OLLAMA_URL, MEMORY_IMPORT_CATEGORIZE_MODEL, APP_TZ } from '../../config.js'
 import { createHash } from 'crypto'
+import { fillNowToken } from '../now-token.js'
 import { logger } from '../../logger.js'
 import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
 import { detectHomoglyphs, formatHomoglyphWarning } from '../../homoglyph.js'
@@ -217,7 +218,12 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     const body = await readBody(req)
     const data = JSON.parse(body.toString()) as { agent_id?: string; content: string; tier?: string; category?: string; keywords?: string }
     if (!data.content?.trim()) { json(res, { error: 'Content is required' }, 400); return true }
-    if (containsSuspiciousContent(data.content)) {
+    // DREAM 11-15 (card 14a2bea1): {{NOW}} is the server's clock at the write here too, as on the
+    // messages, kanban and daily-log paths (now-token.ts). The filter sees the filled text, the one that
+    // is stored: {{NOW}} (7 chars) becomes HH:MM (5), which can pull a bounded-gap idiom into its window
+    // (Viktor 42665 LOW 1). PUT already filters the filled text.
+    const content = fillNowToken(data.content.trim())
+    if (containsSuspiciousContent(content)) {
       logger.warn({ agent: data.agent_id }, 'Memory content rejected: suspicious pattern')
       json(res, { error: 'Content rejected by security filter' }, 400)
       return true
@@ -232,7 +238,7 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     }
     const result = saveAgentMemory(
       data.agent_id || MAIN_AGENT_ID,
-      data.content.trim(),
+      content,
       category,
       data.keywords || undefined,
       true
@@ -580,7 +586,10 @@ Respond ONLY with JSON, nothing else:
       json(res, { error: 'send either content or prepend, not both' }, 400)
       return true
     }
-    let content = rawContent
+    // DREAM 11-15 (card 14a2bea1): {{NOW}} is filled in the text this request brings (content, or the
+    // prepend), never in the row's current content: a category-only move or a prepend leaves an older
+    // row's text, a literal token included, exactly as it was.
+    let content = fillNowToken(rawContent)
     if (if_version !== undefined || prepend !== undefined) {
       const cur = getDb().prepare('SELECT content, updated_at, updated_by FROM memories WHERE id = ?').get(id) as { content: string; updated_at: number | null; updated_by: string | null } | undefined
       if (!cur) { json(res, { error: 'Memory not found' }, 404); return true }
@@ -589,7 +598,7 @@ Respond ONLY with JSON, nothing else:
         json(res, { error: 'version conflict: the memory changed since you read it; re-read and redo your edit', current_version: curVersion, updated_at: cur.updated_at, updated_by: cur.updated_by }, 409)
         return true
       }
-      if (prepend !== undefined) content = prepend.replace(/\n+$/, '') + '\n' + cur.content
+      if (prepend !== undefined) content = fillNowToken(prepend).replace(/\n+$/, '') + '\n' + cur.content
     }
     const newCategory = (tier || category || '').toLowerCase() || undefined
     if (newCategory && !MEMORY_CATEGORIES.has(newCategory)) {
