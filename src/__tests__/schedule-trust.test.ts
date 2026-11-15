@@ -1176,6 +1176,51 @@ describe('preCheck walk: launchers, embedded code, parsed imports (Viktor 42514)
     expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
   })
 
+  // card fae0712e: the simple commands of a line come from the shared shell lexer (scripts/lib/shell-lex.mjs),
+  // not from a regex split that cut inside quotes and comments and missed a lone &
+  it('fae0712e: a lone & ends a command, the next one is walked', () => {
+    const d = dirWith('lex-amp')
+    const walk = wrap(d, `cd "${d}" && true & python3 ./x.py`)
+    expect(hashed(walk, join(d, 'x.py')), JSON.stringify(walk.pairs)).toBe(true)
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+  it('fae0712e: a quoted blank does not break the operand (python3 "a b.py")', () => {
+    const d = dirWith('lex-space')
+    writeFileSync(join(d, 'a b.py'), 'import localmod\n')
+    const walk = wrap(d, `cd "${d}" && python3 "a b.py"`)
+    expect(hashed(walk, join(d, 'a b.py')), JSON.stringify(walk.pairs)).toBe(true)
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+  it.each([
+    ['a ; inside double quotes', 'cd "D" && echo "x; ./tool" && python3 ./x.py'],
+    ['a ; inside single quotes', "cd \"D\" && echo 'x; ./tool' && python3 ./x.py"],
+    ['a ; in a comment', 'cd "D" && python3 ./x.py # ; ./tool'],
+    ['an escaped ;', 'cd "D" && echo x\\; ./tool && python3 ./x.py'],
+    ['an arithmetic $(( ))', 'cd "D" && m=$(( (n-s)/60 )) && python3 ./x.py'],
+    ['an arithmetic (( ))', 'cd "D" && (( k=w*11/100 )) && python3 ./x.py'],
+    ['a ${ } default with a path', 'cd "D" && OUT=${1:-/tmp/a b/c.txt} && python3 ./x.py'],
+    ['a quoted path with a blank', 'cd "D" && F="/Library/Application Support/x.json" && python3 ./x.py'],
+  ])('fae0712e: %s does not split, the quoted word runs nothing', (_label, body) => {
+    const d = dirWith('lex-quote')
+    const walk = wrap(d, body.replace('D', d))
+    expect(walk.blockers, JSON.stringify(walk.blockers)).toEqual([])
+    expect(hashed(walk, join(d, 'x.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+  it.each([
+    ['one pattern', 'cd "D" && case "$1" in\n  a/b*) python3 ./x.py ;;\nesac'],
+    ['alternatives', 'cd "D" && case "$1" in\n  a|b/c*) python3 ./x.py ;;\nesac'],
+  ])('fae0712e: a case pattern (%s) is no command, the command after it is walked', (_label, body) => {
+    const d = dirWith('lex-case')
+    const walk = wrap(d, body.replace('D', d))
+    expect(hashed(walk, join(d, 'x.py')), JSON.stringify(walk.pairs)).toBe(true)
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+  it('fae0712e: a $( ) inside a ${ } default or an arithmetic still runs and is walked', () => {
+    const d = dirWith('lex-nested')
+    const walk = wrap(d, `cd "${d}" && OUT=\${1:-$(python3 ./x.py)} && n=$(( $(python3 ./x.py) + 1 ))`)
+    expect(hashed(walk, join(d, 'x.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
   it.each([
     ['a heredoc after an escaped space is real (echo a\\ <<EOF): its body is data', 'echo a\\ <<EOF\npython3 ./x.py\nEOF', false],
     ['a string over two lines, closed, then a real python heredoc', `echo "a\nb"\ncd "$(dirname "$0")"\npython3 - <<'EOF'\nimport localmod\nEOF`, true],

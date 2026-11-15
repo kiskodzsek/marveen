@@ -59,10 +59,12 @@ fi
 root="$(mktemp -d "$INSTALL_DIR/tmp.provtest.XXXXXX")"
 trap 'rm -rf "$root"' EXIT
 
-# Copy dist/ and the helper script.
+# Copy dist/ and the helper script, plus the shared shell lexer: dist/web/schedule-trust.js imports
+# ../../scripts/lib/shell-lex.mjs at load time (card fae0712e), as it does in the real install tree.
 cp -r "$INSTALL_DIR/dist" "$root/dist"
-mkdir -p "$root/scripts"
+mkdir -p "$root/scripts/lib"
 cp "$REAL_HELPER" "$root/scripts/main-agent-custom-provider.mjs"
+cp "$INSTALL_DIR/scripts/lib/shell-lex.mjs" "$root/scripts/lib/shell-lex.mjs"
 
 # Explicit MAIN_AGENT_ID so the test never depends on the real .env.
 TEST_AGENT="testprovider"

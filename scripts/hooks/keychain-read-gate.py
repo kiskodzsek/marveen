@@ -95,6 +95,14 @@ file a command runs is read and judged too:
   m.py`, `sg staff 'python3 m.py'`) is read like any other (card 3085a683; for ssh the file is looked up here, which
   is right for localhost and a fail-closed guess for a remote host). The gate's own test assembles its fixtures at
   run time, so running the test is not blocked.
+  Shell structure (card fae0712e): the script rules take quotes, heredoc bodies, substitutions and simple commands
+  from the shared lexer scripts/lib/shell_lex.py (see lexer_view): a separator inside a quoted argument of a data
+  command (echo, printf, grep, test ...; unless the text may redefine it: alias, a function, eval, source, PATH=)
+  is no command boundary (`echo 'x; ./m.py'` passes), every command inside
+  a substitution and every word after a shell's -c are read as commands (`echo \\`./m.py\\``, `bash -c ./m.py`
+  block). A text the lexer does not fully read (an unterminated quote, heredoc or substitution, past its bounds)
+  takes the old path. A backslash-newline that ends a comment or follows an escaped backslash is no line join
+  (lexer_normalise; hits() judges that text too).
 Any error while matching blocks (fail-closed; exit 1 would not block). Input that is not a Bash call is allowed.
 The command text is never logged: it may itself carry a secret.
 Tests: keychain-read-gate_test.py next to this file.
@@ -539,8 +547,9 @@ GIT_RULES += [('git-credential-helper', FnRule(lambda t: env_value_hit(t, _PARAM
               ('git-config-override', FnRule(config_write))]
 
 
-def normalise(cmd):
-    cmd = cmd.replace('\\\n', '')                    # line continuation
+def normalise(cmd, joined=False):
+    if not joined:
+        cmd = cmd.replace('\\\n', '')                # line continuation
     cmd = re.sub(r'\\([A-Za-z])', r'\1', cmd)       # sec\urity -> security
     cmd = re.sub(r'(?<=\w)(?:\'\'|"")(?=\w)', '', cmd)  # sec''urity -> security
     cmd = re.sub(r'\$\{IFS\}|\$IFS\b', ' ', cmd)        # security${IFS}dump-keychain -> a space
@@ -608,7 +617,24 @@ def hits(cmd, script=False, _depth=0):
 
 
 def _hits(cmd, script=False):
-    text = normalise(cmd)
+    """The passes on one text, its payloads not read again (hits() does that)."""
+    found = hits_in(normalise(cmd), script)
+    # card fae0712e: normalise() joins every backslash-newline, also one whose backslash ends a comment or is half of
+    # an escaped backslash, and the next line (a command for the shell) became part of a word: `: |#\` + newline +
+    # `security dump-keychain` passed. The command text with only the shell's own joins (lexer_normalise) is judged TOO,
+    # so this only adds a block; not a script file's text (a 1 MB file would be lexed on every read), and only when
+    # the lexer fully reads the text (no problem, inside its bounds).
+    if not script and '\\\n' in cmd:
+        lx = lex_or_none(cmd)
+        if lx is not None:
+            alt = lexer_normalise(cmd, lx['cls'], 0, len(cmd))
+            if alt != normalise(cmd):
+                found += [h for h in hits_in(alt, script) if h not in found]
+    return found
+
+
+def hits_in(text, script=False):
+    """hits() on a normalised text."""
     # `sudo -u root security ...` (card 3085a683): the text with the wrapped commands' boundaries is judged TOO, not
     # instead: a wrong mark (a flag the table reads as taking a word that it does not) could split a call the plain
     # text blocks (`security;dump-keychain`), so a mark only ever adds a block
@@ -684,7 +710,9 @@ def module_files(mod):
         base = '/'.join(parts[:i])
         out += [base + '.py', base + '/__init__.py']
     return out + ['/'.join(parts) + '/__main__.py']
-DIRECT_RX = re.compile(SCRIPT_POSITION + r'''['"]?((?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*)['"]?(?=\s|$|[;&|)])''')
+# A redirection right after the path ends it too (`./m.py>>log`, `./m.py<in`: the shell runs m.py; found by the
+# differential fuzz, card fae0712e)
+DIRECT_RX = re.compile(SCRIPT_POSITION + r'''['"]?((?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*)['"]?(?=\s|$|[;&|)<>])''')
 # A literal naming the binary: 'security', "/usr/bin/security", `security` (a JS template), or a shell assignment
 # SEC=security. The assignment branch walks path segments, not \S*: `=\s*['"]?(?:\S*/)?security` ran to the end of every
 # space-free run and searched back for "/" at each "=", quadratic: 100 000 "=" took 9 s, 1 MB never returned within the
@@ -1124,34 +1152,246 @@ def data_heredoc_blanked(text, cwd):
     """text with the body of its first heredoc blanked (same length, newlines kept) when that heredoc is data: a quoted
     delimiter, nothing before it that changes the shell's state, a data recipient as the operator's own command, and
     nothing after the operator on its line."""
+    return blank_span(text, data_heredoc_span(text, cwd))
+
+
+def blank_span(text, span):
+    """text with [start, end) blanked: every character but a newline becomes a space (same length)."""
+    if span is None:
+        return text
+    a, b = span
+    return text[:a] + re.sub(r'.', ' ', text[a:b]) + text[b:]
+
+
+def data_heredoc_span(text, cwd):
+    """[start, end) of the body data_heredoc_blanked() blanks, or None (see there)."""
     m = HEREDOC_OP_RX.search(text)
     if not m or STATE_BEFORE_OP_RX.search(text, 0, m.start()):
-        return text
+        return None
     delim = m.group(1) or m.group(2)
     line_start = text.rfind('\n', 0, m.start()) + 1
     line_end = text.find('\n', m.end())
     if line_end < 0:
-        return text
+        return None
     head = re.split(r'[;&|]', text[line_start:m.start()])[-1]
     if text[m.end():line_end].strip() or not SAFE_PREFIX_RX.fullmatch(text[:m.start() - len(head)]):
-        return text
+        return None
     rec = DATA_RECIPIENT_RX.search(head + ' ')
     if not rec:
-        return text
+        return None
     if rec.group('msg') is not None:
         path = rec.group('msg')
         if not os.path.isabs(path):
             # a relative path resolves against the cwd only when nothing before it may have moved the shell: an
             # earlier `cd /x &&`, `;`, `&` or line (or a sourced file). A pipe's earlier parts run in subshells.
             if not cwd or re.search(r'[;&\n]', text[:m.start()]):
-                return text
+                return None
             path = os.path.join(cwd, path)
         if os.path.realpath(path) != AGENT_MSG:
-            return text
+            return None
     term = re.compile(r'^\t*' + re.escape(delim) + r'$', re.M).search(text, line_end + 1)
     if not term:
-        return text
-    return text[:line_end + 1] + re.sub(r'.', ' ', text[line_end + 1:term.start()]) + text[term.start():]
+        return None
+    return line_end + 1, term.start()
+
+
+# Card fae0712e (DREAM 11-15; Viktor 42695 LOW 1-2, 42697): the SHELL STRUCTURE the script rules read comes from the
+# shared lexer, scripts/lib/shell_lex.py (the Python twin of shell-lex.mjs, both checked against a real bash): where a
+# quote, a heredoc body and a substitution start and end, and which simple command a word belongs to. The rules that
+# judge a text (interp_groups, DIRECT_RX, CAT_RX, payload_quotes, wrapper_bounds) stay as they are and read:
+#   - the command text, where a separator inside a QUOTED argument of a command that never runs its arguments
+#     (DATA_COMMANDS: `echo 'x; ./m.py'`) is no command boundary any more (it read as one: a false block). Every other
+#     command's quotes are read as before (`ssh h 'a; ./m.py'`, `awk '{system("./m.sh")}'`, `tmux send-keys '...'`
+#     may run them, and no list of such commands is ever complete);
+#   - and, on separate lines, every simple command inside a substitution (`echo \`./m.py\``: the backtick right after
+#     the path hid it from DIRECT_RX, Viktor 42695 LOW 1), and every word after a shell's -c word, unquoted too
+#     (`bash -c ./m.py`, Viktor 42695 LOW 2; a quoted one was already read through payload_quotes).
+# A heredoc body stays in the text (an interpreter may read it); the data-heredoc blanking is kept, and blanks only
+# when the lexer agrees that the span is exactly the body of the text's first heredoc.
+# Fail-closed: when the lexer reports a problem (an unterminated quote, heredoc or substitution, a heredoc inside a
+# substitution), cannot be loaded, raises, or the text is past LEX_MAX_SUBSTS / LEX_MAX_WORK, the text takes the old
+# path unchanged (today's decision): a lexer result never makes an allow on text it does not fully understand.
+# The bounds: segments_of() costs about (length + the length of every substitution's inside) x substitutions, cubic
+# in nested unclosed ones (measured 2026-11-15: 64 x `f(` before 10 000 chars took 2.5 s, 300 x `f(` 6.9 s, 1 000 x
+# `f(` 255 s), so it is not started past LEX_MAX_WORK units (about 0.2 s).
+_LEX_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'lib', 'shell_lex.py')
+LEX_MAX_SUBSTS = 64
+LEX_MAX_WORK = 3_000_000
+# not rg: `rg --pre <cmd>` runs a program per file; not sed (GNU sed's `e`), awk, find, xargs, git, gh, curl ...
+DATA_COMMANDS = frozenset({'echo', 'printf', 'grep', 'egrep', 'fgrep', 'true', 'false', ':', 'test', '['})
+MASK_CHARS = frozenset(';&|(){}<>`\n')
+# what can turn a data command into another command, change how the text is read, or hand a data command's words to
+# a later command (`$_` is the previous command's last word: `echo 'x; ./m.py'; bash -c "$_"` runs it; a DEBUG trap
+# or PS4 sees BASH_COMMAND): then no argument is masked (anywhere in the text, quoted too: a false "no" only keeps
+# the old reading). `.` as a command word: COMPOUND_WORDS. The shell's own command line read back (`echo 'x; ./m.py';
+# ps -o args= -p $$ | cut -d"'" -f2 | bash` ran in bash and zsh): ps, pgrep, lsof, PPID keep the old reading too.
+# Not seen, as everywhere in this gate (see "Not seen"): a command built at run time by an interpreter (a python3 -c
+# that reads its parent's arguments); the old gate did not see `printf '\x2e/m.py' | bash` either, and the
+# data-heredoc blanking has the same limit.
+REDEF_RX = re.compile(r'(?<![\w$-])(?:alias|unalias|function|eval|source|hash|enable|disable|autoload|zmodload'
+                      r'|unfunction|functions|setopt|unsetopt|shopt|emulate|histchars|trap|fc|history|PS4'
+                      r'|PROMPT_COMMAND|BASH_COMMAND|preexec|precmd|ps|pgrep|lsof|PPID|procargs2?)(?![\w-])|\(\s*\)'
+                      r'|(?<![\w$])(?:PATH|path|FPATH|fpath)\+?=|\$\{?_(?!\w)')
+SHELL_WORD_RX = re.compile(r'(?:.*/)?(?:bash|sh|zsh|dash|ksh|fish|csh|tcsh|ash|rbash|pwsh)\d*|\$\{?(?:SHELL|BASH)\}?|\$0')
+C_FLAG_RX = re.compile(r'-[A-Za-z]*c')
+CODE_FRAMES = ('`', '$(', '<(', '>(', '(')
+
+
+class LexTooBig(Exception):
+    """The text is past the lexer's bounds: the caller takes the old path."""
+
+
+def _load_shell_lex():
+    """The lexer as a private module object, loaded by path from this file's own scripts/lib: the hook runs with
+    python3 -I (no script dir, no cwd on sys.path), and nothing is added to sys.path or sys.modules, so no other
+    shell_lex.py can be picked up. Its segments_of() is wrapped with the bounds (lex() calls it by its global name).
+    None when it cannot be loaded: every text then takes the old path."""
+    import importlib.util
+    try:
+        spec = importlib.util.spec_from_file_location('keychain_gate_shell_lex', _LEX_PATH)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        full = mod.segments_of
+    except Exception:
+        return None
+
+    def bounded(s, cls, substs):
+        work = (len(s) + sum(max(0, x['inner'][1] - x['inner'][0]) for x in substs)) * (len(substs) + 1)
+        if len(substs) > LEX_MAX_SUBSTS or work > LEX_MAX_WORK:
+            raise LexTooBig()
+        return full(s, cls, substs)
+    mod.segments_of = bounded
+    return mod
+
+
+shell_lex = _load_shell_lex()
+
+
+_LEX_LAST = [None, None]  # hits() and script_hits() lex the same command: once
+
+
+def lex_or_none(cmd):
+    """The lexer's view of cmd, or None: not loaded, raised, past the bounds, or a problem (see above)."""
+    if shell_lex is None:
+        return None
+    if _LEX_LAST[0] == cmd:
+        return _LEX_LAST[1]
+    try:
+        lx = shell_lex.lex(cmd)
+    except Exception:  # LexTooBig, or a lexer bug: the old path
+        lx = None
+    lx = None if lx is None or lx['problems'] else lx
+    _LEX_LAST[:] = [cmd, lx]
+    return lx
+
+
+def _owners(n, substs):
+    """owner[p]: the index of the innermost substitution whose inside holds p, -1 at the top level."""
+    owner = [-1] * n
+    for k, x in sorted(enumerate(substs), key=lambda kx: kx[1]['start']):
+        a, b = x['inner'][0], min(x['inner'][1], n)
+        if b > a:
+            owner[a:b] = [k] * (b - a)
+    return owner
+
+
+def _first_word(text, cls, seg):
+    """The segment's first word when it is plain code (no quote, escape or expansion in it), else None."""
+    j = seg['start']
+    while j < seg['end'] and not (text[j] in ' \t' and cls[j] == 'c'):
+        if cls[j] != 'c' or text[j] in '$`\\\'"':
+            return None
+        j += 1
+    return text[seg['start']:j]
+
+
+# A data command's output can still become code: piped into a shell (`echo '...' | bash`), written to a file run
+# next (`echo '...' > f; bash f`, `exec >f`), captured by a substitution (`bash <(echo '...')`, `x=$(echo '...');
+# bash -c "$x"`), stored in a variable (`printf -v x '...'`), or as the output of a compound command that is piped
+# (`{ true; echo '...'; } | bash`, `if ...` + newline + `echo '...'` + newline + `fi | bash`). So no argument is masked
+# when any segment starts with one of these words or the text has a brace that is not a ${...}; and a segment is
+# masked only at the top level, with no < or > of its own, not followed by a pipe, and printf only without -v.
+# (Found by review on card fae0712e: the old gate read the quoted separator and blocked all of these by accident.)
+COMPOUND_WORDS = frozenset({'.', 'exec', 'if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', 'for',
+                            'case', 'esac', 'select', 'coproc', 'repeat', 'foreach', 'end', '{', '}'})
+PRINTF_V_RX = re.compile(r'(?<![\w-])-[A-Za-z]*v')
+
+
+def _mask_allowed(cmd, cls, lx):
+    """No data command's argument may be masked in cmd (see above) -> False."""
+    if REDEF_RX.search(cmd):
+        return False
+    words = [_first_word(cmd, cls, s) for s in lx['segments']]
+    if any(w in COMPOUND_WORDS or (w and w[0] in '{}') for w in words):
+        return False
+    braces = {x['start'] + 1 for x in lx['substs'] if x['kind'] == '${'}
+    braces |= {x['end'] - 1 for x in lx['substs'] if x['kind'] == '${'}
+    return not any(ch in '{}' and cls[p] == 'c' and p not in braces for p, ch in enumerate(cmd))
+
+
+def _data_segment(cmd, cls, seg, owner):
+    """seg is a data command whose quoted arguments may be masked (see above)."""
+    word = _first_word(cmd, cls, seg)
+    if seg['frame'] != 'top' or word not in DATA_COMMANDS:
+        return False
+    if word == 'printf' and PRINTF_V_RX.search(cmd, seg['start'], seg['end']):
+        return False
+    if any(cmd[p] in '<>' and cls[p] == 'c' and owner[p] == -1 for p in range(seg['start'], seg['end'])):
+        return False
+    p = seg['end']
+    while p < len(cmd) and (cmd[p] in ' \t' or cls[p] == 'l'):
+        p += 1
+    return not (p < len(cmd) and cmd[p] == '|' and cls[p] == 'c' and cmd[p + 1:p + 2] != '|')
+
+
+def lexer_view(text, cmd, lx):
+    """The text the script rules read (see the block above): `text` (cmd, maybe with the data heredoc blanked; same
+    length) with the separators inside data commands' quoted arguments masked, plus the extra command texts."""
+    cls = lx['cls']
+    segs = lx['segments']
+    owner = _owners(len(cmd), lx['substs'])
+    chars = None
+    if _mask_allowed(cmd, cls, lx):
+        for seg in segs:
+            if not _data_segment(cmd, cls, seg, owner):
+                continue
+            for p in range(seg['start'], seg['end']):
+                if cls[p] in 'qdae' and text[p] in MASK_CHARS and owner[p] == seg['frameAt']:
+                    chars = chars or list(text)
+                    chars[p] = '_'
+    view = ''.join(chars) if chars else text
+    extras = [lexer_normalise(view, cls, s['start'], s['end']) for s in segs
+              if s['depth'] > 0 and s['frame'] in CODE_FRAMES]
+    for seg in segs:
+        raw = cmd[seg['start']:seg['end']]
+        if not (C_FLAG_RX.search(raw) and SHELL_RX.search(' ' + raw + ' ')):  # cheap first: words() is not linear
+            continue
+        ws = shell_lex.words(cmd, lx, seg)
+        shell = next((i for i, w in enumerate(ws) if SHELL_WORD_RX.fullmatch(w['text'])), None)
+        c = next((i for i, w in enumerate(ws) if shell is not None and i > shell and C_FLAG_RX.fullmatch(w['text'])),
+                 None)
+        if c is not None:
+            extras += [normalise(w['text']) for w in ws[c + 1:]]  # shell code: a \ + newline in it does join
+    return lexer_normalise(view, cls, 0, len(view)), extras
+
+
+def lexer_normalise(view, cls, a, b):
+    """normalise() of view[a:b] (same length as the lexed text, cls its classes), with its join of a backslash-newline
+    left out where the backslash ends a comment (`: |#\\` + newline + cmd) or is the second half of an escaped
+    backslash (`x \\\\` + newline + cmd): there the next line is a command of its own for bash and zsh, and the blind
+    join made it part of a word (both found by a differential fuzz against bash and zsh, card fae0712e; the old gate
+    let the script run, and hits() let `security dump-keychain` through). Inside quotes and heredoc bodies it joins as
+    before: they may be a payload whose own shell joins (`bash -c 'python3 m\\` + newline + `.py'`). Splitting there
+    only shows the shell's own line structure; a join never hid less."""
+    out = []
+    p = a
+    while p < b:
+        if view[p] == '\\' and p + 1 < b and view[p + 1] == '\n' and cls[p] not in 'me':
+            p += 2
+            continue
+        out.append(view[p])
+        p += 1
+    return normalise(''.join(out), joined=True)
 
 
 def script_hits(cmd, cwd):
@@ -1164,7 +1404,17 @@ def script_hits(cmd, cwd):
     # blank on the RAW text, normalise after (Viktor 42695 HIGH 1): inside a quoted-delimiter body bash does not join
     # a backslash-newline, so the terminator must be looked for where bash looks; the blanking keeps the length, so
     # normalise() gives the same result on the blanked text
-    text = normalise(data_heredoc_blanked(cmd, cwd))
+    span = data_heredoc_span(cmd, cwd)
+    lx = lex_or_none(cmd)
+    if lx is None:  # the old path (card fae0712e: fail-closed, today's decision)
+        text = normalise(blank_span(cmd, span))
+    else:
+        # the blanking stands only where the lexer agrees: the body of the text's first heredoc, quoted delimiter
+        first = lx['heredocs'][0] if lx['heredocs'] else None
+        if span is not None and not (first and first['quoted'] and (first['bodyStart'], first['bodyEnd']) == span):
+            span = None
+        view, extras = lexer_view(blank_span(cmd, span), cmd, lx)  # both normalised already
+        text = view + ''.join('\n' + e for e in extras)
     marks = payload_quotes(text)
     if marks:
         chars = list(text)

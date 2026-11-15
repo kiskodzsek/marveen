@@ -343,6 +343,11 @@ BLOCK = [
     'login -f -h h root s3curity dump-keychain',
     'sandbox-exec s3curity dump-keychain',  # a chain word with no flag skipped (mutant sandbox_chain_out)
     'sudo 2>&1 s3curity dump-keychain',
+    # card fae0712e (differential fuzz against bash and zsh, both ran line 2): normalise() joined a backslash-newline
+    # whose backslash ends a comment or is the second half of an escaped backslash; the next line is a command
+    ': |#\\\ns3curity dump-keychain',
+    'echo x \\\\\ns3curity dump-keychain',
+    'true # a \\\ns3curity find-generic-password -s x',
 ]
 # Viktor 41970 INFO 6: one row per WRAP_ARGS entry, so a dropped or mistyped entry fails here. A spec of its own,
 # not read from the gate: wrapper -> (short flags with a word, whole flags with the next word, positional words).
@@ -926,6 +931,75 @@ def script_cases():
             ("curl -s -d @- <<'J'\nx\\\nJ\n./measure.py\nJ", d),
             ("git commit -F - <<-'MSG'\n\tx\\\n\tMSG\n./measure.py\nMSG", d),
             ("bash " + AM + " dave v - <<'M'\nx\\\nM\n./measure.py\nM", d),
+            # card fae0712e: the script rules take the shell structure from scripts/lib/shell_lex.py. A command inside
+            # a backtick (Viktor 42695 LOW 1: the backtick right after the path hid it), every word after a shell's -c,
+            # unquoted too (LOW 2)
+            ('echo `./measure.py`', d),
+            ('echo "`./measure.py`"', d),
+            # Viktor 42794 (3): two double-quoted backtick substitutions, then a following command; the lexer mutants
+            # p11-backtick-close and p13-dq-backtick let this through on the mask path (a real bash runs ./measure.py)
+            ('printf %s "`./measure.py`" "`./measure.py`" ; set -x', d),
+            # a comment inside a backtick ends at the closing backtick: the command after it runs
+            ('echo `echo a #` ; ./measure.py', d),
+            ('bash -c ./measure.py', d),
+            ('sudo bash -c ./measure.py', d),
+            ('"$SHELL" -c ./measure.py', d),
+            ('bash -c -e ./measure.py', d),
+            ('sh -c python3\\ measure.py', d),
+            # card fae0712e, fail-closed: a text the lexer does not fully understand (an unterminated quote) takes the
+            # old path, which reads the quoted ; as a boundary
+            ("echo 'x; ./measure.py", d),
+            ('echo "x; ./measure.py', d),
+            # card fae0712e: a quoted argument is masked only for a data command, and only when nothing in the text can
+            # make that command something else (zsh expands an alias set on an earlier line; a function, eval, PATH,
+            # a sourced file)
+            ("alias echo='bash -c'\necho 'x; ./measure.py'", d),
+            ('echo() { bash -c "$1"; }; echo \'x; ./measure.py\'', d),
+            ("eval 'echo() { bash -c \"$1\"; }'; echo 'x; ./measure.py'", d),
+            ("export PATH=./bin:$PATH; grep 'x; ./measure.py' notes.py", d),
+            (". ./runner.sh; echo 'x; ./measure.py'", d),
+            # card fae0712e: every other command's quoted arguments are read as before (they may run them)
+            ("tm" + "ux send-keys -t x 'cd sub2; python3 only.py' Enter", d),
+            ("awk 'BEGIN{system(\"./measure.py\")}'", d),
+            ('git commit -m "x; ./measure.py"', d),  # git is no data command (an alias, a hook): read as before
+            # card fae0712e: a data command's substitution is code, and a real separator still ends it
+            ("echo 'a' $(./measure.py)", d),
+            ("echo 'x;' ; ./measure.py", d),
+            # card fae0712e, found by a differential fuzz against bash and zsh (both ran the script, the old gate
+            # allowed): normalise() joined a backslash-newline whose backslash ends a comment or is the second half of
+            # an escaped backslash, and the next line, a command of its own, became part of a word
+            (': |#\\\n./measure.py a', d),
+            ('grep -c x \\\\\n./measure.py', d),
+            ('grep -c x ;./measure.py>>./measure.py', d),  # the same fuzz: a redirection right after the path
+            ('./measure.py<notes.py', d),
+            # card fae0712e: a data command's output can become code, so its quotes are read as before when it is piped,
+            # redirected, captured, stored, or inside a compound command (bash and zsh ran each of these; the old gate
+            # blocked them by reading the quoted separator, the first lexer draft let them through)
+            ("echo 'x; ./measure.py' | bash", d),
+            ("printf 'x; ./measure.py' | sh", d),
+            ("echo 'x; ./measure.py' |\nbash", d),
+            ("echo 'x; ./measure.py' > run.sh; bash run.sh", d),
+            ("bash <(echo 'x; ./measure.py')", d),
+            ("x=$(echo 'x; ./measure.py'); bash -c \"$x\"", d),
+            ("printf -v x 'a; ./measure.py'; bash -c \"$x\"", d),
+            ("{ true; echo 'x; ./measure.py'; } | bash", d),
+            ("{'true'; echo 'x; ./measure.py'; :} | bash", d),  # zsh: a brace group, no blank, quoted first word
+            ("if true\nthen\necho 'x; ./measure.py'\nfi | bash", d),
+            ("for i in 1\ndo\necho 'x; ./measure.py'\ndone | sh", d),
+            ("exec >run.sh; echo 'x; ./measure.py'; exec >/dev/null; bash run.sh", d),
+            ("echo $(echo 'a; ./measure.py')", d),  # inside a substitution: not masked (conservative)
+            # past the lexer's bounds the old path, which reads the quoted ; (card fae0712e, fail-closed)
+            ("echo 'x; ./measure.py' " + '$(true)' * 65, d),  # LEX_MAX_SUBSTS + 1
+            ("echo 'x; ./measure.py' " + 'f(' * 40 + ' x' * 2000, d),  # unclosed: a lexer problem
+            ("echo 'x; ./measure.py' " + '$(' * 30 + ' x' * 30000 + ')' * 30, d),  # past LEX_MAX_WORK
+            # $_ is the previous command's last word (bash and zsh ran it), and the shell's own command line read back
+            ("echo 'x; ./measure.py'; bash -c \"$_\"", d),
+            ("echo 'x; ./measure.py'; bash -c \"${_}\"", d),
+            ("echo 'x; ./measure.py'; ps -o args= -p $$ | cut -d\"'\" -f2 | bash", d),
+            ("trap 'bash -c \"${BASH_COMMAND:6:-1}\"' DEBUG; echo 'x; ./measure.py'", d),
+            # card fae0712e: a data command's mask stops at its own frame: a nested command's quotes are its own
+            ("echo $(awk 'BEGIN{system(\"./measure.py\")}')", d),
+            ("echo \"$(awk 'BEGIN{system(\"./measure.py\")}')\"", d),
         ]
         allow = [
             ('python3 list.py', d),
@@ -1058,6 +1132,31 @@ def script_cases():
             ("git commit -F - <<'MSG'\nx\ny\nMSG", d),
             ("git commit -F - <<'MSG'\nfix the path ./measure.py in the note\nMSG", d),
             ("git commit -F - <<'MSG'\nx\\\n./measure.py\nMSG", d),  # a body line ending in \ joins nothing in bash
+            # card fae0712e: a separator inside a data command's quoted argument is no command boundary (the old gate
+            # blocked these: a false block), nor an escaped one; a data command inside a substitution too
+            ("echo 'x; ./measure.py'", d),
+            ('echo "x; ./measure.py"', d),
+            ('printf "%s\\n" "a | ./measure.py"', d),
+            ("grep -n 'x; ./measure.py' notes.py", d),
+            ('echo "line\n./measure.py"', d),
+            ("echo 'a' 'b && ./measure.py'", d),
+            ('echo x\\;./measure.py', d),
+            ('test -f "a;./measure.py"', d),
+            ("grep -v 'x; ./measure.py' notes.py", d),
+            ("echo 'x; ./measure.py' || bash", d),  # || and && pass no output
+            ("echo 'x; ./measure.py' " + '$(true)' * 64, d),  # LEX_MAX_SUBSTS substitutions: still the lexer path
+            ('grep -c bash ./measure.py', d),  # a -c before the shell word is no shell's -c (mutant shell_any_order)
+            # The shared lexer's own rules, each pinned here by a lexer mutant it kills (card fae0712e, Viktor 42697
+            # cond. 3; work/fae0712e/lexmut/gateprobe.py): a " MSG" line is body, not the terminator (p02-delim-strip),
+            # and a # after an escaped blank is word text, so the quote it opens hides the rest (p06-comment-after-escape).
+            ("git commit -F - <<'MSG'\n MSG\npython3 measure.py\nMSG", d),
+            ("echo 'x' \\ #'; python3 measure.py'", d),
+            # the same lexer rules, regression rows for the allow paths (no lexer mutant flips them today)
+            ("git commit -F - <<-'MSG'\n\tpython3 measure.py\n\tMSG", d),
+            ("echo $'\\'' 'python3 measure.py'", d),
+            ("echo \"$(( (1) ))\" 'python3 measure.py'", d),
+            ('echo $"python3 measure.py"', d),
+            ("echo 'python3 measure.py' \\\n'x'", d),
         ]
         for cmd, cwd in block:
             code, err = bash_in(cmd, cwd)
@@ -1152,6 +1251,14 @@ def script_cases():
                            timeout=20, env={'PATH': '/usr/bin:/bin'})
         if 'secret-read' not in p.stdout.strip().split(','):
             fails.append(f'script: hits() after an escaped quote {cmd!r} -> {p.stdout.strip()!r}, want secret-read')
+        # card fae0712e: the gate loads the shared lexer from its own scripts/lib (by path, under python3 -I); a text
+        # with a lexer problem gives None (the old path)
+        probe_l = probe.replace('print(m.script_budget())', 'print(m.shell_lex is not None, m.lex_or_none("echo a")'
+                                ' is not None, m.lex_or_none("echo \'a") is None)')
+        p = subprocess.run([sys.executable, '-I', '-c', probe_l, HOOK], capture_output=True, text=True, timeout=20,
+                           env={'PATH': '/usr/bin:/bin'})
+        if p.stdout.strip() != 'True True True':
+            fails.append(f'script: the shared lexer is not loaded or not fail-closed: {p.stdout.strip()!r} {p.stderr[-200:]!r}')
         # more directories than MAX_BASES (32) before a script: blocks instead of leaving the rest unresolved
         code, err = bash_in('cd a && ' * 40 + 'python3 list.py', d)
         if code != 2 or 'script-too-many' not in err:
@@ -1259,6 +1366,11 @@ def script_cases():
             ('bash ' * 30000, 2), ('bash' + ' -o x' * 20000 + " -c 'a'", 2), ("watch" + " -x" * 30000 + " 'a'", 0), ('tmux new ' * 20000 + "'", 0),
             ('sh -c "' * 20000, 0), ('bash' + " -c 'a'" * 30000, 0), ('watch -x -x -x -x -x ' * 20000 + "'", 0), ('bash -c -o pipefail ' + "'a' " * 20000, 0), ('do shell script \\' * 20000, 0),
             ('do shell script ' * 10000, 0), ('os.system(' * 20000, 0), ('"python3" ' * 20000, 2),  # past MAX_ARGS: blocks, fast
+            # card fae0712e: the lexer's bounds (LEX_MAX_SUBSTS, LEX_MAX_WORK). Just inside them the lexer path runs
+            # (and masks the data command's quotes), past them the old path; both fast. 64 nested unclosed `f(` before
+            # 10 000 chars took 2.5 s in segments_of() unbounded, 1 000 x `f(` 255 s.
+            ('echo $(true) ' * 64 + 'x ' * 20000, 0), ('echo `true` ' * 64 + "'a; ./measure.py' " * 2000, 0),
+            ('f(' * 64 + ' x' * 5000, 0), ('f(' * 1000, 0), ('$(' * 64 + ')' * 64, 0),
         ]
         for cmd, want in payload_redos:
             t = _t.monotonic()
@@ -1279,7 +1391,37 @@ def script_cases():
         took = _t.monotonic() - t
         if took > 2:
             fails.append(f'script: 30 000 interpreter calls took {took:.1f} s (want under 2 s)')
-        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos)
+        corpus_fails, corpus_n = corpus_cases(d)
+        fails += corpus_fails
+        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos) + corpus_n + 1
+
+
+def corpus_cases(d):
+    """Card fae0712e (Viktor 42697): the shared attack corpus, scripts/hooks/shell-attack-corpus.json, its keychain
+    column. `d` is script_cases' fixture dir (measure.py reads the keychain, the agent-msg.sh look-alikes and the
+    planted bin/ programs run their stdin), the corpus's "script" fixtures. A row whose script RAN in a real shell
+    (oracle) must be a block row; an `open` row is a known gap and must still fail (flip it when it is fixed)."""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'shell-attack-corpus.json'), encoding='utf-8') as f:
+        rows = json.load(f)['rows']
+    fails = []
+    n = 0
+    for r in rows:
+        want = r['want']['keychain']
+        if r['oracle'] == 'ran' and want != 'block':
+            fails.append(f"corpus {r['id']}: the script ran (oracle) but want.keychain is {want}")
+        if want not in ('block', 'allow'):
+            continue
+        n += 1
+        cmd = r['cmd'].replace('{DIR}', d).replace('{AM}', AM)
+        cwd = d if r['cwd'] == '{DIR}' else AM_ROOT
+        code, err = bash_in(cmd, cwd)
+        got = 'block' if code == 2 and 'KULCSKARIKA-KAPU' in err else 'allow' if code == 0 else f'exit {code}'
+        if r.get('open'):
+            if got == want:
+                fails.append(f"corpus {r['id']}: open gap ({r['open']}) now gives {want}: drop `open` in the corpus")
+        elif got != want:
+            fails.append(f"corpus {r['id']}: want {want}, got {got}: {cmd[:80]!r}")
+    return fails, n + 1
 
 
 def main():

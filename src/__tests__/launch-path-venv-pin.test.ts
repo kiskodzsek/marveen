@@ -37,6 +37,7 @@ const PINS: Record<string, Pin> = {
   'install-macos.sh': { venv: 0, exempt: 3, why: "the installer's own PATH while installing bun/node" },
   'install-linux.sh': { venv: 0, exempt: 7, why: "the installer's own PATH, and the lines it appends to the user's shell rc" },
   'install-lang.sh': { venv: 0, exempt: 2, why: "the installer's own PATH, and the line it appends to the user's shell rc" },
+  'scripts/hooks/shell-attack-corpus-build.py': { venv: 0, exempt: 1, why: 'one attack-corpus row quotes an `export PATH=./bin:$PATH` command as data for the gates (Viktor 42639 MEDIUM); builds no launch PATH, launches no claude (card fae0712e)' },
 }
 
 const EXTS = new Set(['.sh', '.ts', '.mjs', '.js', '.cjs', '.py', '.ps1'])

