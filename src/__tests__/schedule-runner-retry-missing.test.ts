@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ScheduledTask } from '../web/scheduled-tasks-io.js'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // A pending retry whose target session is MISSING (and whose auto-start fails)
 // must survive the tick, not be deleted. Deleting it was a silent abandonment
@@ -17,6 +20,7 @@ import type { ScheduledTask } from '../web/scheduled-tasks-io.js'
 //   * result 'fired' still deletes the row (the queue drains normally).
 
 const mockAppendTaskRun = vi.fn()
+const mockInsertPendingRetry = vi.fn()
 const mockDeletePendingRetry = vi.fn()
 // Mirrors the real DB: refreshing the row updates its last_reason, so the
 // NEXT tick sees the state this tick wrote (the transition-dedup depends on
@@ -48,7 +52,7 @@ vi.mock('../db.js', () => ({
   listPendingTaskRetries: () => mockListPendingRetries(),
   deletePendingTaskRetry: (...a: unknown[]) => mockDeletePendingRetry(...a),
   updatePendingTaskRetry: mockUpdatePendingRetry,
-  insertPendingTaskRetryIfNew: vi.fn(),
+  insertPendingTaskRetryIfNew: (...a: unknown[]) => mockInsertPendingRetry(...a),
   markPendingTaskRetryAlert: vi.fn(() => false),
   clearPendingTaskRetryAlert: vi.fn(),
   markScheduledTaskKanbanWaiting: vi.fn(),
@@ -193,5 +197,115 @@ describe('schedule runner: pending retry survives a missing target session', () 
     await runOneTick()
 
     expect(mockDeletePendingRetry).toHaveBeenCalledWith(DAILY.name, 'retryagent')
+  })
+})
+
+// SCHEDREFUSED1115 (card 97379849): a start refused by the agent's own config ('oauthTokenFile: ...', e.g. the
+// Codex-bridge majsztro) cannot succeed on a later tick. Measured 2026-11-13 10:08 -> 2026-11-15 14:40: one retry row
+// for such a target restarted it every tick, 12 625 times, and never delivered. It ends the row with one run-log line.
+describe("schedule runner: a target whose config refuses a session is not retried", () => {
+  beforeEach(() => {
+    vi.stubEnv('SCHEDULER_TZ', 'Europe/Budapest')
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-31T10:30:00.000Z'))
+    mockListScheduledTasks.mockReturnValue([DAILY])
+    mockSessionExists.mockReturnValue(false)
+  })
+  afterEach(() => {
+    mockStartAgent.mockImplementation(() => ({ ok: false, error: 'tmux unavailable' }))
+    mockListPendingRetries.mockImplementation(() => [])
+    mockDeletePendingRetry.mockImplementation(() => {})
+    vi.useRealTimers()
+    vi.unstubAllEnvs()
+  })
+
+  it("pending retry + 'oauthTokenFile: non-claude-model' -> row deleted, run-log 'refused', one start attempt", async () => {
+    mockStartAgent.mockImplementation(() => ({ ok: false, error: 'oauthTokenFile: non-claude-model' }))
+    // Like the real table: a deleted row is gone on the next tick (the runner ticks several times in the window).
+    const rows = [retryRow({ last_reason: 'missing' })]
+    mockListPendingRetries.mockImplementation(() => rows)
+    mockDeletePendingRetry.mockImplementation(() => { rows.length = 0 })
+    await runOneTick()
+    expect(mockDeletePendingRetry).toHaveBeenCalledWith(DAILY.name, 'retryagent')
+    expect(mockUpdatePendingRetry).not.toHaveBeenCalled()
+    const runs = mockAppendTaskRun.mock.calls.filter(c => c[0] === DAILY.name).map(c => String(c[2]))
+    expect(runs).toEqual(['refused'])
+    expect(mockStartAgent).toHaveBeenCalledTimes(1)
+  })
+
+  it("any other start failure is still 'missing': the row is kept (never-abandon unchanged)", async () => {
+    mockStartAgent.mockImplementation(() => ({ ok: false, error: 'Agent not found' }))
+    mockListPendingRetries.mockReturnValue([retryRow()])
+    await runOneTick()
+    expect(mockDeletePendingRetry).not.toHaveBeenCalled()
+    expect(mockUpdatePendingRetry).toHaveBeenCalledWith(DAILY.name, 'retryagent', expect.any(Number), 'missing')
+  })
+
+  it("a cron fire on such a target queues no retry and writes 'refused'", async () => {
+    // 10:30Z = 12:30 Budapest (CEST); the tick after 61 s lands in minute 12:31.
+    const DUE = task({ name: 'retry-refused-cron', schedule: '31 12 * * *' })
+    mockListScheduledTasks.mockReturnValue([DUE])
+    mockListPendingRetries.mockReturnValue([])
+    mockStartAgent.mockImplementation(() => ({ ok: false, error: 'oauthTokenFile: non-claude-model' }))
+    await runOneTick()
+    expect(mockStartAgent).toHaveBeenCalled()
+    expect(mockInsertPendingRetry).not.toHaveBeenCalled()
+    const runs = mockAppendTaskRun.mock.calls.filter(c => c[0] === DUE.name).map(c => String(c[2]))
+    expect(runs).toEqual(['refused'])
+  })
+})
+
+// Viktor 43041 LOW 1: only the CONFIG reasons are 'refused'. A token-file STATE (missing, empty, mode-too-open, ...)
+// can pass by during a rotation, and config-unparseable can be a half-written save: those stay 'missing', the row is
+// kept and the aged alert still fires.
+describe('isConfigStartRefusal: config reasons only', () => {
+  it('config reasons (with or without a detail) are refusals; token-file states and other errors are not', async () => {
+    const { isConfigStartRefusal } = await loadRunner()
+    for (const r of ['non-claude-model', 'main-agent', 'auth-mode-own_team', 'explicit-config-dir', 'not-absolute', 'not a Claude OAuth agent']) {
+      expect(isConfigStartRefusal(`oauthTokenFile: ${r}`), r).toBe(true)
+    }
+    expect(isConfigStartRefusal('oauthTokenFile: path-bad-characters (x)')).toBe(true)
+    for (const e of ['oauthTokenFile: missing', 'oauthTokenFile: empty', 'oauthTokenFile: mode-too-open (0644)',
+      'oauthTokenFile: config-unparseable', 'oauthTokenFile: same-as-fleet-token', 'oauthTokenFile: non-claude-modelX',
+      'tmux unavailable', 'Agent not found', '', undefined]) {
+      expect(isConfigStartRefusal(e as string | undefined), String(e)).toBe(false)
+    }
+  })
+
+  it('the list covers every oauthTokenFileConflict reason and every invalid-setting reason but config-unparseable', async () => {
+    const { CONFIG_START_REFUSAL_REASONS } = await loadRunner()
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'web', 'agent-oauth-token-file.ts'), 'utf-8')
+    const conflictBody = src.slice(src.indexOf('export function oauthTokenFileConflict'), src.indexOf('\n}\n', src.indexOf('export function oauthTokenFileConflict')))
+    const conflict = [...conflictBody.matchAll(/return '([^']+)'/g)].map((m) => m[1])
+    const invalid = [...src.matchAll(/state: 'invalid', reason: '([^']+)'/g)].map((m) => m[1])
+    expect(conflict.length).toBeGreaterThanOrEqual(7)
+    expect(invalid).toContain('config-unparseable')
+    for (const r of [...conflict, ...invalid.filter((x) => x !== 'config-unparseable')]) {
+      expect(CONFIG_START_REFUSAL_REASONS.has(r), r).toBe(true)
+    }
+    expect(CONFIG_START_REFUSAL_REASONS.has('config-unparseable')).toBe(false)
+  })
+
+  it("a pending retry on 'oauthTokenFile: missing' is kept (the row stays alive for the aged alert)", async () => {
+    vi.stubEnv('SCHEDULER_TZ', 'Europe/Budapest')
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-31T10:30:00.000Z'))
+    mockListScheduledTasks.mockReturnValue([DAILY])
+    mockSessionExists.mockReturnValue(false)
+    mockStartAgent.mockImplementation(() => ({ ok: false, error: 'oauthTokenFile: missing' }))
+    mockListPendingRetries.mockReturnValue([retryRow()])
+    try {
+      await runOneTick()
+      expect(mockDeletePendingRetry).not.toHaveBeenCalled()
+      expect(mockUpdatePendingRetry).toHaveBeenCalledWith(DAILY.name, 'retryagent', expect.any(Number), 'missing')
+      const runs = mockAppendTaskRun.mock.calls.filter(c => c[0] === DAILY.name).map(c => String(c[2]))
+      expect(runs).not.toContain('refused')
+    } finally {
+      mockStartAgent.mockImplementation(() => ({ ok: false, error: 'tmux unavailable' }))
+      vi.useRealTimers()
+      vi.unstubAllEnvs()
+    }
   })
 })

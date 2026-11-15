@@ -1385,13 +1385,43 @@ export function resolveTaskTarget(
   return { session, host }
 }
 
+// SCHEDREFUSED1115 (card 97379849): some 'oauthTokenFile: <reason>' start refusals are the agent's OWN config saying
+// "no Claude session here" (fail-closed, agent-oauth-token-file.ts) -- e.g. majsztro, a Codex bridge whose
+// oauthTokenFile points at a NO-CLAUDE-SESSION marker on purpose. Such a reason cannot change between two ticks, so it
+// is not 'missing' (kept and retried every tick by the never-abandon rule): measured 2026-11-13 10:08 -> 2026-11-15
+// 14:40, one proaktiv-kor-majsztro retry row restarted that agent 12 625 times, each with an ERROR and a WARN, and the
+// prompt was never delivered. attemptFireTask answers 'refused' for those: the delivery ends with one line.
+// ONLY the config reasons below (Viktor 43041 LOW 1): the token-file STATES (missing, empty, unreadable, mode-too-open,
+// wrong-owner, ... -- a rotation can pass through them) and config-unparseable (a half-written save) stay 'missing', so
+// the row is kept and the aged alert still fires. The conflict list is oauthTokenFileConflict's return values (pinned
+// by schedule-runner-retry-missing.test.ts); the setting list is resolveOauthTokenFileSetting's 'invalid' reasons.
+export const CONFIG_START_REFUSAL_REASONS: ReadonlySet<string> = new Set([
+  // oauthTokenFileConflict: a setting the field cannot take effect under
+  'main-agent', 'remote-agent', 'custom-provider', 'non-claude-model', 'auth-mode-own_team', 'auth-mode-api',
+  'explicit-config-dir',
+  // resolveOauthTokenFileSetting: the field's value itself is invalid
+  'not-a-string', 'blank', 'not-absolute', 'path-bad-characters', 'path-parent-traversal',
+  // agent-process.ts: a token file set for an agent that is not a Claude OAuth agent
+  'not a Claude OAuth agent',
+])
+
+export function isConfigStartRefusal(error: string | undefined): boolean {
+  const m = /^oauthTokenFile: (.+?)(?: \(.*\))?$/s.exec(error ?? '')
+  return !!m && CONFIG_START_REFUSAL_REASONS.has(m[1])
+}
+
+function logConfigStartRefusal(taskName: string, agent: string, session: string, error: string | undefined): 'refused' {
+  logger.warn({ task: taskName, agent, session, error }, 'Schedule target cannot be started (its config refuses a Claude session): not delivered, not retried')
+  return 'refused'
+}
+
 async function attemptFireTask(
   task: ScheduledTask,
   agentName: string,
   now: number,
   preCheckPrefix?: string,
   lateCatchUpMs?: number,
-): Promise<'fired' | 'busy' | 'missing' | 'starting' | 'error' | 'mcp-missing' | 'first-run'> {
+): Promise<'fired' | 'busy' | 'missing' | 'starting' | 'error' | 'mcp-missing' | 'first-run' | 'refused'> {
   const { session, host } = resolveTaskTarget(task, agentName)
   // resolveTaskTarget() computes this internally but does not expose it (it
   // only returns {session, host}) -- recompute the same cheap check here
@@ -1445,6 +1475,7 @@ async function attemptFireTask(
       // as busy so the normal retry path delivers. Any other failure (config
       // error, launch failure) is a real miss: log and skip this tick.
       if (/already running/i.test(start.error ?? '')) return 'busy'
+      if (isConfigStartRefusal(start.error)) return logConfigStartRefusal(task.name, agentName, session, start.error)
       logger.warn({ task: task.name, agent: agentName, session, error: start.error }, 'Schedule target session missing, auto-start failed')
       return 'missing'
     }
@@ -2785,6 +2816,13 @@ export function startScheduleRunner(): NodeJS.Timeout {
         deletePendingTaskRetry(row.task_name, row.agent_name)
         continue
       }
+      // SCHEDREFUSED1115: the target's config refuses a session; no later tick can deliver, so the row ends here,
+      // with a run-log line naming why (the never-abandon rule below is for targets that CAN come back).
+      if (result === 'refused') {
+        deletePendingTaskRetry(row.task_name, row.agent_name)
+        appendTaskRun(row.task_name, row.agent_name, 'refused')
+        continue
+      }
       // 'missing' used to DELETE the retry row here -- a silent abandonment
       // that contradicts the never-abandon policy above. The one real-world
       // window where it bites: the target session vanishes during a main-agent
@@ -3095,6 +3133,9 @@ export function startScheduleRunner(): NodeJS.Timeout {
           // trace. The retry row keeps it alive and the aged alert names the
           // actual blocker instead of a generic "busy".
           insertPendingTaskRetryIfNew(task.name, agentName, now, 'first-run')
+        } else if (result === 'refused') {
+          // SCHEDREFUSED1115: no retry row; one run-log line per cron fire, so the run history shows why nothing ran.
+          appendTaskRun(task.name, agentName, 'refused')
         }
       }
     }
