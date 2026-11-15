@@ -58,7 +58,11 @@ file a command runs is read and judged too:
     ksh, ruby, perl, osascript, deno, bun, tsx, ts-node, php, swift, source, `.`, npx tsx, uv/poetry/pipenv/pdm/
     hatch run), every one of its following words that is an existing regular file, its arguments included (an
     innocent first file, `node -r ./ok.js m.js`, does not hide the script; Viktor 41756 LOW 2), up to MAX_ARGS
-    words: more words, or a command running past ARGS_WINDOW, blocks unread ('script-too-many-args', LOW 1); after
+    words: more words, or a command running past ARGS_WINDOW, blocks unread ('script-too-many-args', LOW 1). Except
+    (card 31045f4d, Viktor 43235): for python, ruby, perl and php the first plain word after options the gate knows
+    is the script, the words after it are its argv (data: `python3 stat.py regiszter.jsonl` passes), a directory
+    there is judged by its __main__.py; and for `bash <this repo's agent-msg.sh> ...` its words are the message
+    (resolved from every directory the command may run in: a look-alike keeps the full reading). After
     -c / -e or `-` the code is inline or on stdin; source and `.` judge their first word, and the rest only when
     that first word is an existing regular file (the sourced script gets them as $1...: `source runner.sh m.py`,
     Viktor 41831 LOW 1; a sentence-ending "." in prose is followed by a word that is no file); python -m mod: the files
@@ -102,7 +106,15 @@ file a command runs is read and judged too:
   a substitution and every word after a shell's -c are read as commands (`echo \\`./m.py\\``, `bash -c ./m.py`
   block). A text the lexer does not fully read (an unterminated quote, heredoc or substitution, past its bounds)
   takes the old path. A backslash-newline that ends a comment or follows an escaped backslash is no line join
-  (lexer_normalise; hits() judges that text too).
+  (lexer_normalise; hits() judges that text too). On the lexer path (card 31045f4d) every quoted-delimiter heredoc
+  into a data recipient (curl -d @-, git commit -F -, this repo's agent-msg.sh) is blanked for the script rules
+  when only allowlisted steps stand before it (lexer_data_spans), and in a quoted heredoc into python / node / ruby
+  / perl / php a "(" after a blank is prose, not a subshell (nonshell_prose_masked).
+  Still blocks, accepted (card 31045f4d): a quoted path after "(" in an interpreter body (`open('data.jsonl')`
+  reads like `os.system('./x.sh')` and `exec(open('x').read())`); pass the data file as an argument instead.
+  Seen while measuring, not changed here: an interpreter's words end at a backtick, so `python3 \\`true\\` m.py` passes
+  (on main too). A data file an argv-reading script runs (`python3 stat.py m.py` with exec(open(sys.argv[1]))) is the
+  same boundary as "a file the script builds": not seen.
 Any error while matching blocks (fail-closed; exit 1 would not block). Input that is not a Bash call is allowed.
 The command text is never logged: it may itself carry a secret.
 Tests: keychain-read-gate_test.py next to this file.
@@ -882,6 +894,26 @@ def cd_bases(text, cwd):
     return bases
 
 
+class AgentMsgGroup:
+    """`bash scripts/agent-msg.sh to from "message"` (card 31045f4d, Klodel 43233): when the script is THIS repo's
+    agent-msg.sh in every directory the command may run it from, its words are the message (data), as for a
+    heredoc into it; otherwise (a look-alike, a runner.sh) every word is judged, as for any bash script."""
+    def __init__(self, first, rest, over):
+        self.first, self.rest, self.over = first, rest, over
+
+
+AGENT_MSG_SHELL_RX = re.compile(r'(?:(?:/usr)?/bin/)?(?:bash|sh)')
+
+
+def agent_msg_everywhere(word, bases):
+    """word (a plain path) is this repo's agent-msg.sh from every base it exists in, and exists in one."""
+    if not PLAIN_SCRIPT_RX.fullmatch(word) or os.path.basename(word) != 'agent-msg.sh' or len(bases) > MAX_BASES:
+        return False  # (past MAX_BASES cd_bases stopped collecting: not every directory is known)
+    cands = [word] if os.path.isabs(word) else [os.path.join(b, word) for b in bases]
+    found = [os.path.realpath(c) for c in cands if os.path.exists(c)]
+    return bool(found) and all(f == AGENT_MSG for f in found)
+
+
 class TooManyArgs(Exception):
     """An interpreter call with words the gate does not read (past MAX_ARGS or ARGS_WINDOW): the caller blocks."""
 
@@ -900,6 +932,35 @@ OUT_REDIR_RX = re.compile(r'(?:\d*>>?[&|]?|&>>?)(\S+)?$')
 _CALL_END_RX = re.compile(r'[;\n)`]|' + PIPE + r'|' + AMP)
 
 
+# Card 31045f4d (Viktor 43235/43236, Klodel 43233): for python, ruby, perl and php the FIRST word that is no option is
+# the script, and the words after it are its arguments (sys.argv, ARGV, @ARGV, $argv): data the script may read, not a
+# file the interpreter runs. A data file named there (`python3 stat.py regiszter.jsonl`, whose text names the blocked
+# call in prose) blocked as 'script-file'. This gives no more than writing the path into the script already does (B/C
+# in Viktor 43235: allowed today); the gate is no wall against a script that reads and runs a file (see "Not seen").
+# Only when every word before the script is an option the gate knows, with no argument or with a known argument:
+#   python: clusters of the no-argument flags below; -W / -X with their argument (next word or attached: -Wignore);
+#   ruby, perl, php: no option at all (ruby -r and perl -M preload code, php -c / -d set an ini: not read here).
+# Anything else keeps the old walk (every existing file judged): node -r preloads, bash/sh/source run their $1.
+DATA_ARGV_RX = re.compile(r'python[\d.]*|ruby|perl|php', re.I)
+PY_NOARG = frozenset('bBdEhiIOPqsSuvVx')
+PY_WITHARG = frozenset('WX')
+PY_ATTACHED_RX = re.compile(r'-[^-cmWX][^cmWX]*[WX]|-[WX]')  # a cluster whose first c/m/W/X is a W or an X
+PLAIN_SCRIPT_RX = re.compile(r'''['"]?[\w./+@%,:=-]+['"]?''')  # no $, `, glob, brace, ~ or backslash: one fixed word
+
+
+def _argv_option(w, python):
+    """How an option word before the script is read: 0 = not known (keep the old walk), 1 = no argument, 2 = its
+    argument is the next word."""
+    if not python or len(w) < 2 or w.startswith('--'):
+        return 0
+    for k, ch in enumerate(w[1:], 1):
+        if ch in PY_WITHARG:
+            return 2 if k == len(w) - 1 else 1  # -W alone takes the next word; -Wignore / -uWignore carry it
+        if ch not in PY_NOARG:
+            return 0
+    return 1
+
+
 def interp_groups(text):
     """For each interpreter call: the words that may be its script, in order (every existing file is judged).
     Raises TooManyArgs when a call's words run past MAX_ARGS or ARGS_WINDOW and the walk did not stop before."""
@@ -907,6 +968,7 @@ def interp_groups(text):
     for m in INTERP_RX.finditer(text):
         python = 'python' in m.group(0).lower()
         name = re.split(r'[\s;&|(){}`\'"/\\]', m.group(0).rstrip('\'"\\'))[-1]
+        argv_data = bool(DATA_ARGV_RX.fullmatch(name))  # still True after a known option; False = the old walk
         rest = text[m.end():m.end() + ARGS_WINDOW]  # a window, not the rest: 6 000 calls x the rest was quadratic
         end = _CALL_END_RX.search(rest)
         cut = end.start() if end else len(rest)
@@ -928,12 +990,28 @@ def interp_groups(text):
                                           else (f'source: a parancs hosszabb a {ARGS_WINDOW} karakteres ablaknál'
                                                 if over else '')))
             continue
+        if AGENT_MSG_SHELL_RX.fullmatch(name) and all_words and os.path.basename(
+                strip_quotes(all_words[0])) == 'agent-msg.sh':  # no option before it: `bash -s x` reads stdin
+            over = clipped or len(all_words) > MAX_ARGS
+            groups.append(AgentMsgGroup(strip_quotes(all_words[0]), [strip_quotes(w) for w in all_words[1:MAX_ARGS]
+                                                                     if not w.startswith('-')],
+                                        f'{len(all_words)} szó, MAX_ARGS {MAX_ARGS}' if over else ''))
+            continue
         words = [strip_quotes(w) for w in all_words[:MAX_ARGS]]
         group = []
         stopped = False
         i = 0
         while i < len(words):
             w = words[i]
+            if python and PY_ATTACHED_RX.match(w):
+                # -Wignore, -Xdev, -uWerror: the first of c/m/W/X in the cluster is W or X, so the rest is its
+                # argument, not a -c / -e / -m (CODE_FLAG_RX took -Wignore for a code flag and stopped the walk:
+                # `python3 -Wignore m.py` passed unread; found on card 31045f4d)
+                kind = _argv_option(w, python) if argv_data else 1
+                if kind == 0:
+                    argv_data = False
+                i += 2 if kind == 2 else 1
+                continue
             attached = MODULE_ATTACHED_RX.fullmatch(w) if python else None
             if attached:
                 groups += [[c] for c in module_files(attached.group(1))]
@@ -953,8 +1031,24 @@ def interp_groups(text):
             if out_redir:
                 i += 1 if out_redir.group(1) else 2
                 continue
+            if argv_data and w.startswith('-'):
+                kind = _argv_option(w, python)
+                if kind == 0:
+                    argv_data = False  # an option the gate does not know: every word is judged, as before
+                i += 1  # (a -W / -X cluster, kind 2, never gets here: PY_ATTACHED_RX above takes it and its argument)
+                continue
             if not w.startswith('-') and w:
                 group.append(w)
+                # the script: the words after it are its arguments (see DATA_ARGV_RX). Only a plain word: an unset
+                # $X or a glob may vanish or become another file (`python3 $X m.py` runs m.py), and a word the
+                # window cut may be longer than what was read
+                if argv_data and PLAIN_SCRIPT_RX.fullmatch(all_words[i]) and not (
+                        clipped and i == len(all_words) - 1):
+                    if python:
+                        group.append(os.path.join(w, '__main__.py'))  # a directory runs its __main__.py
+                    stopped = True
+                    break
+                argv_data = False
             i += 1
         if not stopped and clipped:
             raise TooManyArgs(f'a parancs hosszabb a {ARGS_WINDOW} karakteres ablaknál')
@@ -1006,6 +1100,13 @@ def script_paths(cmd, cwd, normalised=None):
         return found
 
     for group in groups:
+        if isinstance(group, AgentMsgGroup):
+            if agent_msg_everywhere(group.first, bases):
+                group = [group.first]  # its words are the message
+            elif group.over:
+                raise TooManyArgs(group.over)
+            else:
+                group = [group.first] + group.rest
         if isinstance(group, SourceGroup):
             first = resolve(group.first)
             if first is None:
@@ -1448,11 +1549,20 @@ def _mask_allowed(cmd, cls, lx):
     return not any(ch in '{}' and cls[p] == 'c' and p not in braces for p, ch in enumerate(cmd))
 
 
-def _data_segment(cmd, cls, seg, owner):
-    """seg is a data command whose quoted arguments may be masked (see above)."""
+def _data_segment(cmd, cls, seg, owner, lx=None, bases=None):
+    """seg is a data command whose quoted arguments may be masked (see above). This repo's agent-msg.sh is one too
+    (card 31045f4d): `bash scripts/agent-msg.sh to from "message"` sends its words, it runs none of them; only when the
+    path is ours from every directory the command may run in (agent_msg_everywhere), so a look-alike is not."""
     word = _first_word(cmd, cls, seg)
-    if seg['frame'] != 'top' or word not in DATA_COMMANDS:
+    if seg['frame'] != 'top':
         return False
+    if word not in DATA_COMMANDS:
+        if lx is None or not word or not (AGENT_MSG_SHELL_RX.fullmatch(word) or word.endswith('agent-msg.sh')):
+            return False
+        ws = shell_lex.words(cmd, lx, seg)
+        path = ws[1]['text'] if AGENT_MSG_SHELL_RX.fullmatch(word) and len(ws) > 1 else ws[0]['text']
+        if not agent_msg_everywhere(path, bases or []):
+            return False
     if word == 'printf' and PRINTF_V_RX.search(cmd, seg['start'], seg['end']):
         return False
     if any(cmd[p] in '<>' and cls[p] == 'c' and owner[p] == -1 for p in range(seg['start'], seg['end'])):
@@ -1463,16 +1573,17 @@ def _data_segment(cmd, cls, seg, owner):
     return not (p < len(cmd) and cmd[p] == '|' and cls[p] == 'c' and cmd[p + 1:p + 2] != '|')
 
 
-def lexer_view(text, cmd, lx):
+def lexer_view(text, cmd, lx, cwd=None):
     """The text the script rules read (see the block above): `text` (cmd, maybe with the data heredoc blanked; same
     length) with the separators inside data commands' quoted arguments masked, plus the extra command texts."""
     cls = lx['cls']
     segs = lx['segments']
     owner = _owners(len(cmd), lx['substs'])
+    bases = cd_bases(normalise(cmd), cwd)  # where an agent-msg.sh path may be resolved from (every cd in the text)
     chars = None
     if _mask_allowed(cmd, cls, lx):
         for seg in segs:
-            if not _data_segment(cmd, cls, seg, owner):
+            if not _data_segment(cmd, cls, seg, owner, lx, bases):
                 continue
             for p in range(seg['start'], seg['end']):
                 if cls[p] in 'qdae' and text[p] in MASK_CHARS and owner[p] == seg['frameAt']:
@@ -1513,6 +1624,114 @@ def lexer_normalise(view, cls, a, b):
     return normalise(''.join(out), joined=True)
 
 
+# Card 31045f4d (Pulzus 43167, Klodel 43233, Viktor 43200/43235): the data heredoc, read by the lexer. The regex path
+# above blanks only the text's FIRST heredoc and only with nothing that may change the shell's state before it (no
+# quote, $, backtick, # or backslash), so the fleet's own forms blocked on the prose of their body:
+#   curl ... -H "Authorization: Bearer $(cat store/.dashboard-token)" --data-binary @- <<'JSON'   (a $ and a quote)
+#   T="Authorization: Bearer $(cat ...)" + newline + curl ... -H "$T" --data-binary @- <<'JSON'  (a step before)
+#   a card comment and an agent-msg in one command                                              (a second heredoc)
+# When the lexer reads the whole text (no problem), it says where each heredoc and each simple command is, so the
+# state question is answered by the lexer, not by the absence of quotes. The rest stays an ALLOWLIST (Viktor 42639):
+#   - the heredoc's delimiter is quoted (a body with live $( ) is not data) and it is the only heredoc of its command;
+#   - its command, from its first word to the operator, is a DATA_RECIPIENT_RX recipient, with nothing after the
+#     operator on its line (the body starts on the next line);
+#   - every top-level command before it is a step: `cd <plain path>`, `true`, a bare `echo` (Klodel's own comment +
+#     memory call printed a blank line between two curls), `git add <plain paths>`, an assignment
+#     to a ONE-LETTER variable (T=..., S=...: no one-letter name is exported or read by curl, git, bash or the
+#     dynamic loader; its value may hold a $( ) whose command runs in a subshell and is read by the script rules as
+#     before), or an earlier data-heredoc command. The first other command ends the walk: nothing after it is blanked;
+#   - no alias, function, eval, source, PATH=, hash, trap ... in the CODE of the text (REDEF_RX on code characters
+#     only: the prose of a body or a quoted argument cannot define anything; a source in a JSON body blocked);
+#   - agent-msg.sh only as this repo's script, a relative path only when no step before it is a cd.
+# The body is blanked for the script-path rules only; hits() still reads the whole text, and every $( ) outside the
+# body is read as its own command (lexer_view extras).
+STEP_RX = re.compile(r'(?:cd[ \t]+[\w./-]+|true|echo|git[ \t]+add(?:[ \t]+[\w./-]+)+)[ \t]*')
+ONE_LETTER_ASSIGN_RX = re.compile(r'[A-Za-z]=')
+STEP_SEP_RX = re.compile(r'[ \t]*(?:&&|\|\||;|\||\n)[ \t\n]*')
+
+
+def _agent_msg_is_ours(path, cwd, moved):
+    """path (the recipient word) names this repo's agent-msg.sh: absolute, or relative to cwd when nothing before it
+    may have moved the shell."""
+    if not os.path.isabs(path):
+        if not cwd or moved:
+            return False
+        path = os.path.join(cwd, path)
+    return os.path.realpath(path) == AGENT_MSG
+
+
+def lexer_data_spans(cmd, cwd, lx):
+    """[(bodyStart, bodyEnd)] of the data heredocs (see the block above), in order; [] when none."""
+    cls = lx['cls']
+    code = ''.join(ch if cls[p] == 'c' else ' ' for p, ch in enumerate(cmd))
+    if REDEF_RX.search(code):
+        return []
+    tops = [s for s in lx['segments'] if s['depth'] == 0 and s['frame'] == 'top']
+    spans = []
+    moved = False
+    prev_end = 0  # where the command before ends (a heredoc command: its terminator line)
+    for seg in tops:
+        # the steps are joined by &&, ||, ;, | or newlines, as on the regex path: a `cd x &` runs in the background
+        sep = cmd[prev_end:seg['start']]
+        # (a heredoc's `end` is past its terminator line's newline: that newline is the join)
+        if prev_end and not (STEP_SEP_RX.fullmatch(sep) or (cmd[prev_end - 1] == '\n' and not sep.strip(' \t\n'))):
+            break
+        hs = [h for h in lx['heredocs'] if seg['start'] <= h['op'] < seg['end']]
+        if hs:
+            h = hs[0]
+            # quoted as <<'D' or <<"D" (the lexer also counts <<\D, which the regex path keeps: so does this one)
+            if len(hs) != 1 or not h['quoted'] or not re.search('[\'"]', cmd[h['op']:h['opEnd']]):
+                break
+            line_end = cmd.find('\n', h['opEnd'])
+            if line_end < 0 or cmd[h['opEnd']:line_end].strip() or h['bodyStart'] != line_end + 1:
+                break
+            rec = DATA_RECIPIENT_RX.match(cmd[seg['start']:h['op']] + ' ')
+            if not rec or (rec.group('msg') is not None and not _agent_msg_is_ours(rec.group('msg'), cwd, moved)):
+                break
+            spans.append((h['bodyStart'], h['bodyEnd']))
+            prev_end = h['end']
+            continue
+        text = cmd[seg['start']:seg['end']]
+        prev_end = seg['end']
+        if STEP_RX.fullmatch(text):
+            moved = moved or text.startswith('cd')
+            continue
+        if ONE_LETTER_ASSIGN_RX.match(text) and len(shell_lex.words(cmd, lx, seg)) == 1:
+            continue
+        break
+    return spans
+
+
+# Card 31045f4d (Pulzus 43167, Viktor 43235 point 2): a quoted heredoc whose command is a non-shell interpreter
+# (`python3 -I - <<'PY'`) has a body the shell does not read; the script rules read it anyway (the program may run a
+# shell command from it), and a prose "( scripts/hooks/x.py" in one of its strings read as a subshell running x.py.
+# There, and only there, a "(" right after a blank, followed by an unquoted path, is not a command position:
+# `word (./x.sh)` is a syntax error in a shell, and after a separator (`; (./x.sh)`, `&& (./x.sh)`) the path still
+# sits at the separator's command position once the "(" is gone. Kept: os.system('./x.sh') and "(./x.sh)" (a quote
+# before), perl qx(./x.sh), ruby %x(./x.sh), $(./x.sh), <(./x.sh) (no blank before), a backtick, a separator.
+NONSHELL_RX = re.compile(r'(?:.*/)?(?:python[\d.]*|node|ruby|perl|php|deno|bun)', re.I)
+PROSE_PAREN_RX = re.compile(r'(?<=[ \t])\((?=[\w./~])')
+
+
+def nonshell_prose_masked(text, cmd, lx):
+    """text (same length as cmd) with the prose "(" of the non-shell heredoc bodies made a blank (see above)."""
+    chars = None
+    for seg in lx['segments']:
+        if seg['depth'] != 0 or seg['frame'] != 'top':
+            continue
+        hs = [h for h in lx['heredocs'] if seg['start'] <= h['op'] < seg['end'] and h['quoted']]
+        if not hs:
+            continue
+        ws = shell_lex.words(cmd, lx, seg)
+        if not ws or not NONSHELL_RX.fullmatch(ws[0]['text']):
+            continue
+        for h in hs:
+            for m in PROSE_PAREN_RX.finditer(cmd, h['bodyStart'], h['bodyEnd']):
+                chars = chars or list(text)
+                chars[m.start()] = ' '
+    return ''.join(chars) if chars else text
+
+
 def script_hits(cmd, cwd):
     """Rule names for inline interpreter code and for the files the command runs."""
     found = []
@@ -1532,7 +1751,11 @@ def script_hits(cmd, cwd):
         first = lx['heredocs'][0] if lx['heredocs'] else None
         if span is not None and not (first and first['quoted'] and (first['bodyStart'], first['bodyEnd']) == span):
             span = None
-        view, extras = lexer_view(blank_span(cmd, span), cmd, lx)  # both normalised already
+        blanked = blank_span(cmd, span)
+        for s in lexer_data_spans(cmd, cwd, lx):  # card 31045f4d: the lexer's data heredocs (see there)
+            blanked = blank_span(blanked, s)
+        blanked = nonshell_prose_masked(blanked, cmd, lx)
+        view, extras = lexer_view(blanked, cmd, lx, cwd)  # both normalised already
         text = view + ''.join('\n' + e for e in extras)
     marks = payload_quotes(text)
     if marks:
@@ -1617,7 +1840,10 @@ def main():
             'security find-generic-password / find-internet-password / dump-keychain / export, vagy -i/-p mód. '
             'Ágens-shellből ez tilos (Viktor 29950, H1): más ágens credentialje is ott van. Ha egy kulcs kell, '
             'a Vault-wrapper adja (scripts/vault-env-wrapper.sh), az értékét ne írd ki. Ha csak egy szövegben '
-            'keresel, a subcommandot keresd magában (pl. grep find-generic-password).\n')
+            'keresel, a subcommandot keresd magában (pl. grep find-generic-password). '
+            # Klodel's rule for a false positive (card aeee72df, 31045f4d; Viktor 43236): said where it is needed
+            'Ha hamis pozitív: a parancsot átalakíthatod, ha ugyanazt a csak-olvasó feladatot végzi, és jelzed a '
+            'kártyán/Dave-nek; ha a cél egy kulcskarika-hívás átjuttatása, állj meg és szólj.\n')
         return 2
     return 0
 
