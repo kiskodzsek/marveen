@@ -247,8 +247,11 @@ export function isExternal(url) {
 // no boundary and no command.
 // `NAME=value` words of this command (also after export / local / readonly, and anywhere in a command, as
 // the earlier regex read them). The NAME= part must be unquoted code: `echo "a U=x"` assigns nothing.
+// The name tables (env, loops) have NO prototype (card f2a0f976, Viktor 43009 LOW 1): on a plain object
+// `env['__proto__'] = url` set the prototype instead of a key, so `__proto__=<url>; curl -s $__proto__` read an
+// unset variable and passed, while bash expands it like any other name.
 function collectAssignments(r) {
-  const env = {}
+  const env = Object.create(null)
   for (const ws of r.segWords) {
     for (const w of ws) {
       const m = /^[A-Za-z_][A-Za-z0-9_]*=/.exec(w.text)
@@ -264,7 +267,7 @@ function collectAssignments(r) {
 // The keyword is an unquoted word (a quoted "for u in" is not a loop); the values are the words after
 // `in`, unquoted, with this command's assignments expanded in them (an unquoted value splits again).
 function collectLoops(r, env) {
-  const loops = {}
+  const loops = Object.create(null)
   for (const ws of r.segWords) {
     const at = ws.findIndex((w, k) => w.text === 'for' && !w.quoted && /^[A-Za-z_][A-Za-z0-9_]*$/.test(ws[k + 1]?.text ?? '') &&
       !ws[k + 1].quoted && ws[k + 2]?.text === 'in' && !ws[k + 2].quoted)
@@ -315,16 +318,43 @@ function loopVariants(text, env, loops) {
   let out = [text]
   for (const v of [...named].sort((a, b) => order.get(a) - order.get(b))) {
     const vals = loops[v]
-    const re = new RegExp(`\\$\\{${v}\\}|\\$${v}(?![A-Za-z0-9_])`, 'g')
+    // ${v:-word} / ${v-word} / ${v:=word} / ${v=word} take the loop value too (card f2a0f976), see expand
+    const re = new RegExp(`\\$\\{${v}\\}|\\$${v}(?![A-Za-z0-9_])|\\$\\{${v}(:?)[-=]([^{}]*)\\}`, 'g')
     if (!re.test(text)) continue
     re.lastIndex = 0
     if (out.length * vals.length > MAX_LOOP_VARIANTS) return null
-    out = out.flatMap((t) => vals.map((x) => t.replace(re, () => asWord(x))))
+    out = out.flatMap((t) => vals.map((x) => t.replace(re, (all, colon, word) =>
+      (!(colon && x === '') ? asWord(x) : word)))) // $v / ${v}: colon is undefined
   }
-  return out.map((t) => expand(t, env))
+  // In a loop reading the loop variables hold the LOOP value: an assignment of the same name elsewhere in the command
+  // must not stand in for it (Viktor 43216 LOW 1: `V=localhost; for V in <ext> ...; curl "${V-${V:-x}}"` read the
+  // outer default with V=localhost). Shadowed as unset, a form left over is the word or stays as written.
+  const venv = named.size ? Object.assign(Object.create(env), Object.fromEntries([...named].map((v) => [v, undefined]))) : env
+  return out.map((t) => expand(t, venv))
 }
-function expand(text, env) {
-  return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (all, a, b) => (env[a ?? b] ?? all))
+// $NAME and ${NAME} take the value assigned in this command. The simple defaults are computed too (card f2a0f976,
+// Viktor 43009 LOW 2): ${NAME:-word} and ${NAME:=word} are the value when it is set and not empty, else the word;
+// ${NAME-word} and ${NAME=word} are the value when it is set, else the word. A name not assigned here reads as the
+// word: that is what bash connects to when the variable is unset, and a value from the environment is as unread as a
+// bare $NAME from the environment always was (header: "read from the environment"). The word may hold $NAME (expanded
+// again); a word with braces in it, and every other operator (${NAME%x}, ${NAME/a/b}, ${NAME:0:9}, ${#NAME},
+// ${!NAME}), is left as written: in a curl destination host it is an unresolved destination (curlOperatorHost).
+// loopNames (the plain reading only): a loop variable not assigned here is SET in the loop body, so its default form
+// is left as written for the loop readings to fill (`for u in <local>; do curl ${u:-x}; done` never reaches x).
+const EXPAND_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?)[-=]([^{}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
+function expand(text, env, loopNames = null) {
+  return text.replace(EXPAND_RE, (all, a, colon, word, b) => {
+    if (b !== undefined) return env[b] ?? all
+    const v = env[a]
+    if (word === undefined) return v ?? all
+    if (v === undefined && loopNames?.has(a)) return all
+    // Viktor 43216 LOW 2: a value that is itself an unexpanded reference (`U=$V`) may be empty in bash, so whether
+    // `:-` / `:=` takes the word is unknown: the form stays as written (in a curl host: unresolved). `-` / `=` take
+    // the set value whatever it holds, as before. (A $( ) or backtick value is a frame, blanked before the assignments
+    // are collected, so only a `$` reference can be left in a value.)
+    if (colon && v !== undefined && v.includes('$')) return all
+    return v !== undefined && !(colon && v === '') ? v : expand(word, env)
+  })
 }
 // $( ... ), backtick, ( ... ), <( ... ) and >( ... ) bodies are commands of their own: each is classified
 // separately (with this command's assignments and loop values), and the rest of the command is read with
@@ -549,8 +579,9 @@ export function curlDestinations(args) {
 }
 // True when a curl destination (positional or --url / -x value) still holds a shell variable after
 // this command's assignments and loop values were expanded: curl will reach a host the text does
-// not name. Only used together with an external URL literal elsewhere in the command (classify).
-export function curlHasUnresolvedDestination(args) {
+// not name. unresolvedHost decides what "still holds" means: unresolvedHostVar (any $NAME in the host; only used
+// together with an external URL literal elsewhere in the command, see classify) or curlOperatorHost (card f2a0f976).
+export function curlHasUnresolvedDestination(args, unresolvedHost) {
   for (let k = 0; k < args.length; k++) {
     const w = args[k]
     if (/^\d*[<>]/.test(w) || w === '&') { if (/^\d*(?:>>?|<)&?$/.test(w)) k++; continue }
@@ -577,16 +608,52 @@ export function curlHasUnresolvedDestination(args) {
 }
 // The HOST part (scheme and userinfo dropped, up to the first / ? #) holds a $VAR or ${VAR}.
 // A variable only in the path (`http://localhost:3420/api/$id`) names its host and is not this.
-function unresolvedHost(value) {
+function unresolvedHostVar(value) {
   if (!value) return false
   const noScheme = String(value).replace(/^[^/?#\s]*:\/\//, '')
   const host = /^(?:[^@/?#]*@)?([^/?#]*)/.exec(noScheme)?.[1] ?? ''
   return /\$\{?[A-Za-z_]/.test(host)
 }
-function curlUnresolvedIn(text) {
-  const argv = shellWords(text)
-  const at = argv.findIndex((w) => w.split('/').pop() === 'curl')
-  return at !== -1 && curlHasUnresolvedDestination(argv.slice(at + 1))
+// The host part of a destination, read with ${ } nesting: a `/`, `:` or `@` inside ${u/a/b} or ${u:-https://x} is
+// part of the expansion, not of the URL. Scheme (anything up to a depth-0 `://` before the first depth-0 / ? #) and
+// userinfo (up to the last depth-0 @) dropped; the host ends at the next depth-0 / ? # (a later `://` starts with a
+// `/`, so it ends the authority too, as curl reads `http://localhost://x`). An unclosed ${ runs to the end: the whole
+// rest is the host.
+function destHostRegion(value) {
+  const s = String(value ?? '')
+  const cuts = [] // [index, char] of the depth-0 / ? # @ and `://`
+  let depth = 0
+  for (let k = 0; k < s.length; k++) {
+    if (s[k] === '$' && s[k + 1] === '{') { depth++; k++; continue }
+    if (depth) { if (s[k] === '}') depth--; continue }
+    if (s.startsWith('://', k)) { cuts.push([k, '://']); k += 2; continue }
+    if ('/?#@'.includes(s[k])) cuts.push([k, s[k]])
+  }
+  let start = 0
+  const scheme = cuts.find(([, c]) => c !== '@')
+  if (scheme?.[1] === '://') start = scheme[0] + 3
+  const end = cuts.find(([k, c]) => k >= start && c !== '@')?.[0] ?? s.length
+  const at = cuts.filter(([k, c]) => c === '@' && k >= start && k < end).pop()
+  return s.slice(at ? at[0] + 1 : start, end)
+}
+// Card f2a0f976 (Viktor 43009 LOW 2): a ${ } in a curl destination HOST that is not a plain ${NAME} -- an operator
+// the gate does not compute (${u%/}, ${u/a/b}, ${u:0:30}, ${u:+x}), an indirection ${!u}, a length ${#u}, a
+// positional ${1} -- is an unresolved destination WITH or WITHOUT an external URL literal elsewhere: a host given
+// without a scheme is no literal (`U=evil.example.com; curl ${U%/}/p` passed). After expand the simple defaults are
+// gone (computed), so what is left here was not read.
+const OPERATOR_EXPANSION = /\$\{(?![A-Za-z_][A-Za-z0-9_]*\})/
+function curlOperatorHost(value) {
+  return OPERATOR_EXPANSION.test(destHostRegion(value))
+}
+// A default form in a destination HOST over a name this command neither assigns nor loops over: expand reads it as the
+// word, but bash takes the ENVIRONMENT's value when there is one, which is as unread as a bare $NAME from the environment.
+// The fail-closed reserve (an external URL literal in the command) therefore still counts it as unresolved, as it did
+// before the defaults were computed (card f2a0f976: `curl ${DASH:-http://localhost:3420}/x; ... https://<ext>` denied).
+function unsetDefaultHost(value, env, loops) {
+  for (const m of destHostRegion(value).matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*):?[-=]/g)) {
+    if (env[m[1]] === undefined && !(m[1] in loops)) return true
+  }
+  return false
 }
 // An external URL literal anywhere in the command text (vendor-listed hosts do not count).
 function hasExternalLiteral(text, vendorHosts, vendorDomains) {
@@ -791,7 +858,7 @@ export function classify(command, depth = 0, vendorHosts = new Set(), vendorDoma
 }
 function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
   const r = readCommand(String(command ?? ''))
-  const outer = scope ?? { env: {}, loops: {}, externalLiteral: hasExternalLiteral(r.codeText, vendorHosts, vendorDomains) }
+  const outer = scope ?? { env: Object.create(null), loops: Object.create(null), externalLiteral: hasExternalLiteral(r.codeText, vendorHosts, vendorDomains) }
   const segText = (s) => r.blankCp.slice(s.start, s.end).join('')
   // This command's own assignments and loops override the enclosing ones (a substitution runs in a
   // subshell that inherits them). Collected before the inner commands are judged, so the curl in
@@ -803,7 +870,7 @@ function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
   const own = collectAssignments(r)
   const env = Object.keys(own).length ? Object.assign(Object.create(outer.env), own) : outer.env
   const ownLoops = Object.entries(collectLoops(r, env))
-  const loops = ownLoops.length ? { ...outer.loops } : outer.loops
+  const loops = ownLoops.length ? Object.assign(Object.create(null), outer.loops) : outer.loops
   for (const [v, vals] of ownLoops) loops[v] = [...(loops[v] ?? []), ...vals]
   const inners = r.frames.filter((f) => f.inner !== null).map((f) => f.inner)
   if (depth < 4) {
@@ -874,9 +941,13 @@ function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
     // Every loop reading AND the plain one: a loop variable can share its name with an assignment
     // elsewhere in the command (`for u in <local>; do ...; done; u=<external>; curl "$u"`), and a
     // loop-only reading would let the assigned value go unjudged.
-    const plain = expand(text0, env)
+    const plain = expand(text0, env, loopOrder(loops))
     const variants = loopVariants(text0, env, loops)
-    for (const text of [plain, ...(variants ?? [])]) {
+    // The two unresolved-destination reserves below read the loop readings' curl argv: noted here from the argv this
+    // walk already lexes (card f2a0f976: lexing each reading again per reserve made 64 values x 4 500 curl spans 3x
+    // slower, 3.6 s), and applied after the walk, in the order they had (an external host found in ANY reading wins).
+    let varUnresolved = false, opUnresolved = false
+    for (const [n, text] of [plain, ...(variants ?? [])].entries()) {
       const cmd = mw[i].split('/').pop()
       let target = null
       if (cmd === 'curl') target = 'curl'
@@ -897,12 +968,24 @@ function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
       const hosts = [...new Set(found)].filter((h) => !vendorHosts.has(h) && !hostInDomains(h, vendorDomains))
       if (hosts.length) return { deny: true, reason: `${target}-external`, hosts }
       if (variants === null) return { deny: true, reason: `${target}-loop-unbounded`, hosts: [] }
+      if (n > 0 && at !== -1) {
+        const args = argv.slice(at + 1)
+        if (outer.externalLiteral && !varUnresolved) varUnresolved = curlHasUnresolvedDestination(args, unresolvedHostVar)
+        if (!opUnresolved) opUnresolved = curlHasUnresolvedDestination(args, curlOperatorHost)
+      }
     }
-    // Fail-closed reserve, judged on the loop-expanded readings only: in the plain reading a loop
+    // Fail-closed reserve, judged on the loop-expanded readings only (n > 0): in the plain reading a loop
     // variable is still a $NAME, and a loop over local URLs is not an unresolved destination.
-    if (outer.externalLiteral && mw[i].split('/').pop() === 'curl' && (variants ?? []).some(curlUnresolvedIn)) {
-      return { deny: true, reason: 'curl-unresolved-destination', hosts: [] }
+    // Card f2a0f976: an operator ${ } left in a destination host denies with no external literal too
+    // (curlOperatorHost), on the same readings: every text with no loop variable in it is one loop reading as well.
+    // ...and a default form over an unassigned name, read before the defaults are computed (unsetDefaultHost): one more
+    // lexing per curl span, not per reading.
+    if (!varUnresolved && outer.externalLiteral && mw[i].split('/').pop() === 'curl') {
+      const raw = shellWords(text0)
+      const at0 = raw.findIndex((w) => w.split('/').pop() === 'curl')
+      if (at0 !== -1) varUnresolved = curlHasUnresolvedDestination(raw.slice(at0 + 1), (v) => unsetDefaultHost(v, env, loops))
     }
+    if (varUnresolved || opUnresolved) return { deny: true, reason: 'curl-unresolved-destination', hosts: [] }
   }
   // Klodel 42889 (four HIGHs of one class: a lexer misreading left problems, and the allow below let a curl
   // through that bash ran): text the lexer did not fully understand denies when its RAW text (quotes and
