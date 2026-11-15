@@ -1,6 +1,7 @@
 import { listAgentNames, readAgentCapabilities, writeAgentCapabilities, isKnownAgent } from '../agent-config.js'
 import { readBody, json } from '../http-helpers.js'
-import { sealCaller } from '../agent-config-seal.js'
+import { sealCaller, sealedWriteRefusal } from '../agent-config-seal.js'
+import { MAIN_AGENT_ID } from '../../config.js'
 import type { RouteContext } from './types.js'
 
 // GET /.well-known/fleetq
@@ -25,6 +26,8 @@ export async function tryHandleFleetQ(ctx: RouteContext): Promise<boolean> {
 
   const capMatch = path.match(/^\/api\/agents\/([^/]+)\/capabilities$/)
   if (capMatch && method === 'PUT') {
+    const sealRefusal = sealedWriteRefusal(ctx.auth, MAIN_AGENT_ID) // card ec665017
+    if (sealRefusal) { json(res, { error: sealRefusal }, 403); return true }
     const name = decodeURIComponent(capMatch[1])
     if (!isKnownAgent(name)) { json(res, { error: 'Agent nem található' }, 404); return true }
     const body = await readBody(req)

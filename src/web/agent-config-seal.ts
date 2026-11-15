@@ -15,6 +15,8 @@
 //     writeAgentClaudePlan, writeAgentCustomProvider, writeAgentCapabilities, writeAgentRemoteConfig) moves THAT field
 //     only, so a hand edit of another sealed field made before it is still reported (a whole-file re-seal would launder
 //     it); the route's caller (sealCaller: session user, or the token with its self-declared X-Agent-Id) is recorded;
+//     writeAgentModel / writeAgentModelProfile / writeAgentCustomProvider also move the derived runtimeClass. The
+//     routes that call them refuse a token caller naming a sub-agent in X-Agent-Id (sealedWriteRefusal, card ec665017);
 //   - acceptAgentConfigSeal (POST /api/agents/<name>/config-seal/accept): after a deliberate hand edit (toolDeny,
 //     runAsUser, excludeRootClaudeMd and claudeConfigDir have no dashboard writer); see mayAcceptSeal for who may;
 //   - the first spawn of an agent with no seal entry, or with no seal file at all (ENOENT): trust on first use, logged
@@ -34,17 +36,23 @@ import { join } from 'node:path'
 import { PROJECT_ROOT, STORE_DIR } from '../config.js'
 import { logger } from '../logger.js'
 import { atomicWriteFileSync } from './atomic-write.js'
-import { readRegularFileSync } from './safe-read.js'
+import { readRegularFileSync, SAFE_READ_MAX_BYTES } from './safe-read.js'
 import { safeJoin } from './sanitize.js'
 
 // The fields the launcher turns into permissions, trust, a credential or a data path: the profile template
 // (securityProfile; team.role 'leader' resolves to 'applier'), the extra deny list, the uid, the root CLAUDE.md opt-out,
 // team.trustFrom (whose messages count as a trusted peer), capabilities (email:thread-reply loosens the outbound mail
 // gate), claudeConfigDir / claudePlan / authMode (which login and subscription the agent runs on), customProvider (where
-// its traffic goes) and remoteHost / remoteWorkdir (ssh). NOT oauthTokenFile: the fleet-switch script edits it by design.
+// its traffic goes) and remoteHost / remoteWorkdir (ssh). NOT oauthTokenFile: the fleet-switch script
+// (agents/kernel/tools/seat/fleet-switch.sh) removes it from Claude agents by design.
+// runtimeClass is DERIVED, not a key of the file (card ec665017, Kernel 43251): the launcher's own split between a
+// Claude session (permissions from securityProfile / toolDeny) and any other runtime. A non-Claude agent (majsztro:
+// model openai-codex) whose model is rewritten to claude-* would start as a Claude session with the 'default' profile
+// and no toolDeny; the model itself is not sealed (claude-opus -> claude-sonnet is routine), its class is.
 export const SEALED_FIELDS = [
   'securityProfile', 'toolDeny', 'runAsUser', 'excludeRootClaudeMd', 'team',
   'capabilities', 'claudeConfigDir', 'authMode', 'customProvider', 'claudePlan', 'remoteHost', 'remoteWorkdir',
+  'runtimeClass',
 ] as const
 export type SealedField = typeof SEALED_FIELDS[number]
 export type SealedView = Record<SealedField, unknown>
@@ -69,6 +77,10 @@ export const DEFAULT_SEAL_PATHS: SealPaths = {
   get sealPath() { return join(STORE_DIR, 'agent-config-seal.json') },
 }
 
+function sha(s: string): string {
+  return createHash('sha256').update(s).digest('hex')
+}
+
 // JSON with sorted object keys, so key order in the file never reads as a change
 export function canonicalJson(v: unknown): string {
   if (Array.isArray(v)) return '[' + v.map(canonicalJson).join(',') + ']'
@@ -79,19 +91,60 @@ export function canonicalJson(v: unknown): string {
   return JSON.stringify(v === undefined ? null : v)
 }
 
+// The model id the launcher would run, from the config object. agent-config.ts registers the real resolver (aliases,
+// modelProfile) at load: this module must not import it (agent-config.ts imports this one). The default reads the
+// literal model only; every process that spawns or writes an agent loads agent-config.ts first.
+export type SealModelResolver = (config: Record<string, unknown>) => string
+const literalModel: SealModelResolver = c => (typeof c.model === 'string' ? c.model.trim() : '')
+let modelResolver: SealModelResolver = literalModel
+export function registerSealModelResolver(fn: SealModelResolver): void { modelResolver = fn }
+
+// The launcher's split (agent-process.ts: isCustom = a customProvider is set; isClaude = !isCustom && the resolved model
+// starts with claude-). openrouter-auto tiers and OpenRouter ids contain '/' and never start with claude-.
+export type RuntimeClass = 'claude' | 'custom' | 'other'
+export function runtimeClassOf(config: Record<string, unknown>): RuntimeClass {
+  const cp = config.customProvider
+  if (typeof cp === 'string' && cp.trim()) return 'custom'
+  let model = ''
+  try { model = modelResolver(config) } catch { model = literalModel(config) }
+  return model.startsWith('claude-') ? 'claude' : 'other'
+}
+
+// Card ec665017 (Viktor 43223 LOW 1): the seal kept every field's FULL value, so four agents with a 300 KB capabilities
+// list pushed the seal file over its own 1 MB read cap and every agent's seal became invalid. A value whose canonical
+// JSON is longer than FIELD_VALUE_CAP is sealed as its sha256 and length: a change is still a change, the card shows
+// the marker instead of the value (it cut the value to VALUE_CAP anyway).
+export const FIELD_VALUE_CAP = 1024
+export function storedValue(v: unknown): unknown {
+  const s = canonicalJson(v)
+  return s.length > FIELD_VALUE_CAP ? { $sha256: sha(s), length: s.length } : (v === undefined ? null : v)
+}
+
 export function sealedView(config: Record<string, unknown>): SealedView {
   const out = {} as SealedView
-  for (const f of SEALED_FIELDS) out[f] = Object.hasOwn(config, f) ? config[f] : null
+  for (const f of SEALED_FIELDS) {
+    out[f] = storedValue(f === 'runtimeClass' ? runtimeClassOf(config) : Object.hasOwn(config, f) ? config[f] : null)
+  }
   return out
+}
+
+// A stored entry as it compares today: an over-cap value written before FIELD_VALUE_CAP existed is read as its marker,
+// and a sealed field the entry does not have yet (a field added to SEALED_FIELDS after the entry was written:
+// runtimeClass) takes the current value -- trust on first use for that field, said in the warning.
+function sealedFieldsOf(fields: Record<string, unknown>, current: SealedView): { view: SealedView; adopted: SealedField[] } {
+  const view = {} as SealedView
+  const adopted: SealedField[] = []
+  for (const f of SEALED_FIELDS) {
+    if (Object.hasOwn(fields, f)) view[f] = storedValue(fields[f])
+    else { view[f] = current[f]; adopted.push(f) }
+  }
+  return { view, adopted }
 }
 
 export function viewHash(view: SealedView): string {
   return createHash('sha256').update(canonicalJson(view)).digest('hex')
 }
 
-function sha(s: string): string {
-  return createHash('sha256').update(s).digest('hex')
-}
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v)
@@ -143,11 +196,40 @@ function entryProblem(e: unknown): string | null {
   if (typeof e.by !== 'string') return 'by is not a string'
   if (e.alertedHash !== undefined && typeof e.alertedHash !== 'string') return 'alertedHash is not a string'
   if (e.alertCardId !== undefined && typeof e.alertCardId !== 'string') return 'alertCardId is not a string'
+  // the hash is of the stored fields (Viktor 43223 INFO): a hand edit of one without the other is a broken entry
+  if (e.hash !== viewHash(e.fields as SealedView)) return 'hash does not match fields'
   return null
 }
 
-function writeSealFile(p: SealPaths, f: SealFile): void {
-  atomicWriteFileSync(p.sealPath, JSON.stringify(f, null, 2) + '\n')
+// Card ec665017 (Viktor 43223 LOW 1): the seal file is read with readRegularFileSync (SAFE_READ_MAX_BYTES); a write
+// that would not read back is refused (the old file stays valid), and over SEAL_FILE_ALARM_BYTES it is written but
+// loud. FIELD_VALUE_CAP keeps an entry near 15 KB, so the alarm means about fifty agents or a hand-padded file.
+export const SEAL_FILE_ALARM_BYTES = 800_000
+// the size written, or -1 when the write was refused
+function writeSealFile(p: SealPaths, f: SealFile): number {
+  const text = JSON.stringify(f, null, 2) + '\n'
+  const bytes = Buffer.byteLength(text)
+  if (bytes > SAFE_READ_MAX_BYTES) {
+    logger.error({ bytes, cap: SAFE_READ_MAX_BYTES }, 'agent-config seal: the seal file would pass its read cap; NOT written, the previous file stays')
+    return -1
+  }
+  if (bytes > SEAL_FILE_ALARM_BYTES) {
+    logger.error({ bytes, alarm: SEAL_FILE_ALARM_BYTES, cap: SAFE_READ_MAX_BYTES }, 'agent-config seal: the seal file is near its read cap')
+  }
+  atomicWriteFileSync(p.sealPath, text)
+  return bytes
+}
+
+// One card per process when a spawn's write is refused or over the alarm size (alertInvalid's dedupe, by size band).
+function alertSize(bytes: number, p: SealPaths, deps: SealDeps): void {
+  if (bytes >= 0 && bytes <= SEAL_FILE_ALARM_BYTES) return
+  alertInvalid(`size|${p.sealPath}|${bytes < 0 ? 'refused' : 'alarm'}`,
+    `INTEGRITÁS: store/agent-config-seal.json ${bytes < 0 ? 'túllépné az olvasási plafonját, nem íródott' : 'közel az olvasási plafonjához'}`,
+    [
+      `A pecsét-fájl ${bytes < 0 ? 'új tartalma' : 'mérete'} ${bytes < 0 ? `nagyobb lenne ${SAFE_READ_MAX_BYTES} bájtnál, ezért a launcher NEM írta ki (a régi fájl érvényes maradt)` : `${bytes} bájt (riasztási küszöb ${SEAL_FILE_ALARM_BYTES}, plafon ${SAFE_READ_MAX_BYTES})`}.`,
+      'Egy mező értéke legfeljebb 1024 karakteren kerül a fájlba (fölötte sha256), tehát ez sok ágenst vagy kézzel',
+      'felduzzasztott fájlt jelent. Nézd meg, ki írta (kártya ec665017).',
+    ].join('\n'), { bytes }, deps)
 }
 
 // null: the config is missing, unsafe (a FIFO, a device, over the cap) or not a JSON object -- nothing to compare
@@ -193,8 +275,8 @@ export function describeValue(v: unknown): string {
   return `érték: ${JSON.stringify(cut)}` + (s.length > VALUE_CAP ? ` (levágva, teljes hossz ${s.length} karakter)` : '')
 }
 
-function describeChange(name: string, fields: SealedField[], sealed: SealEntry, current: SealedView): string {
-  const lines = fields.map(f => `- ${f}: elfogadott ${describeValue(sealed.fields[f])} -> most ${describeValue(current[f])}`)
+function describeChange(name: string, fields: SealedField[], sealed: SealEntry, sealedFields: SealedView, current: SealedView): string {
+  const lines = fields.map(f => `- ${f}: elfogadott ${describeValue(sealedFields[f])} -> most ${describeValue(current[f])}`)
   return [
     `A launcher a(z) ${name} indításakor eltérést mért az agent-config.json biztonsági mezőiben az utolsó elfogadott`,
     `állapothoz képest (store/agent-config-seal.json, elfogadva: ${new Date(sealed.sealedAt * 1000).toISOString()}, ${describeValue(sealed.by)}).`,
@@ -264,7 +346,7 @@ export function checkAgentConfigSeal(name: string, p: SealPaths = DEFAULT_SEAL_P
     const raw: unknown = file.agents[name]
     if (raw === undefined) {
       file.agents[name] = { hash, fields: current, sealedAt: deps.now(), by: 'first-spawn' }
-      writeSealFile(p, file)
+      alertSize(writeSealFile(p, file), p, deps)
       logger.warn({ agent: name, sealFile: read.kind === 'missing' ? 'created' : 'existing' }, 'agent-config seal: no seal for this agent yet, the current security fields are sealed (trust on first use)')
       return { status: 'first-seal' }
     }
@@ -276,22 +358,35 @@ export function checkAgentConfigSeal(name: string, p: SealPaths = DEFAULT_SEAL_P
       return { status: 'seal-invalid', scope: 'entry', reason: problem, cardId }
     }
     const entry = raw as SealEntry
+    const { view: sealedNow, adopted } = sealedFieldsOf(entry.fields, current)
+    let dirty = false
+    if (canonicalJson(sealedNow) !== canonicalJson(entry.fields)) {
+      // an entry from before FIELD_VALUE_CAP or before a new sealed field: stored in today's form (same meaning)
+      if (adopted.length) logger.warn({ agent: name, fields: adopted }, 'agent-config seal: a newly sealed field takes its current value (trust on first use for that field)')
+      entry.fields = sealedNow
+      entry.hash = viewHash(sealedNow)
+      dirty = true
+    }
     if (entry.hash === hash) {
       // back on the seal: the next departure from it is a new event and files a new card (A -> B -> A -> B)
       if (entry.alertedHash !== undefined || entry.alertCardId !== undefined) {
         delete entry.alertedHash
         delete entry.alertCardId
-        writeSealFile(p, file)
+        dirty = true
       }
+      if (dirty) alertSize(writeSealFile(p, file), p, deps)
       return { status: 'ok' }
     }
-    const fields = changedFields(entry.fields, current)
+    const fields = changedFields(sealedNow, current)
     logger.error({ agent: name, fields }, 'agent-config seal: the security fields differ from the last accepted state (not blocked; see the kanban card)')
-    if (entry.alertedHash === hash) return { status: 'changed', fields, cardId: entry.alertCardId ?? null }
+    if (entry.alertedHash === hash) {
+      if (dirty) alertSize(writeSealFile(p, file), p, deps)
+      return { status: 'changed', fields, cardId: entry.alertCardId ?? null }
+    }
     let cardId: string | null = null
     try {
       cardId = deps.fileCard(`INTEGRITÁS: ${name} agent-config.json biztonsági mezője megváltozott (${fields.join(', ')})`,
-        describeChange(name, fields, entry, current))
+        describeChange(name, fields, entry, sealedNow, current))
     } catch (err) {
       logger.error({ agent: name, err }, 'agent-config seal: filing the kanban card failed')
     }
@@ -299,8 +394,9 @@ export function checkAgentConfigSeal(name: string, p: SealPaths = DEFAULT_SEAL_P
     if (cardId) {
       entry.alertedHash = hash
       entry.alertCardId = cardId
-      writeSealFile(p, file)
+      dirty = true
     }
+    if (dirty) alertSize(writeSealFile(p, file), p, deps)
     return { status: 'changed', fields, cardId }
   } catch (err) {
     logger.error({ agent: name, err }, 'agent-config seal: the check failed (the agent starts anyway)')
@@ -333,6 +429,22 @@ export function mayAcceptSeal(auth: SealCallerAuth | undefined | null, mainAgent
   return auth.kind === 'token' && !!auth.agent && auth.agent === mainAgentId
 }
 
+// Card ec665017 (Viktor 43223 point 2): who may call a route that writes a sealed field (security, team, remote,
+// capabilities, customProvider / authMode / claudePlan, a model change across the runtime class, a sub-agent's plan
+// rotation, a new agent's profile). Viktor proposed "a dashboard session or the main agent's X-Agent-Id" and asked to
+// measure the callers first. Measured 2026-11-15: auth_sessions has 0 rows, the dashboard UI runs in token mode and
+// sends the token WITHOUT an X-Agent-Id (web/app.js), and no script or agent tool calls these routes. So the refusal is
+// narrower: the shared token with the X-Agent-Id of any agent other than the main one (the target itself included) is
+// refused, 403. Said plainly: the header is self-declared, a caller that omits it passes like the dashboard UI does and
+// is recorded as 'token' (sealCaller); this keeps an honest sub-agent from moving its own or a colleague's seal, it is
+// not authentication.
+export function sealedWriteRefusal(auth: SealCallerAuth | undefined | null, mainAgentId: string): string | null {
+  if (auth?.kind === 'token' && auth.agent && auth.agent !== mainAgentId) {
+    return `A sealed agent-config field (card 17901b47) is written by the dashboard or the main agent, not by ${auth.agent.slice(0, 64)}; ask the main agent.`
+  }
+  return null
+}
+
 export type SealAccept =
   | { ok: true; entry: SealEntry }
   | { ok: false; reason: 'no-config' | 'seal-invalid' }
@@ -353,8 +465,8 @@ export function acceptAgentConfigSeal(name: string, by: string, p: SealPaths = D
   const prev = raw !== undefined && entryProblem(raw) === null ? raw as SealEntry : undefined
   const entry: SealEntry = { hash: viewHash(current), fields: current, sealedAt: deps.now(), by }
   file.agents[name] = entry
-  writeSealFile(p, file)
-  logger.warn({ agent: name, by, fields: prev ? changedFields(prev.fields, current) : SEALED_FIELDS, replacedMalformed: raw !== undefined && !prev }, 'agent-config seal: accepted')
+  if (writeSealFile(p, file) < 0) return { ok: false, reason: 'seal-invalid' } // over the read cap: the old file stays
+  logger.warn({ agent: name, by, fields: prev ? changedFields(sealedFieldsOf(prev.fields, current).view, current) : SEALED_FIELDS, replacedMalformed: raw !== undefined && !prev }, 'agent-config seal: accepted')
   if (prev?.alertCardId && prev.alertedHash === entry.hash) {
     try { deps.comment(prev.alertCardId, by, `Elfogadva (POST config-seal/accept, ${by}).`) } catch { /* the seal is moved either way */ }
   }
@@ -379,7 +491,7 @@ export function sealDashboardWrite(name: string, field: SealedField, value: unkn
     }
     const entry = raw as SealEntry
     // as the file will read it back: JSON drops an undefined member, which would otherwise read as a change
-    const stored = value === undefined ? null : JSON.parse(JSON.stringify(value))
+    const stored = storedValue(value === undefined ? null : JSON.parse(JSON.stringify(value)))
     entry.fields = { ...entry.fields, [field]: stored }
     entry.hash = viewHash(entry.fields)
     entry.sealedAt = now()
@@ -401,6 +513,7 @@ export function agentConfigSealStatus(name: string, p: SealPaths = DEFAULT_SEAL_
   const entry = raw as SealEntry
   const config = readConfigObject(name, p)
   if (!config) return { sealed: true, matches: null, changed: [], sealedAt: entry.sealedAt, by: entry.by, invalid: null }
-  const changed = changedFields(entry.fields, sealedView(config))
+  const current = sealedView(config)
+  const changed = changedFields(sealedFieldsOf(entry.fields, current).view, current)
   return { sealed: true, matches: changed.length === 0, changed, sealedAt: entry.sealedAt, by: entry.by, invalid: null }
 }
