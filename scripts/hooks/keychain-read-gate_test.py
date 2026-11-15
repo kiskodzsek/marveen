@@ -801,6 +801,10 @@ def script_cases():
             ("python3 - <<'PY'\nimport os\nos.system(\"repeat 1 (./measure.py)\")\nPY", d),
             ("perl - <<'PL'\nsystem(\"while (./measure.py); do break; done\");\nPL", d),
             ("python3 - <<'PY'\nimport os\nos.system(\"\"\"\n (./measure.py)\"\"\")\nPY", d),
+            # mutations r14 / r15: python turns \n into a line break (the "(" then starts a line), and time -p runs
+            # the subshell (both measured: /bin/sh ran it)
+            ("python3 - <<'PY'\nimport os\nos.system(\"true\\n (./measure.py)\")\nPY", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"time -p (./measure.py)\")\nPY", d),
             # Viktor 43324 LELET 1: expand() reads any VAR=value in the text; the real $X may be empty (a comment, an
             # echo argument, unset, an env prefix), and then python3 runs the next word: a text with an expanded
             # variable keeps the old walk
@@ -814,6 +818,10 @@ def script_cases():
             ('pushd ' + d + ' >/dev/null; bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
             ('cd $(echo ' + d + '); bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
             ('env -C ' + d + ' bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
+            # mutation r2: the expanded text reads `bash scripts/agent-msg.sh .../measure.py`, but the real $X is empty
+            # (an env prefix is not this shell's, unset drops it): bash runs measure.py, so the old walk judges it
+            ('X=scripts/agent-msg.sh bash $X ' + d + '/measure.py', AM_ROOT),
+            ('X=scripts/agent-msg.sh; unset X; bash $X ' + d + '/measure.py', AM_ROOT),
             ("perl - <<'PL'\nqx(./measure.py);\nPL", d),
             ("ruby - <<'RB'\n%x(./measure.py)\nRB", d),
             ("bash <<'SH'\necho a (./measure.py)\nSH", d),  # a shell body: unchanged
@@ -1217,6 +1225,9 @@ def script_cases():
             # card 31045f4d (B, Pulzus 43167): prose in a python / node heredoc string
             ("python3 -I - <<'PY'\nr = ('" + prose + "')\nprint(r)\nPY", d),
             ("node - <<'JS'\nconsole.log('" + prose + "')\nJS", d),
+            # mutation r12: a "(" at a line start with no word before it (a tuple on a continuation line) is read
+            # quietly, not as an error
+            ("python3 - <<'PY'\nrows = [\n (1, 2),\n]\nprint(rows)\nPY", d),
             # card 31045f4d (C, Klodel 43233): the fleet's curl and agent-msg forms
             (cf_curl + "<<'JSON'\n{\"content\":\"" + prose + "\"}\nJSON", d),
             ('T="Authorization: Bearer $(cat store/.dashboard-token)"\n' + cf_curl.replace(
