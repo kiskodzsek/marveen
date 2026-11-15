@@ -1228,6 +1228,15 @@ describe('preCheck walk: launchers, embedded code, parsed imports (Viktor 42514)
     ['loader access', 'a forward alias chain with a computed key (each link waits for the one before)', "import importlib\nN = 'import_module'\na = importlib\nb = a\nc = b\nc.__dict__[N]('localmod')"],
     ['loader access', 'a name bound to two modules, the second gives importlib.util', "import importlib, builtins\nm = importlib\nm = builtins\nu = m.util\nN = 'spec_from_file_location'\nu.__dict__[N]"],
     ['loader access', 'the same, the other order', "import importlib, builtins\nm = builtins\nm = importlib\nu = m.util\nN = 'spec_from_file_location'\nu.__dict__[N]"],
+    // Viktor 42652 LOW 1 (Kernel, card 8a61b6a1): a copy of a name bound to two modules inherits both, not only the
+    // alphabetically first (d26 got through: builtins < importlib, so y = m carried only builtins)
+    ['loader access', 'd26: a copy of a name bound to importlib then builtins', "import importlib, builtins\nm = importlib\nm = builtins\ny = m\nz = y.util\nN = 'import_module'\nz.__dict__[N]('localmod')"],
+    ['loader access', 'd25: the same, the other order', "import importlib, builtins\nm = builtins\nm = importlib\ny = m\nz = y.util\nN = 'import_module'\nz.__dict__[N]('localmod')"],
+    // INFO 1 (a): the copy used directly, so a last-writer binding (y = {builtins} only) would miss it
+    ['loader access', 'd25 used directly: y = m keeps importlib after m = builtins is walked last', "import importlib, builtins\nm = builtins\nm = importlib\ny = m\nN = 'import_module'\ny.util.__dict__[N]('localmod')"],
+    // INFO 1 (b): a copy after a multi-target assignment, both orders
+    ['loader access', 'd29: m = n = importlib, then w = n', "import importlib\nm = n = importlib\nw = n\nN = 'import_module'\nw.__dict__[N]('localmod')"],
+    ['loader access', 'd30: w = n before m = n = importlib', "import importlib\nN = 'import_module'\ndef f():\n    return w.__dict__[N]('localmod')\nw = n\nm = n = importlib\nf()"],
     ['loader module value', 'y28: an alias in a class body', "import importlib\nclass C:\n    m = importlib\nC.m.__dict__['import_module']('localmod')"],
     ['loader key', "y28: a loader key on any __dict__", "class C:\n    pass\nC.__dict__['exec']"],
     // Viktor 42641 INFO 2 (M30): the namespace dict's __builtins__ key is never a plain key

@@ -248,6 +248,14 @@ def main():
             if r in MODS:
                 return r
         return None
+    def mods_of(x):
+        if isinstance(x, ast.Subscript) and dotted(x.value) == 'sys.modules':
+            return [lit(x.slice)] if lit(x.slice) in MODS else []
+        d = dotted(x)
+        if d is None:
+            return []
+        head, _, rest = d.partition('.')
+        return sorted(r for r in ([b + ('.' + rest if rest else '') for b in bound[head]] if head in bound else [d]) if r in MODS)
     def is_mod(x):
         return mod_of(x) is not None
     # m = importlib: a plain name for the module is one more binding, not a hand-off (the q14 case)
@@ -263,13 +271,11 @@ def main():
     work = list(aliasing)
     while work:
         a = work.pop()
-        m = mod_of(a.value)
-        if m is None:
-            continue
-        for t in a.targets:
-            if m not in bound.get(t.id, ()):
-                bound.setdefault(t.id, set()).add(m)
-                work.extend(waiting.get(t.id, ()))
+        for m in mods_of(a.value):
+            for t in a.targets:
+                if m not in bound.get(t.id, ()):
+                    bound.setdefault(t.id, set()).add(m)
+                    work.extend(waiting.get(t.id, ()))
     def names_loader(v):
         return v is None or any(part in CANON or part in ('__dict__', '__getattribute__') for part in v.split('.'))
     for n in ast.walk(tree):
