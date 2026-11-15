@@ -22,9 +22,12 @@ $TMUX (measured). So:
 
 Read through the shared lexer (scripts/lib/shell_lex.py, card fae0712e): quotes, $( ), backticks, ;, &&, |, and
 heredoc bodies are separated the way bash does. Followed: VAR=value prefixes, a redirection before the command word
-(>/dev/null tmux ..., quoted >"/tmp/x" and {fd}>f too), function definitions (function f { ...; f() { ...), coproc,
+(>/dev/null tmux ..., quoted >"/tmp/x" and {fd}>f too) and among tmux's arguments (tmux kill-session -t >x agent-dave,
+... | xargs tmux kill-session -t 2>/dev/null: read once as written and once without the redirections), >| (clobber;
+the shared lexer cuts at its '|', so it is read as > here), function definitions (function f { ...; f() { ...), coproc,
 compound-command keywords (if/then/elif/else/while/until/do/{/!, case patterns), env (-S, -S'...', -iS clusters,
---split-string=)/command/exec/nohup/nice/time/sudo/timeout/xargs/caffeinate/setsid/arch/sandbox-exec/stdbuf/screen/
+--split-string=, a value letter closing a cluster: -iu X, -iC dir)/command/exec/nohup/nice/time/sudo/timeout/xargs/
+caffeinate/setsid/arch/sandbox-exec/stdbuf/screen/
 script wrappers (getopt-style values: screen -dmS x, stdbuf -oL, script -qt 0), find -exec/-execdir/-ok/-okdir,
 sh/bash/zsh -c payloads, eval, a heredoc, a here-string or a pipe fed to a shell (also cat <<EOF | sh: the producer's
 heredoc), xargs tmux (the fed words appended or put in place of the -I/-J string; with no pipe in front, the input
@@ -41,13 +44,25 @@ Interpreter code (the 16:45 incident itself: cat > probe.mts <<'EOF' ... execFil
 -e/-c payload that names tmux AND a kill subcommand as literals, and no '-L'/'-S' literal between the kill word and
 the nearest tmux literal before it (per call: one isolated call does not clear a live one, Viktor 43205 LOW 4) ->
 BLOCK. A text match, not a parser: a probe of the gate itself fed through `python3 - <<EOF` is blocked too (use a
-file).
+file). In the same bodies, the string literal right after a shell-running call (system( / popen( / run( / exec( /
+execSync( / spawn(, perl/ruby system "...") is read as a command line, like an sh -c payload: os.system('>x tmux
+kill-server'); a string anywhere else (an assignment, a JSON field, prose) is not.
 
 NOT MODELLED (an ACCIDENT guard, not a boundary: same uid): a script file written in an EARLIER command and run
 later, or one that builds the tmux arguments at run time; the tmux library of an interpreter; kill <pid> of the
 server; a value built at run time and passed as the command word ($T kill-server is blocked only because the
 subcommand is literal); awk system(), ssh, GNU parallel (not installed on the fleet machine, 2026-11-15), and other
-programs that run a command string; xargs tmux whose subcommand itself comes from the input; tmux source-file; a tmux
+programs that run a command string; xargs tmux whose subcommand itself comes from the input; a perl/ruby
+command string in backticks, qx() or %x() (not after a call), a literal split across lines or longer than 4000
+characters, a command string held in a variable before the call (cmd = '>x tmux kill-server'; os.system(cmd)), a
+prefixed literal (r'...', f'...', b'...'), a triple-quoted one, a keyword argument (os.system(command='...'),
+subprocess.run(args='...', shell=True)), an argv list handed to a shell (['sh', '-c', '>x tmux kill-server']),
+os.execl and the like, two literals joined, an escaped character (\\x2d) or a literal in parentheses or str(...),
+perl q()/qq() and ruby %q(). Perl q()/qq() and ruby %q() are not caught at all, plain or prefixed (system(q(tmux
+kill-server)) passes, Viktor 43373); the other shapes only with a redirection or wrapper prefix: a plain
+'tmux kill-server' literal is caught by the interpreter check above. None of these shapes occurred in Viktor's
+14-day replay (43364);
+tmux source-file; a tmux
 config or hook set up outside the command; more than 64 nested wrappers raise (blocked through main() when tmux or
 kill is named). Known false positive: a loop variable as a target (for s in klodel-worker ...; tmux respawn-pane -k
 -t $s) is read as live (Viktor 43177 replay, 1 in 14 days); since klodel-* is protected, the literal names are
@@ -137,6 +152,15 @@ def code_kills_live_tmux(body):
     return False
 
 
+# a single-, double- or backtick-quoted string literal in interpreter code (one line, at most 4000 characters; the
+# alternation is unambiguous, so a failed attempt ends at the line end or the cap, no backtracking blow-up)
+STR_LIT_RX = re.compile(r"""'((?:[^'\\\n]|\\.){1,4000})'|"((?:[^"\\\n]|\\.){1,4000})"|`((?:[^`\\\n]|\\.){1,4000})`""")
+MAX_LITERALS = 2000
+# a call that hands its string argument to a shell: os.system / os.popen / subprocess.run|call|check_output|Popen
+# (with shell=True), subprocess.getoutput, child_process.exec|execSync|spawn, perl/ruby system|exec (with or without
+# parentheses); the literal must follow it directly
+SHELL_CALL_RX = re.compile(r'(?:\b(?:system|popen|getoutput|getstatusoutput|run|call|check_call|check_output|Popen|'
+                           r'exec|execSync|spawn|spawnSync)\s*\(\s*|\b(?:system|exec)\s+)$')
 KILL_WORD_RX = re.compile(r'\b(kill-(se(r(v(er?)?)?)?|session|window|pane)|killp|killw)\b')
 
 
@@ -450,6 +474,11 @@ def strip_wrappers(words):
                     break
                 if t in ('-u', '-P', '-C'):
                     i += 2
+                elif t.startswith('-') and not t.startswith('--') and len(t) > 2 and any(ch in 'uPC' for ch in t[1:]):
+                    # a cluster whose FIRST value letter is its last letter takes the next word (env -iu X tmux
+                    # kill-server, -iC /tmp, -vu X, -0u X; Viktor 43329 LOW 2); -iuX and -ui X carry the value glued
+                    first = next(j for j in range(1, len(t)) if t[j] in 'uPC')
+                    i += 2 if first == len(t) - 1 else 1
                 elif t.startswith('-') or ASSIGN_RX.match(t):
                     i += 1
                 else:
@@ -508,7 +537,15 @@ def segment_reasons(words, depth):
     name = os.path.basename(head['text'])
     rest = words[1:]
     if name == 'tmux' and not dynamic(head):
-        return tmux_reasons(rest, depth)
+        # bash removes a redirection from the arguments wherever it stands (tmux kill-session -t >x agent-dave, and
+        # ... | xargs tmux kill-session -t 2>/dev/null read 2>/dev/null as the target; Viktor 43329 LOW 1). The
+        # arguments are read as written AND without the redirections: only stricter, and a quoted argument that
+        # looks like one ('>x; tmux kill-server' for send-keys) is still read as shell text in the first pass
+        out = tmux_reasons(rest, depth)
+        bare = _drop_redirs(rest)
+        if len(bare) != len(rest):
+            out += tmux_reasons(bare, depth)
+        return out
     if name in SHELLS:
         out = []
         for k, w in enumerate(rest):
@@ -577,9 +614,25 @@ def piped_into_runner(text, lx, segwords, idx):
                 os.path.basename(sw[0]['text']) in SHELLS | {'tmux'})
 
 
+def _drop_redirs(ws):
+    """ws without its redirection words (>x, 2>/dev/null, {fd}>f, > x with its target): a redirection is not an
+    argument (Viktor 43329 LOW 1, his proposal)."""
+    out, k = [], 0
+    while k < len(ws):
+        m = REDIR_RX.match(ws[k]['text'])
+        if m:
+            k += 1 if m.group(3) else 2
+            continue
+        out.append(ws[k])
+        k += 1
+    return out
+
+
 def xargs_tmux(ws):
     """(the words from tmux on, the segment's own xargs replace strings) when the segment is `xargs ... tmux ...`
-    (after VAR= prefixes), else ([], set()). The replace strings go to a fresh set: the caller's level is untouched."""
+    (after VAR= prefixes), else ([], set()). The replace strings go to a fresh set: the caller's level is untouched.
+    A redirection anywhere (>x xargs tmux kill-session -t < names, ... -t 2>/dev/null) is handled where the tmux
+    words are read: segment_reasons reads them once more without the redirections (Viktor 43329 LOW 1)."""
     raw = [w for w in ws if not (ASSIGN_RX.match(w['text']) and not w['quoted'])]
     if not raw or os.path.basename(raw[0]['text']) != 'xargs':
         return [], set()
@@ -601,6 +654,17 @@ def decide_text(text, depth=0):
         return ['command too long to read'] if 'tmux' in text else []
     L = lexer()
     lx = L.lex(text)
+    # >| (clobber) is ONE redirection operator, but the shared lexer cuts a segment at its '|' (>|x tmux kill-server
+    # passed; Viktor 43329 LOW 3). An unquoted '|' right after an unquoted '>' is replaced by a space (same length, so
+    # every offset holds) and the text is lexed again: >|x reads as > x.
+    clob = [p for p in range(1, len(text)) if text[p] == '|' and text[p - 1] == '>' and lx['cls'][p] == 'c'
+            and lx['cls'][p - 1] == 'c']
+    if clob:
+        chars = list(text)
+        for p in clob:
+            chars[p] = ' '
+        text = ''.join(chars)
+        lx = L.lex(text)
     reasons = []
     segwords = [L.words(text, lx, seg) for seg in lx['segments']]
     assigns = dict(_ASSIGNS[-1])
@@ -643,15 +707,7 @@ def decide_text(text, depth=0):
                 # words are dropped, and a run-time word stands for what xargs appends
                 sw, own = xargs_tmux(ws)
                 if sw:
-                    keep, k = [], 0
-                    while k < len(sw):
-                        m = REDIR_RX.match(sw[k]['text'])
-                        if m:
-                            k += 1 if m.group(3) else 2
-                            continue
-                        keep.append(sw[k]['text'])
-                        k += 1
-                    line = ' '.join(keep)
+                    line = ' '.join(w['text'] for w in _drop_redirs(sw))
                     if not any(ph and ph in line for ph in own):
                         line += ' $__XARGS_INPUT'
                     _PLACEHOLDERS.append(set(own))
@@ -678,6 +734,17 @@ def decide_text(text, depth=0):
             if code_kills_live_tmux(b):
                 reasons.append('interpreter code calls tmux with a kill subcommand and no -L/-S socket')
                 break
+        # the string a shell-running call gets (os.system('>x tmux kill-server'), execSync('script -F p tmux
+        # kill-server'), system("coproc tmux kill-server")) is read as a command line, like an sh -c payload (Viktor
+        # 43329 LOW 4). Only right after such a call: prose in an assignment or a JSON field (line = '... a parancs
+        # (tmux kill-server) fut ...', a hibanapló line, 2026-11-15 20:52 in the replay) is not a command.
+        for b in bodies:
+            for k, m in enumerate(STR_LIT_RX.finditer(b)):
+                if k >= MAX_LITERALS:
+                    break
+                lit = next(x for x in m.groups() if x is not None)
+                if 'tmux' in lit and SHELL_CALL_RX.search(b[max(0, m.start() - 40):m.start()]):
+                    reasons += decide_text(unescape(lit.replace('\\"', '"').replace("\\'", "'")), depth + 1)
     # a heredoc body fed to a shell runs as commands
     for h in lx['heredocs']:
         owner = next((sg for sg in lx['segments'] if sg['start'] <= h['op'] < sg['end']), None)
