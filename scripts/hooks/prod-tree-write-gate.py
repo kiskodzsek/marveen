@@ -18,7 +18,8 @@ protected path). No environment variable is read (an agent can set env in its ow
 
 PROTECTED (case-insensitive: APFS is, realpath does not fold case; K1): <prod>/scripts, <prod>/src, <prod>/.claude
 (the directories and everything under them), and the files <prod>/CLAUDE.md, .mcp.json, package.json,
-package-lock.json, store/autonomy-config.json (Klodel 42812). The firmlinked /System/Volumes/Data<prod> form counts.
+package-lock.json, store/autonomy-config.json (Klodel 42812), store/agent-config-seal.json (Viktor 43196 M1: the seal
+of the agent configs; the dashboard writes it in-process, not through a hook). The firmlinked /System/Volumes/Data<prod> form counts.
 A path is checked both normalised and realpath-resolved (symlinks, `..`); either form protected = protected.
 AGENT CONFIG (card 17901b47): <prod>/agents/<any>/agent-config.json (securityProfile, toolDeny: read by the launcher at
 every spawn), agents/<any>/.claude/settings.json and agents/<any>/.claude-config/settings.json (hooks, permissions:
@@ -39,6 +40,15 @@ WHAT IS DENIED for a sub-agent:
     chown/chgrp/chflags/truncate/shred/mkfifo, sed -i/perl -i files, dd of=, curl -o/wget -O, find -delete/-exec;
     for the destructive ones (rm, rmdir, mv, chmod, chown, chgrp, chflags, find) an ANCESTOR of the protected tree
     (the prod root itself) counts too. A glob or a partly unknown target is checked by its literal directory prefix.
+  - Bash, a find with a writer (-delete, -exec/-execdir/-ok/-okdir sed -i, tee, cp, mv, rm, truncate, ...) started
+    at agents/, agents/<n> or its .claude / .claude-config (Viktor 43196 L3): deny unless its -name/-iname/-path/
+    -type tests (no -o, !, -not, `,`; names case-insensitive, APFS) exclude every agent config file below the start
+    (`find . -name "*.pyc" -delete`
+    in a home stays free; a destructive -exec also counts the home and its config directories, the start included).
+  - Bash, directory writers (Viktor 43196 L4): rsync, cp/gcp/scp -r/-R/-a, ditto, tar -x (-C or the cwd), unzip (-d
+    or the cwd) whose effective target directory (the destination for a contents copy `src/`, `src/.`, ditto, an
+    unresolved source, or a missing destination; else destination/basename(source)) is agents/, an agent home or its
+    .claude / .claude-config, or the prod root: they can drop an agent-config.json without naming it.
   - Bash: git commands that write the production work tree (K3): checkout, switch, restore, reset, stash (not list/
     show), apply (not --check/--stat), am, cherry-pick, revert, merge, pull, rebase, clean (not -n), mv, rm,
     read-tree -u, checkout-index, submodule update/deinit, worktree remove/move of the prod tree; the target repo is
@@ -65,7 +75,16 @@ WHAT IS DENIED for a sub-agent:
   git format-patch -o, git merge-file; xargs fed from a variable or a pipe; while-read loops; a command piped to a
   shell (`echo cmd | bash`) and `source <(...)`; interpreters (-c/-e) and script files run by a shell. Only the
   raw-text rule can catch these, when the target is not resolved by the gate.
-  Values the gate tracks inside one command: literal and prefix-known assignments (X=lit, B=dir/m-$(date)),
+  Not resolved: a cp/mv/ln of a glob or variable source WITHOUT -r into a home (`cp /tmp/e/* agents/x/`: the file
+  names are unknown; the recursive forms and rsync are counted as directory writers above).
+  Not modelled either (Viktor 43196 INFO 5): the in-place editors awk -i inplace, plutil -replace/-insert/-remove
+  (it rewrites the JSON), ed, ex/vim -es, and osascript `do shell script`.
+  Out of reach of a path gate (Viktor 43196 INFO 6): a symlink created in the same command (`ln -s agents/x l &&
+  echo > l/agent-config.json`: realpath cannot see it yet; one that already exists is resolved), and a hardlink
+  (`ln agents/x/agent-config.json /tmp/h`, a later write to /tmp/h: the same inode under an unprotected name).
+  Values the gate tracks inside one command: literal and prefix-known assignments (X=lit, B=dir/m-$(date); a
+  relative value counts joined with the cwd at the start of a word and as its own text in the middle of one:
+  `N=dave; echo > agents/$N/agent-config.json`, Viktor 43196 L2),
   $(mktemp), $(pwd), $(dirname X), ${X%pat}, $(git [-C d] rev-parse --show-toplevel [2>/dev/null]) = the
   repository root of that directory, $(echo LIT), $(printf %s LIT), for-loop word lists, repos created by
   worktree add / clone / init.
@@ -97,7 +116,7 @@ normal permission flow continues; the gate never grants a permission). Python 3.
 """
 import sys
 try:
-    import hashlib, json, os, pwd, re, signal, time
+    import fnmatch, hashlib, json, os, pwd, re, signal, time
 except BaseException:  # nothing to log with: let the call through, say why on stderr
     sys.stderr.write('prod-tree-write-gate: python stdlib unavailable, allowing\n')
     sys.exit(0)
@@ -107,7 +126,8 @@ except BaseException:  # nothing to log with: let the call through, say why on s
 PROD = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(os.path.abspath(__file__)))))
 LOG_DIR = os.path.join(PROD, 'store', 'prod-tree-write-gate')
 PROTECTED_DIRS = ('scripts', 'src', '.claude')
-PROTECTED_FILES = ('CLAUDE.md', '.mcp.json', 'package.json', 'package-lock.json', 'store/autonomy-config.json')
+PROTECTED_FILES = ('CLAUDE.md', '.mcp.json', 'package.json', 'package-lock.json', 'store/autonomy-config.json',
+                   'store/agent-config-seal.json')   # the seal of the agent configs (Viktor 43196 MEDIUM 1)
 # <prod>/agents/<any>/...: the launcher reads these at every spawn, the dashboard writes them (card 17901b47)
 AGENT_FILES = ('agent-config.json', '.claude/settings.json', '.claude-config/settings.json')
 AGENT_OTHER_FILES = ('.claude/settings.local.json',)     # another agent's only: the caller's own stays writable
@@ -122,7 +142,8 @@ MAX_PATH = 4096
 LOG_INPUT = 200
 # What to do instead (Klodel 42825 (1)): every deny says it, so a night-time deploy does not stop without a word.
 DENY_HINT = ('a prod-fába (%s: scripts/, src/, .claude/ és a gyökér CLAUDE.md, .mcp.json, package*.json, '
-             'store/autonomy-config.json; agents/*/agent-config.json, .claude/settings.json, '
+             'store/autonomy-config.json, store/agent-config-seal.json; agents/*/agent-config.json, '
+             '.claude/settings.json, '
              '.claude-config/settings.json, más ágens .claude/settings.local.json-ja) sub-ágens nem ír. TEENDŐ: '
              'worktree + PR (scripts/worktree-add.sh); ágens-konfigot a dashboard ír, a saját '
              '.claude/settings.local.json szabad; ha a prod-fán tényleg kell, üzenj Klodelnek a pontos paranccsal')
@@ -229,6 +250,40 @@ class Prod(object):
                 if any(pat.fullmatch(c[len(pre):]) for c in cands if c.startswith(pre)):
                     return True
         return False
+
+    def cfg_below(self, path, dirs):
+        """path: a directory of kind cfg_ancestor (a find start) -> [(path relative to it, 'f' | 'd')]: the agent config
+        files below it, and (dirs) the agent homes / their .claude, .claude-config below it, the start itself as ''."""
+        out = []
+        for d in set((fold(path), fold(os.path.realpath(path)))):
+            if self.kind_of(d) != 'cfg_ancestor':
+                continue
+            if d == self.agents:
+                if self.names is None:
+                    try:
+                        self.names = [n.casefold() for n in sorted(os.listdir(os.path.join(self.root, 'agents')))[:500]]
+                    except OSError:
+                        self.names = []
+                names, below = self.names, None
+            else:
+                name, _, below = d[len(self.agents) + 1:].partition('/')
+                names = [name]
+            for n in names:
+                cands = [(n + '/' + r, 'f') for r in AGENT_FILES]
+                cands += [(n + '/' + r, 'f') for r in AGENT_OTHER_FILES if n != self.caller]
+                if dirs:
+                    cands += [(n, 'd')] + [(n + '/' + r, 'd') for r in AGENT_DIRS]
+                pre = '' if below is None else n + ('/' + below if below else '')
+                for c, t in cands:
+                    if not pre:
+                        out.append((c, t))
+                    elif c == pre:
+                        out.append(('', t))
+                    elif c.startswith(pre + '/'):
+                        out.append((c[len(pre) + 1:], t))
+            if dirs and d == self.agents:
+                out.append(('', 'd'))
+        return out
 
     def classify(self, path):
         """absolute path -> the strictest kind of its normalised and its realpath form."""
@@ -602,6 +657,12 @@ LAST_ARG = frozenset(['cp', 'gcp', 'ln', 'gln', 'install', 'ginstall', 'rsync', 
 OPT_WITH_ARG = {'cp': 'St', 'gcp': 'St', 'ln': 'St', 'gln': 'St', 'install': 'mogSt', 'ginstall': 'mogSt',
                 'mkdir': 'm', 'gmkdir': 'm', 'truncate': 'sr', 'touch': 'rtdA', 'gtouch': 'rtdA', 'rsync': 'eTf',
                 'scp': 'cFiJloPS', 'mv': 'St', 'gmv': 'St', 'patch': 'iodrDBFVYzg'}
+FIND_EXEC = ('-exec', '-execdir', '-ok', '-okdir')
+FIND_MAX_TESTS = 256       # more find tests: they exclude nothing (deny under an agent home)
+FIND_BUDGET = 200000       # test evaluations per command, then fail-closed
+# matched case-insensitively, -name too: APFS folds case, an Agent-Config.JSON on disk is the launcher's file (K1)
+FIND_NAME = ('-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename')
+TREE_COPY = frozenset(['cp', 'gcp', 'scp', 'rsync', 'ditto'])    # recursive: a directory writer (Viktor 43196 L4)
 PKG = frozenset(['npm', 'pnpm', 'yarn', 'bun', 'npx'])
 PKG_WRITE = frozenset(['install', 'i', 'ci', 'uninstall', 'un', 'remove', 'rm', 'update', 'up', 'upgrade', 'add',
                        'dedupe', 'prune', 'link', 'audit', 'rebuild', 'init', 'version'])
@@ -619,6 +680,10 @@ class State(object):
         self.cwd = cwd            # absolute str, or None = unknown
         self.home = home
         self.vars = {'TMPDIR': '/private/tmp/prod-tree-write-gate-tmpdir'}   # a placeholder, not prod
+        # a variable whose assigned text was relative: vars holds it joined with the cwd (right at the start of a
+        # word), this the text itself (mid-word: agents/$N/...; None = not literal, unresolved there; Viktor 43196 L2)
+        self.relvals = {}
+        self.joined = False       # the last word_path joined a relative text with the cwd
         self.loops = {}           # for-loop variable -> the listed words
         self.new_repos = []       # paths a `git worktree add` / `git clone` / `git init` in this command creates
         self.deny = []            # reasons
@@ -628,6 +693,8 @@ class State(object):
         self.rest = []            # the unknown parts of the last 'dir' word_path result
         self.prod_cwd = False     # a cd / pushd / git -C in this command went to the prod root or a protected dir
         self.exec_raw = []        # executed command / script words: not a write mention for the raw-text rule
+        self.find_seen = set()    # (cwd, find start word) already checked against the agent config files
+        self.find_budget = FIND_BUDGET
 
 
 def word_path(w, st, cwd=None):
@@ -653,6 +720,13 @@ def word_path(w, st, cwd=None):
             acc += st.home
         elif k == 'var' and t == 'PWD' and cwd:
             acc += cwd
+        elif k == 'var' and acc and t in st.relvals:
+            # mid-word: the assigned relative text, not its cwd-joined form (`N=dave; echo > agents/$N/x` gave
+            # agents//<cwd>/dave/x; Viktor 43196 L2); a non-literal one is unresolved here
+            if st.relvals[t] is None:
+                rest = w.parts[idx:]
+                break
+            acc += st.relvals[t]
         elif k == 'var' and isinstance(st.vars.get(t), str):
             acc += st.vars[t]
         elif k == 'var' and isinstance(st.vars.get(t), tuple):
@@ -671,6 +745,7 @@ def word_path(w, st, cwd=None):
             break
     st.partial = ''
     st.rest = rest or []
+    st.joined = False
     if rest is None:
         if acc == '':
             return ('unknown', None)
@@ -678,6 +753,7 @@ def word_path(w, st, cwd=None):
             if cwd is None:
                 return ('unknown', None)
             acc = os.path.join(cwd, acc)
+            st.joined = True
         return ('path', acc)
     if any(k == 'lit' and '..' in t for k, t in rest):
         return ('unknown', None)
@@ -693,6 +769,7 @@ def word_path(w, st, cwd=None):
         if cwd is None:
             return ('unknown', None)
         d = os.path.normpath(os.path.join(cwd, d))
+        st.joined = True
     return ('dir', d)
 
 
@@ -831,7 +908,7 @@ def check_target_one(w, st, destructive=False, what='írás'):
                 st.unknown.append(w.raw[:120])
                 return
             try:
-                hit = st.prod.agent_reach(p, rp[0], destructive is True)
+                hit = st.prod.agent_reach(p, rp[0], destructive in (True, 'tree'))
             except ResolveError as e:
                 st.errors.append('útfeloldás (%s): %s' % (e, w.raw[:80]))
                 return
@@ -840,8 +917,11 @@ def check_target_one(w, st, destructive=False, what='írás'):
             elif hit:
                 st.unknown.append(w.raw[:120])
         return
-    if k == 'protected' or (destructive and k == 'ancestor') or (destructive is True and k == 'cfg_ancestor'):
+    if k == 'protected' or (destructive in (True, 'root') and k == 'ancestor') or (
+            destructive in (True, 'tree') and k == 'cfg_ancestor'):
         st.deny.append('%s a védett útra: %s' % (what, w.raw[:80]))
+    elif destructive == 'tree' and k == 'ancestor' and fold(p) == st.prod.cf:
+        st.deny.append('%s a prod-gyökérbe ír: %s' % (what, w.raw[:80]))
 
 
 def lits(words):
@@ -1006,7 +1086,9 @@ def note_new_repo(w, st):
             pass
 
 
-def cwd_writer(st, what):
+def cwd_writer(st, what, tree=False):
+    """a command that writes below its cwd; tree: an archive extractor, so agents/, a home or its config dir as the
+    cwd counts too (it can drop an agent-config.json; Viktor 43196 L4)"""
     if st.cwd is None:
         st.unknown.append(what)
         return
@@ -1017,6 +1099,8 @@ def cwd_writer(st, what):
         return
     if k == 'protected' or fold(st.cwd) == st.prod.cf:
         st.deny.append('%s a prod-fában fut (cwd), %s' % (what, TREE_WRITERS_MSG))
+    elif tree and k == 'cfg_ancestor':
+        st.deny.append('%s ágens-home-ban fut (cwd), ágens-konfigot írhat' % what)
 
 
 def analyze_simple(cmd, st, depth):
@@ -1038,6 +1122,7 @@ def analyze_simple(cmd, st, depth):
         if len(words) >= 3 and words[2].literal() == 'in':
             st.loops[words[1].literal()] = words[3:53]
         st.vars[words[1].literal()] = None
+        st.relvals.pop(words[1].literal(), None)
         return
     while words and words[0].literal() in RESERVED:
         if words[0].literal() == 'function' and len(words) > 1:     # `function NAME [()] { cmd; }`
@@ -1055,7 +1140,7 @@ def analyze_simple(cmd, st, depth):
         name = m.group(1)
         val = Word(strip_assign(words[0], name), raw[m.end():])
         if len(words) == 1:
-            st.vars[name] = assign_value(val, st)
+            set_var(st, name, val)
         else:
             v = assign_value(val, st)
             env[name] = v if v is not None else None
@@ -1117,7 +1202,7 @@ def analyze_simple(cmd, st, depth):
         for w in args:
             m = ASSIGN.match(w.raw)
             if m:
-                st.vars[m.group(1)] = assign_value(Word(strip_assign(w, m.group(1)), ''), st)
+                set_var(st, m.group(1), Word(strip_assign(w, m.group(1)), ''))
         return
     if name in ('cd', 'pushd'):
         a = [w for w in args if not (w.literal() or '').startswith('-')]
@@ -1203,6 +1288,9 @@ def analyze_simple(cmd, st, depth):
         check_target(dest, st, destructive=name in ('rsync',) and any(
             (o.literal() or '').startswith('--delete') for o in opts), what=name)
         dest_basenames(dest, srcs, st, name)
+        if name in ('rsync', 'ditto') or (name in TREE_COPY and any(
+                re.match(r'^(?:-[A-Za-z]*[rRa][A-Za-z]*|--recursive|--archive)$', o.literal() or '') for o in opts)):
+            tree_targets(dest, srcs, st, name)
         return
     if name in ('sed', 'gsed', 'perl'):
         lt = lits(args)
@@ -1250,14 +1338,16 @@ def analyze_simple(cmd, st, depth):
     if name == 'find':
         lt = lits(args)
         writes = any(t in ('-delete', '-fprint', '-fprintf', '-fls') for t in lt)
+        destr = False     # an -exec that can remove / move a directory (the homes and config dirs count then)
         for k, t in enumerate(lt):
-            if t in ('-exec', '-execdir', '-ok', '-okdir') and k + 1 < len(lt):
+            if t in FIND_EXEC and k + 1 < len(lt):
                 ex = os.path.basename(lt[k + 1]) if lt[k + 1] else None
                 rest = lt[k + 2:]
                 if ex is None or ex in ALL_ARGS or ex in LAST_ARG or ex in SHELLS or ex in (
                         'dd', 'git', 'patch', 'xargs', 'install') or (
                         ex in ('sed', 'gsed', 'perl') and any(x and x.startswith('-') and 'i' in x for x in rest)):
                     writes = True
+                    destr = destr or ex is None or ex in DESTRUCTIVE or ex in SHELLS or ex == 'xargs'
         if writes:
             starts = []
             for w in args:
@@ -1265,11 +1355,16 @@ def analyze_simple(cmd, st, depth):
                 if t is not None and (t.startswith('-') or t in ('(', '!', ')')):
                     break
                 starts.append(w)
+            tests = find_tests(lt[len(starts):])
             if not starts:
                 starts = [Word([('lit', '.')], '.')]
             for w in starts:
                 # 'root': a find under an agent home is filtered (-name ...); its config files themselves count
                 check_target(w, st, destructive='root', what='find -delete/-exec')
+                # ... unless the filter lets one through (Viktor 43196 L3: find agents -name agent-config.json -exec
+                # sed -i ... {} +)
+                for a in expand_loops(w, st):
+                    find_cfg_reach(a, tests, st, destr)
         return
     if name in PKG:
         lt, skip = [], False
@@ -1313,24 +1408,31 @@ def analyze_simple(cmd, st, depth):
         return
     if name in ('tar', 'gtar', 'bsdtar'):
         lt = [t or '' for t in lits(args)]
-        if lt and (re.match(r'^-?[A-Za-z]*x', lt[0]) or '--extract' in lt or '-x' in lt):
+        if lt and (re.match(r'^-?[A-Za-z]*x', lt[0]) or '--extract' in lt or '--get' in lt or
+                   any(re.match(r'^-[A-Za-z]*x[A-Za-z]*$', t) for t in lt)):   # `tar -C d -xf a.tar` too
+            # -O / --to-stdout: extracted to stdout, nothing written (replay 17901b47 r2: `tar -xOf $F x.log | ...`)
+            # (an option cluster: the first word, old style `xOf` too, or a single-dash word; not a file name)
+            if '--to-stdout' in lt or any('O' in t for t in [lt[0]] + [x for x in lt[1:] if x.startswith('-')]
+                                          if re.match(r'^-?[A-Za-z]+$', t)):
+                return
             cdir = None
             for k, t in enumerate(lt):
                 if t in ('-C', '--directory') and k + 1 < len(args):
                     cdir = args[k + 1]
             if cdir is not None:
-                check_target(cdir, st, what='tar -x -C')
+                check_target(cdir, st, destructive='tree', what='tar -x -C')
             else:
-                cwd_writer(st, 'tar -x')
+                cwd_writer(st, 'tar -x', tree=True)
         return
     if name == 'unzip':
         lt = lits(args)
         for k, t in enumerate(lt):
             if t == '-d' and k + 1 < len(args):
-                check_target(args[k + 1], st, what='unzip -d')
+                check_target(args[k + 1], st, destructive='tree', what='unzip -d')
                 return
-        if not any(t in ('-l', '-t', '-v', '-p', '-Z') for t in lt):
-            cwd_writer(st, 'unzip')
+        # a listing / test / pipe / comment / zipinfo mode in any option cluster (`-qql`, `-Z1`; replay 17901b47 r2)
+        if not any(t and re.match(r'^-[A-Za-z^:]*[ltvpzZ]', t) for t in lt):
+            cwd_writer(st, 'unzip', tree=True)
         return
 
 
@@ -1344,6 +1446,99 @@ def dest_basenames(dest, srcs, st, name):
                 bn = os.path.basename(sl.rstrip('/'))
                 if bn:
                     check_target(Word([('lit', os.path.join(dp, bn))], dest.raw + '/' + bn), st, what=name)
+
+
+def find_tests(expr):
+    """the -name/-iname/-path/-ipath/-wholename/-iwholename/-type tests of a find expression (the words after the
+    start points), compiled once: [(regex, on the full path, None) | (None, None, types)]; None = they exclude
+    nothing (an -o / ! / -not / `,`, or more than FIND_MAX_TESTS tests: an accident guard need not read those)"""
+    tests, i = [], 0
+    while i < len(expr):
+        t = expr[i]
+        if t in FIND_EXEC:                       # the command's own words up to ; or + are not tests
+            i += 1
+            while i < len(expr) and expr[i] not in (';', '+'):
+                i += 1
+        elif t in ('-o', '-or', '!', '-not', ','):
+            return None                          # an alternative or a negation: no test excludes anything
+        elif (t in FIND_NAME or t == '-type') and i + 1 < len(expr):
+            v = expr[i + 1]
+            if v is not None:                    # a pattern from a variable excludes nothing
+                if len(tests) >= FIND_MAX_TESTS:
+                    return None
+                if t == '-type':
+                    tests.append((None, None, frozenset(v.split(','))))
+                else:
+                    tests.append((re.compile(fnmatch.translate(v), re.S | re.I),
+                                  t not in ('-name', '-iname'), None))
+            i += 1
+        i += 1
+    return tests
+
+
+def find_cfg_reach(w, tests, st, dirs):
+    """a writing find started at w (agents/, a home, its .claude / .claude-config): deny unless its tests exclude
+    every agent config file below it (dirs: the homes and config dirs, too). Bounded: the same start once, at most
+    FIND_BUDGET test evaluations per command, then fail-closed."""
+    key = (st.cwd, tuple(w.parts))      # not w.raw: a for-loop alternative keeps the raw text of its word
+    if key in st.find_seen:
+        return
+    st.find_seen.add(key)
+    kind, p = word_path(w, st)
+    if kind != 'path':
+        return            # unresolved start: check_target already did the dir / raw-text part
+    try:
+        cands = st.prod.cfg_below(p, dirs)      # empty unless p (or its realpath) is agents/, a home, a config dir
+    except ResolveError as e:
+        st.errors.append('útfeloldás (%s): %s' % (e, w.raw[:80]))
+        return
+    lw = w.literal()
+    top = (lw if lw is not None else p).rstrip('/') or '/'
+    for rel, typ in cands:
+        full = top + '/' + rel if rel else top
+        ok = True
+        for rx, whole, types in tests or ():
+            st.find_budget -= 1
+            if st.find_budget < 0:
+                st.deny.append('find: túl sok kezdőpont és teszt ágens-home alatt (fail-closed)')
+                return
+            if types is not None:
+                ok = typ in types
+            else:
+                ok = rx.match(full if whole else os.path.basename(full)) is not None
+            if not ok:
+                break
+        if ok:
+            st.deny.append('find író parancsa ágens-konfigot érhet el (%s: %s)' % (w.raw[:60], rel or '.'))
+            return
+
+
+def tree_targets(dest, srcs, st, name):
+    """a directory writer (cp -r, rsync, ditto, scp -r): the directories it fills; an agent home, agents/, a home's
+    .claude / .claude-config or the prod root = deny (Viktor 43196 L4: rsync -a x/ agents/dave/ can drop an
+    agent-config.json without naming it)"""
+    dk, dp = word_path(dest, st)
+    if dk != 'path':
+        # agents/x$N/: the trailing slash off, so the unknown part is matched against the home names
+        parts = list(dest.parts)
+        if len(parts) > 1 and parts[-1][0] == 'lit' and parts[-1][1].endswith('/'):
+            parts[-1:] = [('lit', parts[-1][1].rstrip('/'))] if parts[-1][1].strip('/') else []
+        check_target(Word(parts, dest.raw), st, destructive='tree', what=name + ' (könyvtár)')
+        return
+    isdir, seen = os.path.isdir(dp), set()
+    for s_ in srcs or [None]:
+        sk, sp = word_path(s_, st) if s_ is not None else ('unknown', None)
+        last = s_.parts[-1] if s_ is not None and s_.parts else ('', '')
+        # src/ (and src/., whose basename is '.'), ditto, an unresolved source: the contents land in dest itself
+        contents = name == 'ditto' or (last[0] == 'lit' and last[1].endswith('/'))
+        bn = os.path.basename(sp.rstrip('/')) if sk == 'path' else ''
+        if contents or not bn or (name != 'rsync' and not isdir):
+            target = dp
+        else:
+            target = os.path.join(dp, bn)
+        if target not in seen:      # 20 000 sources into one directory: classified once
+            seen.add(target)
+            check_target(Word([('lit', target)], dest.raw), st, destructive='tree', what=name + ' (könyvtár)')
 
 
 def strip_prefix(w, n):
@@ -1364,8 +1559,18 @@ def strip_assign(w, name):
     return parts
 
 
+def set_var(st, name, w):
+    """X=value in the shell: vars gets the value, relvals the relative text (see State.relvals)"""
+    st.vars[name] = assign_value(w, st)
+    if st.joined:
+        st.relvals[name] = w.literal()
+    else:
+        st.relvals.pop(name, None)
+
+
 def assign_value(w, st):
     """the literal value of an assignment, a safe placeholder for $(mktemp ...), else None (unknown)."""
+    st.joined = False
     if len(w.parts) == 1 and w.parts[0][0] == 'sub' and w.parts[0][1].strip().startswith('mktemp'):
         return '/private/tmp/prod-tree-write-gate-mktemp'
     kind, p = word_path(w, st)
@@ -1452,7 +1657,7 @@ def raw_protected(text, prod, home, cwd, bare_root=True):
     acfg = r'(?:' + name + r'/+(?:agent-config\.json|\.claude/+settings\.json|\.claude-config/+settings\.json)|' + \
         other + r'/+\.claude/+settings\.local\.json)' + fend
     prot = r'(?:scripts|src|\.claude)' + end + r'|(?:claude\.md|\.mcp\.json|package\.json|package-lock\.json|' \
-           r'store/autonomy-config\.json)' + fend + r'|agents/+' + acfg
+           r'store/autonomy-config\.json|store/agent-config-seal\.json)' + fend + r'|agents/+' + acfg
     root = r'(?:' + '|'.join(roots) + r')'
     # closers between the root and the protected part: the root yielded by a substitution or a quoted piece,
     # e.g. "$(echo P)"/scripts/x (Viktor 42855 L3)
