@@ -1128,7 +1128,7 @@ IDEA_WORDS = (IDEA_WORD, 'irány')
 # átirányítás, útirány, irányítás triggered too. Now "irány" only at a word start, and not the verb irányít-
 # (irányítás, irányító: control, not direction). "ötlet" stays a substring ON PURPOSE: üzletötlet, termékötlet are
 # exactly the pitches the gate is for.
-IDEA_RE = re.compile(r'ötlet|(?<!\w)irány(?!ít)')
+IDEA_RE = re.compile(r'ötlet|(?<!\w)irány(?!ít)|vállalkozási lehetőség|üzleti lehetőség')  # + Klodel 43404
 IDEA_MARK = 'ÖTLET-KAPU:'
 IDEA_NEEDS = ('nem marabel/könyv', 'termékpaletta ellenőrizve')
 # Klodel 38049 (hibanapló 11-11 15:46): an "AI-recepciós/titkárság" idea went to Patrik (TG 17453/17460) with a valid
@@ -1250,15 +1250,113 @@ def idea_majsztro_check(t):
     return need + (f' ({why})' if why else '')
 
 
-def idea_check(text):
+# Klodel 43404 (Patrik private TG 18585, 2026-11-15): Patrik asked for an unfiltered, history-free answer from one model
+# ("teljesen friss szemmel ... csak te"). Every idea-gate line (ÖTLET-KAPU, ATNEZO MEHET/nincs-otlet, MAJSZTRO) would
+# have been untrue, so the answer went out as an image with a text that avoided the idea words: a detour. Third form:
+# "ATNEZO: patrik-kerte-szuro-nelkul TG <n>". It passes the whole idea gate only when message <n> is the OWNER's
+# (inbound-senders.jsonl: same chat, user_id = the owner), at most UNFILTERED_MAX_AGE_S old, and its text
+# (inbound-evidence.jsonl, the plugin's record, never the sent text) asks for an unfiltered answer: one of
+# UNFILTERED_ASK, matched without accents and case (Patrik types without accents). No record = no pass (fail closed).
+ATNEZO_UNFILTERED_RE = re.compile(r'(?mi)^\s*ATN[EÉ]Z[OŐ]:\s*patrik-kerte-sz[uű]r[oő]-n[eé]lk[uü]l\b[ \t]*(.*)$')
+ATNEZO_UNFILTERED_TG = re.compile(r'^TG\s*(\d{1,12})\b', re.I)
+UNFILTERED_ASK = ('szuro nelkul', 'szures nelkul', 'szuretlen', 'friss szem', 'csak te ', 'eloszor beszel',
+                  'elozmeny nelkul', 'elozmenyek nelkul')
+UNFILTERED_MAX_AGE_S = 6 * 3600
+
+
+def fold(s):
+    """Lower case, no accents, no zero-width characters, single spaces: 'Szűrő  NÉLKÜL' -> 'szuro nelkul'."""
+    s = ZERO_WIDTH_RE.sub('', unicodedata.normalize('NFKD', s or ''))
+    return re.sub(r'\s+', ' ', ''.join(c for c in s if not unicodedata.combining(c)).lower())
+
+
+def unfiltered_ask_proof(chat, tg_id, now=None):
+    """None if message <tg_id> in <chat> is a fresh owner message asking for an unfiltered answer, else why not."""
+    owner = owner_private_chat()
+    if not owner:
+        return 'a tulajdonos azonosítója nem ismert'
+    if not chat:
+        return 'nincs chat_id'
+    now_ms = (time.time() if now is None else now) * 1000
+    fresh_owner = False
+    for r in _jsonl_rows('inbound-senders.jsonl'):
+        if (norm_chat(r.get('chat_id')) != chat or str(r.get('message_id')) != tg_id
+                or norm_chat(r.get('user_id')) != owner):
+            continue
+        try:
+            fresh_owner = fresh_owner or 0 <= now_ms - float(r.get('at')) <= UNFILTERED_MAX_AGE_S * 1000
+        except (TypeError, ValueError):
+            pass
+    if not fresh_owner:
+        return f'a TG {tg_id} nem Patrik friss (max. {UNFILTERED_MAX_AGE_S // 3600} órás) üzenete ebben a chatben'
+    for r in _jsonl_rows('inbound-evidence.jsonl'):
+        if norm_chat(r.get('chat_id')) == chat and str(r.get('message_id')) == tg_id:
+            body = fold(str(r.get('text') or '')) + ' '
+            if any(k in body for k in UNFILTERED_ASK):
+                return None
+    return f'a TG {tg_id} szövege nem kér szűrő nélküli választ (' + ', '.join(k.strip() for k in UNFILTERED_ASK) + ')'
+
+
+def unfiltered_check(t, chat):
+    """'none' if the text has no patrik-kerte-szuro-nelkul line; None if a line is proven; else the reason to block."""
+    lines = list(ATNEZO_UNFILTERED_RE.finditer(t))
+    if not lines:
+        return 'none'
+    why = []
+    for m in lines:
+        tg = ATNEZO_UNFILTERED_TG.match(m.group(1).strip())
+        if not tg:
+            why.append('a sorban nincs "TG <szám>"')
+            continue
+        try:
+            err = unfiltered_ask_proof(norm_chat(chat), tg.group(1))
+        except Exception as e:  # an unreadable record is no proof (fail closed)
+            err = f'a plugin-napló nem olvasható ({type(e).__name__})'
+        if err is None:
+            return None
+        why.append(err)
+    return ('ÖTLET-KAPU (Klodel 43404): "ATNEZO: patrik-kerte-szuro-nelkul TG <n>" csak akkor megy, ha a TG <n> Patrik '
+            'friss üzenete ebben a chatben, és szűrő nélküli választ kér. Most: ' + '; '.join(why) + '.')
+
+
+# Klodel 43404: the image-gate .ok KERES line names what Patrik asked; a business-idea request there runs the idea gate
+# on the reply text even when the text itself avoids the idea words. Narrower than IDEA_RE on purpose, measured on the
+# 599 store/kep-kapu/*.ok of 2026-11-15: a bare "irány" hit 25 (mostly style or feedback: "Apple-irányú", "amilyen
+# irányba mentek", "nem rossz irány"), a bare "ötletet" 3 more (a caption idea for a Marabel video, TG 4389 "adj
+# otletet"); these business forms hit 3, all one business-direction request (TG 18551 "5 potens uzleti iranyt").
+IDEA_KERES_RE = re.compile(r'(?<!\w)(?:(?:uzleti|vallalkozasi|uj|potens uzleti) (?:otlet\w*|iranyt?)'
+                           r'|(?:vallalkozasi|uzleti) lehetoseg\w*|vallalkozas(?:t|ba) (?:kezd|indit)\w*)(?!\w)')
+
+
+def idea_keres_files(files):
+    """The attached media whose image-gate .ok KERES line asks for an idea (missing or unreadable .ok: not listed)."""
+    out = []
+    for f in files:
+        if not str(f).lower().endswith(MEDIA):
+            continue
+        try:
+            d = parse(os.path.join(KAPU, os.path.basename(str(f)) + '.ok'))
+        except Exception:
+            continue
+        if IDEA_KERES_RE.search(fold(d.get('KERES') or '')):
+            out.append(os.path.basename(str(f)))
+    return out
+
+
+def idea_check(text, chat=None, force=False):
     """Klodel 33881: a private-chat text that mentions an idea ("ötlet") passes only with an "ÖTLET-KAPU:" line that
     contains both "nem Marabel/könyv" and "termékpaletta ellenőrizve". Klodel 38049: and it names no direction Patrik
-    already refused, unless an "ELVETETT-DE-KERT: TG <n>" line says he asked for it. Returns the reason to block, or None."""
+    already refused, unless an "ELVETETT-DE-KERT: TG <n>" line says he asked for it. Klodel 43404: force=True (an
+    attached image whose .ok KERES asks for an idea) runs the gate without an idea word in the text, and a proven
+    "ATNEZO: patrik-kerte-szuro-nelkul TG <n>" line (unfiltered_check) passes it. Returns the reason to block, or None."""
     t = unicodedata.normalize('NFC', text)
-    if t.lstrip().startswith('📊 ÉLŐ ÁLLAPOT'):  # generated by ops/elo_allapot.py from card titles, not a pitch
+    if t.lstrip().startswith('📊 ÉLŐ ÁLLAPOT') and not force:  # generated by ops/elo_allapot.py from card titles
         return None
-    if not IDEA_RE.search(t.lower()):
+    if not force and not IDEA_RE.search(t.lower()):
         return None
+    uf = unfiltered_check(t, chat)
+    if uf != 'none':
+        return uf
     if not IDEA_ASKED_RE.search(t):
         hits = refused_in_text(t)
         if hits:
@@ -1585,8 +1683,12 @@ def main():
         # business idea pitched to Patrik privately came back as yet another Marabel/book variation. A private reply
         # that talks about an idea needs an "ÖTLET-KAPU:" line stating both checks. Applies with the window open too:
         # the window lifts the PRIVÁT-OK marker only.
-        idea = idea_check(str(ti.get('text') or ''))
+        # Klodel 43404: an attached image whose .ok KERES asks for an idea runs the idea gate on the text, too.
+        kf = idea_keres_files(ti.get('files') or [])
+        idea = idea_check(str(ti.get('text') or ''), chat, force=bool(kf))
         if idea:
+            if kf:
+                idea += ' (a csatolt kép .ok KERES sora ötletet kér: ' + ', '.join(kf) + ')'
             sys.stderr.write(idea + '\n')
             return 2
         cz = creatorz_check(chat, str(ti.get('text') or ''), ti.get('reply_to'))
