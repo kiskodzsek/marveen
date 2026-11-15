@@ -788,6 +788,24 @@ def script_cases():
             ('python3 -Xdev -Wignore measure.py', d),
             ('python3 -uWerror measure.py', d),
             ('python3 -W ignore measure.py', d),
+            # card 217f551b: a backtick that OPENS a substitution is part of a word, not the end of the call (bash runs
+            # `true`, pastes its empty output and runs measure.py; the walk stopped at the backtick: allow)
+            ('python3 `true` measure.py', d),
+            ('python3 `true` `true` measure.py', d),
+            ('python3 -I `true` measure.py', d),
+            ('python3 x`true` measure.py', d),
+            ('python3 `echo a b` measure.py', d),
+            ('ruby `true` measure.py', d),
+            ('bash `true` measure.py', d),
+            ('echo "$(python3 `true` measure.py)"', d),
+            # a backtick substitution nested with \` inside another (the lexer lists the outer one only)
+            ('x=`python3 \\`true\\` measure.py`', d),
+            # over-read, as before for a non-plain word: python3 runs the file "a`b", measure.py is its argv
+            ('python3 a\\`b measure.py', d),
+            # bash: "`true`" is an empty argument (python3 '' fails); read on, as for "$X"
+            ('python3 "`true`" measure.py', d),
+            # past LEX_MAX_SUBSTS the lexer gives no reading: then no backtick ends a call (mutation m4)
+            ('echo ' + '`true` ' * 65 + '; python3 `true` measure.py', d),
             # card 31045f4d (B): in a non-shell heredoc only a "(" after a blank stops being a command position
             ("python3 - <<'PY'\nimport os\nos.system('./measure.py')\nPY", d),
             ("python3 - <<'PY'\nimport os\nos.system(\"(./measure.py)\")\nPY", d),
@@ -1216,6 +1234,15 @@ def script_cases():
             ('/usr/bin/python3 stat.py regiszter.jsonl 2>/dev/null', d),
             ('python3 stat.py ' + ' '.join('a%d' % i for i in range(80)), d),  # argv past MAX_ARGS: data
             ('python3 -c pass -Wignore measure.py', d),  # -c first: inline code, the rest is its argv
+            # card 217f551b: the backtick that CLOSES the substitution the call stands in still ends its words
+            ('x=`python3 stat.py` measure.py', d),
+            ('echo `python3 stat.py` measure.py', d),
+            ('x=`python3 stat.py \\`true\\` regiszter.jsonl`', d),
+            ('python3 stat.py `true` regiszter.jsonl', d),  # after the plain script: argv data, as before
+            ("python3 stat.py '`' measure.py", d),
+            # an EVEN run of backslashes is escaped backslashes: the backtick after them closes the substitution, and
+            # measure.py is no word of bash's call (mutation m11: counting one backslash read it as bash's $2)
+            ('x=`bash runner.sh a\\\\` measure.py', d),
             # Viktor 43235 point 1: python's words after the script are its sys.argv (this was a block row: "an
             # argument is read too"; node -r, source and bash keep that reading)
             ('python3 list.py measure.py', d),
