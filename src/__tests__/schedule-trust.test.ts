@@ -956,6 +956,7 @@ describe('preCheck walk: launchers, embedded code, parsed imports (Viktor 42514)
     ['interpreter stdin', 'python3 - < x.py'],
     ['interpreter -c', 'python3 -c "$CODE"'],
     ['interpreter -c', 'bash -c "python3 $X"'],
+    ['interpreter -c', 'bash -c $CODE'],
     ['heredoc expands', 'python3 <<EOF\nimport $MOD\nEOF'],
     ['heredoc', "python3 <<'EOF'\nimport localmod"],
   ])('what cannot be followed is UNRESOLVED: %s (%s)', (kind, body) => {
@@ -1151,6 +1152,109 @@ describe('preCheck walk: launchers, embedded code, parsed imports (Viktor 42514)
     const d = dirWith('low5ok')
     writeFileSync(join(d, 'x.py'), src + '\n')
     expect(wrap(d, 'python3 "$(dirname "$0")/x.py"').blockers).toEqual([])
+  })
+
+  // Viktor 42593 RES 1, 2, 3, 5 and INFO 3, 4: a fake heredoc must not swallow the line that runs x.py.
+  it.each([
+    ['RES 1: <<EOF inside a double-quoted string over two lines', 'echo "start\ncat <<EOF"\npython3 ./x.py\nEOF'],
+    ['RES 2: an escaped < (echo \\<<EOF) is a literal and a redirect', 'echo \\<<EOF\npython3 ./x.py\nEOF'],
+    ['RES 5: a quoted <<EOF after a command substitution in double quotes', `echo "$(true)" '<<EOF'\npython3 ./x.py\nEOF`],
+    ['INFO 3 (N13): <<EOF in single quotes', "echo 'cat <<EOF'\npython3 ./x.py\nEOF"],
+    ['INFO 4 (N15): <<EOF after an escaped quote in double quotes', 'echo "a\\" <<EOF"\npython3 ./x.py\nEOF'],
+    ['RES 1: a single-quoted string over two lines', "echo 'a\ncat <<EOF'\npython3 ./x.py\nEOF"],
+  ])('42593: %s -- the next line is walked', (_label, body) => {
+    const d = dirWith('g42593')
+    const walk = wrap(d, body)
+    expect(hashed(walk, join(d, 'x.py')), JSON.stringify(walk.pairs)).toBe(true)
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
+  it('42593 RES 3: bash -c with an escaped space hands ONE word (python3 ./x.py) to bash, and it is walked', () => {
+    const d = dirWith('res3')
+    const walk = wrap(d, `cd "${d}" && bash -c python3\\ ./x.py`)
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
+  it.each([
+    ['a heredoc after an escaped space is real (echo a\\ <<EOF): its body is data', 'echo a\\ <<EOF\npython3 ./x.py\nEOF', false],
+    ['a string over two lines, closed, then a real python heredoc', `echo "a\nb"\ncd "$(dirname "$0")"\npython3 - <<'EOF'\nimport localmod\nEOF`, true],
+    ['a python heredoc inside a command substitution in double quotes', `cd "$(dirname "$0")"\nX="$(python3 - <<'EOF'\nimport localmod\nEOF\n)"`, true],
+    ['a closed "$( )" then a real python heredoc on the same line', `cd "$(dirname "$0")"\necho "$(date)"; python3 - <<'EOF'\nimport localmod\nEOF`, true],
+    ['a string closing on a line that starts with #, then a real python heredoc', `cd "$(dirname "$0")"\necho "a\n# b"\npython3 - <<'EOF'\nimport localmod\nEOF`, true],
+  ])('42593 controls: %s', (_label, body, walked) => {
+    const d = dirWith('g42593ok')
+    const walk = wrap(d, body)
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(walked)
+  })
+
+  it("42593 false positive g07: $'it\\'s' keeps its escaped quote, the python heredoc after it is walked, no marker", () => {
+    const d = dirWith('g07')
+    const walk = wrap(d, `cd "$(dirname "$0")"\necho $'it\\'s' ; python3 - <<'EOF'\nimport localmod\nEOF`)
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
+  })
+
+  it('INFO 5 (N17): a continued line is walked once, as part of the joined command', () => {
+    const d = dirWith('n17')
+    expect(wrap(d, 'echo foo \\\n  $CMD').blockers).toEqual([])
+  })
+
+  // Viktor 42593 RES 4: a loader fetched with a computed key, or the loader module handed on.
+  it.each([
+    ['loader access', 'q01 importlib.__dict__[N]', "import importlib\nN = 'import_module'\nimportlib.__dict__[N]('localmod')"],
+    ['loader access', 'q02 vars(importlib)[N]', "import importlib\nN = 'import_module'\nvars(importlib)[N]('localmod')"],
+    ['loader access', 'q03 builtins.__dict__[N]', "import builtins\nN = 'exec'\nbuiltins.__dict__[N]('x = 1')"],
+    ['loader access', 'q04 operator.attrgetter', "import operator, importlib\noperator.attrgetter('import_module')(importlib)('localmod')"],
+    ['loader access', 'q13 __dict__.get(N)', "import importlib\nN = 'import_module'\nimportlib.__dict__.get(N)('localmod')"],
+    ['loader access', 'q24 __getattribute__', "import importlib\nimp = importlib.__getattribute__\nimp('import_module')('localmod')"],
+    ['loader access', 'an aliased module (import importlib as il)', "import importlib as il\nN = 'import_module'\nil.__dict__[N]('localmod')"],
+    ['loader access', 'a module bound by assignment (m = importlib)', "import importlib\nm = importlib\nN = 'import_module'\nm.__dict__[N]('localmod')"],
+    ['loader access', 'from importlib import util', "from importlib import util\nN = 'spec_from_file_location'\nutil.__dict__[N]"],
+    ['loader access', "sys.modules['importlib'].__dict__", "import sys\nN = 'import_module'\nsys.modules['importlib'].__dict__[N]('localmod')"],
+    ['getattr', "getattr on sys.modules['importlib'] with a computed name", "import sys\nN = 'import_module'\ngetattr(sys.modules['importlib'], N)('localmod')"],
+    ['loader access', 'sys.modules with a computed key', "import sys\nN = 'importlib'\nsys.modules[N].import_module('localmod')"],
+    ['loader access', 'a computed methodcaller', "import operator, importlib\nN = 'import_module'\noperator.methodcaller(N, 'localmod')(importlib)"],
+    ['loader key', 'globals() with a computed key', "N = 'exec'\nglobals()[N]('x = 1')"],
+    ['loader key', 'globals() taken whole', "g = globals()\ng['exec']('x = 1')"],
+    ['loader module value', 'the module passed on (f(importlib))', "import importlib\ndef f(m):\n    return m\nf(importlib)"],
+    ['loader value', 'builtins.exec as a value', "import builtins\nr = builtins.exec\nr('x = 1')"],
+    ['exec', 'builtins.exec with computed code', "import builtins\nC = 'x = 1'\nbuiltins.exec(C)"],
+    // Viktor 42641 LOW 1 (regression of the q11 fix): a long reversed alias chain, a class-body alias
+    ['loader key', 'y26: a reversed four-link alias chain', "import importlib\ndef f():\n    return d.__dict__['import_module']('localmod')\nd = c\nc = b\nb = a\na = importlib\nf()"],
+    ['loader access', 'y26 with a computed key: only the full alias chain finds the module', "import importlib\nN = 'import_module'\ndef f():\n    return d.__dict__[N]('localmod')\nd = c\nc = b\nb = a\na = importlib\nf()"],
+    ['loader access', 'Viktor 42645: a reversed 70-link alias chain with a computed key', "import importlib\nN = 'import_module'\ndef f():\n    return v0.__dict__[N]('localmod')\n" + Array.from({ length: 69 }, (_, k) => `v${k} = v${k + 1}`).join('\n') + "\nv69 = importlib\nf()"],
+    ['loader access', 'a forward alias chain with a computed key (each link waits for the one before)', "import importlib\nN = 'import_module'\na = importlib\nb = a\nc = b\nc.__dict__[N]('localmod')"],
+    ['loader access', 'a name bound to two modules, the second gives importlib.util', "import importlib, builtins\nm = importlib\nm = builtins\nu = m.util\nN = 'spec_from_file_location'\nu.__dict__[N]"],
+    ['loader access', 'the same, the other order', "import importlib, builtins\nm = builtins\nm = importlib\nu = m.util\nN = 'spec_from_file_location'\nu.__dict__[N]"],
+    ['loader module value', 'y28: an alias in a class body', "import importlib\nclass C:\n    m = importlib\nC.m.__dict__['import_module']('localmod')"],
+    ['loader key', "y28: a loader key on any __dict__", "class C:\n    pass\nC.__dict__['exec']"],
+    // Viktor 42641 INFO 2 (M30): the namespace dict's __builtins__ key is never a plain key
+    ['loader key', "globals()['__builtins__']", "b = globals()['__builtins__']\nb.exec('x = 1')"],
+    // Viktor 42593 INFO 1 (N08) and INFO 2 (N09): the branches without a test row
+    ['getattr', 'INFO 1 (N08): getattr with a computed name on an __import__ result', "N = 'path'\ngetattr(__import__('os'), N)"],
+    ['loader value', 'INFO 2 (N09): an aliased loader taken as a value', 'from importlib import import_module as im\nf = im'],
+  ])('42593: %s -- %s is UNRESOLVED', (kind, _label, src) => {
+    const d = dirWith('res4')
+    writeFileSync(join(d, 'x.py'), src + '\n')
+    const walk = wrap(d, 'python3 "$(dirname "$0")/x.py"')
+    expect(walk.blockers.some(b => b.startsWith(`UNRESOLVED ${join(d, 'x.py')}#${kind}@`)), walk.blockers.join('|')).toBe(true)
+  })
+
+  it.each([
+    ["q11: a plain dict with an 'exec' key", "d = {'exec': 1}\nprint(d['exec'])\nimport localmod"],
+    ['a module bound by assignment, a literal loader call (q14)', "import importlib\nm = importlib\nm.import_module('localmod')"],
+    ['globals() with a plain literal key', "name = globals()['__name__']\nimport localmod"],
+    ['an object __dict__ that is no loader module', 'class A: pass\nv = A().__dict__\nimport localmod'],
+    ['Viktor 42645 INFO 2: a plain key on a __dict__', "class C:\n    name = 1\nv = C.__dict__['name']\nimport localmod"],
+    ['a literal builtins.exec', "import builtins\nbuiltins.exec('x = 1')\nimport localmod"],
+  ])('42593 false positives: %s is no marker', (_label, src) => {
+    const d = dirWith('fp4')
+    writeFileSync(join(d, 'x.py'), src + '\n')
+    const walk = wrap(d, 'python3 "$(dirname "$0")/x.py"')
+    expect(walk.blockers).toEqual([])
+    expect(hashed(walk, join(d, 'localmod.py')), JSON.stringify(walk.pairs)).toBe(true)
   })
 
   // Viktor 42560 INFO 2 Q29 / Q30: the import parser runs isolated (-I), and its failure blocks.
