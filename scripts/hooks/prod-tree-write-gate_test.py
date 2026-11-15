@@ -505,6 +505,12 @@ R2_DENY = [  # Viktor 43196 (card 17901b47 round 2)
     ('tar -x --absolute-paths -f /tmp/abs.tar', '/tmp'),
     # Viktor 43347 mutant B7: a -f start point as its own word, before a protected start point
     ('find -f /tmp/ok agents/x -name agent-config.json -delete', P),
+    # mutant b7: -f takes the next word even when it starts with "-" (measured on macOS find: `find -f -x/../../t`
+    # walks t); read as a plain start point the walk stops there and only the cwd was checked
+    ('find -f -x/../../../x -delete', K + '/work'),
+    # mutants t1 / t15: every -C of the chain is checked, not only the last (bsdtar extracts into the last one; GNU
+    # tar's positional -C before members is not measured here: a deny on a rare form, Viktor 43347's reading kept)
+    ('tar -xf /tmp/e.tar -C ' + P + '/agents/x -C sub', '/tmp'),
 ]
 R2_ALLOW = [
     ('cat store/agent-config-seal.json', P), ('cp ' + SEAL + ' /tmp/s', '/tmp'),
@@ -551,6 +557,10 @@ R2_ALLOW = [
     # against the cwd); --cd / --dir to a scratch dir; --di is ambiguous in bsdtar (not a directory option)
     ('tar -xf /tmp/e.tar -C /tmp/a -C agents/x', P), ('tar -xf /tmp/e.tar -C /tmp/o -C sub', K + '/work'),
     ('tar -xf /tmp/e.tar --cd /tmp/o', K + '/work'), ('tar -xf /tmp/e.tar --dir=/tmp/o', K + '/work'),
+    # mutant t6: --di is ambiguous in bsdtar (--disable-copyfile, --directory; measured rc 1, nothing extracted)
+    ('tar -xf /tmp/e.tar --di=' + P + '/agents/x', K + '/work'),
+    # mutant t12: in -xfP the f takes the rest of the word: P is the archive name, not -P (measured: "P: No such file")
+    ('tar -xfP /tmp/e.tar', K + '/work'),
     ('F=notes.md; cd agents/x && echo x > $F', P), ('F=agent-config.json; cd /tmp && echo x > $F', P),
     ('B=agents/pulzus/backups/m-$(date +%H%M%S); cd /tmp; mkdir -p $B', P),
     ('find agents -wholename "*/work/*" -delete', P), ('find agents -iwholename "*/WORK/*" -delete', P),
