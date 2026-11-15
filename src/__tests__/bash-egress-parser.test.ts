@@ -1533,3 +1533,63 @@ describe('variable names and parameter expansion (card f2a0f976, Viktor 43009 LO
     expect(classify(`curl -s "http://localhost:3420/api/\${ID:-x}"; echo https://${H}`)).toMatchObject({ deny: false })
   })
 })
+
+describe('a value is expanded when it is assigned (card c20467d6, Viktor 43231 LOW)', () => {
+  const H = 'evil.example.com'
+  it('an assignment chain reaches curl with the value (bash 3.2: every line prints the external host)', () => {
+    for (const c of [
+      `V=${H}; U=$V; curl -s $U/p`,
+      `V=${H}; U=\${V}; curl -s $U/p`,
+      `V=${H}; U=\${V:-x}; curl -s $U/p`,
+      `V=${H}; U=\${V=x}; curl -s $U/p`,
+      `V=${H}; U="$V"; curl -s "$U/p"`,
+      `V=${H}; U=$V; W=$U; curl -s $W/p`,
+      `V=\${W:-${H}}; U=$V; curl -s $U/p`,
+      `V=\${V:-${H}}; U=$V; curl -s \${U}/p`,
+      `V=${H}; U=$V; curl -s \${U=x}/p`,
+      `V=${H}; U=$V; curl -s \${U-x}/p`,
+      `export V=${H}; export U=$V; curl -s $U/p`,
+      `V=${H} U=$V; curl -s $U/p`,
+      `A=${H}; B=$A$A; curl -s $B/p`,
+      // a substitution inherits the chain
+      `V=${H}; x=$(U=$V; curl -s $U/p)`,
+    ]) expect(classify(c), c).toMatchObject({ deny: true, reason: 'curl-external' })
+  })
+  it('a chain to a local host passes, also where the unexpanded value used to be an unresolved destination', () => {
+    expect(classify('V=localhost:3420; U=$V; curl -s $U/api/x')).toMatchObject({ deny: false })
+    expect(classify('V=localhost:3420; U=http://$V; curl -s $U/api/x')).toMatchObject({ deny: false })
+    // bash: U is set before V, so U holds the environment's V (here unset): /p
+    expect(classify(`U=$V; V=${H}; curl -s $U/p`)).toMatchObject({ deny: false })
+  })
+  it("a quoted or escaped $ is a literal (bash: [$V/p]); both kinds in one value are not read", () => {
+    for (const c of [`V=${H}; U='$V'; curl -s $U/p`, `V=${H}; U=\\$V; curl -s $U/p`, `V=${H}; U="\\$V"; curl -s $U/p`,
+      `V=${H}; U=$'\\x24V'; curl -s $U/p`]) expect(classify(c), c).toMatchObject({ deny: false })
+    expect(classify(`V=${H}; U="$V"'$x'; curl -s $U/p`)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    // a $'...' opener is no literal $
+    expect(classify(`V=${H}; U=$'a'$V; curl -s $U/p`)).toMatchObject({ deny: true, reason: 'curl-external' })
+  })
+  it('a loop variable is left as written in a value, as before (the loop readings are unchanged)', () => {
+    expect(classify(`for v in ${H}; do U=\${v:-localhost}; curl -s $U/p; done`)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    expect(classify('for v in localhost; do U=$v; curl -s $U/p; done')).toMatchObject({ deny: false })
+    // the loop shadows an earlier value of its name (bash: localhost/p), also for a substitution in the body
+    expect(classify(`v=${H}; for v in localhost; do U=$v; curl -s $U/p; done`)).toMatchObject({ deny: false })
+    expect(classify(`v=${H}; for v in localhost; do x=$(U=$v; curl -s $U/p); done`)).toMatchObject({ deny: false })
+    // before the loop head the earlier value is read; after the head an assignment sets the name again (bash: the host)
+    expect(classify(`v=${H}; U=$v; for v in localhost; do curl -s $U/p; done`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`for v in localhost; do v=${H}; U=$v; curl -s $U/p; done`)).toMatchObject({ deny: true, reason: 'curl-external' })
+  })
+  it('a value that could grow past its text is not built: doubling and fan-out stay fast and deny as unresolved', () => {
+    let c = 'A=' + 'a'.repeat(56) + '; '
+    for (let i = 0; i < 40; i++) c += 'A=$A$A; '
+    let t0 = Date.now()
+    expect(classify(c + 'curl -s $A/p')).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    expect(Date.now() - t0).toBeLessThan(1000)
+    c = 'A=' + 'a'.repeat(8000) + '; B=' + '$A'.repeat(20000) + '; curl -s $B/p'
+    expect(c.length).toBeLessThan(MAX_COMMAND_CHARS)
+    t0 = Date.now()
+    expect(classify(c)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    expect(Date.now() - t0).toBeLessThan(1000)
+    // under the growth limit the value is built
+    expect(classify(`A=${H}; B=$A$A$A; curl -s $B/p`)).toMatchObject({ deny: true, reason: 'curl-external' })
+  })
+})
