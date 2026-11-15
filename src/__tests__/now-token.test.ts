@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeAll } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { initDatabase, createAgentMessage, getAgentMessage, getDailyLog, getDailyLogDates, getPendingMessages, createKanbanCard, getKanbanComments } from '../db.js'
+import { initDatabase, createAgentMessage, getAgentMessage, getDailyLog, getDailyLogDates, getPendingMessages, createKanbanCard, getKanbanComments, getMemoryById, saveAgentMemory } from '../db.js'
 import { tryHandleMessages } from '../web/routes/messages.js'
 import { tryHandleDailyLog } from '../web/routes/daily-log.js'
 import { tryHandleKanban } from '../web/routes/kanban.js'
+import { tryHandleMemories } from '../web/routes/memories.js'
 import { fillNowToken, NOW_TOKEN } from '../web/now-token.js'
 import { APP_TZ, MAIN_AGENT_ID } from '../config.js'
 import type { RouteContext } from '../web/routes/types.js'
@@ -155,5 +156,63 @@ describe('the kanban comment paths fill {{NOW}} at the server', () => {
     createKanbanCard({ id: card.id, title: 'now-token quoted', status: 'planned', assignee: 'dex', priority: 'normal' })
     await call(tryHandleKanban, 'POST', `/api/kanban/${card.id}/comments`, { author: 'dex', content: 'a token: {{ NOW }}' })
     expect(lastComment(card.id)).toBe('a token: {{ NOW }}')
+  })
+})
+
+// DREAM 11-15 (card 14a2bea1): POST and PUT /api/memories stored {{NOW}} verbatim (14 of Viktor's memories,
+// 11-13 16:06 to 11-14 23:47). Those old rows are not rewritten: a write that does not bring text leaves them.
+describe('the memory write paths fill {{NOW}} at the server', () => {
+  const content = (id: number) => getMemoryById(id)?.content ?? ''
+  // An old row as it is on disk today: the literal token, written before this fix.
+  // (the db function, not the route: it stores the text as given)
+  const oldRow = (text: string) => saveAgentMemory('dex', text, 'hot', undefined, true).id
+
+  it('POST /api/memories content', async () => {
+    const before = new Date()
+    const r = await call(tryHandleMemories, 'POST', '/api/memories', { agent_id: 'dex', content: 'HOT dex 11-15 {{NOW}}: próba', category: 'hot' })
+    const after = new Date()
+    expect(r.statusCode).toBe(200)
+    expect(content(r.json.id)).not.toContain(NOW_TOKEN)
+    expect(stampedNow(content(r.json.id), before, after)).toBe(true)
+  })
+
+  it('PUT /api/memories/:id content', async () => {
+    const id = oldRow('régi szöveg')
+    const before = new Date()
+    const r = await call(tryHandleMemories, 'PUT', `/api/memories/${id}`, { content: 'COLD dex 11-15 {{NOW}}: lezárva', category: 'cold', updated_by: 'dex' })
+    const after = new Date()
+    expect(r.statusCode).toBe(200)
+    expect(content(id)).not.toContain(NOW_TOKEN)
+    expect(stampedNow(content(id), before, after)).toBe(true)
+  })
+
+  it('PUT prepend: the new header is filled, the row below it stays as it was (its literal token too)', async () => {
+    const id = oldRow('régi sor {{NOW}} kitöltetlenül')
+    const r = await call(tryHandleMemories, 'PUT', `/api/memories/${id}`, { prepend: '## {{NOW}} frissítés', updated_by: 'dex' })
+    expect(r.statusCode).toBe(200)
+    const [head, ...rest] = content(id).split('\n')
+    expect(head).toMatch(/^## \d{2}:\d{2} frissítés$/)
+    expect(rest.join('\n')).toBe('régi sor {{NOW}} kitöltetlenül')
+  })
+
+  it('a category-only move does not touch an old row that holds the literal token', async () => {
+    const id = oldRow('HOT viktor 11-14 {{NOW}}: régi')
+    const r = await call(tryHandleMemories, 'PUT', `/api/memories/${id}`, { category: 'cold', updated_by: 'dex' })
+    expect(r.statusCode).toBe(200)
+    expect(content(id)).toBe('HOT viktor 11-14 {{NOW}}: régi')
+    expect(getMemoryById(id)?.category).toBe('cold')
+  })
+
+  it('a quoted token ({{ NOW }}) stays as written on POST and PUT', async () => {
+    const r = await call(tryHandleMemories, 'POST', '/api/memories', { agent_id: 'dex', content: 'a token: {{ NOW }}', category: 'warm' })
+    expect(content(r.json.id)).toBe('a token: {{ NOW }}')
+    await call(tryHandleMemories, 'PUT', `/api/memories/${r.json.id}`, { content: 'még mindig: {{ NOW }}', updated_by: 'dex' })
+    expect(content(r.json.id)).toBe('még mindig: {{ NOW }}')
+  })
+
+  it('POST filters the filled text: a token that shrinks a bounded gap does not slip an idiom past the filter (Viktor 42665 LOW 1)', async () => {
+    // 24 spaces + {{NOW}} (7) + 1 = 32 before the fill (outside the 30-char window), 30 after it (inside).
+    const r = await call(tryHandleMemories, 'POST', '/api/memories', { agent_id: 'dex', content: 'mostantol' + ' '.repeat(24) + '{{NOW}}' + ' uj persona', category: 'warm' })
+    expect(r.statusCode).toBe(400)
   })
 })
