@@ -94,6 +94,25 @@ describe.each(GATES)('$marker: the ensure accepts only the exact entry', (g) => 
     expect(mine(read(), g.event, g.marker)).toEqual([canonical])
   })
 
+  // Viktor 42916 INFO 1: without these two, a check that ignored the matcher or the hook type survived mutation.
+  it('a changed matcher is rewritten', () => {
+    const canonical = wire(g)
+    edit(g, (e) => { e.matcher = 'Read' })
+    expect(g.ensure()).toBe(true)
+    // The Telegram copy-gate injector keeps an entry of its script under another matcher (Viktor 42916 INFO 2):
+    // the canonical entry is added next to it. Every other gate ends with exactly the canonical entry.
+    if (g.marker === 'outgoing-copy-gate.py') expect(mine(read(), g.event, g.marker)).toContainEqual(canonical)
+    else expect(mine(read(), g.event, g.marker)).toEqual([canonical])
+    expect(g.ensure()).toBe(false)
+  })
+
+  it('a changed hook type is rewritten', () => {
+    const canonical = wire(g)
+    edit(g, (e) => { e.hooks[0].type = 'prompt' })
+    expect(g.ensure()).toBe(true)
+    expect(mine(read(), g.event, g.marker)).toEqual([canonical])
+  })
+
   it('a second hook added to the entry is rewritten', () => {
     const canonical = wire(g)
     edit(g, (e) => { e.hooks.push({ type: 'command', command: 'true' }) })
