@@ -50,7 +50,9 @@ vi.mock('../channel-provider.js', async (importOriginal) => {
   }
 })
 
-vi.mock('../web/scheduled-tasks-io.js', () => ({
+vi.mock('../web/scheduled-tasks-io.js', async (importOriginal) => ({
+  // the real directory guard (c453361b): the switch-off goes through it
+  resolveTaskDirInside: (await importOriginal<typeof import('../web/scheduled-tasks-io.js')>()).resolveTaskDirInside,
   listScheduledTasks: () => mockListScheduledTasks(),
   readScheduledTask: (n: string) => mockListScheduledTasks().find(t => t.name === n) ?? null,
   removeScheduledTaskDir: (n: string) => mockRemove(n),

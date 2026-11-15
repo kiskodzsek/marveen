@@ -13,10 +13,10 @@
 // use this form (it is switched off after its first day); a weekday cron
 // (`... * * 1`) or a month-day cron (`... 15 * *`) is never touched.
 import { existsSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 import { readJsonObjectForWrite } from './agent-config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
-import { SCHEDULED_TASKS_DIR, type ScheduledTask } from './scheduled-tasks-io.js'
+import { resolveTaskDirInside, SCHEDULED_TASKS_DIR, type ScheduledTask } from './scheduled-tasks-io.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 /** A configured "always catch up" (Infinity) must not keep a dated task alive for ever. */
@@ -63,9 +63,11 @@ export function disableScheduledTaskOnDisk(
   dir: string = SCHEDULED_TASKS_DIR,
   expect?: { schedule?: string; createdAt?: number },
 ): boolean {
-  // task.name can come from the SKILL.md frontmatter, not from the directory: only a plain directory name is written to
-  if (!name || basename(name) !== name || name.startsWith('.')) return false
-  const configPath = join(dir, name, 'task-config.json')
+  // task.name can come from the SKILL.md frontmatter, not from the directory: only a plain directory name whose
+  // real path is directly in the tasks dir is written to (a symlinked task dir is not; Viktor 42613 INFO 1)
+  const taskDir = resolveTaskDirInside(name, dir)
+  if (!taskDir) return false
+  const configPath = join(taskDir, 'task-config.json')
   // a task removed meanwhile is not re-created as a bare {enabled:false}
   if (!existsSync(configPath)) return false
   let config: Record<string, unknown>

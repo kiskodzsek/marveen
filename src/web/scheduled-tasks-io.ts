@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { MAIN_AGENT_ID } from '../config.js'
 import type { ChannelProviderType } from '../channel-provider.js'
@@ -268,10 +268,56 @@ export function parsePositiveInt(raw: unknown): number | undefined {
   return typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : undefined
 }
 
+/**
+ * The directory of task `taskName` when it is safe for the runner to write or
+ * remove: a plain directory name (no separator, no leading dot) whose
+ * real path (symlinks resolved) sits directly in the real tasks directory.
+ * null otherwise, and when the directory does not exist.
+ *
+ * Why (Viktor 42609 LOW 2 and 42613 INFO 1, card c453361b): a listed
+ * task.name comes from the SKILL.md frontmatter (`name: name || taskName` in
+ * readScheduledTask), not from the directory. A planted SKILL.md with
+ * `name: ../x` pointed the runner's recursive remove (and the dated-once
+ * switch-off) at a path outside the tasks directory; a task directory that is a
+ * symlink to elsewhere did the same past a name check.
+ */
+export function resolveTaskDirInside(taskName: string, root: string = SCHEDULED_TASKS_DIR): string | null {
+  // an empty name resolves to the tasks dir itself and a NUL makes realpathSync throw: both null below
+  if (typeof taskName !== 'string') return null
+  if (basename(taskName) !== taskName || taskName.startsWith('.')) return null
+  const dir = join(root, taskName)
+  try {
+    if (dirname(realpathSync(dir)) !== realpathSync(root)) return null
+  } catch {
+    return null
+  }
+  return dir
+}
+
 // ONCE: remove a one-shot task after it fired or went stale. No tombstone: a
 // once-task is never a shipped default, and a tombstone would block nothing.
-export function removeScheduledTaskDir(taskName: string): void {
-  rmSync(join(SCHEDULED_TASKS_DIR, taskName), { recursive: true, force: true })
+// `expect` is what the caller listed (runAt, createdAt): the directory is
+// removed only when its own task-config.json still carries them, so a
+// frontmatter name that points at ANOTHER task (a live cron, say) removes
+// nothing (Viktor 42609 LOW 2, card c453361b). Returns whether it removed.
+export function removeScheduledTaskDir(
+  taskName: string,
+  expect: { runAt?: number; createdAt?: number },
+  root: string = SCHEDULED_TASKS_DIR,
+): boolean {
+  const dir = resolveTaskDirInside(taskName, root)
+  if (!dir) return false
+  let config: Record<string, unknown>
+  try {
+    config = JSON.parse(readFileSync(join(dir, 'task-config.json'), 'utf8'))
+  } catch {
+    return false
+  }
+  if (expect.runAt == null || parsePositiveInt(config.runAt) !== expect.runAt) return false
+  // the same reading as readScheduledTask (`config.createdAt || 0`)
+  if ((config.createdAt || 0) !== (expect.createdAt ?? 0)) return false
+  rmSync(dir, { recursive: true, force: true })
+  return true
 }
 
 // Only a finite number is a policy; anything else (string, null, NaN) is
