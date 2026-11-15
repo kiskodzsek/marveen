@@ -8061,6 +8061,2600 @@
    "ran": [],
    "cell": "comment|\"|after",
    "syntax": true
+  },
+  {
+   "cmd": "m1 # m2\n",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 # m2\n) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 # m2\n` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 # m2\n) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 # m2\n ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a # m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( (( 1 # 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a # m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a # m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a # m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a # m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na # m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na # m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 ; m2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 ; m2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 ; m2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 ; m2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a ; m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1 ; 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1 ; 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a ; m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a ; m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a ; m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a ; m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na ; m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na ; m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 & m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 & m2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 & m2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 & m2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 & m2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a & m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1 & 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1 & 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a & m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a & m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a & m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a & m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na & m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na & m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 | m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 | m2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 | m2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 | m2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 | m2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a | m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1 | 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1 | 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a | m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a | m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a | m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a | m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na | m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na | m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 </dev/null ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 </dev/null ; m2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 </dev/null ; m2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 </dev/null ; m2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 </dev/null ; m2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a < m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1 < 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1 < 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a < m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a < m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a < m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a < m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na < m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na < m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 >o ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 >o ; m2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 >o ; m2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 >o ; m2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 >o ; m2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a > m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1 > 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1 > 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a > m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a > m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a > m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a > m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na > m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na > m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 'x' m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 'x' m2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 'x' m2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 'x' m2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 'x' m2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo \"a ' m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "true # a ' m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na ' m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na ' m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 \"x\" m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 \"x\" m2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 \"x\" m2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 \"x\" m2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 \"x\" m2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo 'a \" m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo $'a \" m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a \" m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na \" m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na \" m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 `m2`",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 `m2`) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 \\`m2\\`` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 `m2`) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 `m2` ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo 'a ` m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo $'a ` m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a ` m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na ` m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na ` m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 $(m2)",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 $(m2)) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 $(m2)` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 $(m2)) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 $(m2) ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a $ m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1 $ 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1 $ 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a $ m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a $ m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a $ m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a $ m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na $ m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na $ m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 \\; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 \\; m2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 \\; m2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 \\; m2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 \\; m2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a \\ m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1 \\ 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1 \\ 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a \\ m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a \\ m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a \\ m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a \\ m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na \\ m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na \\ m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 ; ( m2 )",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 ; ( m2 )) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 ; ( m2 )` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 ; ( m2 )) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 ; ( m2 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a ( m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "echo 'a ( m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a ( m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a ( m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a ( m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na ( m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na ( m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 ; ( m2 )",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 ; ( m2 )) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 ; ( m2 )` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 ; ( m2 )) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 ; ( m2 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a ) m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "echo 'a ) m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a ) m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a ) m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a ) m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na ) m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na ) m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 ; { m2 ; }",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 ; { m2 ; }) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 ; { m2 ; }` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 ; { m2 ; }) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 ; { m2 ; } ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a { m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1 { 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1 { 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a { m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a { m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a { m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a { m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na { m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na { m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 ; { m2 ; }",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 ; { m2 ; }) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 ; { m2 ; }` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 ; { m2 ; }) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 ; { m2 ; } ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a } m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1 } 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1 } 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a } m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a } m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a } m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a } m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na } m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na } m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1\nm2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1\nm2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1\nm2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1\nm2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a \n m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1 \n 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1 \n 2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a \n m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a \n m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a \n m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a \n m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na \n m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na \n m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "m1 m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "top"
+  },
+  {
+   "cmd": "echo $(m1 m2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "$("
+  },
+  {
+   "cmd": "echo `m1 m2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "`"
+  },
+  {
+   "cmd": "cat <(m1 m2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "<("
+  },
+  {
+   "cmd": "( m1 m2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "matrix": "("
+  },
+  {
+   "cmd": "echo ${X:-a   m1 b} ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "${"
+  },
+  {
+   "cmd": "( echo $(( 1   2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "$(("
+  },
+  {
+   "cmd": "( (( 1   2 )) ) ; m1",
+   "markers": [
+    "m1"
+   ],
+   "ran": [
+    "m1"
+   ],
+   "matrix": "(("
+  },
+  {
+   "cmd": "echo 'a   m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "'..'"
+  },
+  {
+   "cmd": "echo \"a   m1 b\" ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "\"..\""
+  },
+  {
+   "cmd": "echo $'a   m1 b' ; m2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "$'..'"
+  },
+  {
+   "cmd": "true # a   m1 b\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "comment"
+  },
+  {
+   "cmd": "cat >/dev/null <<E\na   m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(u)"
+  },
+  {
+   "cmd": "cat >/dev/null <<'E'\na   m1 b\nE\nm2",
+   "markers": [
+    "m1",
+    "m2"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "matrix": "heredoc(q)"
   }
  ]
 }

@@ -91,11 +91,14 @@ function lexOnce(text, split) {
   }
   let i = 0
 
-  const openSubst = (kind, start, innerStart) => {
+  const openSubst = (kind, start, innerStart, nested = false) => {
     const sub = { kind, start, end: n, inner: [innerStart, n] }
     substs.push(sub)
-    const fr = { kind, sub, depth: 0 }
-    if (kind === '`') {
+    const fr = { kind, sub, depth: 0, nested }
+    // an escaped-backtick frame (nested) has no body end of its own: the next escaped backtick closes it, and the
+    // outer body's end (its first unescaped backtick) ends it too, as an unterminated frame (bash: echo `a \` b` ; ls
+    // runs ls at the top)
+    if (kind === '`' && !nested) {
       // bash 3.2 cuts a backtick body out FIRST: it ends at the first unescaped backtick, whatever quote or $( ) is
       // open inside it (echo `echo '` ; curl runs curl). Quotes and comments in the body end there too.
       let j = innerStart
@@ -236,6 +239,16 @@ function lexOnce(text, split) {
     if (f.kind === '${' && ch === '}') { closeSubst(i, i + 1); i++; continue }
     if (ch === ')' && ['$(', '(', '<(', '>('].includes(f.kind)) { closeSubst(i, i + 1); i++; continue }
 
+    // card f7d4ead8 (oracle matrix): inside a backtick an escaped backtick opens a nested command substitution, and
+    // the next escaped backtick closes it; bash runs the command in it (echo `a \`b\`` runs b). A third level
+    // (\\\`) is not modelled.
+    if (ch === '\\' && nx === '`' && f.kind === '`') {
+      cls[i] = cls[i + 1] = 'c'
+      if (f.nested) closeSubst(i, i + 2)
+      else openSubst('`', i, i + 2, true)
+      i += 2
+      continue
+    }
     if (ch === '\\') {
       if (i + 1 < n) { cls[i] = cls[i + 1] = nx === '\n' ? 'l' : 'e'; i += 2 } else { cls[i] = 'e'; i++ }
       continue

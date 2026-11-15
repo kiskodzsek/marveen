@@ -71,11 +71,14 @@ def _lex_once(text, split):
     def at(k):
         return s[k] if 0 <= k < n else ''
 
-    def open_subst(kind, start, inner_start):
+    def open_subst(kind, start, inner_start, nested=False):
         sub = {'kind': kind, 'start': start, 'end': n, 'inner': [inner_start, n]}
         substs.append(sub)
-        fr = {'kind': kind, 'sub': sub, 'depth': 0}
-        if kind == '`':
+        fr = {'kind': kind, 'sub': sub, 'depth': 0, 'nested': nested}
+        # an escaped-backtick frame (nested) has no body end of its own: the next escaped backtick closes it, and the
+        # outer body's end (its first unescaped backtick) ends it too, as an unterminated frame (bash: echo `a \` b`
+        # ; ls runs ls at the top)
+        if kind == '`' and not nested:
             # bash 3.2 cuts a backtick body out FIRST: it ends at the first unescaped backtick, whatever quote or
             # $( ) is open inside it (Viktor 42888 HIGH 4: echo `echo '` ; curl runs curl)
             j = inner_start
@@ -263,6 +266,16 @@ def _lex_once(text, split):
             i += 1
             continue
 
+        # card f7d4ead8 (oracle matrix): inside a backtick an escaped backtick opens a nested command substitution,
+        # the next escaped backtick closes it; bash runs the command in it. A third level (\\\`) is not modelled.
+        if ch == '\\' and nx == '`' and kind == '`':
+            cls[i] = cls[i + 1] = 'c'
+            if f.get('nested'):
+                close_subst(i, i + 2)
+            else:
+                open_subst('`', i, i + 2, True)
+            i += 2
+            continue
         if ch == '\\':
             if i + 1 < n:
                 cls[i] = cls[i + 1] = 'l' if nx == '\n' else 'e'
