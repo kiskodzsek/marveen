@@ -19,10 +19,14 @@ $TMUX (measured). So:
   tmux command (send-keys, capture-pane, list-*, new-session ...); kill-session -t <a plain non-agent name>.
 
 Read through the shared lexer (scripts/lib/shell_lex.py, card fae0712e): quotes, $( ), backticks, ;, &&, |, and
-heredoc bodies are separated the way bash does. Followed: VAR=value prefixes, env/command/exec/nohup/nice/time/
-sudo/timeout/xargs/caffeinate wrappers, sh/bash/zsh -c payloads, eval, a heredoc fed to a shell, tmux -c, and the
-arguments of every tmux subcommand (send-keys "tmux kill-server" Enter would run it in a pane).
-A $NAME / ${NAME} socket or target resolves only to a LITERAL value assigned earlier in the same command
+heredoc bodies are separated the way bash does. Followed: VAR=value prefixes, compound-command keywords (if/then/
+elif/else/while/until/do/{/!, case patterns), env (-S too)/command/exec/nohup/nice/time/sudo/timeout/xargs/
+caffeinate/setsid/arch/sandbox-exec wrappers, find -exec/-execdir, sh/bash/zsh -c payloads, eval, a heredoc, a
+here-string or a pipe fed to a shell (or to xargs running a shell / tmux), tmux -c, and the arguments of every tmux
+subcommand (send-keys "tmux kill-server" Enter would run it in a pane). With both -S and -L, -S counts (tmux uses
+it whatever the order, measured); an -L label with a path part (-L ../tmux-<uid>/default) is live. A window/pane
+target without a session part (-t 1, -t .0, -t <window>) resolves in the caller's own session: blocked.
+A $NAME / ${NAME} socket, target or subcommand resolves only to a LITERAL value assigned earlier in the same command
 (L=probe; tmux -L $L ...); an unknown, reassigned or prefix-assigned one stays dynamic, i.e. live.
 Interpreter code (the 16:45 incident itself: cat > probe.mts <<'EOF' ... execFileSync('tmux', ['kill-server'])
 ... EOF; node probe.mts): in a command that runs an interpreter (node, python3, tsx, ...), a heredoc body or an
@@ -32,7 +36,9 @@ not a parser: a probe of the gate itself fed through `python3 - <<EOF` is blocke
 NOT MODELLED (an ACCIDENT guard, not a boundary: same uid): a script file written in an EARLIER command and run
 later, or one that builds the tmux arguments at run time; the tmux library of an interpreter; kill <pid> of the
 server; a value built at run time and passed as the command word ($T kill-server is blocked only because the
-subcommand is literal); tmux source-file; a tmux config or hook.
+subcommand is literal); awk system(), ssh, and other programs that run a command string; tmux source-file; a tmux
+config or hook. Known false positive: a loop variable as a target (for s in klodel-worker ...; tmux respawn-pane -k
+-t $s) is read as live (Viktor 43177 replay, 1 in 14 days): write the names literally.
 
 Exit 2 + the reason on stderr = block; exit 0 = allow. Internal error or watchdog: block only when the command text
 mentions tmux or a kill command (fail closed where it matters, open elsewhere). Deny lines are logged to
@@ -168,7 +174,9 @@ def socket_is_live(opt, word):
         return True
     val = word['text']
     if opt == '-L':
-        return val == 'default' or val == ''
+        # Viktor 43177 LOW 2: tmux does not filter the label, -L ../tmux-<uid>/default and -L ./default reach the live
+        # server (measured on an isolated server); a label with a path part is read as live.
+        return val in ('default', '') or '/' in val or val.startswith('.')
     p = os.path.expanduser(val)
     if p in live_socket_paths() or os.path.realpath(p) in live_socket_paths():
         return True
@@ -184,7 +192,7 @@ def resolve(name):
     return cands[0] if len(cands) == 1 else None
 
 
-def target_dangerous(word):
+def target_dangerous(word, name='kill-session'):
     word = resolved(word)
     if word is None:
         return 'no -t: the caller\'s own (current) session'
@@ -193,6 +201,10 @@ def target_dangerous(word):
         return f'target {t!r} is an id or expanded'
     if dynamic(word):
         return 'the target is expanded at run time'
+    # Viktor 43177 MEDIUM 2: a window/pane target without a session part (-t 1, -t .0, -t <window name>) resolves in
+    # the CALLER's own session (measured on an isolated server): an agent's window or pane dies.
+    if name != 'kill-session' and ':' not in t:
+        return f'target {t!r} has no session part: it resolves in the caller\'s own (agent) session'
     session = t.split(':', 1)[0]
     exact = session.startswith('=')
     if exact:
@@ -244,7 +256,7 @@ def tmux_reasons(words, depth):
     reasons = []
     # global options, up to the first non-option word
     i = 0
-    sock_opt, sock_word = None, None
+    sock_l, sock_s = None, None
     while i < len(words):
         t = words[i]['text']
         if t == '--':
@@ -261,13 +273,17 @@ def tmux_reasons(words, depth):
                 if j + 1 >= len(t):
                     consumed = True
                 if ch in 'LS':
-                    sock_opt, sock_word = '-' + ch, val
+                    if ch == 'S':
+                        sock_s = val
+                    else:
+                        sock_l = val
                 elif ch == 'c' and val is not None:
                     reasons += decide_text(val['text'], depth + 1)
                 break
             j += 1
         i += 2 if consumed else 1
-    live = socket_is_live(sock_opt, sock_word)
+    # Viktor 43177 LOW 1: with both, tmux uses -S whatever the order (measured); -L counts only without -S.
+    live = socket_is_live('-S', sock_s) if sock_s is not None else socket_is_live('-L' if sock_l is not None else None, sock_l)
     rest = words[i:]
     # tmux command sequences: a ';' argument separates commands
     seqs, cur = [], []
@@ -281,6 +297,8 @@ def tmux_reasons(words, depth):
     for seq in seqs:
         if not seq:
             continue
+        # Viktor 43177 LOW 5: x=kill-server; tmux $x -- a literal assignment resolves the subcommand too
+        seq = [resolved(seq[0])] + seq[1:]
         name = resolve(seq[0]['text']) if not dynamic(seq[0]) else None
         args = seq[1:]
         # anything handed to the server as shell text (send-keys, run-shell, new-session's command ...) is read too
@@ -303,41 +321,70 @@ def tmux_reasons(words, depth):
             if 'a' in opts:
                 reasons.append(f'tmux {name} -a on the LIVE server (kills everything but the target)')
                 continue
-            why = target_dangerous(opts.get('t') if isinstance(opts.get('t'), dict) else None)
+            why = target_dangerous(opts.get('t') if isinstance(opts.get('t'), dict) else None, name)
             if why:
                 reasons.append(f'tmux {name} on the LIVE server: {why}')
     return reasons
 
 
+# Viktor 43177 MEDIUM 1: the lexer hands a compound command's keyword over as the segment's first word
+# (then tmux kill-server; do tmux ...; { tmux ...; ! tmux ...).
+RESERVED = {'if', 'then', 'elif', 'else', 'while', 'until', 'do', '{', '!'}
+# options taking a value, per wrapper
+WRAPPER_ARGS = {
+    'command': '', 'builtin': '', 'nohup': '', 'time': '', 'caffeinate': '-t -w', 'noglob': '', 'stdbuf': '',
+    'exec': '-a', 'setsid': '', 'arch': '-e', 'sandbox-exec': '-f -p -n -D',
+    'nice': '-n', 'sudo': '-u -g -C -D -h -p -r -t -U', 'xargs': '-n -I -L -P -s -E -d -J -R', 'watch': '-n -d',
+}
+
+
 def strip_wrappers(words):
-    """Drop VAR=value prefixes and the common command wrappers; returns the words from the real command word."""
+    """Drop VAR=value prefixes, compound-command keywords and the common command wrappers; returns the words from the
+    real command word."""
     i = 0
-    for _ in range(12):
+    for _ in range(24):
         while i < len(words) and ASSIGN_RX.match(words[i]['text']) and not words[i]['quoted']:
             i += 1
         if i >= len(words):
             return []
-        name = os.path.basename(words[i]['text'])
+        w = words[i]
+        name = os.path.basename(w['text'])
+        if not w['quoted'] and w['text'] in RESERVED:
+            i += 1
+            continue
+        if not w['quoted'] and w['text'] == 'case':
+            # case WORD in PATTERN) cmd ...
+            k = next((k for k in range(i + 1, len(words)) if words[k]['text'] == 'in' and not words[k]['quoted']), None)
+            if k is None:
+                return []
+            i = k + 1
+            continue
+        if not w['quoted'] and len(w['text']) > 1 and w['text'].endswith(')') and '(' not in w['text']:
+            i += 1  # a case pattern (a) / *) / b|c)), also the one opening a later ;; branch
+            continue
         if name == 'env':
             i += 1
             while i < len(words):
                 t = words[i]['text']
-                if t in ('-u', '-P', '-S', '-C'):
+                if t in ('-S', '--split-string') and i + 1 < len(words):
+                    # env -S 'tmux kill-server': the value is split into the command line (Viktor 43177 LOW 4)
+                    L = lexer()
+                    val = words[i + 1]['text']
+                    lx = L.lex(val)
+                    head = L.words(val, lx, lx['segments'][0]) if lx['segments'] else []
+                    words = head + words[i + 2:]
+                    i = 0
+                    break
+                if t in ('-u', '-P', '-C'):
                     i += 2
                 elif t.startswith('-') or ASSIGN_RX.match(t):
                     i += 1
                 else:
                     break
             continue
-        if name in ('command', 'exec', 'builtin', 'nohup', 'time', 'caffeinate', 'noglob', 'stdbuf'):
+        if name in WRAPPER_ARGS:
             i += 1
-            while i < len(words) and words[i]['text'].startswith('-'):
-                i += 1
-            continue
-        if name in ('nice', 'sudo', 'xargs', 'watch'):
-            i += 1
-            argful = {'nice': '-n', 'sudo': '-u -g -C -D -h -p -r -t -U', 'xargs': '-n -I -L -P -s -E -d -J -R',
-                      'watch': '-n -d'}[name].split()
+            argful = WRAPPER_ARGS[name].split()
             while i < len(words) and words[i]['text'].startswith('-'):
                 i += 2 if words[i]['text'] in argful else 1
             continue
@@ -367,6 +414,17 @@ def segment_reasons(words, depth):
             if re.fullmatch(r'-[A-Za-z]*c[A-Za-z]*', t) and k + 1 < len(rest):
                 out += decide_text(rest[k + 1]['text'], depth + 1)
                 break
+        for k, w in enumerate(rest[:-1]):
+            if w['text'] == '<<<' and not w['quoted']:  # bash <<< 'tmux kill-server' (Viktor 43177 LOW 3)
+                out += decide_text(unescape(rest[k + 1]['text']), depth + 1)
+        return out
+    if name == 'find':
+        # find ... -exec / -execdir / -ok CMD ... ; or +  (Viktor 43177 LOW 4)
+        out = []
+        for k, w in enumerate(rest):
+            if w['text'] in ('-exec', '-execdir', '-ok', '-okdir'):
+                end = next((m for m in range(k + 1, len(rest)) if rest[m]['text'] in (';', '+')), len(rest))
+                out += segment_reasons(rest[k + 1:end], depth + 1)
         return out
     if name == 'eval':
         return decide_text(' '.join(w['text'] for w in rest), depth + 1)
@@ -382,6 +440,39 @@ def segment_reasons(words, depth):
         # $T kill-server: the command word is not known before run time
         return ['a command word built at run time with a tmux kill subcommand']
     return []
+
+
+def unescape(t):
+    return t.replace('\\n', '\n').replace('\\t', '\t')
+
+
+def shell_reads_stdin(ws):
+    """sh/bash/zsh with no -c and no script argument (or with -s): it runs what comes on stdin."""
+    if not ws or os.path.basename(ws[0]['text']) not in SHELLS:
+        return False
+    opts = [w['text'] for w in ws[1:] if w['text'].startswith('-') and not w['quoted']]
+    if any(re.fullmatch(r'-[A-Za-z]*c[A-Za-z]*', o) for o in opts):
+        return False
+    if any(re.fullmatch(r'-[A-Za-z]*s[A-Za-z]*', o) for o in opts):
+        return True
+    return not any(not w['text'].startswith('-') for w in ws[1:])
+
+
+def piped_into_runner(text, lx, segwords, idx):
+    """Segment idx reads the previous segment's output through a pipe and runs it: a stdin-reading shell, or xargs
+    handing it to a shell or tmux (echo 'tmux kill-server' | sh; ... | xargs -I{} sh -c {})."""
+    if idx == 0:
+        return False
+    sep = text[lx['segments'][idx - 1]['end']:lx['segments'][idx]['start']].strip()
+    if sep not in ('|', '|&'):
+        return False
+    ws = segwords[idx]
+    sw = strip_wrappers(ws)
+    if shell_reads_stdin(sw):
+        return True
+    raw = [w for w in ws if not (ASSIGN_RX.match(w['text']) and not w['quoted'])]
+    return bool(raw and os.path.basename(raw[0]['text']) == 'xargs' and sw and
+                os.path.basename(sw[0]['text']) in SHELLS | {'tmux'})
 
 
 def decide_text(text, depth=0):
@@ -404,8 +495,12 @@ def decide_text(text, depth=0):
                     assigns[k] = v
     _ASSIGNS.append(assigns)
     try:
-        for ws in segwords:
+        for idx, ws in enumerate(segwords):
             reasons += segment_reasons(ws, depth)
+            if piped_into_runner(text, lx, segwords, idx):
+                # what the producer prints is run: read its arguments as a command line (Viktor 43177 LOW 3)
+                fed = ' '.join(unescape(w['text']) for w in segwords[idx - 1][1:])
+                reasons += decide_text(fed, depth + 1)
     finally:
         _ASSIGNS.pop()
     # Interpreter code (the 2026-11-15 16:45 case: cat > probe.mts <<'EOF' ... execFileSync('tmux', ['kill-server'])

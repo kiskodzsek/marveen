@@ -86,7 +86,54 @@ BLOCK = [
     "node -e \"require('child_process').execFileSync('tmux', ['killp'])\"",
     "python3 - <<'PY'\nimport subprocess\nsubprocess.run('cd /x && tmux kill-server', shell=True)\nPY",
     "perl -e 'system(\"tmux kill-session -t agent-dave\")'",
+    # Viktor 43177 INFO 1 (mutant M3 survived): a glob target without the agent- prefix
+    "tmux kill-session -t '*'",
+    "tmux kill-session -t '*-viktor'",
+    # Viktor 43177 LOW 1/2: -S wins over -L; an -L label with a path part
+    f'tmux -S /private/tmp/tmux-{UID}/default -L probe kill-server',
+    f'tmux -L ../tmux-{UID}/default kill-server',
+    'tmux -L ./default kill-server',
+    # Viktor 43177 MEDIUM 2: a window/pane target without a session part resolves in the caller's own session
+    'tmux kill-window -t 0',
+    'tmux kill-window -t 1',
+    'tmux kill-window -t claude',
+    'tmux kill-pane -t 0',
+    'tmux kill-pane -t 1',
+    'tmux kill-pane -t .0',
+    'tmux unlink-window -k -t 0',
+    'tmux respawn-pane -k -t 0',
+    'tmux respawn-window -k -t claude',
+    # Viktor 43177 LOW 3: shell text on stdin
+    "echo 'tmux kill-server' | sh",
+    "echo 'tmux kill-server' | bash",
+    "bash <<< 'tmux kill-server'",
+    "printf 'tmux kill-server\\n' | sh -s",
+    'echo tmux kill-server | xargs -I{} sh -c {}',
+    "echo 'tmux kill-session -t agent-dave' | zsh",
+    # Viktor 43177 LOW 4: wrappers and runners
+    'setsid tmux kill-server',
+    'arch -arm64 tmux kill-server',
+    'sandbox-exec -f /x/prof.sb tmux kill-server',
+    'find . -maxdepth 0 -exec tmux kill-server \\;',
+    'exec -a name tmux kill-server',
+    "env -S 'tmux kill-server'",
+    # Viktor 43177 LOW 5: the subcommand in a literal variable
+    'x=kill-server; tmux $x',
 ]
+# Viktor 43177 MEDIUM 1: compound-command keywords, for three kill forms each
+for _k in ('tmux kill-server', 'tmux kill-session -t agent-x', 'pkill tmux'):
+    BLOCK += [
+        f'if true; then {_k}; fi',
+        f'if {_k}; then :; fi',
+        f'for i in 1; do {_k}; done',
+        f'while true; do {_k}; done',
+        f'until false; do {_k}; done',
+        f'{{ {_k}; }}',
+        f'! {_k}',
+        f'if false; then :; else {_k}; fi',
+        f'case x in a) {_k};; esac',
+        f'case x in a) ls;; b|c) {_k};; esac',
+    ]
 ALLOW = [
     'tmux -L kernelprobe kill-server',
     'tmux -Lkernelprobe kill-server',
@@ -126,6 +173,19 @@ ALLOW = [
     # prose about the incident written by an interpreter (E1 2026-11-15 16:10, a hibanapló line): not code
     ("python3 -I - <<'PY'\nline = '- 2026-11-15 | Viktor | a próba végén tmux kill-server futott, minden session leállt'\n"
      "open('/tmp/x.md', 'a').write(line)\nPY"),
+    # Viktor 43177: -S decides over -L (the iso socket), a window target WITH a non-agent session part
+    'tmux -S /private/tmp/iso/sock -L default kill-server',
+    'tmux kill-window -t scratch:2',
+    'tmux kill-pane -t scratch:1.0',
+    'if true; then tmux ls; fi',
+    'for s in a b; do tmux capture-pane -p -t agent-$s; done',
+    'case x in a) ls;; esac',
+    'echo hello | sh',
+    'echo tmux kill-server',
+    'bash tools/x.sh < notes.txt',
+    'find . -name "*.py" -exec grep -l tmux {} \\;',
+    'setsid tmux -L iso kill-server',
+    "env -S 'tmux ls'",
 ]
 
 bad = 0
@@ -140,6 +200,36 @@ for c in ALLOW:
         bad += 1
         print(f'FAIL (blocked, should allow): {c!r} -> {r}')
 print(f'decide: {len(BLOCK)} block + {len(ALLOW)} allow cases, {bad} failed')
+
+# Viktor 43177 INFO 1 (mutant M16 survived): an internal error blocks when the command mentions tmux or kill, and
+# allows otherwise. In process: decide() is made to raise, main() reads the hook JSON from a replaced stdin.
+import io  # noqa: E402
+import signal  # noqa: E402
+
+
+def _boom(_cmd):
+    raise RuntimeError('synthetic')
+
+
+_real_decide, _real_stdin, _real_stderr = g.decide, sys.stdin, sys.stderr
+g.decide = _boom
+try:
+    for _cmd, _want in (('tmux kill-server', 2), ('kill 1234', 2), ('ls -la', 0)):
+        sys.stdin = io.StringIO(json.dumps({'tool_name': 'Bash', 'tool_input': {'command': _cmd}}))
+        sys.stderr = io.StringIO()
+        _orig_log = g.log_deny
+        g.log_deny = lambda *a, **k: None  # keep the real store/ clean
+        try:
+            _rc = g.main()
+        finally:
+            g.log_deny = _orig_log
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        if _rc != _want:
+            bad += 1
+            _real_stderr.write(f'FAIL exception path: {_cmd!r} -> rc {_rc}, want {_want}\n')
+finally:
+    g.decide, sys.stdin, sys.stderr = _real_decide, _real_stdin, _real_stderr
+print('exception path: done')
 
 
 def hook(cmd, env):
