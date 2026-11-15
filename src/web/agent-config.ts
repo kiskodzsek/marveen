@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { PROJECT_ROOT, MAIN_AGENT_ID, DEFAULT_AGENT_MODEL } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { readRegularFileSync } from './safe-read.js'
 import { parseExtraChannels } from './agent-extra-channels.js'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { logger } from '../logger.js'
@@ -55,8 +56,10 @@ export function agentConfigRoot(name: string): string {
   return agentDir(name)
 }
 
+// A FIFO, a device or a file over 1 MB in place of an agent's file is treated like an unreadable one (the
+// fallback), never read: a FIFO would block the dashboard's main thread (Viktor 43021 MEDIUM 1: agent-config.json).
 export function readFileOr(path: string, fallback: string): string {
-  try { return readFileSync(path, 'utf-8') } catch { return fallback }
+  try { return readRegularFileSync(path) } catch { return fallback }
 }
 
 // JSONCLOBBER926 (card 035e46d0): the read half of every read-modify-write on a
@@ -86,7 +89,7 @@ export function readJsonObjectForWrite(path: string): Record<string, unknown> {
   if (!existsSync(path)) return {}
   let raw: string
   try {
-    raw = readFileSync(path, 'utf-8')
+    raw = readRegularFileSync(path)
   } catch (err) {
     logger.warn({ path, err: (err as Error)?.message }, 'JSON config exists but cannot be read -- refusing to overwrite it')
     throw new Error(`${path} exists but cannot be read; refusing to overwrite it`)

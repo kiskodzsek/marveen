@@ -25,6 +25,10 @@ export class UnsafeFileError extends Error {
 
 const CHUNK = 64 * 1024
 
+// Claude Code's own state file (.claude.json) grows with every project it has seen (153 KB measured on
+// 2026-11-15); refusing it would skip the onboarding / trust stamps, so its readers get a wider cap.
+export const CLAUDE_JSON_MAX_BYTES = 16_000_000
+
 export function readRegularFileSync(path: string, maxBytes: number = SAFE_READ_MAX_BYTES): string {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK)
   try {
