@@ -1,5 +1,6 @@
 import { listAgentNames, readAgentCapabilities, writeAgentCapabilities, isKnownAgent } from '../agent-config.js'
 import { readBody, json } from '../http-helpers.js'
+import { sealCaller } from '../agent-config-seal.js'
 import type { RouteContext } from './types.js'
 
 // GET /.well-known/fleetq
@@ -32,7 +33,7 @@ export async function tryHandleFleetQ(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'capabilities: string[] required' }, 400)
       return true
     }
-    writeAgentCapabilities(name, parsed.capabilities)
+    writeAgentCapabilities(name, parsed.capabilities, sealCaller(ctx.auth))
     json(res, { ok: true, capabilities: parsed.capabilities })
     return true
   }

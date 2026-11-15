@@ -24,6 +24,7 @@ import { setSecret, deleteSecret, getSecret } from '../vault.js'
 import { readClaudePlansState, writeClaudePlansState, applyRotation, recordPlanObservation } from '../claude-plans-state.js'
 import { probePlanUsage, observationFromProbe, usageFromProbe } from '../../claude-plan-usage-probe.js'
 import { agentDir, writeAgentClaudePlan } from '../agent-config.js'
+import { sealCaller } from '../agent-config-seal.js'
 import { restartAgentProcess } from '../agent-process.js'
 import { hardRestartMarveenChannels } from '../channel-monitor.js'
 import { rotationReadiness } from '../claude-rotation-heartbeat.js'
@@ -313,7 +314,7 @@ export async function tryHandleClaudePlans(ctx: RouteContext): Promise<boolean> 
     }
     // Agent config first: if it refuses (corrupt file, JSONCLOBBER926) the
     // rotation side-car must not already claim the switch happened.
-    writeAgentClaudePlan(agentId, targetPlanId)
+    writeAgentClaudePlan(agentId, targetPlanId, sealCaller(ctx.auth))
     writeClaudePlansState(applyRotation(readClaudePlansState(), agentId, targetPlanId))
     const result = await restartAgentProcess(agentId)
     if (!result.ok) {

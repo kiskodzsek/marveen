@@ -7,7 +7,7 @@ import { beginRestart, endRestart } from '../restart-lock.js'
 import { isModelProfileId, MODEL_PROFILE_IDS } from '../../model-profiles.js'
 import { MAIN_AGENT_ID, currentBotName, PROJECT_ROOT } from '../../config.js'
 import { createSystemMessage, listPendingChannelRequests, updateChannelRequestStatus, getDb, claimPendingForAgent, markMessageFailed, countNewerMessagesFromSameSender,
-  getAgentToolActivity, getAgentMessageActivity, getAgentCurrentCards } from '../../db.js'
+  getAgentToolActivity, getAgentMessageActivity, getAgentCurrentCards, addKanbanComment } from '../../db.js'
 import { deriveAgentStatus, AGENT_STATUS_THRESHOLDS } from '../agent-status.js'
 import type { AgentStatusSignals, AgentStatusRow } from '../agent-status.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from '../agent-message-wrap.js'
@@ -170,6 +170,7 @@ import { readAgentTranscript, isTranscriptAllowed } from '../agent-transcript.js
 import { configDirFor } from '../main-transcript-root.js'
 import { kindAllowed, FORBIDDEN_KIND } from './auth.js'
 import { isValidModelId, InvalidModelIdError } from '../../model-id.js'
+import { acceptAgentConfigSeal, agentConfigSealStatus, DEFAULT_SEAL_DEPS, DEFAULT_SEAL_PATHS, mayAcceptSeal, sealCaller } from '../agent-config-seal.js'
 
 // Which credential kinds may read a transcript. NAMED principals only: a
 // logged-in human, or a key enrolled to that human's own device. Deliberately
@@ -1071,7 +1072,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
     scaffoldAgentDir(name)
     writeAgentModel(name, model)
-    writeAgentSecurityProfile(name, profileId)
+    writeAgentSecurityProfile(name, profileId, sealCaller(ctx.auth))
     writeAgentSettingsFromProfile(name, loadProfileTemplate(profileId))
     // A new agent comes up with the context guard ARMED (fleet policy, 2026-09-08).
     // Written as an explicit store row rather than by moving
@@ -1616,6 +1617,33 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     return true
   }
 
+  // Card 17901b47 (Viktor 43132, 43194 LOW 6): the agent-config.json seal. GET = does the file match the last accepted
+  // security fields; POST .../accept = accept the file's current fields (after a deliberate hand edit). Accept is for a
+  // dashboard session or the token with X-Agent-Id = the main agent (mayAcceptSeal; the X-Agent-Id leg is
+  // self-declared, so it is friction and a record, not authentication). The caller is recorded (sealCaller).
+  const sealMatch = path.match(/^\/api\/agents\/([^/]+)\/config-seal(\/accept)?$/)
+  if (sealMatch && ((method === 'GET' && !sealMatch[2]) || (method === 'POST' && sealMatch[2]))) {
+    const name = sanitizeAgentName(decodeURIComponent(sealMatch[1]))
+    if (!name || !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    if (method === 'GET') { json(res, agentConfigSealStatus(name)); return true }
+    if (!mayAcceptSeal(ctx.auth, MAIN_AGENT_ID)) {
+      json(res, { error: `config-seal accept: a dashboard session or X-Agent-Id: ${MAIN_AGENT_ID} only` }, 403)
+      return true
+    }
+    const r = acceptAgentConfigSeal(name, sealCaller(ctx.auth), DEFAULT_SEAL_PATHS, {
+      ...DEFAULT_SEAL_DEPS,
+      comment: (cardId, author, text) => { addKanbanComment(cardId, author, text) },
+    })
+    if (!r.ok) {
+      json(res, { error: r.reason === 'seal-invalid'
+        ? 'store/agent-config-seal.json is invalid: repair or delete it first (accept would drop every other agent\'s seal)'
+        : 'agent-config.json is missing or unreadable' }, 409)
+      return true
+    }
+    json(res, { ok: true, sealedAt: r.entry.sealedAt, by: r.entry.by })
+    return true
+  }
+
   const secGetMatch = path.match(/^\/api\/agents\/([^/]+)\/security$/)
   if (secGetMatch && method === 'GET') {
     const name = decodeURIComponent(secGetMatch[1])
@@ -1649,7 +1677,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     if (!requested) { json(res, { error: 'profile is required' }, 400); return true }
     const profile = loadProfileTemplate(requested)
     if (profile.id !== requested) { json(res, { error: `Unknown profile: ${requested}` }, 400); return true }
-    writeAgentSecurityProfile(name, requested)
+    writeAgentSecurityProfile(name, requested, sealCaller(ctx.auth))
     writeAgentSettingsFromProfile(name, profile)
     json(res, { ok: true, requiresRestart: isAgentRunning(name) })
     return true
@@ -1789,7 +1817,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const body = await readBody(req)
     let data: { host?: string; workdir?: string }
     try { data = JSON.parse(body.toString() || '{}') } catch { json(res, { error: 'invalid JSON' }, 400); return true }
-    const result = writeAgentRemoteConfig(name, data.host ?? '', data.workdir ?? '')
+    const result = writeAgentRemoteConfig(name, data.host ?? '', data.workdir ?? '', sealCaller(ctx.auth))
     if (!result.ok) { json(res, { error: result.error }, 400); return true }
     // Config changed -> drop any cached status so the next poll reflects it.
     remoteRunStateCache.invalidate(name)
@@ -1880,7 +1908,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       cycleRejected = true
     }
     const { team: next, warnings } = sanitizeTeamConfig(name, proposed)
-    writeAgentTeam(name, next)
+    writeAgentTeam(name, next, sealCaller(ctx.auth))
     json(res, { ok: true, team: next, warnings, cycleRejected })
     return true
   }
@@ -2598,10 +2626,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       }
     }
     if (data.customProvider !== undefined) {
-      writeAgentCustomProvider(name, data.customProvider || null)
+      writeAgentCustomProvider(name, data.customProvider || null, sealCaller(ctx.auth))
     }
     if (data.authMode !== undefined) {
-      writeAgentAuthMode(name, data.authMode)
+      writeAgentAuthMode(name, data.authMode, sealCaller(ctx.auth))
       if (data.authMode === 'api' && typeof data.apiKey === 'string' && data.apiKey.trim()) {
         setSecret(`agent-${name}-api-key`, `API key for agent ${name}`, data.apiKey.trim())
       }
@@ -2627,7 +2655,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         json(res, { error: `Ismeretlen Claude plan id: ${planId}` }, 400)
         return true
       }
-      writeAgentClaudePlan(name, planId)
+      writeAgentClaudePlan(name, planId, sealCaller(ctx.auth))
     }
     json(res, { ok: true })
     return true

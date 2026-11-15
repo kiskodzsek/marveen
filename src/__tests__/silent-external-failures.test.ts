@@ -136,7 +136,7 @@ describe('readJsonObjectForWrite never clobbers an existing config', () => {
     const plans = read('src/web/routes/claude-plans.ts')
     const anchor = plans.indexOf('// Agent config first')
     expect(anchor).toBeGreaterThan(0)
-    const cfgIdx = plans.indexOf('writeAgentClaudePlan(agentId, targetPlanId)', anchor)
+    const cfgIdx = plans.indexOf('writeAgentClaudePlan(agentId, targetPlanId, sealCaller(ctx.auth))', anchor)
     const rotIdx = plans.indexOf('writeClaudePlansState(applyRotation(', anchor)
     expect(cfgIdx).toBeGreaterThan(0)
     expect(cfgIdx).toBeLessThan(rotIdx)
