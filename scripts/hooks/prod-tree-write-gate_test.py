@@ -492,6 +492,19 @@ R2_DENY = [  # Viktor 43196 (card 17901b47 round 2)
     ('unzip -l --v /tmp/e.zip', P), ('unzip -l-l /tmp/e.zip', P), ('unzip -- -l /tmp/e.zip', P), ('unzip -t --t /tmp/e.zip', P),
     # Viktor 43289 INFO (mutant U11): -D is a timestamp flag, not an exdir
     ('unzip -D /tmp/e.zip', P),
+    # Viktor 43347 LOW 1: several -C are applied in order (bsdtar: -C o1 -C sub extracts to o1/sub); last-wins read
+    # the attached one alone (agents/kernel/work/x) and allowed what the parent denied
+    ('tar -xf /tmp/e.tar -C ../.. -Cx', K + '/work'), ('tar -xf /tmp/e.tar -C ../.. -C x', K + '/work'),
+    ('tar -xf /tmp/e.tar -C /tmp/a -C ' + P + '/agents/x', '/tmp'),   # an absolute one starts the chain again
+    # Viktor 43347 LOW 2: bsdtar's --cd and the unique prefixes of --directory
+    ('tar -xf /tmp/e.tar --cd ' + P + '/agents/x', K + '/work'), ('tar -xf /tmp/e.tar --cd=' + P + '/agents/x', K + '/work'),
+    ('tar -xf /tmp/e.tar --dir ' + P + '/agents/x', K + '/work'), ('tar -xf /tmp/e.tar --direc=' + P + '/agents/x', K + '/work'),
+    ('tar --extract --file /tmp/e.tar --directory agents/x', P),
+    # Viktor 43347 LOW 3: -P / --absolute-names: the archive's member names are the targets
+    ('tar -xPf /tmp/abs.tar', K + '/work'), ('tar -x --absolute-names -f /tmp/abs.tar', '/tmp'), ('tar xPf /tmp/abs.tar', '/tmp'),
+    ('tar -x --absolute-paths -f /tmp/abs.tar', '/tmp'),
+    # Viktor 43347 mutant B7: a -f start point as its own word, before a protected start point
+    ('find -f /tmp/ok agents/x -name agent-config.json -delete', P),
 ]
 R2_ALLOW = [
     ('cat store/agent-config-seal.json', P), ('cp ' + SEAL + ' /tmp/s', '/tmp'),
@@ -534,6 +547,10 @@ R2_ALLOW = [
     ('tar -xf /tmp/e.tar --directory=/tmp/out', P), ('tar xCf /tmp/out /tmp/e.tar', P), ('tar -xC/tmp/out -f /tmp/e.tar', P),
     ('tar -xfC ' + P + '/agents/x', K + '/work'),     # f takes "C" (the archive), the cwd is a work dir
     ('tar xfO /tmp/e.tar a', P),                      # old style: every letter is a flag, O = stdout
+    # Viktor 43347: a relative -C after an absolute one is inside it (the head denied this: last-wins read agents/x
+    # against the cwd); --cd / --dir to a scratch dir; --di is ambiguous in bsdtar (not a directory option)
+    ('tar -xf /tmp/e.tar -C /tmp/a -C agents/x', P), ('tar -xf /tmp/e.tar -C /tmp/o -C sub', K + '/work'),
+    ('tar -xf /tmp/e.tar --cd /tmp/o', K + '/work'), ('tar -xf /tmp/e.tar --dir=/tmp/o', K + '/work'),
     ('F=notes.md; cd agents/x && echo x > $F', P), ('F=agent-config.json; cd /tmp && echo x > $F', P),
     ('B=agents/pulzus/backups/m-$(date +%H%M%S); cd /tmp; mkdir -p $B', P),
     ('find agents -wholename "*/work/*" -delete', P), ('find agents -iwholename "*/WORK/*" -delete', P),

@@ -1446,9 +1446,12 @@ def analyze_simple(cmd, st, depth):
             # -O / --to-stdout: extracted to stdout, nothing written (replay 17901b47 r2: `tar -xOf $F x.log | ...`)
             if '--to-stdout' in lt or tar_to_stdout(lt):
                 return
-            cdir = tar_cdir(args, lt)
-            if cdir is not None:
-                check_target(cdir, st, destructive='tree', what='tar -x -C')
+            if tar_absolute(lt):
+                st.deny.append('tar -x -P: the archive member names may be absolute paths, the target is not the cwd or -C')
+            cdirs = tar_cdirs(args, lt)
+            if cdirs:
+                for cdir in cdirs:
+                    check_target(cdir, st, destructive='tree', what='tar -x -C')
             else:
                 cwd_writer(st, 'tar -x', tree=True)
         return
@@ -1507,34 +1510,84 @@ def tar_to_stdout(lt):
     return False
 
 
-def tar_cdir(args, lt):
-    """the -C / --directory word tar extracts into, or None (Viktor 43257 C: --directory=X, -CX, -xC X, xCf X a.tar
-    are read too). The last one counts, as for tar."""
-    cdir = None
+def _tar_long(t, full, minlen):
+    """a bsdtar/GNU long option as typed: the full name or a unique prefix of at least minlen characters (measured on
+    macOS bsdtar: --dir, --dire, --directo= work, --di is ambiguous); returns (matched, inline value or None)"""
+    base, eq, val = t.partition('=')
+    if len(base) >= minlen and full.startswith(base):
+        return True, (val if eq else None)
+    return False, None
+
+
+def tar_absolute(lt):
+    """-P / --absolute-paths / --absolute-names in an extract: the member names of the archive are written as they are,
+    so the target is whatever the archive says (Viktor 43319)"""
+    for t in lt:
+        if not t:
+            continue
+        if t.startswith('--'):
+            if _tar_long(t, '--absolute-paths', 5)[0] or _tar_long(t, '--absolute-names', 5)[0]:
+                return True
+        elif re.fullmatch(r'-[A-Za-z]+', t):
+            for ch in t[1:]:
+                if ch == 'P':
+                    return True
+                if ch in TAR_VALUED:
+                    break
+    if lt and lt[0] and not lt[0].startswith('-') and re.fullmatch(r'[A-Za-z]+', lt[0]) and 'P' in lt[0]:
+        return True
+    return False
+
+
+def tar_cdirs(args, lt):
+    """the directories tar extracts into, as the targets to check: every -C / --directory / --cd word (--directory=X,
+    -CX, -xC X, xCf X a.tar, the bsdtar alias --cd and the long-option prefixes are read too). Several -C are applied
+    in order and a relative one is taken inside the previous one (measured: -C o1 -C sub extracts to o1/sub), an
+    absolute one starts over (Viktor 43319)."""
+    found = []
     if lt and lt[0] and not lt[0].startswith('-') and re.fullmatch(r'[A-Za-z]+', lt[0]):
         n = 0
         for ch in lt[0]:
             if ch in TAR_VALUED:
                 n += 1
                 if ch == 'C' and n < len(args):
-                    cdir = args[n]
+                    found.append(args[n])
     for k, t in enumerate(lt):
         if t is None:
             continue
-        if t in ('-C', '--directory') and k + 1 < len(args):
-            cdir = args[k + 1]
-        elif t.startswith('--directory='):
-            cdir = Word([('lit', t.split('=', 1)[1])], args[k].raw)
-        elif re.fullmatch(r'-[A-Za-z]+.*', t) and not t.startswith('--'):
+        if t.startswith('--'):
+            ok, val = _tar_long(t, '--directory', 5)
+            if not ok:
+                ok, val = _tar_long(t, '--cd', 4)
+            if ok:
+                if val is not None:
+                    found.append(Word([('lit', val)], args[k].raw))
+                elif k + 1 < len(args):
+                    found.append(args[k + 1])
+            continue
+        if t == '-C':
+            if k + 1 < len(args):
+                found.append(args[k + 1])
+        elif re.fullmatch(r'-[A-Za-z]+.*', t):
             for j, ch in enumerate(t[1:], 2):
                 if ch in TAR_VALUED:
                     if ch == 'C':
                         if j < len(t):
-                            cdir = Word([('lit', t[j:])], args[k].raw)
+                            found.append(Word([('lit', t[j:])], args[k].raw))
                         elif k + 1 < len(args):
-                            cdir = args[k + 1]
+                            found.append(args[k + 1])
                     break
-    return cdir
+    chain = []
+    for w in found:
+        s = w.literal()
+        prev = chain[-1].literal() if chain else None
+        if s is not None and s.startswith(('/', '~')):
+            chain = [w]
+        elif s is not None and prev is not None:
+            chain.append(Word([('lit', prev.rstrip('/') + '/' + s)], w.raw))
+        else:
+            chain.append(w)
+    return chain
 
 
 def dest_basenames(dest, srcs, st, name):
