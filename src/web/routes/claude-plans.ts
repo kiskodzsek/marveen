@@ -24,7 +24,7 @@ import { setSecret, deleteSecret, getSecret } from '../vault.js'
 import { readClaudePlansState, writeClaudePlansState, applyRotation, recordPlanObservation } from '../claude-plans-state.js'
 import { probePlanUsage, observationFromProbe, usageFromProbe } from '../../claude-plan-usage-probe.js'
 import { agentDir, writeAgentClaudePlan } from '../agent-config.js'
-import { sealCaller } from '../agent-config-seal.js'
+import { sealCaller, sealedWriteRefusal } from '../agent-config-seal.js'
 import { restartAgentProcess } from '../agent-process.js'
 import { hardRestartMarveenChannels } from '../channel-monitor.js'
 import { rotationReadiness } from '../claude-rotation-heartbeat.js'
@@ -308,6 +308,8 @@ export async function tryHandleClaudePlans(ctx: RouteContext): Promise<boolean> 
     // Sub-agent path: point its claudePlan field at the target and restart it
     // through the same primitive the dashboard's own restart button uses --
     // no separate sub-agent rotation mechanism to keep in sync.
+    const sealRefusal = sealedWriteRefusal(ctx.auth, MAIN_AGENT_ID) // card ec665017
+    if (sealRefusal) { json(res, { error: sealRefusal }, 403); return true }
     if (!existsSync(agentDir(agentId))) {
       json(res, { error: `Agent not found: ${agentId}` }, 404)
       return true

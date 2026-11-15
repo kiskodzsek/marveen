@@ -60,6 +60,7 @@ import {
   writeAgentCustomProvider,
   type AuthMode,
   readJsonObjectForWrite,
+  runtimeClassChange,
 } from '../agent-config.js'
 import { readClaudePlans, resolveAgentConfigDir } from '../claude-plans.js'
 import {
@@ -170,7 +171,7 @@ import { readAgentTranscript, isTranscriptAllowed } from '../agent-transcript.js
 import { configDirFor } from '../main-transcript-root.js'
 import { kindAllowed, FORBIDDEN_KIND } from './auth.js'
 import { isValidModelId, InvalidModelIdError } from '../../model-id.js'
-import { acceptAgentConfigSeal, agentConfigSealStatus, DEFAULT_SEAL_DEPS, DEFAULT_SEAL_PATHS, mayAcceptSeal, sealCaller } from '../agent-config-seal.js'
+import { acceptAgentConfigSeal, agentConfigSealStatus, DEFAULT_SEAL_DEPS, DEFAULT_SEAL_PATHS, mayAcceptSeal, sealCaller, sealedWriteRefusal } from '../agent-config-seal.js'
 
 // Which credential kinds may read a transcript. NAMED principals only: a
 // logged-in human, or a key enrolled to that human's own device. Deliberately
@@ -1042,6 +1043,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   }
 
   if (path === '/api/agents' && method === 'POST') {
+    const sealRefusal = sealedWriteRefusal(ctx.auth, MAIN_AGENT_ID) // card ec665017
+    if (sealRefusal) { json(res, { error: sealRefusal }, 403); return true }
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
     const { description, model: rawModel, profile: rawProfile } = data as { name: string; description: string; model?: string; profile?: string }
@@ -1071,7 +1074,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     if (existsSync(agentDir(name))) { json(res, { error: 'Agent already exists' }, 409); return true }
 
     scaffoldAgentDir(name)
-    writeAgentModel(name, model)
+    writeAgentModel(name, model, sealCaller(ctx.auth))
     writeAgentSecurityProfile(name, profileId, sealCaller(ctx.auth))
     writeAgentSettingsFromProfile(name, loadProfileTemplate(profileId))
     // A new agent comes up with the context guard ARMED (fleet policy, 2026-09-08).
@@ -1669,6 +1672,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   }
 
   if (secGetMatch && method === 'PUT') {
+    const sealRefusal = sealedWriteRefusal(ctx.auth, MAIN_AGENT_ID) // card ec665017
+    if (sealRefusal) { json(res, { error: sealRefusal }, 403); return true }
     const name = decodeURIComponent(secGetMatch[1])
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
     const body = await readBody(req)
@@ -1811,6 +1816,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   // strings clear the fields (revert to local). The main agent is always local.
   const remoteCfgMatch = path.match(/^\/api\/agents\/([^/]+)\/remote$/)
   if (remoteCfgMatch && method === 'PUT') {
+    const sealRefusal = sealedWriteRefusal(ctx.auth, MAIN_AGENT_ID) // card ec665017
+    if (sealRefusal) { json(res, { error: sealRefusal }, 403); return true }
     const name = decodeURIComponent(remoteCfgMatch[1])
     if (name === MAIN_AGENT_ID) { json(res, { error: 'Main agent is always local' }, 400); return true }
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
@@ -1877,6 +1884,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   }
 
   if (teamMatch && method === 'PUT') {
+    const sealRefusal = sealedWriteRefusal(ctx.auth, MAIN_AGENT_ID) // card ec665017
+    if (sealRefusal) { json(res, { error: sealRefusal }, 403); return true }
     const name = decodeURIComponent(teamMatch[1])
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
     const body = await readBody(req)
@@ -2564,6 +2573,17 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       json(res, { error: fieldCheck.message, rejected: fieldCheck.rejected, writable: AGENT_PUT_WRITABLE_FIELDS }, 400)
       return true
     }
+    // Card ec665017: a sealed field (customProvider, authMode, claudePlan), or a model / modelProfile that moves the
+    // runtime class, is written by the dashboard or the main agent only (sealedWriteRefusal); a model change within
+    // the class (claude-opus -> claude-sonnet) and the other fields stay as they were. Checked before any write.
+    const classChange = data.model !== undefined || data.modelProfile !== undefined
+      ? runtimeClassChange(name, { model: data.model, modelProfile: data.modelProfile, customProvider: data.customProvider })
+      : undefined
+    const crossesClass = classChange !== undefined && (classChange === null || classChange.before !== classChange.after)
+    if (data.customProvider !== undefined || data.authMode !== undefined || data.claudePlan !== undefined || crossesClass) {
+      const sealRefusal = sealedWriteRefusal(ctx.auth, MAIN_AGENT_ID) // card ec665017
+      if (sealRefusal) { json(res, { error: sealRefusal }, 403); return true }
+    }
 
     if (data.memoryIsolation !== undefined) {
       // The main agent's cwd IS the install repo root, which is already a git
@@ -2600,7 +2620,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
           return true
         }
       }
-      writeAgentModel(name, data.model)
+      writeAgentModel(name, data.model, sealCaller(ctx.auth))
     }
     // Card c755f4b2 Block B: optional generic capability tier. An unknown id
     // is a 400, never a persisted value -- storing one would leave the UI
@@ -2608,7 +2628,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // default, i.e. a model change nobody asked for. Empty string clears it.
     if (data.modelProfile !== undefined) {
       if (data.modelProfile === '' || data.modelProfile === null) {
-        writeAgentModelProfile(name, null)
+        writeAgentModelProfile(name, null, sealCaller(ctx.auth))
       } else if (isModelProfileId(data.modelProfile)) {
         const mapState = readModelProfileMap()
         if (!mapState) {
@@ -2619,7 +2639,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
           json(res, { error: `Model-profile map is unusable: ${mapState.error}` }, 400)
           return true
         }
-        writeAgentModelProfile(name, data.modelProfile)
+        writeAgentModelProfile(name, data.modelProfile, sealCaller(ctx.auth))
       } else {
         json(res, { error: `modelProfile must be one of ${MODEL_PROFILE_IDS.join('|')}` }, 400)
         return true

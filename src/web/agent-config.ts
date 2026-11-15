@@ -8,7 +8,7 @@ import { parseExtraChannels } from './agent-extra-channels.js'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { logger } from '../logger.js'
 import { safeJoin } from './sanitize.js'
-import { sealDashboardWrite } from './agent-config-seal.js'
+import { registerSealModelResolver, runtimeClassOf, sealDashboardWrite } from './agent-config-seal.js'
 import { isValidModelId, InvalidModelIdError } from '../model-id.js'
 import {
   resolveAgentModelFromConfig,
@@ -199,6 +199,29 @@ export function resolveAgentModelDetailed(name: string): ModelResolution {
   return resolveAgentModelFromConfig(config, readModelProfileMap(), DEFAULT_MODEL, resolveModelId)
 }
 
+// Card ec665017: the seal's runtimeClass resolves the model the way the launcher does (aliases, modelProfile). The seal
+// module cannot import this one (this one imports it), so it is handed over at load.
+registerSealModelResolver(config =>
+  resolveAgentModelFromConfig(config as AgentModelConfig, readModelProfileMap(), DEFAULT_MODEL, resolveModelId).model)
+
+// Card ec665017: a write of model / modelProfile / customProvider may change the runtime class (Claude session or
+// not); the dashboard's own write moves that sealed field too, so only a hand edit across the class files a card.
+// For the route's gate: the class before and after a patch of those keys (an unreadable file: null, the gate applies).
+export function runtimeClassChange(name: string, patch: Record<string, unknown>): { before: string; after: string } | null {
+  try {
+    const config = readJsonObjectForWrite(join(agentDir(name), 'agent-config.json'))
+    const next: Record<string, unknown> = { ...config }
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) continue
+      if (v === null || v === '') delete next[k]
+      else next[k] = v
+    }
+    return { before: runtimeClassOf(config), after: runtimeClassOf(next) }
+  } catch {
+    return null
+  }
+}
+
 // Unchanged contract: the concrete model id this agent runs on. For every
 // config that names a `model` -- which is all of them today -- this returns
 // byte-identically what it returned before Block B existed.
@@ -209,22 +232,24 @@ export function readAgentModel(name: string): string {
 // Card c755f4b2 Block B. Passing null REMOVES the key rather than writing a
 // null: an absent field and an explicit null must not become two ways of
 // saying the same thing in a config a human also edits by hand.
-export function writeAgentModelProfile(name: string, profile: string | null): void {
+export function writeAgentModelProfile(name: string, profile: string | null, by?: string): void {
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
   if (profile === null) delete config.modelProfile
   else config.modelProfile = profile
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  sealDashboardWrite(name, 'runtimeClass', runtimeClassOf(config), by) // card ec665017: the derived class only
 }
 
-export function writeAgentModel(name: string, model: string): void {
+export function writeAgentModel(name: string, model: string, by?: string): void {
   if (!isValidModelId(model)) throw new InvalidModelIdError(model)
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
   config.model = model
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  sealDashboardWrite(name, 'runtimeClass', runtimeClassOf(config), by) // card ec665017: the derived class only
 }
 
 export function readAgentDisplayName(name: string): string {
@@ -855,4 +880,5 @@ export function writeAgentCustomProvider(name: string, id: string | null, by?: s
   else delete config.customProvider
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
   sealDashboardWrite(name, 'customProvider', trimmed, by) // card 17901b47: this field only
+  sealDashboardWrite(name, 'runtimeClass', runtimeClassOf(config), by) // card ec665017: and the class it decides
 }
