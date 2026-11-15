@@ -2875,6 +2875,15 @@ export async function restartAgentProcess(name: string, opts: { fresh?: boolean;
     return { ok: false, error: 'A restart is already in flight for this agent' }
   }
   try {
+    // Card 1d62d919 (Viktor 43103 LOW 1): startAgentProcess refuses an unsafe agent-config.json (FIFO, device, over
+    // the cap), so stopping first would leave a running agent DOWN until someone fixes the file. Check before the
+    // stop: the running instance keeps the settings it already applied. Same error as the start guard, so the
+    // scheduler classifies it as a config refusal (isConfigStartRefusal) here too.
+    const cfgRefusal = agentConfigRefusal(name)
+    if (cfgRefusal !== null) {
+      logger.error({ name, reason: cfgRefusal }, 'agent-config.json: restart refused before stopping (unsafe file); a running agent is left running')
+      return { ok: false, error: `agent-config.json: unsafe-file (${cfgRefusal})` }
+    }
     if (isAgentRunning(name)) {
       const stopResult = await stopAgentProcess(name)
       if (!stopResult.ok) return { ok: false, error: stopResult.error || 'Failed to stop running agent before restart' }
