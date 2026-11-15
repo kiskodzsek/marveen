@@ -32,13 +32,18 @@ LOG = os.path.join(HOME, 'log')
 def setup_tree():
     for d in ('.git', 'scripts/hooks', 'src', '.claude', 'store', 'agents/kernel/.claude-config/projects/x',
               'agents/pulzus/.claude-config/projects/x', 'agents/pulzus/scripts', 'agents/dave/repos/wt/scripts',
-              'agents/x/.claude', 'other/.git'):
+              'agents/x/.claude', 'other/.git', 'agents/kernel/.claude', 'agents/kernel/work',
+              'agents/x/.claude-config'):
         os.makedirs(os.path.join(P, d), exist_ok=True)
     for f in ('CLAUDE.md', '.mcp.json', 'package.json', 'package-lock.json', 'store/autonomy-config.json',
-              'store/verified-recipients.json', 'scripts/x.py', 'README.md'):
+              'store/verified-recipients.json', 'scripts/x.py', 'README.md', 'agents/kernel/agent-config.json',
+              'agents/x/agent-config.json', 'agents/x/.claude/settings.local.json'):
         open(os.path.join(P, f), 'w').close()
     open(WT + '/.git', 'w').write('gitdir: ' + P + '/.git/worktrees/wt\n')
     os.symlink(P + '/scripts', P + '/agents/kernel/lnk')
+    os.symlink(P + '/agents/x/.claude', P + '/agents/kernel/xclaude')
+    os.symlink(P + '/agents/x', P + '/agents/kernel/xhome')          # Viktor 43196 mutant (b): a symlinked home
+    os.symlink(P + '/agents', P + '/agents/kernel/xagents')
     os.symlink(P + '/agents/kernel/loop2', P + '/agents/kernel/loop1')
     os.symlink(P + '/agents/kernel/loop1', P + '/agents/kernel/loop2')
     os.makedirs(os.path.join(LOG, 'seen'), exist_ok=True)
@@ -136,7 +141,7 @@ BASH_ALLOW = [
     ('rm -rf /tmp/x', P), ('find /tmp/x -delete', P), ('echo hi 2>/dev/null', P), ('ls 2>&1', P),
     ('python3 -c "open(\'P/scripts/x\',\'w\')"', '/tmp'), ('touch *.txt', '/tmp'), ('rm $X', '/tmp'),
     ('echo x > P/README.md', '/tmp'), ('echo x > P/store/verified-recipients.json', '/tmp'),
-    ('mkdir -p P/agents/kernel/work/new', '/tmp'), ('touch P/agents/x/.claude/settings.json', '/tmp'),
+    ('mkdir -p P/agents/kernel/work/new', '/tmp'), ('touch P/agents/kernel/.claude/settings.local.json', '/tmp'),
     ('curl -s https://e > /tmp/x', P), ('git -C P/other checkout .', '/tmp'),
     ('node P/scripts/agent-msg.mjs < /tmp/in', '/tmp'), ('sed -n 1,5p scripts/x.py', P),
     ('python3 - <<"PY"\nopen("P/scripts/x","w")\nPY', '/tmp'), ('tar -tf a.tar', P), ('unzip -l a.zip', P),
@@ -175,7 +180,7 @@ class Decide(unittest.TestCase):
             self.assertEqual(d(write('/System/Volumes/Data' + P + '/scripts/x', tool)), 'deny', tool)
 
     def test_write_tools_allow(self):
-        for p in (P + '/agents/kernel/x', WT + '/scripts/x', P + '/agents/x/.claude/settings.json',
+        for p in (P + '/agents/kernel/x', WT + '/scripts/x', P + '/agents/kernel/.claude/settings.local.json',
                   P + '/store/verified-recipients.json', P + '/README.md', '/tmp/x', P + '/agents/kernel/loop1/x'):
             self.assertEqual(d(write(p)), 'allow', p)
 
@@ -252,6 +257,327 @@ class Decide(unittest.TestCase):
     def test_other_tools_allow(self):
         self.assertEqual(gate.decide({'tool_name': 'Read', 'tool_input': {'file_path': P + '/scripts/x'}},
                                      P, HOME)[0], 'allow')
+
+
+# card 17901b47 (Viktor): agent config files. The caller is kernel (SUB_TP); x is another agent.
+K = P + '/agents/kernel'
+CFG_FILES = ('agent-config.json', '.claude/settings.json', '.claude-config/settings.json')
+CFG_BASH = ('echo {{}} > {f}', 'printf x >> {f}', "sed -i '' s/a/b/ {f}", 'cp /tmp/a {f}', 'mv /tmp/a {f}',
+            'tee {f} < /dev/null', 'rm {f}', 'rm -f {f}', 'mv {f} /tmp/bak', 'chmod 600 {f}', 'ln -sf /tmp/a {f}',
+            'truncate -s 0 {f}', 'touch {f}', 'bash -c "echo x > {f}"')
+
+
+def cfg_deny_rows():
+    """(command, cwd): every Bash write form on own and other agent config files, absolute and home-relative"""
+    rows = []
+    for owner in ('kernel', 'x'):
+        for f in CFG_FILES:
+            for c in CFG_BASH:
+                rows.append((c.format(f=P + '/agents/' + owner + '/' + f), '/tmp'))
+                rows.append((c.format(f=f), P + '/agents/' + owner))
+    for c in CFG_BASH:   # another agent's settings.local.json
+        rows.append((c.format(f=P + '/agents/x/.claude/settings.local.json'), '/tmp'))
+        rows.append((c.format(f='../x/.claude/settings.local.json'), K))
+    return rows
+
+
+CFG_DENY_MORE = [
+    # case, firmlink, symlink, relative climbs
+    ('echo > ' + P + '/AGENTS/X/Agent-Config.JSON', '/tmp'), ('echo > /System/Volumes/Data' + P + '/agents/x/agent-config.json', '/tmp'),
+    ('echo > xclaude/settings.json', K), ('echo > xclaude/settings.local.json', K),
+    ('echo > ../x/agent-config.json', K), ('echo > ../../agents/x/.claude/settings.json', K),
+    ('cd ../x && echo > agent-config.json', K), ('cd .claude && echo {} > settings.json', K),
+    # destructive ops on the agent home / its config directories (an ancestor of the files)
+    ('rm -rf ' + P + '/agents/x', '/tmp'), ('rm -rf .claude', K), ('rm -rf .claude-config', K),
+    ('mv ' + P + '/agents/x/.claude /tmp/y', '/tmp'), ('chmod -R 777 ' + P + '/agents/x', '/tmp'),
+    ('rm -rf ' + P + '/agents/*', '/tmp'), ('rm *.json', K), ('rm -rf .c*', K), ('rm -rf *', K),
+    ('rmdir ' + P + '/agents', '/tmp'),
+    # into a directory: destination/basename(source)
+    ('mv /tmp/agent-config.json ' + P + '/agents/x/', '/tmp'), ('cp /tmp/settings.json ' + P + '/agents/x/.claude/', '/tmp'),
+    ('cp -t .claude /tmp/settings.json', K), ('mv -t ' + P + '/agents/x /tmp/agent-config.json', '/tmp'),
+    # unresolved agent name: the raw-text rule
+    ('echo x > ' + P + '/agents/$A/agent-config.json', '/tmp'), ('cd ' + P + '/agents/$A && echo > agent-config.json', '/tmp'),
+    ('echo x > ~/BASE/agents/$A/.claude/settings.json'.replace('BASE', BASE), '/tmp'),
+    ('echo x > "$HOME/BASE/agents/x/.claude-config/settings.json"'.replace('BASE', BASE), '/tmp'),
+    ('for a in x kernel; do echo > ' + P + '/agents/$a/agent-config.json; done', '/tmp'),
+    ('X=' + P + '/agents/x; echo > $X/agent-config.json', '/tmp'), ('echo "x ' + P + '/agents/x/agent-config.json', '/tmp'),
+    # a variable inside the name next to a literal: matched against the config names
+    ('echo > ' + K + '/$X-config.json', '/tmp'), ('echo > ' + P + '/agents/$A/.claude/settings.json', '/tmp'),
+    ('cp /tmp/s ' + K + '/$D/settings.json', '/tmp'), ('rm -f ' + P + '/agents/x/{agent-config,y}.json', '/tmp'),
+    ('rm -rf agents/x/$Y', P),
+    # the raw-text rule from an agent home (cwd unknown after `cd $X`): ../<name>/<config file>
+    ('cd $X; echo > ../x/agent-config.json', K), ('cd $X; echo > ./../../x/.claude/settings.json', K),
+]
+
+CFG_ALLOW = [
+    # reads
+    ('cat agent-config.json', K), ('cat ' + P + '/agents/x/agent-config.json', '/tmp'), ('jq . agent-config.json', K),
+    ('grep -n hook .claude/settings.json ../x/.claude/settings.json', K), ('ls -la .claude .claude-config', K),
+    ('python3 -c "import json; print(json.load(open(\'agent-config.json\')))"', K), ('cp agent-config.json /tmp/a.bak', K),
+    ('cat ' + P + '/agents/x/agent-config.json > /tmp/out', '/tmp'), ('shasum -a 256 .claude/settings.json', K),
+    ('diff .claude/settings.json ../x/.claude/settings.json', K), ('git -C ' + P + ' diff -- agents/x/agent-config.json', '/tmp'),
+    ('cat agent-config.json > "$OUT"', K), ('echo agent-config.json > /tmp/x', K),
+    ('grep -rl agent-config.json src > $LIST', K), ('cp .claude/settings.json "$B/"', K),
+    # the caller's own settings.local.json (its self-imposed hook gates)
+    ('echo {} > .claude/settings.local.json', K), ("sed -i '' s/a/b/ .claude/settings.local.json", K),
+    ('cp /tmp/s .claude/settings.local.json', K), ('mv /tmp/s ' + K + '/.claude/settings.local.json', '/tmp'),
+    ('tee .claude/settings.local.json < /tmp/s', K), ('cp .claude/settings.local.json .claude/settings.local.json.bak', K),
+    # writes elsewhere in the own home
+    ('echo > work/x', K), ('echo x > ' + K + '/work/x', '/tmp'), ('mkdir -p bin && cp /tmp/t bin/t', K),
+    ('rm -rf work/old', K), ('mv /tmp/r.md ' + K + '/', '/tmp'), ('mv /tmp/r.md .', K), ('rm *.log', K),
+    ('find . -name "*.pyc" -delete', K), ('mkdir -p .claude/skills/a && echo > .claude/skills/a/SKILL.md', K),
+    ('echo > .claude-config/projects/x/m.md', K), ('cp agent-config.json agent-config.json.bak', K),
+    ('mkdir -p ' + P + '/agents/newagent/work', '/tmp'), ('echo > work/$NAME', K), ('rm -rf work/*', K),
+    ('echo > ' + WT + '/agents/x/agent-config.json', '/tmp'), ('echo > ' + WT + '/.claude/settings.json', '/tmp'),
+    ('touch ' + K, '/tmp'), ('echo > ' + K + '/$F', '/tmp'),
+    # replay 17901b47: a HANDOFF backup with a substitution in the name, from the prod root cwd (the raw rule sees
+    # protected text there); a variable directory below the agents/ dir
+    ('cd ' + P + '; echo > store/x; cp ' + K + '/HANDOFF.md ' + K + '/HANDOFF.prev-$(date +%H%M)-1110.md', P),
+    ('cd ' + P + '; cat scripts/x.py > agents/kernel/HANDOFF.prev-$(date +%H%M).md', P),
+    ('echo > ' + P + '/agents/$A/work/x', '/tmp'), ('echo > ' + K + '/$F.log', '/tmp'),
+    ('cd $X; echo > ../x/work.txt', K), ('cd $X; echo > ../kernel/.claude/settings.local.json', K),
+]
+
+
+class AgentConfig(unittest.TestCase):
+    """card 17901b47: a sub-agent does not write any agent's agent-config.json / .claude/settings.json /
+    .claude-config/settings.json or another agent's .claude/settings.local.json; its own settings.local.json and the
+    rest of its home stay writable; reads stay free; the main agent is never gated."""
+
+    def test_write_tools_deny(self):
+        for tool in ('Write', 'Edit', 'MultiEdit'):
+            for owner in ('kernel', 'x', 'pulzus', 'nobody'):
+                for f in CFG_FILES:
+                    with self.subTest(tool=tool, path=owner + '/' + f):
+                        self.assertEqual(d(write(P + '/agents/' + owner + '/' + f, tool)), 'deny')
+            for p in (P + '/agents/x/.claude/settings.local.json', P + '/AGENTS/X/.Claude/Settings.json',
+                      K + '/xclaude/settings.json', K + '/xclaude/settings.local.json'):
+                with self.subTest(tool=tool, path=p):
+                    self.assertEqual(d(write(p, tool)), 'deny')
+            with self.subTest(tool=tool, path='relative'):
+                self.assertEqual(d(write('agent-config.json', tool, cwd=K)), 'deny')
+
+    def test_write_tools_allow(self):
+        for p in (K + '/.claude/settings.local.json', K + '/.Claude/Settings.Local.json', K + '/work/x',
+                  K + '/.claude/skills/a/SKILL.md', K + '/agent-config.json.bak', K + '/.claude',
+                  WT + '/agents/x/agent-config.json', WT + '/.claude/settings.json'):
+            with self.subTest(path=p):
+                self.assertEqual(d(write(p)), 'allow')
+
+    def test_bash_deny(self):
+        for cmd, cwd in cfg_deny_rows() + CFG_DENY_MORE:
+            with self.subTest(cmd=cmd, cwd=cwd):
+                self.assertEqual(gate.decide(bash(cmd, cwd), P, HOME)[0], 'deny')
+
+    def test_bash_allow(self):
+        for cmd, cwd in CFG_ALLOW:
+            with self.subTest(cmd=cmd, cwd=cwd):
+                r = gate.decide(bash(cmd, cwd), P, HOME)
+                self.assertEqual(r[0], 'allow', r)
+
+    def test_main_agent_never_denied(self):
+        for tp in (MAIN_TP, None):
+            open(os.path.join(LOG, 'gate.jsonl'), 'w').close()
+            for cmd, cwd in cfg_deny_rows() + CFG_DENY_MORE:
+                p = bash(cmd, cwd)
+                p['transcript_path'] = tp
+                with self.subTest(tp=tp, cmd=cmd):
+                    self.assertEqual(run(p), '')
+            for f in CFG_FILES + ('.claude/settings.local.json',):
+                p = write(P + '/agents/x/' + f)
+                p['transcript_path'] = tp
+                self.assertEqual(run(p), '')
+            if tp == MAIN_TP:
+                self.assertTrue(any(r['decision'] == 'would-deny' for r in log_rows()))
+
+    def test_own_settings_local_follows_identity(self):
+        """the same write is the caller's own for kernel (allow) and another's for pulzus (deny)"""
+        p = write(K + '/.claude/settings.local.json')
+        self.assertEqual(d(p), 'allow')
+        p['transcript_path'] = P + '/agents/pulzus/.claude-config/projects/x/s.jsonl'
+        self.assertEqual(d(p), 'deny')
+        p = bash('echo > ' + K + '/.claude/settings.local.json', '/tmp')
+        self.assertEqual(d(p), 'allow')
+        p['transcript_path'] = P + '/agents/pulzus/.claude-config/projects/x/s.jsonl'
+        self.assertEqual(d(p), 'deny')
+
+    def test_sub_agent_deny_via_run(self):
+        out = run(bash('echo {} > ' + P + '/agents/x/agent-config.json', '/tmp'))
+        msg = json.loads(out)['hookSpecificOutput']['permissionDecisionReason']
+        self.assertIn('agent-config.json', msg)
+        self.assertIn('saját .claude/settings.local.json szabad', msg)
+
+
+SEAL = P + '/store/agent-config-seal.json'
+R2_DENY = [  # Viktor 43196 (card 17901b47 round 2)
+    # MEDIUM 1: the seal of the agent configs
+    ('echo {} > store/agent-config-seal.json', P), ('echo {} >> ' + SEAL, '/tmp'), ('rm store/agent-config-seal.json', P),
+    ('rm -f ' + SEAL, '/tmp'), ('mv /tmp/s ' + SEAL, '/tmp'), ('mv ' + SEAL + ' /tmp/s', '/tmp'),
+    ('cp /tmp/s store/agent-config-seal.json', P), ('truncate -s 0 STORE/Agent-Config-Seal.JSON', P),
+    ('echo "x ' + SEAL, '/tmp'), ('echo x > $UNSET; ls ' + SEAL, '/tmp'),
+    # LOW 2: a relative value in the middle of a path word
+    ('N=x; echo x > agents/$N/agent-config.json', P), ("N=x; sed -i '' s/a/b/ agents/${N}/agent-config.json", P),
+    ('N=x; echo x > "agents/$N/.claude/settings.json"', P), ('export N=x; rm agents/$N/.claude-config/settings.json', P),
+    ('N=x; echo x > ' + P + '/agents/$N/agent-config.json', '/tmp'), ('N=kernel; tee agents/$N/agent-config.json < /dev/null', P),
+    ('for N in x kernel; do echo x > agents/$N/agent-config.json; done', P),
+    ('for N in x; do echo x > agents/${N}/agent-config.json; done', P),
+    ('N=x$(date); echo x > agents/$N/agent-config.json', P), ('N=x; cd agents/$N && echo > agent-config.json', P),
+    ('N=x/$(echo .claude); echo > $N/settings.json', P + '/agents'),
+    # LOW 3: a writing find under agents/ or a home, its tests let a config file through
+    ('find agents -name agent-config.json -exec sed -i s/applier/developer/ {} +', P),
+    ('find ' + P + '/agents -name agent-config.json -execdir perl -pi -e s/a/b/ {} \\;', '/tmp'),
+    ('find agents -iname AGENT-CONFIG.JSON -ok rm {} \\;', P), ('find agents -type f -exec truncate -s 0 {} +', P),
+    ('find agents/x -name "*.json" -delete', P), ('find agents -path "*/.claude/settings.json" -exec rm {} +', P),
+    ('find agents -wholename "*/.claude-config/settings.json" -exec rm {} +', P),
+    ('find agents -ipath "*/AGENT-CONFIG.JSON" -exec cp /tmp/a {} \\;', P), ('find . -maxdepth 1 -type f -delete', K),
+    ('find agents ! -name "*.md" -delete', P), ('find agents -not -name "*.md" -delete', P),
+    ('find agents -name "*.md" -o -name "*.json" -delete', P), ('find agents -name "*.md" , -delete', P),
+    ('find agents -name "$X" -delete', P), ('find . -name .claude -exec rm -rf {} +', K),
+    ('find . -type d -name .claude -exec chmod 700 {} +', K), ('find . -type f,d -name "*-config.json" -delete', K),
+    ('find agents -exec ls {} + -name "*.json" -delete', P), ('find agents -exec ls {} \\; -name "*.json" -delete', P),
+    ("find xclaude -name 'settings*' -exec sed -i '' s/a/b/ {} +", K),
+    ('find xagents -name agent-config.json -exec tee {} \\;', K),
+    ('for d in x/work x; do find agents/$d -name "*.json" -delete; done', P),   # the 2nd loop value counts
+    ('find agents/x/work agents/x -name "*.json" -delete', P), ('cd agents; find x -name "*.json" -delete', P),
+    ('cd /tmp; find . -name "*.json" -delete; cd ' + P + '/agents/x; find . -name "*.json" -delete', P),  # same word
+    ('find agents -path "agents/*/agent-config.json" -exec rm {} +', P),          # -path against the start as typed
+    ("find ../x/.claude -name settings.local.json -exec sed -i '' s/a/b/ {} +", K),  # another agent's
+    ('find .claude -type d -exec rm -rf {} +', K), ('find agents -name agents -exec rm -rf {} +', P),  # the start itself
+    ('find agents ' + '-name "*.md" ' * 257 + '-delete', P),     # more than FIND_MAX_TESTS (256): no exclusion
+    # LOW 4: directory writers into agents/, a home, its config dirs, the prod root
+    ('rsync -a /tmp/evil/ agents/x/', P), ('cp -r /tmp/evil/. agents/x/', P), ('tar -xf /tmp/e.tar -C agents/x', P),
+    ('unzip -o /tmp/e.zip -d agents/x', P), ('ditto /tmp/evil agents/x', P), ('cp -R /tmp/evil/ agents/x', P),
+    ('gcp -a /tmp/evil/. agents/x/', P), ('scp -r /tmp/evil/. agents/x/', P),
+    ('rsync -av --exclude=.git /tmp/evil/ ' + P + '/agents/x/', '/tmp'), ('cp -r /tmp/x ' + P + '/agents/', '/tmp'),
+    ('cp -r /tmp/evil/. .claude/', K), ('ditto -x -k /tmp/e.zip agents/x', P), ('tar -C agents/x -xf /tmp/e.tar', P),
+    ('tar --extract -f /tmp/e.tar -C agents/x', P), ('unzip -o /tmp/e.zip', K), ('tar -xf /tmp/e.tar', P + '/agents'),
+    ('rsync -a "$S/" agents/x/', P), ('cp -r /tmp/evil ' + P + '/agents/newagent', '/tmp'),
+    ('N=x; rsync -a /tmp/e/ agents/$N/', P), ('rsync -a /tmp/e/ ' + P + '/', '/tmp'), ('cp -a /tmp/e/. ' + P, '/tmp'),
+    ('cp -r /tmp/e/. --target-directory=' + P + '/agents/x', '/tmp'),
+    ('cp --recursive /tmp/evil/. agents/x/', P), ('gcp --archive /tmp/e/. agents/x/', P),
+    ('rsync -a /tmp/e/ ' + P + '/agents/x$N/', '/tmp'), ('tar --get -f /tmp/e.tar -C agents/x', P),
+    ('rsync -a "$S" agents/x/', P),
+    ('N=kernel; for N in x; do cd agents/$N && echo > .claude/settings.local.json; done', P),   # the loop value
+    ('find agents -name AGENT-CONFIG.JSON -exec sed -i s/a/b/ {} +', P),     # APFS: the same file
+    ('rsync -a /tmp/e/ ' + P + '/agents/x*/', '/tmp'), ('rsync /tmp/e/* agents/x/', P),
+    ('tar -xf /tmp/e.tar --exclude=Old -C agents/x', P), ('tar -xf- -C agents/x < /tmp/e.tar', P),
+    ('tar -xf /tmp/e.tar Output', K), ('tar -C agents/x -xvf /tmp/e.tar', P), ('unzip -oq /tmp/e.zip', K),
+    # option clusters with letters inside the [A-Za-z] ranges (not only at their ends), old-style tar
+    ('cp -PpRLv /tmp/e/ agents/x/', P), ('tar Pmxf /tmp/e.tar -C agents/x', P),
+    ('tar -C agents/x -PmxvU -f /tmp/e.tar', P), ('unzip -CMoq /tmp/e.zip', K),
+    # Viktor 43196 mutant (b): a glob below a symlinked config directory / home (agent_reach's realpath form)
+    ('rm -f xclaude/*.json', K), ('rm -f xhome/*-config.json', K), ('echo > xhome/agent-*.json', K),
+    # Viktor 43257 A: the letters of a joined -dDIR are not listing letters; d / P take the rest of the word
+    ('unzip -o /tmp/e.zip -dscripts', P), ('unzip -qodscripts /tmp/e.zip', P), ('unzip -Pl /tmp/e.zip', P),
+    ('unzip -o /tmp/e.zip -d' + P + '/agents/x', '/tmp'), ('unzip -qod' + P + '/agents/x /tmp/e.zip', '/tmp'),
+    ('unzip -qod ' + P + '/agents/x /tmp/e.zip', '/tmp'), ('unzip -l /tmp/e.zip -d agents/x', P),
+    ('unzip --l /tmp/e.zip', P),
+]
+R2_ALLOW = [
+    ('cat store/agent-config-seal.json', P), ('cp ' + SEAL + ' /tmp/s', '/tmp'),
+    ('echo x > $UNSET; ls ' + P + '/store/verified-recipients.json', '/tmp'), ('echo "x ' + SEAL + '.bak', '/tmp'),
+    ('N=x; echo x > agents/$N/notes.md', P), ('N=x; echo x > agents/${N}/work/a.txt', P),
+    ('for N in x kernel; do echo x > agents/$N/notes.md; done', P), ('N=x$(date); echo x > agents/$N/notes.md', P),
+    ('N=x; echo x > ' + P + '/agents/$N/work/a', '/tmp'), ('N=x/$(echo work); echo > $N/settings.json', P + '/agents'),
+    ('find agents -name agent-config.json -print', P), ('find agents -name agent-config.json -exec cat {} +', P),
+    ('find agents -name agent-config.json | xargs grep securityProfile', P),
+    ('find agents -name agent-config.json -exec grep -l x {} +', P), ('find agents -name "*.log" -delete', P),
+    ('find agents -path "*/work/*.tmp" -delete', P), ('find . -type d -name __pycache__ -exec rm -rf {} +', K),
+    ("find . -type d -name .claude -exec sed -i '' s/a/b/ {} +", K), ("find xclaude -name '*.md' -exec sed -i '' s/a/b/ {} +", K),
+    ('find agents -iname "*.LOG" -delete', P), ('find agents -ipath "*/WORK/*" -delete', P),
+    ('find agents -name "*.md" -exec test ! -s {} \\; -delete', P), ('find agents -exec ls {} + -name "*.md" -delete', P),
+    ('find agents -exec ls {} \\; -name "*.md" -delete', P), ('find agents/x/work -delete', P),
+    ('find xagents -name "*.md" -exec rm {} +', K),
+    ('find agents ' + '-name "*.md" ' * 256 + '-delete', P),     # FIND_MAX_TESTS (256) tests are still read
+    ('cp -r /tmp/proj agents/x/', P), ('rsync -a /tmp/proj agents/x/', P), ('rsync -a /tmp/evil/ agents/x/work/', P),
+    ('tar -xf /tmp/e.tar -C agents/x/work', P), ('unzip /tmp/e.zip -d agents/kernel/work/u', P),
+    ('cp -r /tmp/skills/. .claude/skills/', K), ('cp /tmp/a agents/x/', P), ('tar -xf /tmp/e.tar', K + '/work'),
+    ('unzip -l /tmp/e.zip', K), ('tar -tf /tmp/e.tar', K), ('rsync -a ' + P + '/agents/x/ /tmp/bak/', '/tmp'),
+    ('cp -r ' + P + '/agents/x /tmp/bak', '/tmp'), ('ditto ' + P + '/agents/x /tmp/bak', '/tmp'),
+    ('cp -r /tmp/evil/. /tmp/y/', P), ('tar -czf /tmp/a.tgz -C agents/x .', P), ('cp -r /tmp/e/. ' + HOME + '/', '/tmp'),
+    ('rsync -a /tmp/e/ ' + HOME + '/other/', '/tmp'), ('cp -p /tmp/e/. agents/x/', P),
+    ('rm -f xhome/*.md', K), ('rm -f xclaude/*.md', K),
+    ('find agents -path "agents/*/work/*" -delete', P), ("find .claude -name settings.local.json -exec sed -i '' s/a/b/ {} +", K),
+    ('rsync -a /tmp/kernel agents/newdir', P), ('patch -p1 < /tmp/x.diff', K),
+    ('rsync -a /tmp/e/ ' + P + '/agents/x/work$N/', '/tmp'),
+    # replay 17901b47 r2 (Kernel, 11-09/10-27): extract to stdout, zipinfo / listing modes write nothing
+    ('tar -xOf /tmp/e.tar ./job.log | tail -5', K), ('tar xOf /tmp/e.tar a', K), ('tar -xzf /tmp/e.tgz --to-stdout x', K),
+    ('tar -C agents/x -xOf /tmp/e.tar a', P), ('m=$(unzip -Z1 /tmp/e.whl | grep x)', K), ('unzip -qql /tmp/e.zip', K),
+    ('unzip -p /tmp/e.zip a | grep x', K), ('unzip -t /tmp/e.zip', K), ('unzip -v /tmp/e.zip', K),
+    ('unzip -z /tmp/e.zip', K), ('tar -PxOm -f /tmp/e.tar a', K), ('unzip -^:CMqql /tmp/e.zip', K),
+    ('unzip -o /tmp/e.zip -d/tmp/out', P), ('unzip -qod /tmp/out /tmp/e.zip', P), ('unzip -Z1 /tmp/e.zip', P),
+    ('unzip -qql /tmp/e.zip', P),
+    ('find agents -wholename "*/work/*" -delete', P), ('find agents -iwholename "*/WORK/*" -delete', P),
+    # mutation round 1 survivors: a stale relative value / joined flag, -type alone excluding
+    ('N=x; M=$(mktemp); echo > agents/x/$M', P), ('D=$(dirname agents/x/f); echo > agents/$D/agent-config.json', P),
+    ('N=x/work; echo > agents/$N/agent-config.json', P), ('N=kernel; echo > agents/$N/.claude/settings.local.json', P),
+    ('N=x; N=$(mktemp); echo > agents/$N/agent-config.json', P), ("find . -type d -exec sed -i '' s/a/b/ {} +", K),
+    ("find . -type f -name '.claude*' -exec rm -rf {} +", K), ('rsync -a /tmp/e/ ' + P + '/agents/x/wo*/', '/tmp'),
+]
+
+
+class ViktorR2(unittest.TestCase):
+    """Viktor 43196 on card 17901b47: the seal file, a mid-word relative variable, a writing find under agents/,
+    directory writers into a home, the symlinked glob directory."""
+
+    def test_deny(self):
+        bad = [(c, w, r) for c, w in R2_DENY for r in [gate.decide(bash(c, w), P, HOME)] if r[0] != 'deny']
+        self.assertEqual(bad, [])
+
+    def test_allow(self):
+        bad = [(c, w, r) for c, w in R2_ALLOW for r in [gate.decide(bash(c, w), P, HOME)] if r[0] != 'allow']
+        self.assertEqual(bad, [])
+
+    def test_seal_write_tools(self):
+        for tool in ('Write', 'Edit', 'MultiEdit'):
+            for p in (SEAL, P + '/STORE/Agent-Config-Seal.JSON', '/System/Volumes/Data' + SEAL):
+                self.assertEqual(d(write(p, tool)), 'deny', (tool, p))
+            self.assertEqual(d(write('store/agent-config-seal.json', tool, cwd=P)), 'deny', tool)
+            self.assertEqual(d(write(SEAL + '.bak', tool)), 'allow', tool)
+
+    def test_main_agent_never_denied(self):
+        for tp in (MAIN_TP, None):
+            open(os.path.join(LOG, 'gate.jsonl'), 'w').close()
+            for cmd, cwd in R2_DENY:
+                p = bash(cmd, cwd)
+                p['transcript_path'] = tp
+                with self.subTest(tp=tp, cmd=cmd):
+                    self.assertEqual(run(p), '')
+            p = write(SEAL)
+            p['transcript_path'] = tp
+            self.assertEqual(run(p), '')
+            if tp == MAIN_TP:
+                self.assertIn('would-deny', [r['decision'] for r in log_rows()])
+
+    def test_floods(self):
+        """x20000 of each new token, with the write at the end (deny) and without it (allow), each under 4 s"""
+        many_starts = ' '.join('./' * i + 'agents' for i in range(300))
+        rows = [
+            ('find agents ' + '-name a ' * 20000 + '-delete', 'find agents ' + '-name a ' * 20000 + '-print'),
+            ('find ' + 'agents/x ' * 20000 + '-name "*.json" -delete', 'find ' + 'agents/x ' * 20000 + '-name "*.md" -delete'),
+            ('find ' + many_starts + ' -name "*a*"' * 250 + ' -name "*.md" -delete',
+             'find ' + many_starts + ' -name "*a*"' * 250 + ' -name "*.md" -print'),
+            ('N=x; ' * 20000 + 'echo > agents/$N/agent-config.json', 'N=x; ' * 20000 + 'echo > agents/$N/notes.md'),
+            ('rsync -a ' + '/tmp/e/ ' * 20000 + 'agents/x/', 'rsync -a ' + '/tmp/e/ ' * 20000 + 'agents/x/work/'),
+            ('cp -r ' + ' '.join('/e%d' % i for i in range(20000)) + ' ' + P + '/agents/',
+             'cp -r ' + ' '.join('/e%d' % i for i in range(20000)) + ' ' + P + '/agents/x/work/'),
+        ]
+        for want_deny, want_allow in rows:
+            for cmd, want in ((want_deny, 'deny'), (want_allow, 'allow')):
+                t0 = time.time()
+                r = gate.decide(bash(cmd, P), P, HOME)
+                self.assertEqual(r[0], want, (cmd[:60], cmd[-60:], r))
+                self.assertLess(time.time() - t0, 4, cmd[:60])
+
+    def test_find_budget_fails_closed(self):
+        st = gate.State(gate.Prod(P, 'kernel'), P, HOME)
+        st.find_budget = 3
+        gate.analyze_text('find agents -name "*.md" -delete', st, 0)
+        self.assertEqual(len(st.deny), 1)
+        self.assertIn('fail-closed', st.deny[0])
+        st = gate.State(gate.Prod(P, 'kernel'), P, HOME)
+        gate.analyze_text('find agents -name "*.md" -delete', st, 0)
+        self.assertEqual(st.deny, [])
 
 
 def run(payload, raw=None):
