@@ -62,6 +62,8 @@ const EXEMPT: Record<string, string> = {
     'agent-run CLI that closes one group inbound as "not for me" (python3 scripts/hooks/ledger-close.py <chat_id> <message_id> "nem nekem: <kinek>"); the reply guard names it by this path in its block text, so it lives next to ledger_lib.py; not itself a hook (Klodel 37860)',
   'keychain-read-gate_test.py':
     'the unit test of keychain-read-gate.py (run: python3 -I scripts/hooks/keychain-read-gate_test.py); not itself a hook (c1921b55)',
+  'prod-tree-write-gate_test.py':
+    'the unit test of prod-tree-write-gate.py (run: python3 -I scripts/hooks/prod-tree-write-gate_test.py); not itself a hook (11c4a5fe)',
   'command_prompt.py':
     'shared library: the one "is this prompt an owner slash command" check, imported by marveen-commands.py, inbox-drain.py and channel-inbox-drain.py; not itself a hook',
   'hook_errlog.py':

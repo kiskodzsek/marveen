@@ -780,6 +780,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsImageQuarantineGate(name)) injectImageQuarantineGate(existing)
   if (agentGetsKeychainReadGate(name)) injectKeychainReadGate(existing)
   if (agentGetsRevocationNote(name)) injectRevocationNote(existing)
+  if (agentGetsProdTreeWriteGate(name)) injectProdTreeWriteGate(existing)
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
 }
 
@@ -1689,6 +1690,64 @@ export function ensureKeychainReadGate(name: string): boolean {
   if (wired) return false
   if (isUnsafeHookCommand(command)) return false
   injectKeychainReadGate(settings)
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  return true
+}
+
+// Card 11c4a5fe (Klodel 42803/42872, Viktor 42806/42810/42855): the prod-tree write gate. A sub-agent does not
+// write the production checkout's scripts/, src/, .claude/ or its root CLAUDE.md, .mcp.json, package*.json,
+// store/autonomy-config.json with Write/Edit/MultiEdit/NotebookEdit or a Bash write; the place for that is a
+// worktree + PR (Pulzus: agents/pulzus/scripts/restore-from-main.sh). An ACCIDENT guard, not a boundary: same uid,
+// and a script or an interpreter is not followed (the script header lists what it does not see). Measured before
+// it: 27 agent-written .bak files under the prod scripts/hooks (card 36d290b3). Every sub-agent; the main agent
+// does not carry it (the gate identifies the session from transcript_path and never gates the main agent anyway).
+// Wired here, not in the root-owned managed settings: the owner runs no more commands (TG 18455, Klodel 42872);
+// Viktor 42810 accepted this placement. An entry taken out of an agent's settings is written back on the next start.
+const PROD_TREE_WRITE_GATE_MATCHER = 'Write|Edit|MultiEdit|NotebookEdit|Bash'
+
+export function agentGetsProdTreeWriteGate(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+export function injectProdTreeWriteGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'prod-tree-write-gate.py'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  // timeout 15 s above the gate's internal 5 s deadline: a timed-out hook does not block
+  const entry = {
+    matcher: PROD_TREE_WRITE_GATE_MATCHER,
+    hooks: [{ type: 'command', command, timeout: 15 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  // One canonical entry: a prior one under another matcher or with a stale command is a gate that never fires.
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('prod-tree-write-gate.py')),
+    entry,
+  ]
+}
+
+// Idempotent migration for the running fleet (same shape as ensureKeychainReadGate). Returns true if written; a
+// settings file that is not there is not created (a never-spawned agent gets the hook on its first spawn).
+export function ensureProdTreeWriteGate(name: string): boolean {
+  if (!agentGetsProdTreeWriteGate(name)) return false
+  const settingsPath = agentSettingsPath(name)
+  if (!existsSync(settingsPath)) return false
+  let settings: Record<string, unknown> = {}
+  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'prod-tree-write-gate.py'))
+  const hooks = (settings.hooks && typeof settings.hooks === 'object')
+    ? settings.hooks as Record<string, unknown>
+    : {}
+  const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse as unknown[] : []
+  const mine = ptu.filter((e) => JSON.stringify(e).includes('prod-tree-write-gate.py'))
+  const wired = mine.length === 1 && (mine[0] as { matcher?: unknown })?.matcher === PROD_TREE_WRITE_GATE_MATCHER
+    && hookCommandWired(JSON.stringify(mine[0]), command)
+  if (wired) return false
+  if (isUnsafeHookCommand(command)) return false
+  injectProdTreeWriteGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }
