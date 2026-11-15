@@ -11,7 +11,7 @@
 // next to it). Comment lines do not count.
 
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, relative, extname } from 'node:path'
 
@@ -41,8 +41,11 @@ const PINS: Record<string, Pin> = {
 
 const EXTS = new Set(['.sh', '.ts', '.mjs', '.js', '.cjs', '.py', '.ps1'])
 // A Python hook's test sits beside it as <name>_test.py (scripts/hooks/keychain-read-gate_test.py: its rows quote
-// `PATH=` commands as data, it builds no launch PATH; Kernel 42488).
-const isTest = (rel: string) => rel.includes('__tests__/') || /\.test\.[a-z]+$/.test(rel) || /_test\.py$/.test(rel)
+// `PATH=` commands as data, it builds no launch PATH; Kernel 42488). Only beside its <name>.py (Viktor 42491 INFO): a lone
+// x_test.py that writes a launch PATH stays in the set.
+const isTest = (rel: string) =>
+  rel.includes('__tests__/') || /\.test\.[a-z]+$/.test(rel) ||
+  (/_test\.py$/.test(rel) && existsSync(join(REPO, rel.replace(/_test\.py$/, '.py'))))
 
 function walk(dir: string, out: string[]): void {
   for (const name of readdirSync(dir)) {

@@ -1021,6 +1021,80 @@ def wrapper_bounds(text, rx):
     return None
 
 
+# A heredoc whose RECIPIENT only stores or sends its body (Viktor 42491, card 8a5d51e8): a commit message, an
+# agent-msg, a curl body. A path at a line start in it was read as a script run (`git commit -F - <<'MSG'` naming
+# keychain-read-gate_test.py blocked, 2026-11-14). Only a QUOTED delimiter (<<'D', <<"D"): an unquoted body runs its
+# $(...) and backticks; normalise() turns <<\D into <<D, so that form stays unquoted and kept. Only these recipients, as
+# the operator's own command, with nothing after the operator on its line (conservative): `python3 - <<'PY'`,
+# `bash <<'SH'`, `cat <<'E' | bash` and `cat > f <<'E'` (the file may be run next) keep their bodies. hits() still
+# reads the whole text; only the script-path walk skips the body.
+# Viktor 42575 HIGH: the regex does not know the shell's state, so `<<'D'` may be no operator at all: a here-string
+# (`<<<'D'`), an escaped `\<` (then `<'D'` is an input redirection), inside a quote (`-m "x <<'D'"`, a quote opened on
+# an earlier line), after a comment (`true # a; git commit -F - <<'D'`) or inside an earlier heredoc's body. Blanking
+# then hid real command lines up to the next line equal to D. So ONLY the text's first heredoc can be data, and only
+# when nothing before it can change the shell's state: no quote, `#`, backslash, backtick or `$` before it (a `$(`
+# or a backtick left open before the operator ends on a body line, and what follows there runs: measured with bash,
+# card 8a5d51e8). An earlier heredoc needs a quote or the SAFE_PREFIX_RX steps below, so `<<` is not listed.
+HEREDOC_OP_RX = re.compile(r'(?<!<)<<-?[ \t]*(?:\'(\w+)\'|"(\w+)")')
+STATE_BEFORE_OP_RX = re.compile(r'[\'"#\\`$]')
+# anchored at the command's first word: `bash -s agent-msg.sh <<'M'` reads its script from the heredoc, `python3 - git
+# commit -F -` is python, so the recipient must BE the command, not a word inside it. No VAR=x prefix: PATH=,
+# GIT_EXEC_PATH=, BASH_ENV= and the like can make the recipient hand its stdin to a program of the caller's choosing
+DATA_RECIPIENT_RX = re.compile(
+    r'^\s*(?:'
+    r'git\s+(?:-C\s+\S+\s+)?(?:commit|tag)\s.*?(?:-F\s*-|--file[= ]-)(?=\s|$)'
+    r'|(?:(?:/usr)?(?:/bin/)?(?:bash|sh)\s+)?(?P<msg>\S*agent-msg\.sh)\s'
+    r'|curl\s.*?(?:--data(?:-binary|-raw)?|-d)\s+@-(?=\s|$))')
+# Viktor 42639 (delta on 722fd7be): a denylist of what may stand around the operator kept leaking, so both sides are
+# an ALLOWLIST now. Before the recipient's command only `cd <plain path>` or `true` steps, joined by &&, ||, ;, | or a
+# newline: a function (`git() { bash; }`), `export PATH=`, `alias`, `hash -p` or a planted program earlier in the text
+# makes the recipient something else. After the operator nothing at all on its line: a quote left open there makes the
+# next lines part of the command line (`<<'MSG' -m "x` + newline + `" ; ./run.py`), and the body starts only after
+# them. The bash of `bash agent-msg.sh` is the bare one or /bin, /usr/bin: an absolute `/tmp/x/bash` is the caller's.
+# `git add <plain paths>` is a step too: the fleet's real form is `git add f && git commit -F - <<'MSG'` (replay of 150
+# transcripts: without it 0 of the false blocks went away); it runs only what the repo's own config runs, the same as
+# the commit itself.
+SAFE_PREFIX_RX = re.compile(
+    r'(?:[ \t]*(?:cd[ \t]+[\w./-]+|true|git[ \t]+add(?:[ \t]+[\w./-]+)+)[ \t]*(?:&&|\|\||;|\||\n))*')
+# Viktor 42575 MEDIUM: agent-msg.sh is a recipient only as THIS repo's script (resolved against the cwd): a look-alike
+# `./agent-msg.sh` or `./scripts/agent-msg.sh` written elsewhere may run its stdin
+AGENT_MSG = os.path.realpath(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'agent-msg.sh'))
+
+
+def data_heredoc_blanked(text, cwd):
+    """text with the body of its first heredoc blanked (same length, newlines kept) when that heredoc is data: a quoted
+    delimiter, nothing before it that changes the shell's state, a data recipient as the operator's own command, and
+    nothing after the operator on its line."""
+    m = HEREDOC_OP_RX.search(text)
+    if not m or STATE_BEFORE_OP_RX.search(text, 0, m.start()):
+        return text
+    delim = m.group(1) or m.group(2)
+    line_start = text.rfind('\n', 0, m.start()) + 1
+    line_end = text.find('\n', m.end())
+    if line_end < 0:
+        return text
+    head = re.split(r'[;&|]', text[line_start:m.start()])[-1]
+    if text[m.end():line_end].strip() or not SAFE_PREFIX_RX.fullmatch(text[:m.start() - len(head)]):
+        return text
+    rec = DATA_RECIPIENT_RX.search(head + ' ')
+    if not rec:
+        return text
+    if rec.group('msg') is not None:
+        path = rec.group('msg')
+        if not os.path.isabs(path):
+            # a relative path resolves against the cwd only when nothing before it may have moved the shell: an
+            # earlier `cd /x &&`, `;`, `&` or line (or a sourced file). A pipe's earlier parts run in subshells.
+            if not cwd or re.search(r'[;&\n]', text[:m.start()]):
+                return text
+            path = os.path.join(cwd, path)
+        if os.path.realpath(path) != AGENT_MSG:
+            return text
+    term = re.compile(r'^\t*' + re.escape(delim) + r'$', re.M).search(text, line_end + 1)
+    if not term:
+        return text
+    return text[:line_end + 1] + re.sub(r'.', ' ', text[line_end + 1:term.start()]) + text[term.start():]
+
+
 def script_hits(cmd, cwd):
     """Rule names for inline interpreter code and for the files the command runs."""
     found = []
@@ -1028,7 +1102,10 @@ def script_hits(cmd, cwd):
         found.append('script-inline')
     # the payload a quote opens past PAYLOAD_OPEN's reach: that quote becomes a command boundary (`;`), so the
     # script rules read the payload as a command; nothing else changes
-    text = normalise(cmd)
+    # blank on the RAW text, normalise after (Viktor 42695 HIGH 1): inside a quoted-delimiter body bash does not join
+    # a backslash-newline, so the terminator must be looked for where bash looks; the blanking keeps the length, so
+    # normalise() gives the same result on the blanked text
+    text = normalise(data_heredoc_blanked(cmd, cwd))
     marks = payload_quotes(text)
     if marks:
         chars = list(text)
