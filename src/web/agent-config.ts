@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { PROJECT_ROOT, MAIN_AGENT_ID, DEFAULT_AGENT_MODEL } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
-import { readRegularFileSync } from './safe-read.js'
+import { readRegularFileSync, UnsafeFileError } from './safe-read.js'
 import { parseExtraChannels } from './agent-extra-channels.js'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { logger } from '../logger.js'
@@ -58,8 +58,33 @@ export function agentConfigRoot(name: string): string {
 
 // A FIFO, a device or a file over 1 MB in place of an agent's file is treated like an unreadable one (the
 // fallback), never read: a FIFO would block the dashboard's main thread (Viktor 43021 MEDIUM 1: agent-config.json).
+//
+// A refusal (UnsafeFileError) is logged, once per path per process (Viktor 43048 LOW 3: a refused agent-config.json fell
+// back to the defaults with no log line). Once, because readFileOr has 80 call sites and some run on every scheduler
+// tick: a FIFO left in place must not turn into a warn line per tick. An ordinary unreadable file stays quiet as before.
+const refusedPathsWarned = new Set<string>()
 export function readFileOr(path: string, fallback: string): string {
-  try { return readRegularFileSync(path) } catch { return fallback }
+  try { return readRegularFileSync(path) } catch (err) {
+    if (err instanceof UnsafeFileError && !refusedPathsWarned.has(path)) {
+      refusedPathsWarned.add(path)
+      logger.warn({ path, reason: err.message }, 'readFileOr: refused an unsafe file (FIFO, device or over the size cap); the caller gets its fallback')
+    }
+    return fallback
+  }
+}
+
+// Card e32fdc02 (Viktor 43048 LOW 3): agent-config.json carries the agent's security settings (securityProfile, toolDeny,
+// runAsUser, excludeRootClaudeMd). When it is a FIFO, a device or over the cap, every readFileOr reader falls back to
+// the LEAST strict default, so the launcher must not start the agent at all (fail closed). Returns the refusal reason,
+// or null when the file is a readable regular file, missing, or unreadable for an ordinary reason (those keep their
+// existing meaning: missing = defaults, as before).
+export function agentConfigRefusal(name: string): string | null {
+  try {
+    readRegularFileSync(join(agentDir(name), 'agent-config.json'))
+    return null
+  } catch (err) {
+    return err instanceof UnsafeFileError ? err.message : null
+  }
 }
 
 // JSONCLOBBER926 (card 035e46d0): the read half of every read-modify-write on a

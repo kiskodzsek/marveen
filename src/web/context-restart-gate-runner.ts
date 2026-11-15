@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { logger } from '../logger.js'
+import { readRegularFileSync } from './safe-read.js'
 import { makeLazyBinResolver } from '../platform.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { listAgentNames } from './agent-config.js'
@@ -377,7 +378,8 @@ export function extractMcpPackageNames(mcpServers: Record<string, unknown>): str
 
 function getMcpJsonPatterns(workingDir: string): string[] {
   try {
-    const raw = JSON.parse(readFileSync(join(workingDir, '.mcp.json'), 'utf-8')) as Record<string, unknown>
+    // Card e32fdc02 (Viktor 43048 LELET 2c): the agent's own .mcp.json; a FIFO would block the gate runner.
+    const raw = JSON.parse(readRegularFileSync(join(workingDir, '.mcp.json'))) as Record<string, unknown>
     const servers = (raw['mcpServers'] ?? {}) as Record<string, unknown>
     return extractMcpPackageNames(servers)
   } catch { return [] }

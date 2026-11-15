@@ -12,6 +12,7 @@ import { verifyHeartbeatKanban, HEARTBEAT_KANBAN_WINDOW_SEC } from './heartbeat-
 import { existsSync, readFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { readRegularFileSync } from './safe-read.js'
 import { disableExpiredDatedTasks } from './schedule-dated-once.js'
 import { logger } from '../logger.js'
 import { decideDesktopGate, readDesktopLock, recordDesktopSkip } from './desktop-lock.js'
@@ -1058,7 +1059,10 @@ export function resolveBoundChannel(agentName: string, providerOverride?: Channe
     ? channelStateDir(provider)
     : channelStateDir(provider, agentDir(agentName))
   try {
-    const raw = JSON.parse(readFileSync(join(dir, 'access.json'), 'utf-8')) as Record<string, unknown>
+    // Card e32fdc02 (Viktor 43048 LELET 2a, measured): access.json sits in the agent's own channel-state folder; a FIFO
+    // there blocked this call (and the scheduler thread with it). A FIFO, a device or > 1 MB is now unreadable like any
+    // other broken file: no chat id, the caller skips delivery.
+    const raw = JSON.parse(readRegularFileSync(join(dir, 'access.json'))) as Record<string, unknown>
     const candidates = Array.isArray(raw?.allowFrom) ? raw.allowFrom.length : 0
     // WRONGRECIP819: 2+ DM contacts is a GUESS, not a binding. Returning the
     // first one with a warn line still delivers to a possibly-wrong person,
@@ -1406,6 +1410,9 @@ export const CONFIG_START_REFUSAL_REASONS: ReadonlySet<string> = new Set([
 ])
 
 export function isConfigStartRefusal(error: string | undefined): boolean {
+  // Card e32fdc02: startAgentProcess refuses an agent whose agent-config.json is a FIFO, a device or over the cap
+  // (fail closed). That is a config state too: retrying every tick would rebuild the 97379849 loop.
+  if (/^agent-config\.json: unsafe-file\b/.test(error ?? '')) return true
   const m = /^oauthTokenFile: (.+?)(?: \(.*\))?$/s.exec(error ?? '')
   return !!m && CONFIG_START_REFUSAL_REASONS.has(m[1])
 }
