@@ -116,7 +116,20 @@ import { CHANNEL_PLUGIN_IDS } from './plugin-ids.js'
 import { ROOT_SANDBOX_ENV } from './root-sandbox-env.js'
 import { exactTmuxTarget, sessionOfTmuxTarget } from '../tmux-target.js'
 import { expandAndValidateConfigDir } from '../config-dir-path.js'
+import { randomUUID } from 'node:crypto'
+import { createKanbanCard } from '../db.js'
+import { checkAgentConfigSeal, DEFAULT_SEAL_DEPS, DEFAULT_SEAL_PATHS, type SealDeps } from './agent-config-seal.js'
 export { CHANNEL_PLUGIN_IDS }
+
+// The seal check's kanban side (card 17901b47): one high-priority card for Klodel per distinct changed state.
+const LAUNCHER_SEAL_DEPS: SealDeps = {
+  ...DEFAULT_SEAL_DEPS,
+  fileCard: (title, description) => {
+    const id = randomUUID().slice(0, 8).toUpperCase()
+    createKanbanCard({ id, title, description, assignee: MAIN_AGENT_ID, priority: 'high' })
+    return id
+  },
+}
 
 // Pure: compute the enabledPlugins map for a sub-agent so that exactly its own
 // channel plugin is enabled and every other channel plugin is disabled.
@@ -1838,6 +1851,10 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
     logger.error({ name, reason: cfgRefusal }, 'agent-config.json: agent NOT started (unsafe file, fail-closed)')
     return { ok: false, error: `agent-config.json: unsafe-file (${cfgRefusal})` }
   }
+  // Card 17901b47 (Viktor 43132): the security fields are compared with the last accepted state (store/
+  // agent-config-seal.json); a difference is a logger.error plus one kanban card for Klodel. Detective only: the agent
+  // starts either way, and the check never throws.
+  checkAgentConfigSeal(name, DEFAULT_SEAL_PATHS, LAUNCHER_SEAL_DEPS)
 
   // Remote agents are handled entirely by the ssh path above (with its own
   // start guard), before any local already-running check / scaffolding.

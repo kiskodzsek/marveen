@@ -7,7 +7,7 @@ import { beginRestart, endRestart } from '../restart-lock.js'
 import { isModelProfileId, MODEL_PROFILE_IDS } from '../../model-profiles.js'
 import { MAIN_AGENT_ID, currentBotName, PROJECT_ROOT } from '../../config.js'
 import { createSystemMessage, listPendingChannelRequests, updateChannelRequestStatus, getDb, claimPendingForAgent, markMessageFailed, countNewerMessagesFromSameSender,
-  getAgentToolActivity, getAgentMessageActivity, getAgentCurrentCards } from '../../db.js'
+  getAgentToolActivity, getAgentMessageActivity, getAgentCurrentCards, addKanbanComment } from '../../db.js'
 import { deriveAgentStatus, AGENT_STATUS_THRESHOLDS } from '../agent-status.js'
 import type { AgentStatusSignals, AgentStatusRow } from '../agent-status.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from '../agent-message-wrap.js'
@@ -170,6 +170,7 @@ import { readAgentTranscript, isTranscriptAllowed } from '../agent-transcript.js
 import { configDirFor } from '../main-transcript-root.js'
 import { kindAllowed, FORBIDDEN_KIND } from './auth.js'
 import { isValidModelId, InvalidModelIdError } from '../../model-id.js'
+import { acceptAgentConfigSeal, agentConfigSealStatus, DEFAULT_SEAL_DEPS, DEFAULT_SEAL_PATHS } from '../agent-config-seal.js'
 
 // Which credential kinds may read a transcript. NAMED principals only: a
 // logged-in human, or a key enrolled to that human's own device. Deliberately
@@ -1613,6 +1614,24 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     writeAgentChannelProvider(name, '')
     resetAgentEnabledPlugins(name)
     json(res, { ok: true })
+    return true
+  }
+
+  // Card 17901b47 (Viktor 43132): the agent-config.json seal. GET = does the file match the last accepted security
+  // fields; POST .../accept = accept the file's current fields (after a deliberate hand edit). The caller is recorded
+  // (a dashboard session, or the token with its self-declared X-Agent-Id): a record, not an authorisation.
+  const sealMatch = path.match(/^\/api\/agents\/([^/]+)\/config-seal(\/accept)?$/)
+  if (sealMatch && ((method === 'GET' && !sealMatch[2]) || (method === 'POST' && sealMatch[2]))) {
+    const name = sanitizeAgentName(decodeURIComponent(sealMatch[1]))
+    if (!name || !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    if (method === 'GET') { json(res, agentConfigSealStatus(name)); return true }
+    const by = ctx.auth?.kind === 'token' ? `token${ctx.auth.agent ? `:${ctx.auth.agent}` : ''}` : (ctx.auth?.kind ?? 'none')
+    const entry = acceptAgentConfigSeal(name, by, DEFAULT_SEAL_PATHS, {
+      ...DEFAULT_SEAL_DEPS,
+      comment: (cardId, author, text) => { addKanbanComment(cardId, author, text) },
+    })
+    if (!entry) { json(res, { error: 'agent-config.json is missing or unreadable' }, 409); return true }
+    json(res, { ok: true, sealedAt: entry.sealedAt, by: entry.by })
     return true
   }
 

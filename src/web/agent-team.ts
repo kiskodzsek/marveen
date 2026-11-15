@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { MAIN_AGENT_ID } from '../config.js'
 import { logger } from '../logger.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { sealDashboardWrite } from './agent-config-seal.js'
 import { agentDir, readFileOr, listAgentNames, readAgentSecurityProfile , readJsonObjectForWrite } from './agent-config.js'
 
 export interface TeamConfig {
@@ -87,6 +88,7 @@ export function writeAgentTeam(name: string, team: TeamConfig): void {
   config = readJsonObjectForWrite(configPath)
   config.team = team
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  sealDashboardWrite(name, 'team', team) // card 17901b47: this field only
 }
 
 // Scrub self-references and unknown agent names from a TeamConfig's name

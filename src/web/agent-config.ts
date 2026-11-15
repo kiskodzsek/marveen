@@ -8,6 +8,7 @@ import { parseExtraChannels } from './agent-extra-channels.js'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { logger } from '../logger.js'
 import { safeJoin } from './sanitize.js'
+import { sealDashboardWrite } from './agent-config-seal.js'
 import { isValidModelId, InvalidModelIdError } from '../model-id.js'
 import {
   resolveAgentModelFromConfig,
@@ -558,6 +559,7 @@ export function writeAgentSecurityProfile(name: string, profileId: string): void
   config = readJsonObjectForWrite(configPath)
   config.securityProfile = profileId
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  sealDashboardWrite(name, 'securityProfile', profileId) // card 17901b47: this field only
 }
 
 // Optional per-agent named Claude subscription plan. Stores a registry id
