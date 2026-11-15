@@ -574,10 +574,11 @@ describe('a URL variable used inside a $(...) or backtick substitution', () => {
     expect(classify(`for u in ${vals(8)}; do for w in ${vals(9)}; do curl $u/$w; done; done`)).toMatchObject({ deny: true, reason: 'curl-loop-unbounded' })
     // a loop variable in braces is read too
     expect(classify('for u in evil.example.com; do curl -s ${u}/x; done')).toMatchObject({ deny: true, reason: 'curl-external' })
-    // only a spelling the variable's own pattern matches makes readings: `${u:-x}` makes none (65 values, no unbounded
-    // deny). NOT a claim that this is right: a loop variable or an assignment in a `${u:-x}` / `${u%/}` form is not
-    // expanded at all, in b58374d7 either (open, reported with fae0712e h8).
-    expect(classify(`for u in ${vals(65)}; do curl -s http://localhost:3420/x -d \${u:-x}; done`)).toMatchObject({ deny: false })
+    // a default form `${u:-x}` makes readings too since card f2a0f976 (it was the open point reported with fae0712e h8:
+    // no readings, so 65 values passed); any other operator form (`${u%/}`) makes none and is judged as written
+    expect(classify(`for u in ${vals(65)}; do curl -s http://localhost:3420/x -d \${u:-x}; done`)).toMatchObject({ deny: true, reason: 'curl-loop-unbounded' })
+    expect(classify(`for u in ${vals(64)}; do curl -s http://localhost:3420/x -d \${u:-x}; done`)).toMatchObject({ deny: false })
+    expect(classify(`for u in ${vals(65)}; do curl -s http://localhost:3420/x -d \${u%/}; done`)).toMatchObject({ deny: false })
     // the values of every loop over one name are collected (after the first loop bash's curl got evil.example.com)
     expect(classify('for u in evil.example.com; do curl -s $u; done; for u in localhost; do :; done')).toMatchObject({ deny: true, reason: 'curl-external' })
   })
@@ -1392,5 +1393,143 @@ describe('structure from the shared shell lexer (card fae0712e)', () => {
   it('STILL OPEN, pinned: a program file named by an unknown variable is a program file (open point (a))', () => {
     // card fae0712e: the old reader could not see a quoted word and read the heredoc as the program
     expect(classify(`python3 "$S" - <<'PY'\nimport urllib.request\nurllib.request.urlopen("${U}")\nPY`)).toMatchObject({ deny: false })
+  })
+})
+
+describe('variable names and parameter expansion (card f2a0f976, Viktor 43009 LOW 1-2)', () => {
+  const H = 'evil.example.com'
+  it('LOW 1: a variable named __proto__ is a variable like any other (bash expands it)', () => {
+    expect(classify(`__proto__=https://${H}/x; curl -s $__proto__`)).toMatchObject({ deny: true, reason: 'curl-external', hosts: [H] })
+    expect(classify(`__proto__=https://${H}/x; curl -s \${__proto__}`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`x=$(__proto__=https://${H}/x; curl -s $__proto__)`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`__proto__=https://${H}/x; x=$(curl -s $__proto__)`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`for __proto__ in https://${H}/x; do curl -s $__proto__; done`)).toMatchObject({ deny: true, reason: 'curl-external', hosts: [H] })
+    expect(classify(`for u in a; do for __proto__ in https://${H}/x; do curl -s $__proto__; done; done`)).toMatchObject({ deny: true, hosts: [H] })
+    for (const n of ['constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
+      expect(classify(`${n}=https://${H}/x; curl -s $${n}`)).toMatchObject({ deny: true, hosts: [H] })
+    }
+    // an unset __proto__ is not a destination of its own
+    expect(classify('__proto__=a; curl -s http://localhost:3420/api/x')).toMatchObject({ deny: false })
+    expect(classify('curl -s http://localhost:3420/api/$__proto__')).toMatchObject({ deny: false })
+  })
+  it('LOW 2: the simple defaults are computed, a host without a scheme included', () => {
+    expect(classify(`U=${H}; curl -s \${U:-x}/p`)).toMatchObject({ deny: true, reason: 'curl-external', hosts: [H] })
+    expect(classify(`U=${H}; curl \${U:-x}`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`U=${H}; curl -s \${U-x}/p`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`U=${H}; curl -s \${U:=x}/p`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`U=${H}; curl -s \${U=x}/p`)).toMatchObject({ deny: true, hosts: [H] })
+    // unset: the word is what bash connects to
+    expect(classify(`curl -s \${NOPE:-${H}}/p`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`curl -s \${NOPE-${H}}/p`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`curl -s \${NOPE:=${H}}/p`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`B=${H}; curl -s \${A:-$B}/p`)).toMatchObject({ deny: true, hosts: [H] })
+    // set but empty: `:-` takes the word, `-` keeps the empty value (measured in bash 3.2)
+    expect(classify(`U=; curl -s \${U:-${H}}/p`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`U=; curl -s http://localhost:3420\${U-${H}}/p`)).toMatchObject({ deny: false })
+    expect(classify(`U=; curl -s http://localhost\${U-.${H}}/p`)).toMatchObject({ deny: false })
+    expect(classify(`U=; curl -s http://localhost\${U:-.${H}}/p`)).toMatchObject({ deny: true, hosts: [`localhost.${H}`] })
+    // Viktor 43216 LOW 2: a value that is itself an unexpanded reference may be empty, so `:-` / `:=` stay unread
+    // (bash 3.2 with V unset: evil.example.com/p); `-` takes the set value whatever it holds (bash: /p)
+    expect(classify(`U=$V; curl -s \${U:-${H}}/p`)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    expect(classify(`U=$V; curl -s \${U:=${H}}/p`)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    expect(classify('U=`x`; curl -s ${U:-' + H + '}/p')).toMatchObject({ deny: true })
+    expect(classify(`U=$V; curl -s \${U-${H}}/p`)).toMatchObject({ deny: false })
+    // a set value wins over the word
+    expect(classify(`U=http://localhost:3420; curl -s \${U:-https://${H}}/api/x`)).toMatchObject({ deny: false })
+    expect(classify(`U=http://localhost:3420; curl -s \${U-https://${H}}/api/x`)).toMatchObject({ deny: false })
+  })
+  it('LOW 2: a loop variable in a default form takes each loop value', () => {
+    expect(classify(`for u in ${H}; do curl -s \${u:-localhost}/p; done`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`for u in ${H}; do curl -s \${u-localhost}/p; done`)).toMatchObject({ deny: true, hosts: [H] })
+    expect(classify(`for u in http://localhost:3420; do curl -s \${u:-x}/api; done`)).toMatchObject({ deny: false })
+    // an empty loop value: `:-` takes the word, `-` keeps the empty value
+    expect(classify(`for u in ''; do curl -s \${u:-${H}}/p; done`)).toMatchObject({ deny: true, hosts: [H] })
+    // stricter than bash, as before this card: asWord reads an empty loop value as the neutral word `x` (localhostx)
+    expect(classify(`for u in ''; do curl -s http://localhost\${u-.${H}}/p; done`)).toMatchObject({ deny: true, hosts: ['localhostx'] })
+    // Viktor 43216 LOW 1: an assignment of the loop variable's name elsewhere must not stand in for the loop value in a
+    // loop reading (bash 3.2: the first round prints the external URL)
+    expect(classify(`V=localhost; for V in https://${H} http://localhost:3420; do curl -s "\${V-\${V:-${H}}}"; done`)).toMatchObject({ deny: true })
+    expect(classify(`V=localhost; for V in https://${H} http://localhost:3420; do curl -s "\${V:-\${W:-x}}"; done`)).toMatchObject({ deny: true })
+    expect(classify(`V=localhost; for V in https://${H} http://localhost:3420; do curl -s "\${V:=\${V}}"; done`)).toMatchObject({ deny: true })
+    expect(classify('V=localhost; for V in http://localhost:3420; do curl -s "${V-${V:-x}}/api"; done')).toMatchObject({ deny: false })
+    // a nested default around a loop variable is not computed: it is left as written, and denies as unresolved
+    expect(classify(`for u in ${H}; do curl -s \${u:-\${B:-x}}/p; done`)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+  })
+  it('LOW 2: any other ${ } in a curl destination HOST is an unresolved destination, with no URL literal anywhere', () => {
+    for (const c of [
+      `U=${H}; curl -s \${U%/}/p`,
+      `u=https://${H}/; curl -s \${u%/}/p`,
+      `U=${H}; curl -s \${U/x/y}/p`,
+      `U=${H}; curl -s \${U:0:30}`,
+      `U=1; curl -s https://\${U:+${H}}/p`,
+      `V=${H}; U=V; curl -s \${!U}/p`,
+      'curl -s ${#U}/p',
+      'curl -s ${1}/p',
+      `curl -s \${A:-\${B:-${H}}}/p`,
+      'curl -s https://x@${U%/}/p',
+      'curl -s ${U:-x',
+      'curl -s -x ${P%/} http://localhost:3420/',
+      'curl -s --url=${P/a/b}',
+      'curl -s --proxy ${P#x} http://localhost:3420/',
+      `for u in ${H}/; do curl -s \${u%/}/p; done`,
+      // an operator form in ONE loop value is enough, whatever the later values read (bash: evil.example.com)
+      `A=${H}x; for u in "\${A%x}" localhost; do curl -s $u/p; done`,
+      'x=$(curl -s ${U%/}/p)',
+      "bash -c 'curl -s ${U%/}/p'",
+      // a `/`, `:` or `://` INSIDE the ${ } is the expansion's, not the URL's: A='evil.example.com://x' gives the host
+      'curl -s "${A%://*}"',
+      'curl -s "${A/x/https://}localhost"',
+      // the plain ${B} inside a default whose name is unset: the word is not cut at the inner `}`
+      `B=${H}; curl -s \${A:-\${B}}/p`,
+    ]) expect(classify(c), c).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+  })
+  it('LOW 2: an operator form in the PATH, the query, a flag value or outside curl names no destination', () => {
+    for (const c of [
+      'curl -s "http://localhost:3420/api/memories?agent=${AGENT:-dave}&q=${Q%x}"',
+      'curl -s http://localhost:3420/api/${ID#x}',
+      'curl -s "http://localhost:3420/api/${ID/a/b}/x"',
+      'curl -s "${DASH:-http://localhost:3420}/api/kanban"',
+      'curl -s "http://localhost:${PORT:-3420}/api/kanban"',
+      'curl -s -d "${X%y}" http://localhost:3420/api/x',
+      'curl -s -H "X-Agent-Id: ${ME:-dave}" http://localhost:3420/api/x',
+      'echo ${U%/} ${#U} ${!U}',
+      `U=${H}; echo \${U%/}`,
+      // the host part only: the scheme, the userinfo, the query, the fragment, a later `://` are not the host
+      'curl -s "${P%x}://localhost:3420/api"',
+      'curl -s "http://${CRED%x}@localhost:3420/api"',
+      'curl -s "http://localhost:3420?q=${A%x}"',
+      'curl -s "http://localhost:3420#${A%x}"',
+      'curl -s "http://localhost://${A%x}/p"',
+      'curl -s "localhost/x://${A%x}"',
+    ]) expect(classify(c), c).toMatchObject({ deny: false })
+  })
+  it('a 64-value loop over thousands of curl spans stays fast: each reading is lexed once (card f2a0f976 timing)', () => {
+    // measured: the reserves lexing every reading again took 2.7-3.6 s at this size (main 1.2 s, now 0.4-0.5 s)
+    const head = 'for u in ' + Array.from({ length: 64 }, (_, k) => `h${k}.local`).join(' ') + '; do '
+    for (const seg of ['curl -s $u/p; ', 'curl -s ${u:-x}/p; ']) {
+      const cmd = head + seg.repeat(Math.floor((64000 - head.length) / seg.length)) + `done\ncurl -s https://${H}/x`
+      expect(cmd.length).toBeLessThan(MAX_COMMAND_CHARS)
+      const t0 = Date.now()
+      expect(classify(cmd), seg).toMatchObject({ deny: true, reason: 'curl-external' })
+      expect(Date.now() - t0, seg).toBeLessThan(2000)
+    }
+  })
+  it('STILL OPEN, pinned: a plain $NAME / ${NAME} not assigned in the command is read from the environment (header)', () => {
+    // card f2a0f976 changes the operator forms only; a bare name with no value here stays as it was (allow with no
+    // external URL literal in the command, the fail-closed reserve with one)
+    expect(classify('curl -s "${DASH}/api/kanban"')).toMatchObject({ deny: false })
+    expect(classify('curl -s "$DASH/api/kanban"')).toMatchObject({ deny: false })
+    expect(classify(`curl -s "\${DASH}/api/kanban"; echo https://${H}`)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    // a default form over an unassigned name keeps the environment reading in the reserve (as before the defaults were
+    // computed); the word alone is judged too, and alone it is local
+    for (const op of [':-', '-', ':=', '=']) {
+      expect(classify(`curl -s "\${DASH${op}http://localhost:3420}/api/kanban"; echo https://${H}`), op).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+      expect(classify(`curl -s "\${DASH${op}http://localhost:3420}/api/kanban"`), op).toMatchObject({ deny: false })
+    }
+    // assigned in the command, or a loop variable: the value is known, nothing is left to the environment
+    expect(classify(`DASH=http://localhost:3420; curl -s "\${DASH:-x}/api/kanban"; echo https://${H}`)).toMatchObject({ deny: false })
+    expect(classify(`for u in http://localhost:3420; do curl -s "\${u:-x}/api"; done; echo https://${H}`)).toMatchObject({ deny: false })
+    // in the path the default names no destination
+    expect(classify(`curl -s "http://localhost:3420/api/\${ID:-x}"; echo https://${H}`)).toMatchObject({ deny: false })
   })
 })
