@@ -60,6 +60,8 @@ const EXEMPT: Record<string, string> = {
     'shared library imported by the ledger hooks; not itself a hook',
   'ledger-close.py':
     'agent-run CLI that closes one group inbound as "not for me" (python3 scripts/hooks/ledger-close.py <chat_id> <message_id> "nem nekem: <kinek>"); the reply guard names it by this path in its block text, so it lives next to ledger_lib.py; not itself a hook (Klodel 37860)',
+  'shell-attack-corpus-build.py':
+    'builds and re-checks the shared attack corpus (shell-attack-corpus.json) the command-gate tests read, with a real bash/zsh oracle (run: python3 -I scripts/hooks/shell-attack-corpus-build.py [--check]); not itself a hook (card fae0712e, Viktor 42697)',
   'keychain-read-gate_test.py':
     'the unit test of keychain-read-gate.py (run: python3 -I scripts/hooks/keychain-read-gate_test.py); not itself a hook (c1921b55)',
   'prod-tree-write-gate_test.py':

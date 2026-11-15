@@ -78,6 +78,16 @@ describe('GHPRPIN: every other shape is denied', () => {
       `for s in ${S}; do node $s marabel pr get 1; done`,
     ]) expect({ cmd, ...deny(cmd) }).toMatchObject({ cmd, deny: true })
   })
+  it('text the shell lexer does not fully understand is never the stand-alone shape', () => {
+    // card fae0712e: an unterminated heredoc or quote made the old reader skip every rule (an unread allow)
+    for (const cmd of [
+      `node ${S} marabel pr edit 1 --body-file - <<'EOF'\nno terminator`,
+      `node ${S} marabel pr get 1 "unterminated`,
+    ]) expect({ cmd, ...deny(cmd) }).toMatchObject({ cmd, deny: true, reason: 'gh-pr-pin-shape' })
+  })
+  it('a comment is no second command (card fae0712e)', () => {
+    expect(deny(`node ${S} marabel pr get 1 # read the PR`)).toMatchObject({ deny: false })
+  })
   it('VAR= and wrappers are refused by the shape rule itself, not only by the path rule behind it', () => {
     for (const cmd of [
       `NODE_OPTIONS=--require=/tmp/x.js node ${S} marabel pr get 1`, `X=1 node ${S} marabel pr get 1`,

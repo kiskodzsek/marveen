@@ -81,6 +81,7 @@ import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { resolvePreCheckPath } from './precheck-path.js'
 import { PRECHECK_PIN_EXPECTED } from './schedule-trust-precheck-pins.js'
 import { logger } from '../logger.js'
+import { lex as shLex, words as shLexWords } from '../../scripts/lib/shell-lex.mjs'
 import type { ScheduledTask } from './scheduled-tasks-io.js'
 
 /** approved/legacy run with the owner framing; agent/mismatch do not. */
@@ -668,6 +669,39 @@ function shCodeMask(s: string, start: readonly string[] = []): { code: boolean[]
   return { code, open: st }
 }
 
+/**
+ * The simple commands of one (joined) shell line, each as its words, from the shared shell lexer
+ * (scripts/lib/shell-lex.mjs, card fae0712e): a quoted or escaped separator does not split, a comment is no
+ * command, a lone `&` splits, a quoted blank does not break a word, and every $( ), backtick, <( ) and ( ) body
+ * is a command of its own. A substitution stays verbatim in its word (so its $ marks the word as expanding).
+ * The old regex split is kept for a line the lexer cannot read on its own: one that starts inside a quote left
+ * open on the previous line, or that the lexer reports problems on (unterminated quote or substitution).
+ */
+function shSimpleCommands(raw: string, lineOpen: boolean): string[][] {
+  const lx = lineOpen ? null : shLex(raw)
+  if (lx === null || lx.problems.length > 0) {
+    return raw.split(/;|&&|\|\||\||\$\(|`|\(|\)/).map(seg => seg.trim().split(/\s+/).filter(Boolean))
+  }
+  // An arithmetic $(( )) / (( )) and a parameter ${ } run no command of their own (a $( ) inside one is its own
+  // frame and stays); bash 5.3's ${ cmd; } / ${| cmd; } does run one, so a ${ followed by a blank or | stays.
+  const chars = Array.from(raw)
+  const runs = (seg: { frame: string; frameAt: number }) => {
+    if (seg.frame === '$((' || seg.frame === '((') return false
+    if (seg.frame === '${') return /^[\s|]$/.test(chars[lx.substs[seg.frameAt].inner[0]] ?? '')
+    return true
+  }
+  // the words come with their quotes removed; a substitution keeps its $( or backtick, so the $ / ` checks below
+  // still see an expanding word
+  // a case pattern (`pat)`, `a|b)`: a word ending in an unquoted `)`) at the start of a command is no command;
+  // what follows it on the line is (the old split cut at the `)`)
+  const pattern = (w: { end: number }) => chars[w.end - 1] === ')' && lx.cls[w.end - 1] === 'c'
+  return lx.segments.filter(runs).map(seg => {
+    const ws = shLexWords(raw, lx, seg)
+    while (ws.length > 0 && pattern(ws[0])) ws.shift()
+    return ws.map(w => w.text)
+  })
+}
+
 function shReferences(file: string, body: string, out: PreCheckRefs, bases: string[], add: (p: string) => void, depth = 0): void {
   const lines = body.split('\n')
   // the quoting open at the end of the previous line (Viktor 42593 RES 1)
@@ -688,6 +722,7 @@ function shReferences(file: string, body: string, out: PreCheckRefs, bases: stri
     let heredocLang: string | null = null
     const scan = raw.replace(SH_ARITH_RX, m => ' '.repeat(m.length))
     // not a here-string (<<<), not inside quotes, not in a comment (Viktor 42578 LOW D)
+    const startOpen = open.length
     const mask = shCodeMask(scan, open)
     const code = mask.code
     open = mask.open
@@ -720,6 +755,7 @@ function shReferences(file: string, body: string, out: PreCheckRefs, bases: stri
     }
     // The heredoc feeds ONE stdin interpreter on the line, the first; any other reads unknown code.
     let heredocFree = heredocLang !== null
+    const lineOpen = startOpen > 0
     // `-c <code>`: walk the code, then blank it so its ; | ( do not split this line.
     for (let guard = 0; guard < 8; guard++) {
       SH_EMBED_RX.lastIndex = 0
@@ -732,8 +768,7 @@ function shReferences(file: string, body: string, out: PreCheckRefs, bases: stri
       const cpos = (m.index ?? 0) + m[0].search(/\s-[A-Za-z]*c\s*$/) + 1
       raw = raw.slice(0, cpos) + SH_C_WALKED + ' ' + raw.slice(w.end)
     }
-    for (const seg of raw.split(/;|&&|\|\||\||\$\(|`|\(|\)/)) {
-      const words = seg.trim().split(/\s+/).filter(Boolean)
+    for (const words of shSimpleCommands(raw, lineOpen)) {
       const unq = (w: string) => w.replace(/^\\(?=[A-Za-z])/, '').replace(/^["']|["']$/g, '')
       const named = words.some(w => SH_INTERP_RX.test(unq(w)))
       const sysName = (w: string) => { const u = unq(w); const m = SH_SYS_BIN_RX.exec(u); return m ? m[1] : u }
