@@ -18,6 +18,7 @@ import { loadProfileTemplate, profileWantsDestructiveGate, resolveProfilePlaceho
 import { resolveAgentSecurityProfile } from './agent-team.js'
 import { sanitizeCapabilityTag, CAPABILITY_TAG_MAX_PER_AGENT } from '../prompt-safety.js'
 import { TMP_ROOT_PREFIXES as _TMP_PREFIXES } from './tmp-root-prefixes.js'
+import { resolveAgentConfigDirForRead } from './claude-plans.js'
 
 // Resolve the base URL agents should use to reach the dashboard API.
 //
@@ -818,6 +819,8 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsRevocationNote(name)) injectRevocationNote(existing)
   if (agentGetsProdTreeWriteGate(name)) injectProdTreeWriteGate(existing)
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
+  // Card d4180ec8: no hook kill switch survives a spawn, in this file or the agent's other two (ensureNoHookKillSwitch).
+  if (name !== MAIN_AGENT_ID) ensureNoHookKillSwitch(name)
 }
 
 // Which agents are subject to the email-send hard-gate: every agent EXCEPT the
@@ -1789,6 +1792,63 @@ export function ensureRevocationNote(name: string): boolean {
   injectRevocationNote(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
+}
+
+// Card d4180ec8 (Viktor 42916 INFO 3): the hook kill switch. One `"disableAllHooks": true` turns off EVERY hook of a
+// session, the gates above included, and the ensure* checks only look at the hook entries, so they report the gates
+// wired while none of them runs. Measured 2026-11-15 on Claude Code 2.1.325 (agents/kernel/reports/
+// hook-killswitch-1115.md): the key works from the project settings.json, from settings.local.json and from the
+// user-scope settings.json of the session's CLAUDE_CONFIG_DIR -- all three files a sub-agent can write. No hook
+// fired with it, 3 of 3 fired without it. `allowManagedHooksOnly` in those files did NOT stop the hooks (it counts in
+// managed settings only, which the owner keeps), so only disableAllHooks is removed here.
+export const HOOK_KILL_SWITCH_KEY = 'disableAllHooks'
+
+// The settings files of a sub-agent in which the kill switch counts: its project settings.json and
+// settings.local.json, and the settings.json of its own config dir. A config dir outside the agent's folder (a plan's
+// shared dir, the owner's ~/.claude) is not the agent's to rewrite, so it is not listed. `configDir` is a test seam;
+// production passes nothing and gets the launcher's own answer (resolveAgentConfigDirForRead).
+export function agentHookKillSwitchFiles(name: string, configDir?: string | null): string[] {
+  if (name === MAIN_AGENT_ID) return []
+  const own = agentDir(name)
+  const files = [agentSettingsPath(name), join(own, '.claude', 'settings.local.json')]
+  const dir = configDir === undefined ? resolveAgentConfigDirForRead(name) : configDir
+  if (dir && (dir === own || dir.startsWith(own + '/'))) files.push(join(dir, 'settings.json'))
+  return files
+}
+
+// Remove the kill switch from a sub-agent's settings files. Returns what it did per file, so the boot log names it:
+// 'removed' (written back without the key, the file mode kept), 'outside' (a symlink whose target is outside the
+// agent's folder: reported, never written), 'unreadable' (not JSON: reported, never written). A file without the
+// key is not touched and not listed. The main agent is never touched (its settings are the owner's).
+export function ensureNoHookKillSwitch(name: string, configDir?: string | null): Array<{ path: string; result: 'removed' | 'outside' | 'unreadable' }> {
+  const out: Array<{ path: string; result: 'removed' | 'outside' | 'unreadable' }> = []
+  const own = agentDir(name)
+  for (const path of agentHookKillSwitchFiles(name, configDir)) {
+    if (!existsSync(path)) continue
+    // Resolve and stat BEFORE reading: a FIFO (mkfifo) or a device (a symlink to /dev/zero) in the agent's own folder
+    // would block or exhaust the dashboard process, which reads these files synchronously.
+    let real: string
+    try { real = realpathSync(path) } catch { out.push({ path, result: 'unreadable' }); continue }
+    let size = 0
+    try { const st = statSync(real); if (!st.isFile()) throw new Error('not a regular file'); size = st.size } catch { out.push({ path, result: 'unreadable' }); continue }
+    if (size > 1_000_000) { out.push({ path, result: 'unreadable' }); continue }
+    let text: string
+    // Claude Code strips a leading BOM and decodes \uXXXX escapes in keys: both spell the same key, so the text is
+    // parsed first and the key is looked up in the parsed object, never in the raw text.
+    try { text = readFileSync(real, 'utf-8').replace(/^\uFEFF/, '') } catch { out.push({ path, result: 'unreadable' }); continue }
+    let settings: Record<string, unknown>
+    try { settings = JSON.parse(text) } catch { out.push({ path, result: 'unreadable' }); continue }
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) { out.push({ path, result: 'unreadable' }); continue }
+    if (!Object.prototype.hasOwnProperty.call(settings, HOOK_KILL_SWITCH_KEY)) continue
+    let ownReal = own
+    try { ownReal = realpathSync(own) } catch { /* keep the nominal path */ }
+    if (!real.startsWith(ownReal + '/')) { out.push({ path, result: 'outside' }); continue }
+    delete settings[HOOK_KILL_SWITCH_KEY]
+    const mode = statSync(real).mode & 0o777
+    atomicWriteFileSync(real, JSON.stringify(settings, null, 2), { mode })
+    out.push({ path, result: 'removed' })
+  }
+  return out
 }
 
 // The domains the owner added for this install, from the egress allowlist.
