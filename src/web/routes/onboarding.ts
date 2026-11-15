@@ -19,6 +19,7 @@ import { liveProbeAuth, stampTokenVerified } from '../claude-credentials-guard.j
 import { json, readBody } from '../http-helpers.js'
 import { isManagedSettingsReady, getManagedSettingsSudoCommand } from './agents.js'
 import type { RouteContext } from './types.js'
+import { readRegularFileSync } from '../safe-read.js'
 
 // First-run onboarding for the "pre-install now, configure later" flow: the
 // dashboard boots without Claude auth / channels, and the operator finishes
@@ -171,7 +172,8 @@ function existingChannelTokens(): { botToken: string | null; appToken: string | 
 
 function paired(): boolean {
   try {
-    const a = JSON.parse(readFileSync(join(channelStateDir(CHANNEL_PROVIDER), 'access.json'), 'utf-8')) as {
+    // Card e32fdc02: the main agent's channel-state access.json is agent-writable; a FIFO would block the request.
+    const a = JSON.parse(readRegularFileSync(join(channelStateDir(CHANNEL_PROVIDER), 'access.json'))) as {
       allowFrom?: unknown[]; groups?: Record<string, unknown>
     }
     const allow = Array.isArray(a.allowFrom) ? a.allowFrom.length : 0

@@ -32,7 +32,7 @@ import {
 } from '../pane-state.js'
 import { scheduleRecoveryBrief } from './restart-recovery-brief.js'
 import { beginRestart, endRestart } from './restart-lock.js'
-import { agentDir, listAgentNames, readAgentModel, resolveAgentModelDetailed, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentRunAsUser, readAgentMemoryIsolation, readAgentStateObserver, readAgentWorksourceChannel, readAgentCustomProvider, readAgentExtraChannels, readFileOr, readJsonObjectForWrite } from './agent-config.js'
+import { agentDir, listAgentNames, readAgentModel, resolveAgentModelDetailed, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentRunAsUser, readAgentMemoryIsolation, readAgentStateObserver, readAgentWorksourceChannel, readAgentCustomProvider, readAgentExtraChannels, readFileOr, readJsonObjectForWrite, agentConfigRefusal } from './agent-config.js'
 import { buildExtraChannelLaunch, enableExtraPlugins } from './agent-extra-channels.js'
 import { probeExtraPluginsInTree, combineLiveness } from './extra-channel-liveness.js'
 import { loadCustomProvider, type CustomProviderDef } from './custom-providers.js'
@@ -1828,6 +1828,16 @@ export function shouldBriefAfterStart(
 export async function startAgentProcess(name: string, opts: { fresh?: boolean; brief?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
   const dir = agentDir(name)
   if (!existsSync(dir)) return { ok: false, error: 'Agent not found' }
+
+  // Card e32fdc02 (Viktor 43048 LOW 3): a FIFO, a device or an over-cap agent-config.json makes every config reader
+  // below fall back to the least strict default (securityProfile, toolDeny, runAsUser, excludeRootClaudeMd), so the
+  // agent would start with its restrictions silently dropped. Refuse first, before any other read: fail closed.
+  // The error is a config refusal for the scheduler (isConfigStartRefusal): not retried every tick.
+  const cfgRefusal = agentConfigRefusal(name)
+  if (cfgRefusal !== null) {
+    logger.error({ name, reason: cfgRefusal }, 'agent-config.json: agent NOT started (unsafe file, fail-closed)')
+    return { ok: false, error: `agent-config.json: unsafe-file (${cfgRefusal})` }
+  }
 
   // Remote agents are handled entirely by the ssh path above (with its own
   // start guard), before any local already-running check / scaffolding.

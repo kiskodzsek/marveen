@@ -14,6 +14,7 @@ import { readQuotaSnapshot, DEFAULT_MAX_AGE_SEC, readFableSnapshot, DEFAULT_FABL
 import { STATE_OBSERVER_STATE_DIR } from '../state-observer.js'
 import { resolveOauthTokenFileSetting } from '../agent-oauth-token-file.js'
 import type { RouteContext } from './types.js'
+import { readRegularFileSync } from '../safe-read.js'
 
 // Count "real" user turns (operator prompts, Telegram messages) in every
 // Claude Code session JSONL under ~/.claude/projects/. Filters out
@@ -113,7 +114,8 @@ function agentQuotaKeys(): Map<string, string> {
  */
 function readAgentOauthTokenFilePath(agent: string): string | null {
   let raw = '{}'
-  try { raw = readFileSync(join(agentDir(agent), 'agent-config.json'), 'utf-8') } catch { /* no config: unset */ }
+  // Card e32fdc02 (Viktor 43048 LELET 2b): an agent-writable file read on a dashboard request; a FIFO would block it.
+  try { raw = readRegularFileSync(join(agentDir(agent), 'agent-config.json')) } catch { /* no config or unsafe: unset */ }
   const setting = resolveOauthTokenFileSetting(raw)
   return setting.state === 'set' ? setting.path : null
 }
