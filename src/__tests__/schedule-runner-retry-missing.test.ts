@@ -17,6 +17,7 @@ import type { ScheduledTask } from '../web/scheduled-tasks-io.js'
 //   * result 'fired' still deletes the row (the queue drains normally).
 
 const mockAppendTaskRun = vi.fn()
+const mockInsertPendingRetry = vi.fn()
 const mockDeletePendingRetry = vi.fn()
 // Mirrors the real DB: refreshing the row updates its last_reason, so the
 // NEXT tick sees the state this tick wrote (the transition-dedup depends on
@@ -48,7 +49,7 @@ vi.mock('../db.js', () => ({
   listPendingTaskRetries: () => mockListPendingRetries(),
   deletePendingTaskRetry: (...a: unknown[]) => mockDeletePendingRetry(...a),
   updatePendingTaskRetry: mockUpdatePendingRetry,
-  insertPendingTaskRetryIfNew: vi.fn(),
+  insertPendingTaskRetryIfNew: (...a: unknown[]) => mockInsertPendingRetry(...a),
   markPendingTaskRetryAlert: vi.fn(() => false),
   clearPendingTaskRetryAlert: vi.fn(),
   markScheduledTaskKanbanWaiting: vi.fn(),
@@ -193,5 +194,61 @@ describe('schedule runner: pending retry survives a missing target session', () 
     await runOneTick()
 
     expect(mockDeletePendingRetry).toHaveBeenCalledWith(DAILY.name, 'retryagent')
+  })
+})
+
+// SCHEDREFUSED1115 (card 97379849): a start refused by the agent's own config ('oauthTokenFile: ...', e.g. the
+// Codex-bridge majsztro) cannot succeed on a later tick. Measured 2026-11-13 10:08 -> 2026-11-15 14:40: one retry row
+// for such a target restarted it every tick, 12 625 times, and never delivered. It ends the row with one run-log line.
+describe("schedule runner: a target whose config refuses a session is not retried", () => {
+  beforeEach(() => {
+    vi.stubEnv('SCHEDULER_TZ', 'Europe/Budapest')
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-31T10:30:00.000Z'))
+    mockListScheduledTasks.mockReturnValue([DAILY])
+    mockSessionExists.mockReturnValue(false)
+  })
+  afterEach(() => {
+    mockStartAgent.mockImplementation(() => ({ ok: false, error: 'tmux unavailable' }))
+    mockListPendingRetries.mockImplementation(() => [])
+    mockDeletePendingRetry.mockImplementation(() => {})
+    vi.useRealTimers()
+    vi.unstubAllEnvs()
+  })
+
+  it("pending retry + 'oauthTokenFile: non-claude-model' -> row deleted, run-log 'refused', one start attempt", async () => {
+    mockStartAgent.mockImplementation(() => ({ ok: false, error: 'oauthTokenFile: non-claude-model' }))
+    // Like the real table: a deleted row is gone on the next tick (the runner ticks several times in the window).
+    const rows = [retryRow({ last_reason: 'missing' })]
+    mockListPendingRetries.mockImplementation(() => rows)
+    mockDeletePendingRetry.mockImplementation(() => { rows.length = 0 })
+    await runOneTick()
+    expect(mockDeletePendingRetry).toHaveBeenCalledWith(DAILY.name, 'retryagent')
+    expect(mockUpdatePendingRetry).not.toHaveBeenCalled()
+    const runs = mockAppendTaskRun.mock.calls.filter(c => c[0] === DAILY.name).map(c => String(c[2]))
+    expect(runs).toEqual(['refused'])
+    expect(mockStartAgent).toHaveBeenCalledTimes(1)
+  })
+
+  it("any other start failure is still 'missing': the row is kept (never-abandon unchanged)", async () => {
+    mockStartAgent.mockImplementation(() => ({ ok: false, error: 'Agent not found' }))
+    mockListPendingRetries.mockReturnValue([retryRow()])
+    await runOneTick()
+    expect(mockDeletePendingRetry).not.toHaveBeenCalled()
+    expect(mockUpdatePendingRetry).toHaveBeenCalledWith(DAILY.name, 'retryagent', expect.any(Number), 'missing')
+  })
+
+  it("a cron fire on such a target queues no retry and writes 'refused'", async () => {
+    // 10:30Z = 12:30 Budapest (CEST); the tick after 61 s lands in minute 12:31.
+    const DUE = task({ name: 'retry-refused-cron', schedule: '31 12 * * *' })
+    mockListScheduledTasks.mockReturnValue([DUE])
+    mockListPendingRetries.mockReturnValue([])
+    mockStartAgent.mockImplementation(() => ({ ok: false, error: 'oauthTokenFile: non-claude-model' }))
+    await runOneTick()
+    expect(mockStartAgent).toHaveBeenCalled()
+    expect(mockInsertPendingRetry).not.toHaveBeenCalled()
+    const runs = mockAppendTaskRun.mock.calls.filter(c => c[0] === DUE.name).map(c => String(c[2]))
+    expect(runs).toEqual(['refused'])
   })
 })
