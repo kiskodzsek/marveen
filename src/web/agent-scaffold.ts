@@ -109,9 +109,45 @@ export function pythonHookCommand(scriptPath: string): string {
 // the serialized PreToolUse array? The command must be JSON-escaped before the
 // includes() -- comparing the RAW string disagrees with the serialized form on
 // any backslash path (Windows), where the check then never settles and every
-// boot rewrites settings.json. Exported for unit tests.
+// boot rewrites settings.json. Exported for unit tests. Since card c8a65f38 no ensure* decides on it alone:
+// a substring match also accepts an edited command (see hookEntriesSettled below).
 export function hookCommandWired(ptuJson: string, command: string): boolean {
   return ptuJson.includes(JSON.stringify(command).slice(1, -1))
+}
+
+// Key-order-independent JSON (object keys sorted at every level, array order kept): a hand-reordered but otherwise
+// identical entry is the same entry, so it does not rewrite settings.json at every boot.
+function sortedKeyJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(sortedKeyJson).join(',')}]`
+  if (typeof value === 'object' && value !== null) {
+    const o = value as Record<string, unknown>
+    return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${sortedKeyJson(o[k])}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+// Settled predicate for the ensure* migrations (card c8a65f38, Viktor 42891 LOW 1): would `inject` leave this gate's
+// own entries (the `event` entries whose JSON names `marker`, the same marker the injector dedupes by) exactly as
+// they are? hookCommandWired() is a substring check, so an agent that appended to the command in its own settings
+// (`... > /dev/null`, `|| true`), changed the timeout, or added a second hook to the entry kept a gate that does not
+// enforce while the ensure saw it as wired and never wrote it back. Running the injector on a copy and comparing
+// the gate's entries is the exact-entry check (command, matcher, timeout, type, one entry) without a second copy of
+// the canonical shape that could drift from the injector. Other gates' entries are not compared: the injector keeps
+// them, and their own ensure owns them. Exported for unit tests.
+export function hookEntriesSettled(
+  settings: Record<string, unknown>,
+  event: 'PreToolUse' | 'PostToolUse',
+  marker: string,
+  inject: (s: Record<string, unknown>) => void,
+): boolean {
+  const mine = (s: Record<string, unknown>): unknown[] => {
+    const hooks = s.hooks
+    const list = hooks && typeof hooks === 'object' ? (hooks as Record<string, unknown>)[event] : undefined
+    return Array.isArray(list) ? list.filter((e) => JSON.stringify(e).includes(marker)) : []
+  }
+  const copy = JSON.parse(JSON.stringify(settings)) as Record<string, unknown>
+  inject(copy)
+  return sortedKeyJson(mine(settings)) === sortedKeyJson(mine(copy))
 }
 
 // Identity values the template substitution injects. Pulled out so the
@@ -1536,19 +1572,10 @@ export function ensureTelegramCopyGate(name: string): boolean {
   if (!existsSync(settingsPath)) return false
   let settings: Record<string, unknown> = {}
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
-  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'outgoing-copy-gate.py'))
-  const hooks = (settings.hooks && typeof settings.hooks === 'object')
-    ? settings.hooks as Record<string, unknown>
-    : {}
-  const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []
-  // Two failure modes, same as the email gate: not wired at all, or wired under
-  // a matcher that no longer names the Telegram tools.
-  const wiredHere = ptu.some((e) => {
-    const j = JSON.stringify(e)
-    return j.includes('outgoing-copy-gate.py')
-      && (e as { matcher?: unknown })?.matcher === TELEGRAM_COPY_GATE_MATCHER
-  })
-  if (wiredHere && hookCommandWired(JSON.stringify(ptu), command)) return false
+  // Three failure modes, all silently non-enforcing: not wired at all, wired under a matcher that no longer names
+  // the Telegram tools, or wired with an edited entry (card c8a65f38). The injector keeps an entry of this script
+  // under ANOTHER matcher, so the settled check does not flag one either.
+  if (hookEntriesSettled(settings, 'PreToolUse', 'outgoing-copy-gate.py', injectTelegramCopyGate)) return false
   injectTelegramCopyGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
@@ -1570,16 +1597,10 @@ export function ensureEgressGate(name: string): boolean {
     try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
   }
   const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'egress-gate.mjs'))
-  const hooks = (settings.hooks && typeof settings.hooks === 'object')
-    ? settings.hooks as Record<string, unknown>
-    : {}
-  const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse as unknown[] : []
-  // Idempotency: already wired only if an entry references the egress-gate
-  // script AND already uses the absolute node binary. A legacy bare-`node`
-  // entry (dead on nvm PATHs, exit 127 = silently non-enforcing) must NOT
-  // count as wired -- fall through so injectEgressGate replaces it in place.
-  const ptuJson = JSON.stringify(ptu)
-  if (ptuJson.includes('egress-gate.mjs') && hookCommandWired(ptuJson, command)) return false
+  // Idempotency: already wired only if the egress-gate entry is exactly the one the injector writes. A legacy
+  // bare-`node` entry (dead on nvm PATHs, exit 127 = silently non-enforcing) or an edited one (card c8a65f38)
+  // must NOT count as wired -- fall through so injectEgressGate replaces it in place.
+  if (hookEntriesSettled(settings, 'PreToolUse', 'egress-gate.mjs', injectEgressGate)) return false
   if (isUnsafeHookCommand(command)) return false
   injectEgressGate(settings)
   if (name !== MAIN_AGENT_ID) mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
@@ -1599,16 +1620,10 @@ export function ensureBashEgressParser(name: string): boolean {
   let settings: Record<string, unknown> = {}
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
   const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'bash-egress-parser.mjs'))
-  const hooks = (settings.hooks && typeof settings.hooks === 'object')
-    ? settings.hooks as Record<string, unknown>
-    : {}
-  const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse as unknown[] : []
-  // Wired only when the entry carries the CURRENT command under the Bash
-  // matcher: a stale node path or a different matcher is silently
-  // non-enforcing, so both fall through to an in-place replace.
-  const wired = ptu.some((e) => (e as { matcher?: unknown })?.matcher === 'Bash'
-    && hookCommandWired(JSON.stringify(e), command))
-  if (wired) return false
+  // Wired only when the one entry is exactly the injector's (CURRENT command, Bash matcher, timeout): a stale node
+  // path, a different matcher or an edited command (card c8a65f38) is silently non-enforcing, so all fall through
+  // to an in-place replace.
+  if (hookEntriesSettled(settings, 'PreToolUse', 'bash-egress-parser.mjs', injectBashEgressParser)) return false
   if (isUnsafeHookCommand(command)) return false
   injectBashEgressParser(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
@@ -1625,15 +1640,9 @@ export function ensureImageQuarantineGate(name: string): boolean {
   let settings: Record<string, unknown> = {}
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
   const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'image-quarantine-gate.mjs'))
-  const hooks = (settings.hooks && typeof settings.hooks === 'object')
-    ? settings.hooks as Record<string, unknown>
-    : {}
-  const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse as unknown[] : []
-  // A narrower matcher is the exact defect this gate fixes, so it counts as
-  // not wired, the same as a stale node path.
-  const wired = ptu.some((e) => (e as { matcher?: unknown })?.matcher === IMAGE_QUARANTINE_GATE_MATCHER
-    && hookCommandWired(JSON.stringify(e), command))
-  if (wired) return false
+  // A narrower matcher is the exact defect this gate fixes, so it counts as not wired, the same as a stale node
+  // path or an edited entry (card c8a65f38).
+  if (hookEntriesSettled(settings, 'PreToolUse', 'image-quarantine-gate.mjs', injectImageQuarantineGate)) return false
   if (isUnsafeHookCommand(command)) return false
   injectImageQuarantineGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
@@ -1679,15 +1688,8 @@ export function ensureKeychainReadGate(name: string): boolean {
   let settings: Record<string, unknown> = {}
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
   const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'keychain-read-gate.py'))
-  const hooks = (settings.hooks && typeof settings.hooks === 'object')
-    ? settings.hooks as Record<string, unknown>
-    : {}
-  const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse as unknown[] : []
-  // Wired only with the CURRENT command under the Bash matcher and as the only entry of this script.
-  const mine = ptu.filter((e) => JSON.stringify(e).includes('keychain-read-gate.py'))
-  const wired = mine.length === 1 && (mine[0] as { matcher?: unknown })?.matcher === 'Bash'
-    && hookCommandWired(JSON.stringify(mine[0]), command)
-  if (wired) return false
+  // Wired only as the injector's exact entry (CURRENT command, Bash matcher, timeout), the only one of this script.
+  if (hookEntriesSettled(settings, 'PreToolUse', 'keychain-read-gate.py', injectKeychainReadGate)) return false
   if (isUnsafeHookCommand(command)) return false
   injectKeychainReadGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
@@ -1738,14 +1740,7 @@ export function ensureProdTreeWriteGate(name: string): boolean {
   let settings: Record<string, unknown> = {}
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
   const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'prod-tree-write-gate.py'))
-  const hooks = (settings.hooks && typeof settings.hooks === 'object')
-    ? settings.hooks as Record<string, unknown>
-    : {}
-  const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse as unknown[] : []
-  const mine = ptu.filter((e) => JSON.stringify(e).includes('prod-tree-write-gate.py'))
-  const wired = mine.length === 1 && (mine[0] as { matcher?: unknown })?.matcher === PROD_TREE_WRITE_GATE_MATCHER
-    && hookCommandWired(JSON.stringify(mine[0]), command)
-  if (wired) return false
+  if (hookEntriesSettled(settings, 'PreToolUse', 'prod-tree-write-gate.py', injectProdTreeWriteGate)) return false
   if (isUnsafeHookCommand(command)) return false
   injectProdTreeWriteGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
@@ -1789,14 +1784,7 @@ export function ensureRevocationNote(name: string): boolean {
   let settings: Record<string, unknown> = {}
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
   const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'revocation-evening-note.py'))
-  const hooks = (settings.hooks && typeof settings.hooks === 'object')
-    ? settings.hooks as Record<string, unknown>
-    : {}
-  const post = Array.isArray(hooks.PostToolUse) ? hooks.PostToolUse as unknown[] : []
-  const mine = post.filter((e) => JSON.stringify(e).includes('revocation-evening-note.py'))
-  const wired = mine.length === 1 && (mine[0] as { matcher?: unknown })?.matcher === 'Bash'
-    && hookCommandWired(JSON.stringify(mine[0]), command)
-  if (wired) return false
+  if (hookEntriesSettled(settings, 'PostToolUse', 'revocation-evening-note.py', injectRevocationNote)) return false
   if (isUnsafeHookCommand(command)) return false
   injectRevocationNote(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
@@ -2239,36 +2227,19 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
   if (!existsSync(settingsPath)) return false
   let settings: Record<string, unknown> = {}
   try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
-  const emailCmd = hookCommand(join(PROJECT_ROOT, 'scripts', 'email-send-gate.mjs'))
-  const paceCmd = selfPaceGateCommand(name)
-  const destructiveCmd = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'destructive-gate.py'))
-  const hooks = (settings.hooks && typeof settings.hooks === 'object')
-    ? settings.hooks as Record<string, unknown>
-    : {}
-  const ptu = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : []
-  const ptuJson = JSON.stringify(ptu)
-  // Two separate failure modes, both silently non-enforcing: the command is not
-  // wired at all, or it IS wired but under a pre-2026-08-10 matcher that cannot
-  // match a qualified MCP tool name. The second one is why the wiring check
-  // alone is not enough -- it would report the gate healthy forever.
+  // Failure modes, all silently non-enforcing: the command is not wired at all; it IS wired but under a
+  // pre-2026-08-10 matcher that cannot match a qualified MCP tool name; the thread-reply flag was granted or revoked
+  // since; the destructive gate's hand-wired 2026-09-08 entry, which this code never wrote; or the agent edited the
+  // entry in its own settings (appended to the command, changed the timeout; card c8a65f38). A substring wiring
+  // check reports every one but the first as healthy forever, so each gate counts as wired only when its injector
+  // would leave its entries exactly as they are.
   const threadReply = hasThreadReplyCapability(name, readAgentCapabilities(name))
-  const emailCmdExpected = threadReply ? `${emailCmd} ${EMAIL_THREAD_REPLY_FLAG}` : emailCmd
   const needEmail = agentGetsEmailGate(name)
-    && (!hookCommandWired(ptuJson, emailCmdExpected)
-      || emailGateMatcherStale(ptu)
-      || emailGateCommandStale(ptu, emailCmdExpected))
-  const needPace = agentGetsGovernanceGates(name) && !hookCommandWired(ptuJson, paceCmd)
-  // The destructive gate has the same two failure modes, plus a third that is
-  // specific to it: it was hand-wired on 2026-09-08, so an install can carry a
-  // correct-looking entry this code never wrote. Treat a stale matcher as
-  // not-wired and let the injector replace it in place.
-  const destructiveStale = ptu.some((e) => {
-    const j = JSON.stringify(e)
-    return j.includes('destructive-gate.py')
-      && (e as { matcher?: unknown })?.matcher !== DESTRUCTIVE_GATE_MATCHER
-  })
+    && !hookEntriesSettled(settings, 'PreToolUse', 'email-send-gate.mjs', (s) => injectEmailSendGate(s, threadReply))
+  const needPace = agentGetsGovernanceGates(name)
+    && !hookEntriesSettled(settings, 'PreToolUse', 'self-pace-gate.mjs', (s) => injectSelfPaceGate(s, name))
   const needDestructive = agentGetsDestructiveGate(name, profile)
-    && (!hookCommandWired(ptuJson, destructiveCmd) || destructiveStale)
+    && !hookEntriesSettled(settings, 'PreToolUse', 'destructive-gate.py', injectDestructiveGate)
   if (!needEmail && !needPace && !needDestructive) return false
   // The injectors dedupe by script basename, so a stale bare-`node` entry is
   // replaced in place rather than accumulated.
