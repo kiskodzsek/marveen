@@ -9,6 +9,7 @@ import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, 
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { readRegularFileSync } from './safe-read.js'
 import { findDuplicateJsonKeys } from './json-dup-keys.js'
 import { logger } from '../logger.js'
 import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInherited } from './mcp-inheritance.js'
@@ -379,7 +380,7 @@ export function hookScriptAlreadyEffectiveInOtherScope(
   if (!bn) return false
   try {
     if (!existsSync(projectScope)) return false
-    const parsed = JSON.parse(readFileSync(projectScope, 'utf-8')) as { hooks?: Record<string, unknown> }
+    const parsed = JSON.parse(readRegularFileSync(projectScope)) as { hooks?: Record<string, unknown> }
     const entries = parsed?.hooks?.[event]
     if (!Array.isArray(entries)) return false
     return (entries as HookEntry[]).some((e) =>
@@ -518,7 +519,7 @@ export function ensureAgentHooks(
   let existing: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
     try {
-      const rawExisting = readFileSync(settingsPath, 'utf-8')
+      const rawExisting = readRegularFileSync(settingsPath)
       // JSON.parse keeps only the LAST occurrence of a duplicated key, so a
       // settings file with two "PreToolUse" (or any hook-event) keys silently
       // drops every hook in the earlier block -- guards die with no error and
@@ -649,7 +650,7 @@ export function ensureAgentStalenessHook(name: string): boolean {
   const settingsPath = agentSettingsPath(name)
   let settings: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
-    try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+    try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   }
   const hooks = (settings.hooks && typeof settings.hooks === 'object')
     ? settings.hooks as Record<string, unknown>
@@ -689,7 +690,7 @@ export function ensureAgentProvenanceHook(name: string): boolean {
   const settingsPath = agentSettingsPath(name)
   let settings: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
-    try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+    try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   }
   const hooks = (settings.hooks && typeof settings.hooks === 'object')
     ? settings.hooks as Record<string, unknown>
@@ -737,7 +738,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   mkdirSync(settingsDir, { recursive: true })
   let existing: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
-    try { existing = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { /* overwrite */ }
+    try { existing = JSON.parse(readRegularFileSync(settingsPath)) } catch { /* overwrite */ }
   }
   const ctx = { HOME: homedir(), AGENT_DIR: agentRoot }
   // Deny rules carry paths too, and the SAME leading-`//` rule applies to them: a
@@ -1236,7 +1237,7 @@ export function ensureBashEgressDeny(name: string, mainAgentConfigDir: string | 
   if (!settingsPath) return false
   let settings: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
-    try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+    try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   }
   if (!mergeBashEgressDeny(settings)) return false
   if (name !== MAIN_AGENT_ID) mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
@@ -1574,7 +1575,7 @@ export function ensureTelegramCopyGate(name: string): boolean {
   const settingsPath = agentSettingsPath(name)
   if (!existsSync(settingsPath)) return false
   let settings: Record<string, unknown> = {}
-  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   // Three failure modes, all silently non-enforcing: not wired at all, wired under a matcher that no longer names
   // the Telegram tools, or wired with an edited entry (card c8a65f38). The injector keeps an entry of this script
   // under ANOTHER matcher, so the settled check does not flag one either.
@@ -1597,7 +1598,7 @@ export function ensureEgressGate(name: string): boolean {
   const settingsPath = agentSettingsPath(name)
   let settings: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
-    try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+    try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   }
   const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'egress-gate.mjs'))
   // Idempotency: already wired only if the egress-gate entry is exactly the one the injector writes. A legacy
@@ -1621,7 +1622,7 @@ export function ensureBashEgressParser(name: string): boolean {
   const settingsPath = agentSettingsPath(name)
   if (!existsSync(settingsPath)) return false
   let settings: Record<string, unknown> = {}
-  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'bash-egress-parser.mjs'))
   // Wired only when the one entry is exactly the injector's (CURRENT command, Bash matcher, timeout): a stale node
   // path, a different matcher or an edited command (card c8a65f38) is silently non-enforcing, so all fall through
@@ -1641,7 +1642,7 @@ export function ensureImageQuarantineGate(name: string): boolean {
   const settingsPath = agentSettingsPath(name)
   if (!existsSync(settingsPath)) return false
   let settings: Record<string, unknown> = {}
-  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   const command = hookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'image-quarantine-gate.mjs'))
   // A narrower matcher is the exact defect this gate fixes, so it counts as not wired, the same as a stale node
   // path or an edited entry (card c8a65f38).
@@ -1689,7 +1690,7 @@ export function ensureKeychainReadGate(name: string): boolean {
   const settingsPath = agentSettingsPath(name)
   if (!existsSync(settingsPath)) return false
   let settings: Record<string, unknown> = {}
-  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'keychain-read-gate.py'))
   // Wired only as the injector's exact entry (CURRENT command, Bash matcher, timeout), the only one of this script.
   if (hookEntriesSettled(settings, 'PreToolUse', 'keychain-read-gate.py', injectKeychainReadGate)) return false
@@ -1741,7 +1742,7 @@ export function ensureProdTreeWriteGate(name: string): boolean {
   const settingsPath = agentSettingsPath(name)
   if (!existsSync(settingsPath)) return false
   let settings: Record<string, unknown> = {}
-  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'prod-tree-write-gate.py'))
   if (hookEntriesSettled(settings, 'PreToolUse', 'prod-tree-write-gate.py', injectProdTreeWriteGate)) return false
   if (isUnsafeHookCommand(command)) return false
@@ -1785,7 +1786,7 @@ export function ensureRevocationNote(name: string): boolean {
   const settingsPath = agentSettingsPath(name)
   if (!existsSync(settingsPath)) return false
   let settings: Record<string, unknown> = {}
-  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'revocation-evening-note.py'))
   if (hookEntriesSettled(settings, 'PostToolUse', 'revocation-evening-note.py', injectRevocationNote)) return false
   if (isUnsafeHookCommand(command)) return false
@@ -1825,17 +1826,15 @@ export function ensureNoHookKillSwitch(name: string, configDir?: string | null):
   const own = agentDir(name)
   for (const path of agentHookKillSwitchFiles(name, configDir)) {
     if (!existsSync(path)) continue
-    // Resolve and stat BEFORE reading: a FIFO (mkfifo) or a device (a symlink to /dev/zero) in the agent's own folder
-    // would block or exhaust the dashboard process, which reads these files synchronously.
+    // A FIFO (mkfifo) or a device (a symlink to /dev/zero) in the agent's own folder would block or exhaust the
+    // dashboard process, which reads these files synchronously: readRegularFileSync refuses both (and >1 MB) on the
+    // open descriptor, so nothing can be swapped in between the check and the read.
     let real: string
     try { real = realpathSync(path) } catch { out.push({ path, result: 'unreadable' }); continue }
-    let size = 0
-    try { const st = statSync(real); if (!st.isFile()) throw new Error('not a regular file'); size = st.size } catch { out.push({ path, result: 'unreadable' }); continue }
-    if (size > 1_000_000) { out.push({ path, result: 'unreadable' }); continue }
     let text: string
     // Claude Code strips a leading BOM and decodes \uXXXX escapes in keys: both spell the same key, so the text is
     // parsed first and the key is looked up in the parsed object, never in the raw text.
-    try { text = readFileSync(real, 'utf-8').replace(/^\uFEFF/, '') } catch { out.push({ path, result: 'unreadable' }); continue }
+    try { text = readRegularFileSync(real).replace(/^\uFEFF/, '') } catch { out.push({ path, result: 'unreadable' }); continue }
     let settings: Record<string, unknown>
     try { settings = JSON.parse(text) } catch { out.push({ path, result: 'unreadable' }); continue }
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) { out.push({ path, result: 'unreadable' }); continue }
@@ -2286,7 +2285,7 @@ export function ensureGovernanceGateCommands(name: string, profile?: ProfileTemp
   const settingsPath = agentSettingsPath(name)
   if (!existsSync(settingsPath)) return false
   let settings: Record<string, unknown> = {}
-  try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
   // Failure modes, all silently non-enforcing: the command is not wired at all; it IS wired but under a
   // pre-2026-08-10 matcher that cannot match a qualified MCP tool name; the thread-reply flag was granted or revoked
   // since; the destructive gate's hand-wired 2026-09-08 entry, which this code never wrote; or the agent edited the
@@ -2360,10 +2359,12 @@ export function ensureQuarantineReader(
   let upToDate = false
   if (existsSync(destPath)) {
     try {
-      upToDate = readFileSync(destPath, 'utf-8') === rendered
-    } catch { /* unreadable -> treat as stale, re-write below */ }
+      upToDate = readRegularFileSync(destPath) === rendered
+    } catch { /* unreadable (incl. a FIFO or a device) -> treat as stale, re-write below */ }
   }
-  if (!upToDate) writeFileSync(destPath, rendered)
+  // Atomic (tmp + rename): the rename replaces whatever stands at destPath -- a FIFO, which a plain writeFileSync
+  // would block on waiting for a reader, or a symlink, which a plain write would follow out of the agent's folder.
+  if (!upToDate) atomicWriteFileSync(destPath, rendered)
   // Legacy cleanup, deliberately AFTER the project-scoped copy is guaranteed
   // on disk (either it was already current, or the line above just wrote it):
   // there must be no window in which NEITHER copy exists. The user-scope copy
@@ -2836,7 +2837,7 @@ export function ensureEvidenceSection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -2869,7 +2870,7 @@ export function ensureMcpListChannelSection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -2937,7 +2938,7 @@ export function ensureMessageCloseSection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -2969,7 +2970,7 @@ export function ensureAutonomySection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -3007,7 +3008,7 @@ export function ensureFleetRosterSection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -3035,7 +3036,7 @@ export function ensureProjectRootInClaudeMd(name: string): boolean {
   if (!existsSync(claudeMdPath)) return false
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return false
   }
@@ -3119,7 +3120,7 @@ export function ensureSkillsPathTrapSection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -3190,7 +3191,7 @@ export function ensureSystemDirectiveAuthSection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -3253,7 +3254,7 @@ export function ensureAgentIdHeaderSection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -3520,7 +3521,7 @@ export function ensureThinChiefHandoffSection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -3606,7 +3607,7 @@ export function ensureMemorySearchLabelSection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -3706,7 +3707,7 @@ export function ensureFleetAuthSection(name: string): void {
 
   let existing: string
   try {
-    existing = readFileSync(claudeMdPath, 'utf-8')
+    existing = readRegularFileSync(claudeMdPath)
   } catch {
     return
   }
@@ -4170,7 +4171,7 @@ export function ensureFleetRulesSection(
 // The generated block, written (body) or removed (null). False on failure.
 function writeFleetRulesBlock(name: string, claudeMdPath: string, body: string | null): boolean {
   let existing: string
-  try { existing = readFileSync(claudeMdPath, 'utf-8') } catch { return false }
+  try { existing = readRegularFileSync(claudeMdPath) } catch { return false }
   let updated: string
   if (body !== null) {
     const block = `${FLEETRULES_BEGIN}\n${body}\n${FLEETRULES_END}`
@@ -4199,7 +4200,7 @@ function writeRootClaudeMdExcludes(name: string, excludePaths: string[], exclude
   let settings: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
     try {
-      const parsed = JSON.parse(readFileSync(settingsPath, 'utf-8')) as unknown
+      const parsed = JSON.parse(readRegularFileSync(settingsPath)) as unknown
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) settings = parsed as Record<string, unknown>
       else return false
     } catch {
