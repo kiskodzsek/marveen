@@ -125,7 +125,7 @@ import { RemoteStatusCache } from '../remote-status-cache.js'
 import type { AgentRunState } from '../ssh-tmux.js'
 import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
 import { detectPaneState, detectPermissionMode } from '../../pane-state.js'
-import { checkAgentPutFields, checkConfigPutFields, AGENT_PUT_WRITABLE_FIELDS } from '../agent-put-fields.js'
+import { agentFileWriteRefusal, checkAgentPutFields, checkConfigPutFields, AGENT_PUT_WRITABLE_FIELDS } from '../agent-put-fields.js'
 import { detectReauthNeeded } from '../reauth-detect.js'
 import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
 import { readContextGuardConfig, writeContextGuardConfig, seedContextGuardForNewAgent } from '../context-guard-store.js'
@@ -2584,6 +2584,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       const sealRefusal = sealedWriteRefusal(ctx.auth, MAIN_AGENT_ID) // card ec665017
       if (sealRefusal) { json(res, { error: sealRefusal }, 403); return true }
     }
+    // Card a8944247: CLAUDE.md, SOUL.md and .mcp.json are not written by a sub-agent's token call (the same caller
+    // rule), checked here, before the first write of this handler (memoryIsolation below).
+    const fileRefusal = agentFileWriteRefusal(ctx.auth, MAIN_AGENT_ID, data)
+    if (fileRefusal) { json(res, { error: fileRefusal }, 403); return true }
 
     if (data.memoryIsolation !== undefined) {
       // The main agent's cwd IS the install repo root, which is already a git
