@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ScheduledTask } from '../web/scheduled-tasks-io.js'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 // A pending retry whose target session is MISSING (and whose auto-start fails)
 // must survive the tick, not be deleted. Deleting it was a silent abandonment
@@ -250,5 +253,59 @@ describe("schedule runner: a target whose config refuses a session is not retrie
     expect(mockInsertPendingRetry).not.toHaveBeenCalled()
     const runs = mockAppendTaskRun.mock.calls.filter(c => c[0] === DUE.name).map(c => String(c[2]))
     expect(runs).toEqual(['refused'])
+  })
+})
+
+// Viktor 43041 LOW 1: only the CONFIG reasons are 'refused'. A token-file STATE (missing, empty, mode-too-open, ...)
+// can pass by during a rotation, and config-unparseable can be a half-written save: those stay 'missing', the row is
+// kept and the aged alert still fires.
+describe('isConfigStartRefusal: config reasons only', () => {
+  it('config reasons (with or without a detail) are refusals; token-file states and other errors are not', async () => {
+    const { isConfigStartRefusal } = await loadRunner()
+    for (const r of ['non-claude-model', 'main-agent', 'auth-mode-own_team', 'explicit-config-dir', 'not-absolute', 'not a Claude OAuth agent']) {
+      expect(isConfigStartRefusal(`oauthTokenFile: ${r}`), r).toBe(true)
+    }
+    expect(isConfigStartRefusal('oauthTokenFile: path-bad-characters (x)')).toBe(true)
+    for (const e of ['oauthTokenFile: missing', 'oauthTokenFile: empty', 'oauthTokenFile: mode-too-open (0644)',
+      'oauthTokenFile: config-unparseable', 'oauthTokenFile: same-as-fleet-token', 'oauthTokenFile: non-claude-modelX',
+      'tmux unavailable', 'Agent not found', '', undefined]) {
+      expect(isConfigStartRefusal(e as string | undefined), String(e)).toBe(false)
+    }
+  })
+
+  it('the list covers every oauthTokenFileConflict reason and every invalid-setting reason but config-unparseable', async () => {
+    const { CONFIG_START_REFUSAL_REASONS } = await loadRunner()
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'web', 'agent-oauth-token-file.ts'), 'utf-8')
+    const conflictBody = src.slice(src.indexOf('export function oauthTokenFileConflict'), src.indexOf('\n}\n', src.indexOf('export function oauthTokenFileConflict')))
+    const conflict = [...conflictBody.matchAll(/return '([^']+)'/g)].map((m) => m[1])
+    const invalid = [...src.matchAll(/state: 'invalid', reason: '([^']+)'/g)].map((m) => m[1])
+    expect(conflict.length).toBeGreaterThanOrEqual(7)
+    expect(invalid).toContain('config-unparseable')
+    for (const r of [...conflict, ...invalid.filter((x) => x !== 'config-unparseable')]) {
+      expect(CONFIG_START_REFUSAL_REASONS.has(r), r).toBe(true)
+    }
+    expect(CONFIG_START_REFUSAL_REASONS.has('config-unparseable')).toBe(false)
+  })
+
+  it("a pending retry on 'oauthTokenFile: missing' is kept (the row stays alive for the aged alert)", async () => {
+    vi.stubEnv('SCHEDULER_TZ', 'Europe/Budapest')
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-07-31T10:30:00.000Z'))
+    mockListScheduledTasks.mockReturnValue([DAILY])
+    mockSessionExists.mockReturnValue(false)
+    mockStartAgent.mockImplementation(() => ({ ok: false, error: 'oauthTokenFile: missing' }))
+    mockListPendingRetries.mockReturnValue([retryRow()])
+    try {
+      await runOneTick()
+      expect(mockDeletePendingRetry).not.toHaveBeenCalled()
+      expect(mockUpdatePendingRetry).toHaveBeenCalledWith(DAILY.name, 'retryagent', expect.any(Number), 'missing')
+      const runs = mockAppendTaskRun.mock.calls.filter(c => c[0] === DAILY.name).map(c => String(c[2]))
+      expect(runs).not.toContain('refused')
+    } finally {
+      mockStartAgent.mockImplementation(() => ({ ok: false, error: 'tmux unavailable' }))
+      vi.useRealTimers()
+      vi.unstubAllEnvs()
+    }
   })
 })

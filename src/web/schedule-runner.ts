@@ -1385,14 +1385,29 @@ export function resolveTaskTarget(
   return { session, host }
 }
 
-// SCHEDREFUSED1115 (card 97379849): an 'oauthTokenFile:' start refusal is the agent's OWN config saying "no Claude
-// session here" (fail-closed, agent-oauth-token-file.ts) -- e.g. majsztro, a Codex bridge whose oauthTokenFile points
-// at a NO-CLAUDE-SESSION marker on purpose. It cannot change between two ticks, so it is not 'missing' (kept and
-// retried every tick by the never-abandon rule): measured 2026-11-13 10:08 -> 2026-11-15 14:40, one
-// proaktiv-kor-majsztro retry row restarted that agent 12 625 times, each with an ERROR and a WARN, and the prompt
-// was never delivered. attemptFireTask answers 'refused' instead: the delivery ends with one line.
+// SCHEDREFUSED1115 (card 97379849): some 'oauthTokenFile: <reason>' start refusals are the agent's OWN config saying
+// "no Claude session here" (fail-closed, agent-oauth-token-file.ts) -- e.g. majsztro, a Codex bridge whose
+// oauthTokenFile points at a NO-CLAUDE-SESSION marker on purpose. Such a reason cannot change between two ticks, so it
+// is not 'missing' (kept and retried every tick by the never-abandon rule): measured 2026-11-13 10:08 -> 2026-11-15
+// 14:40, one proaktiv-kor-majsztro retry row restarted that agent 12 625 times, each with an ERROR and a WARN, and the
+// prompt was never delivered. attemptFireTask answers 'refused' for those: the delivery ends with one line.
+// ONLY the config reasons below (Viktor 43041 LOW 1): the token-file STATES (missing, empty, unreadable, mode-too-open,
+// wrong-owner, ... -- a rotation can pass through them) and config-unparseable (a half-written save) stay 'missing', so
+// the row is kept and the aged alert still fires. The conflict list is oauthTokenFileConflict's return values (pinned
+// by schedule-runner-retry-missing.test.ts); the setting list is resolveOauthTokenFileSetting's 'invalid' reasons.
+export const CONFIG_START_REFUSAL_REASONS: ReadonlySet<string> = new Set([
+  // oauthTokenFileConflict: a setting the field cannot take effect under
+  'main-agent', 'remote-agent', 'custom-provider', 'non-claude-model', 'auth-mode-own_team', 'auth-mode-api',
+  'explicit-config-dir',
+  // resolveOauthTokenFileSetting: the field's value itself is invalid
+  'not-a-string', 'blank', 'not-absolute', 'path-bad-characters', 'path-parent-traversal',
+  // agent-process.ts: a token file set for an agent that is not a Claude OAuth agent
+  'not a Claude OAuth agent',
+])
+
 export function isConfigStartRefusal(error: string | undefined): boolean {
-  return /^oauthTokenFile: /.test(error ?? '')
+  const m = /^oauthTokenFile: (.+?)(?: \(.*\))?$/s.exec(error ?? '')
+  return !!m && CONFIG_START_REFUSAL_REASONS.has(m[1])
 }
 
 function logConfigStartRefusal(taskName: string, agent: string, session: string, error: string | undefined): 'refused' {
