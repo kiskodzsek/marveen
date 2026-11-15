@@ -891,7 +891,23 @@ def cd_bases(text, cwd):
             bases.append(cur)
             if len(bases) > MAX_BASES:  # the caller only needs "too many"; collecting on was quadratic (25 000 cd: 2 s)
                 break
-    return bases
+    if CHDIR_OTHER_RX.search(text) or (ENV_WORD_RX.search(text) and ENV_CHDIR_RX.search(text)) or len(CD_WORD_RX.findall(text)) > len(CD_RX.findall(text)):
+        return Bases(bases, unknown=True)  # a directory change the lines above did not follow
+    return Bases(bases)
+
+
+class Bases(list):
+    """cd_bases result; unknown = the command also changes directory in a way cd_bases cannot follow (pushd, `cd $(..)`,
+    `cd ${PWD}/x`, a bare `cd`, `env -C`), so "this agent-msg.sh is ours in every directory" is not known (Viktor 43304 A)."""
+    def __init__(self, items=(), unknown=False):
+        super().__init__(items)
+        self.unknown = unknown
+
+
+CD_WORD_RX = re.compile(r'(?<![\w./-])cd(?![\w./-])')
+CHDIR_OTHER_RX = re.compile(r'(?<![\w./-])(?:pushd|popd|chdir)(?![\w./-])')
+ENV_WORD_RX = re.compile(r'(?<![\w./-])env(?![\w./-])')
+ENV_CHDIR_RX = re.compile(r'(?<=[ \t])(?:-\w*C|--chdir)(?=[ \t=]|$)')  # two linear scans, not one nested pattern (ReDoS)
 
 
 class AgentMsgGroup:
@@ -907,7 +923,8 @@ AGENT_MSG_SHELL_RX = re.compile(r'(?:(?:/usr)?/bin/)?(?:bash|sh)')
 
 def agent_msg_everywhere(word, bases):
     """word (a plain path) is this repo's agent-msg.sh from every base it exists in, and exists in one."""
-    if not PLAIN_SCRIPT_RX.fullmatch(word) or os.path.basename(word) != 'agent-msg.sh' or len(bases) > MAX_BASES:
+    if not PLAIN_SCRIPT_RX.fullmatch(word) or os.path.basename(word) != 'agent-msg.sh' or len(bases) > MAX_BASES \
+            or getattr(bases, 'unknown', False):
         return False  # (past MAX_BASES cd_bases stopped collecting: not every directory is known)
     cands = [word] if os.path.isabs(word) else [os.path.join(b, word) for b in bases]
     found = [os.path.realpath(c) for c in cands if os.path.exists(c)]
@@ -961,14 +978,16 @@ def _argv_option(w, python):
     return 1
 
 
-def interp_groups(text):
+def interp_groups(text, expanded=False):
     """For each interpreter call: the words that may be its script, in order (every existing file is judged).
     Raises TooManyArgs when a call's words run past MAX_ARGS or ARGS_WINDOW and the walk did not stop before."""
     groups = []
     for m in INTERP_RX.finditer(text):
         python = 'python' in m.group(0).lower()
         name = re.split(r'[\s;&|(){}`\'"/\\]', m.group(0).rstrip('\'"\\'))[-1]
-        argv_data = bool(DATA_ARGV_RX.fullmatch(name))  # still True after a known option; False = the old walk
+        argv_data = bool(DATA_ARGV_RX.fullmatch(name)) and not expanded  # still True after a known option; False = the old walk
+        # (expanded: expand() read a VAR=value anywhere in the text as this shell's assignment; the real value may be empty
+        # (X=a python3 $X m.py, unset X, a comment) and the script the second word: such a text keeps the old walk)
         rest = text[m.end():m.end() + ARGS_WINDOW]  # a window, not the rest: 6 000 calls x the rest was quadratic
         end = _CALL_END_RX.search(rest)
         cut = end.start() if end else len(rest)
@@ -990,7 +1009,7 @@ def interp_groups(text):
                                           else (f'source: a parancs hosszabb a {ARGS_WINDOW} karakteres ablaknál'
                                                 if over else '')))
             continue
-        if AGENT_MSG_SHELL_RX.fullmatch(name) and all_words and os.path.basename(
+        if not expanded and AGENT_MSG_SHELL_RX.fullmatch(name) and all_words and os.path.basename(
                 strip_quotes(all_words[0])) == 'agent-msg.sh':  # no option before it: `bash -s x` reads stdin
             over = clipped or len(all_words) > MAX_ARGS
             groups.append(AgentMsgGroup(strip_quotes(all_words[0]), [strip_quotes(w) for w in all_words[1:MAX_ARGS]
@@ -1062,8 +1081,9 @@ def interp_groups(text):
 def script_paths(cmd, cwd, normalised=None):
     """The script files the command runs (resolved, existing regular files), at most MAX_SCRIPTS (an eleventh file
     or more than MAX_BASES directories returns MAX_SCRIPTS + 1 entries: the caller blocks). Raises TooManyArgs."""
-    text = expand(normalise(cmd) if normalised is None else normalised)
-    groups = interp_groups(text)
+    norm = normalise(cmd) if normalised is None else normalised
+    text = expand(norm)
+    groups = interp_groups(text, text != norm)
     if INTERP_RX.search(text):  # the script on stdin: only when an interpreter runs
         groups += [[m.group(1)] for m in REDIRECT_RX.finditer(text)]
         for m in CAT_RX.finditer(text):
@@ -1713,6 +1733,40 @@ NONSHELL_RX = re.compile(r'(?:.*/)?(?:python[\d.]*|node|ruby|perl|php|deno|bun)'
 PROSE_PAREN_RX = re.compile(r'(?<=[ \t])\((?=[\w./~])')
 
 
+# Where `word (./x.sh)` runs (measured with a real bash, sh and zsh): after a reserved word that takes a command list
+# (time, if, then, elif, else, while, until, do, !, {), after zsh's repeat N and coproc, at the start of a line or of a
+# string (a blank only before the paren), and after a separator. After an ordinary word (echo a (./x.sh), x, (./x.sh))
+# it is a syntax error. So only a "(" right after a word (letters or digits, or a word ending in . , :) that is no such
+# keyword, on the same line, is prose; a word with a backslash (an escape: "\\n (./x.sh)") or starting with - or !
+# (time -p (./x.sh)) is not (Viktor 43304).
+PROSE_KEYWORDS = frozenset({'time', 'if', 'then', 'elif', 'else', 'while', 'until', 'do', 'coproc', 'repeat', 'nocorrect',
+                            'noglob', 'always', 'foreach', 'select', 'case', 'for', 'in'})
+
+
+PROSE_WORD_RX = re.compile(r'[\w.,:\\!-]+')
+
+
+def _prose_paren(cmd, p):
+    # a bounded window, not the whole line: 40 000 "(x" on one line took 42 s with a scan to the line start per paren
+    start = max(0, p - 200)
+    seg = cmd[start:p]
+    nl = seg.rfind('\n')
+    if nl >= 0:
+        before = seg[nl + 1:].rstrip(' \t')
+    else:
+        before = seg.rstrip(' \t')
+        if start:  # the window may begin inside a word: drop that first, maybe cut, word
+            i = before.find(' ')
+            before = before[i + 1:] if i >= 0 else ''
+    toks = PROSE_WORD_RX.findall(before)
+    if not toks or not before.endswith(toks[-1]):  # a quote, bracket, = or separator right before the blanks: no word
+        return False
+    tok = toks[-1]
+    if '\\' in tok or tok[0] in '-!' or not (tok[-1].isalnum() or tok[-1] in '.,:') or tok in PROSE_KEYWORDS:
+        return False
+    return not any(t in ('repeat', 'coproc') for t in toks[-3:])
+
+
 def nonshell_prose_masked(text, cmd, lx):
     """text (same length as cmd) with the prose "(" of the non-shell heredoc bodies made a blank (see above)."""
     chars = None
@@ -1727,6 +1781,8 @@ def nonshell_prose_masked(text, cmd, lx):
             continue
         for h in hs:
             for m in PROSE_PAREN_RX.finditer(cmd, h['bodyStart'], h['bodyEnd']):
+                if not _prose_paren(cmd, m.start()):
+                    continue
                 chars = chars or list(text)
                 chars[m.start()] = ' '
     return ''.join(chars) if chars else text

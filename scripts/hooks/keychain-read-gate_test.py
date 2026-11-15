@@ -793,6 +793,27 @@ def script_cases():
             ("python3 - <<'PY'\nimport os\nos.system(\"(./measure.py)\")\nPY", d),
             ("python3 - <<'PY'\nx = 1; (./measure.py)\nPY", d),
             ("python3 - <<'PY'\nx = 1 && (./measure.py)\nPY", d),
+            # Viktor 43324 LELET 2: after a reserved word, zsh's repeat N, a line start or a "!" the "(" runs a
+            # subshell (real bash / sh / zsh ran the stub); only a "(" right after an ordinary word is prose
+            ("python3 - <<'PY'\nimport os\nos.system(\"time (./measure.py)\")\nPY", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"if (./measure.py); then :; fi\")\nPY", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"! (./measure.py)\")\nPY", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"repeat 1 (./measure.py)\")\nPY", d),
+            ("perl - <<'PL'\nsystem(\"while (./measure.py); do break; done\");\nPL", d),
+            ("python3 - <<'PY'\nimport os\nos.system(\"\"\"\n (./measure.py)\"\"\")\nPY", d),
+            # Viktor 43324 LELET 1: expand() reads any VAR=value in the text; the real $X may be empty (a comment, an
+            # echo argument, unset, an env prefix), and then python3 runs the next word: a text with an expanded
+            # variable keeps the old walk
+            ('X=nosuch python3 $X ./measure.py', d),
+            ('python3 $X ./measure.py  # X=nosuch', d),
+            ('echo X=nosuch >/dev/null; python3 $X ./measure.py', d),
+            ('X=nosuch; unset X; python3 $X ./measure.py', d),
+            ('X=nosuch; X=$(true); python3 $X ./measure.py', d),
+            # Viktor 43324 LELET 4: a directory change cd_bases does not follow (pushd, cd $(..), cd ${PWD}/.., env -C):
+            # "this agent-msg.sh is ours everywhere" is not known, d's look-alike runs its words
+            ('pushd ' + d + ' >/dev/null; bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
+            ('cd $(echo ' + d + '); bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
+            ('env -C ' + d + ' bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
             ("perl - <<'PL'\nqx(./measure.py);\nPL", d),
             ("ruby - <<'RB'\n%x(./measure.py)\nRB", d),
             ("bash <<'SH'\necho a (./measure.py)\nSH", d),  # a shell body: unchanged
