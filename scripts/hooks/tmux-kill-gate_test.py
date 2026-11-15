@@ -218,6 +218,58 @@ BLOCK = [
     # macOS script -F is a flag (man script), so /tmp/p is the FILE and tmux kill-server runs (#326 let it pass)
     'script -F /tmp/p tmux kill-server',
     'script -qF /tmp/p tmux kill-server',
+    # Viktor 43329 LOW 1: a redirection among the arguments is not one of them (xargs appends after the last real
+    # argument; bash drops >x wherever it stands)
+    'echo agent-dave | xargs tmux kill-session -t 2>/dev/null',
+    'echo agent-dave | xargs tmux kill-session -t >x',
+    'echo agent-dave | xargs tmux kill-session -t 2>&1',
+    'echo agent-dave | xargs -n1 tmux kill-session -t >x',
+    'echo agent-dave | xargs tmux kill-session -t 2> /dev/null',
+    '>x xargs tmux kill-session -t < names',
+    '2>x xargs tmux kill-session -t < names',
+    '{fd}>x xargs tmux kill-session -t < names',
+    '>x xargs -n1 tmux kill-session -t < names',
+    'tmux kill-session -t >/tmp/x agent-dave',
+    'tmux 2>/dev/null kill-server',
+    # Viktor 43329 LOW 2: an env cluster whose first value letter is its last one takes the next word
+    'env -iu X tmux kill-server',
+    'env -iu X -- tmux kill-server',
+    'env -iC /tmp tmux kill-server',
+    'env -vu X tmux kill-server',
+    'env -0u X tmux kill-server',
+    'env -iP /usr/bin tmux kill-server',
+    "env -iu X -S 'tmux kill-server'",
+    "env -iC /tmp -S 'tmux kill-server'",
+    'env -iuX tmux kill-server',
+    "env -iu X sh -c 'tmux kill-server'",
+    # Viktor 43329 LOW 3: >| (clobber) is one redirection, not a pipe
+    '>|/tmp/x tmux kill-server',
+    '>| /tmp/x tmux kill-server',
+    '2>|x tmux kill-server',
+    '>|/tmp/x tmux kill-session -t agent-dave',
+    "sh -c '>|x tmux kill-server'",
+    # Viktor 43329 LOW 4: the string a shell-running interpreter call gets
+    """python3 -c "import os; os.system('>x tmux kill-server')\"""",
+    """python3 -c "import os; os.system('script -F p tmux kill-server')\"""",
+    """python3 -c "import os; os.system('coproc tmux kill-server')\"""",
+    "python3 - <<'E'\nimport os\nos.system('>x tmux kill-server')\nE",
+    "python3 - <<'E'\nimport subprocess\nsubprocess.run('2>/dev/null tmux kill-server', shell=True)\nE",
+    """node -e "require('child_process').execSync('>x tmux kill-server')\"""",
+    """perl -e 'system(">x tmux kill-server")'""",
+    """ruby -e 'system ">x tmux kill-server"'""",
+    # an escaped quote inside the literal is the shell's quote (own mutant m15)
+    "python3 - <<'E'\nimport os\nos.system(\">x tmux kill-session -t \\\"agent-dave\\\"\")\nE",
+    # an ESCAPED > before | is no clobber: the pipe stays, sh runs what printf prints (own mutant m12)
+    "printf 'tmux kill-server\\n' \\>| sh",
+    # Viktor 43364 M2: the redirection-free reading is ADDED to the reading as written, it does not replace it (a
+    # quoted argument that looks like a redirection is still shell text for send-keys)
+    "tmux send-keys -t scratch '>x; tmux kill-server' Enter",
+    # Viktor 43364 M11: the FIRST value letter of the cluster decides (u glued with C as its value)
+    'env -iuC tmux kill-server',
+    # Viktor 43329 INFO (mutant s10 survived): the |& pipe
+    "echo 'tmux kill-server' |& sh",
+    'echo agent-dave |& xargs tmux kill-session -t',
+    "echo agent-dave |& xargs -I X sh -c 'tmux kill-session -t X'",
 ]
 # Viktor 43177 MEDIUM 1: compound-command keywords, for three kill forms each
 for _k in ('tmux kill-server', 'tmux kill-session -t agent-x', 'pkill tmux'):
@@ -315,6 +367,23 @@ ALLOW = [
     "python3 - <<'E'\nrun(['tmux','-L','iso','ls'])\nk = 'kill-server'\nE",
     'coproc tmux ls',
     "env -iS 'tmux ls'",
+    # Viktor 43329 round: the isolated, harmless and value-glued forms stay open
+    'env -iu X tmux -L iso kill-server',
+    'env -iu X tmux ls',
+    "env -iu X -S 'echo tmux kill-server'",
+    'env -ui X tmux kill-server',  # -u takes "i"; X is the command (Viktor: the allow is right)
+    'echo hi |& cat',
+    'echo agent-dave | xargs tmux -L iso kill-session -t 2>/dev/null',
+    '>|/tmp/x tmux ls',
+    "echo 'tmux kill-server' >| sh",  # a file named sh, nothing runs
+    """python3 -c "import os; os.system('>x tmux -L iso kill-server')\"""",
+    """python3 -c "import os; os.system('tmux ls >x')\"""",
+    # prose in an interpreter string, not handed to a shell (replay 2026-11-15 19:37 / 20:52: a card title, a
+    # hibanapló line)
+    "python3 - <<'E'\nline = '- 2026-11-15 | a parancs (tmux kill-server) fut, a #326 átengedte'\nprint(line)\nE",
+    """python3 -c "print('LOW 2: (>/tmp/x tmux kill-server) a REDIR-ellenőrzés')\"""",
+    # Viktor 43364 M19: only the literal DIRECTLY after the call is a command, not a later one on the same line
+    "python3 - <<'E'\nimport os\nos.system('ls'); msg = '>x tmux kill-server'\nE",
 ]
 
 bad = 0
