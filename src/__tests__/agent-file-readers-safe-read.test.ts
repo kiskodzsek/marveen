@@ -12,9 +12,9 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const { warn } = vi.hoisted(() => ({ warn: vi.fn() }))
+const { warn, error } = vi.hoisted(() => ({ warn: vi.fn(), error: vi.fn() }))
 vi.mock('../logger.js', () => ({
-  logger: { warn, info: vi.fn(), error: vi.fn(), debug: vi.fn(), child: () => ({ warn, info: vi.fn(), error: vi.fn(), debug: vi.fn() }) },
+  logger: { warn, info: vi.fn(), error, debug: vi.fn(), child: () => ({ warn, info: vi.fn(), error, debug: vi.fn() }) },
   PRETTY_OPTIONS: {},
 }))
 
@@ -123,6 +123,40 @@ describe('agent-writable file readers outside the scaffold refuse a FIFO (LELET 
     const refusals = warn.mock.calls.filter((c) => String(c[1]).startsWith('readFileOr: refused'))
     expect(refusals).toHaveLength(1)
     expect(refusals[0][0]).toMatchObject({ path: fifo })
+  })
+})
+
+describe('restartAgentProcess refuses an unsafe agent-config.json BEFORE stopping (card 1d62d919, Viktor 43103 LOW 1)', () => {
+  // Safe to call for real: even if THIS guard regressed, startAgentProcess's own guard (#319) refuses the same file,
+  // so no session can start; the restart-specific log line is what tells the two guards apart.
+  it.skipIf(!unix)('returns the classified error from the restart guard, not from the start guard', async () => {
+    const { restartAgentProcess } = await import('../web/agent-process.js')
+    const name = `zz-afr-rs-${process.pid}-${Date.now()}`
+    const d = join(AGENTS_BASE_DIR, name)
+    mkdirSync(d, { recursive: true })
+    try {
+      execFileSync('mkfifo', [join(d, 'agent-config.json')])
+      error.mockClear()
+      const r = await restartAgentProcess(name)
+      expect(r.ok).toBe(false)
+      expect(String(r.error)).toMatch(/^agent-config\.json: unsafe-file \(not a regular file: /)
+      expect(isConfigStartRefusal(r.error)).toBe(true)
+      const msgs = error.mock.calls.map((c) => String(c[1]))
+      expect(msgs).toContain('agent-config.json: restart refused before stopping (unsafe file); a running agent is left running')
+      expect(msgs).not.toContain('agent-config.json: agent NOT started (unsafe file, fail-closed)')
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
+
+  it('the guard comes before isAgentRunning / stopAgentProcess in the source', () => {
+    const s = readFileSync(join(web, 'agent-process.ts'), 'utf-8')
+    const start = s.indexOf('export async function restartAgentProcess(')
+    const end = s.indexOf('\n}\n', start)
+    const fn = s.slice(start, end)
+    const guard = fn.indexOf('const cfgRefusal = agentConfigRefusal(name)')
+    expect(guard).toBeGreaterThan(-1)
+    expect(guard).toBeLessThan(fn.indexOf('isAgentRunning(name)'))
+    expect(guard).toBeLessThan(fn.indexOf('stopAgentProcess(name)'))
+    expect(fn).toContain("return { ok: false, error: `agent-config.json: unsafe-file (${cfgRefusal})` }")
   })
 })
 
