@@ -82,13 +82,13 @@ export function resolveAgentSecurityProfile(name: string): string {
   return resolveSecurityProfileId(readAgentSecurityProfile(name), readAgentTeam(name))
 }
 
-export function writeAgentTeam(name: string, team: TeamConfig): void {
+export function writeAgentTeam(name: string, team: TeamConfig, by?: string): void {
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
   config.team = team
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
-  sealDashboardWrite(name, 'team', team) // card 17901b47: this field only
+  sealDashboardWrite(name, 'team', team, by) // card 17901b47: this field only
 }
 
 // Scrub self-references and unknown agent names from a TeamConfig's name
@@ -209,6 +209,6 @@ function cleanupTeamReferencesFor(other: string, removedName: string): void {
       team.trustFrom = filteredTrust
       dirty = true
     }
-    if (dirty) writeAgentTeam(other, team)
+    if (dirty) writeAgentTeam(other, team, `agent-removed:${removedName}`)
   }
 }

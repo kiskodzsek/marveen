@@ -382,6 +382,7 @@ export function writeAgentRemoteConfig(
   name: string,
   host: string,
   workdir: string,
+  by?: string,
 ): { ok: true; remote: RemoteAgentConfig } | { ok: false; error: string } {
   const h = host.trim()
   const w = workdir.trim()
@@ -394,6 +395,8 @@ export function writeAgentRemoteConfig(
     delete config.remoteHost
     delete config.remoteWorkdir
     atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+    sealDashboardWrite(name, 'remoteHost', undefined, by) // card 17901b47: these fields only
+    sealDashboardWrite(name, 'remoteWorkdir', undefined, by)
     return { ok: true, remote: { host: null, workdir: null } }
   }
 
@@ -411,6 +414,8 @@ export function writeAgentRemoteConfig(
   config.remoteHost = probe.host
   config.remoteWorkdir = probe.workdir
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  sealDashboardWrite(name, 'remoteHost', probe.host, by) // card 17901b47: these fields only
+  sealDashboardWrite(name, 'remoteWorkdir', probe.workdir, by)
   return { ok: true, remote: probe }
 }
 
@@ -544,22 +549,23 @@ export function writeAgentWorksourceChannel(name: string, enabled: boolean): voi
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
 }
 
-export function writeAgentAuthMode(name: string, mode: AuthMode): void {
+export function writeAgentAuthMode(name: string, mode: AuthMode, by?: string): void {
   if (!VALID_AUTH_MODES.has(mode)) return
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
   config.authMode = mode
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  sealDashboardWrite(name, 'authMode', mode, by) // card 17901b47: this field only
 }
 
-export function writeAgentSecurityProfile(name: string, profileId: string): void {
+export function writeAgentSecurityProfile(name: string, profileId: string, by?: string): void {
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
   config.securityProfile = profileId
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
-  sealDashboardWrite(name, 'securityProfile', profileId) // card 17901b47: this field only
+  sealDashboardWrite(name, 'securityProfile', profileId, by) // card 17901b47: this field only
 }
 
 // Optional per-agent named Claude subscription plan. Stores a registry id
@@ -582,7 +588,7 @@ export function readAgentClaudePlan(name: string): string | null {
 // Set (non-empty string) or clear (empty/whitespace) the per-agent plan id.
 // Clearing removes the key so the agent reverts to the raw-configDir/default
 // resolution path.
-export function writeAgentClaudePlan(name: string, planId: string): void {
+export function writeAgentClaudePlan(name: string, planId: string, by?: string): void {
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
@@ -590,6 +596,7 @@ export function writeAgentClaudePlan(name: string, planId: string): void {
   if (trimmed) config.claudePlan = trimmed
   else delete config.claudePlan
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  sealDashboardWrite(name, 'claudePlan', trimmed || undefined, by) // card 17901b47: this field only
 }
 
 // Sentinel filename. A subdirectory under agents/ that contains this empty
@@ -818,12 +825,13 @@ export function readAgentExcludeRootClaudeMd(name: string): boolean {
   }
 }
 
-export function writeAgentCapabilities(name: string, capabilities: string[]): void {
+export function writeAgentCapabilities(name: string, capabilities: string[], by?: string): void {
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
   config.capabilities = capabilities
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  sealDashboardWrite(name, 'capabilities', capabilities, by) // card 17901b47: this field only
 }
 
 // ---- per-agent custom provider ---------------------------------------------
@@ -838,11 +846,13 @@ export function readAgentCustomProvider(name: string): string | null {
   return null
 }
 
-export function writeAgentCustomProvider(name: string, id: string | null): void {
+export function writeAgentCustomProvider(name: string, id: string | null, by?: string): void {
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
-  if (id && id.trim()) config.customProvider = id.trim()
+  const trimmed = id && id.trim() ? id.trim() : undefined
+  if (trimmed) config.customProvider = trimmed
   else delete config.customProvider
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
+  sealDashboardWrite(name, 'customProvider', trimmed, by) // card 17901b47: this field only
 }
