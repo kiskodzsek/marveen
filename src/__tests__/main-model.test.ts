@@ -837,3 +837,154 @@ describe('haiku has no effort', () => {
   })
 })
 
+// Card e6b7df37 (Klodel 43384): measured 2026-11-15 23:00, after the context-guard restart at 22:58 the main session
+// ran opus while a fable hold had 1.5 h left; nothing sent the held model again.
+describe('a new session under a live hold gets the held model (and effort) again', () => {
+  const HELD = 'claude-fable-5-2'
+  const held = (over: Partial<HoldState> = {}): HoldState => ({
+    model: HELD, name: 'fable', revert_to: BASE, until: T0 + 3600_000, set_at: T0, effort: null, revert_effort: null,
+    verify_pending: false, blocked_since: null, block_alert_at: null, applied_session: 'old-session', ...over,
+  })
+
+  it('a restart onto the base model: the held model is sent once, the session recorded, nothing on the next sweep', async () => {
+    const d = deps({ liveSession: () => ({ id: 'new-session', model: BASE }) })
+    writeHold(d.holdFile, held())
+    expect(await sweepModelHold(T0 + 60_000, d)).toBe('reapplied')
+    expect(d.sent).toEqual([`/model ${HELD}`])
+    expect(readHold(d.holdFile).state?.applied_session).toBe('new-session')
+    expect(readHold(d.holdFile).state?.until).toBe(T0 + 3600_000) // the hold itself is unchanged
+    expect(await sweepModelHold(T0 + 120_000, d)).toBe('waiting')
+    expect(d.sent).toEqual([`/model ${HELD}`])
+    expect(d.notes).toEqual([]) // a successful re-send is logged, not sent to the owner
+  })
+
+  it('the same session is never re-sent to, even when it measures another model', async () => {
+    const d = deps({ liveSession: () => ({ id: 'old-session', model: BASE }) })
+    writeHold(d.holdFile, held())
+    expect(await sweepModelHold(T0 + 60_000, d)).toBe('waiting')
+    expect(d.sent).toEqual([])
+  })
+
+  it('a new session before its first turn (no model yet) waits', async () => {
+    const d = deps({ liveSession: () => ({ id: 'new-session', model: null }) })
+    writeHold(d.holdFile, held())
+    expect(await sweepModelHold(T0 + 60_000, d)).toBe('waiting')
+    expect(d.sent).toEqual([])
+    expect(readHold(d.holdFile).state?.applied_session).toBe('old-session')
+  })
+
+  it('a busy pane waits; the next quiet sweep sends', async () => {
+    let quiet = false
+    const d = deps({
+      liveSession: () => ({ id: 'new-session', model: BASE }),
+      quiet: () => (quiet ? { quiet: true as const } : { quiet: false as const, reason: 'pane-busy' }),
+    })
+    writeHold(d.holdFile, held())
+    expect(await sweepModelHold(T0 + 60_000, d)).toBe('waiting')
+    expect(d.sent).toEqual([])
+    expect(readHold(d.holdFile).state?.applied_session).toBe('old-session')
+    quiet = true
+    expect(await sweepModelHold(T0 + 120_000, d)).toBe('reapplied')
+    expect(d.sent).toEqual([`/model ${HELD}`])
+  })
+
+  it('the new session already runs the held model: only recorded, nothing sent', async () => {
+    const d = deps({ liveSession: () => ({ id: 'new-session', model: HELD }) })
+    writeHold(d.holdFile, held())
+    expect(await sweepModelHold(T0 + 60_000, d)).toBe('waiting')
+    expect(d.sent).toEqual([])
+    expect(readHold(d.holdFile).state?.applied_session).toBe('new-session')
+  })
+
+  it('a held effort is sent again too (a restart resets it, and it cannot be measured)', async () => {
+    const d = deps({ liveSession: () => ({ id: 'new-session', model: HELD }) })
+    writeHold(d.holdFile, held({ effort: 'high', revert_effort: 'medium' }))
+    expect(await sweepModelHold(T0 + 60_000, d)).toBe('reapplied')
+    expect(d.sent).toEqual(['/effort high'])
+    const d2 = deps({ liveSession: () => ({ id: 'new-session', model: BASE }) })
+    writeHold(d2.holdFile, held({ model: null, revert_to: null, name: 'high', effort: 'high', revert_effort: 'medium' }))
+    expect(await sweepModelHold(T0 + 60_000, d2)).toBe('reapplied')
+    expect(d2.sent).toEqual(['/effort high'])
+  })
+
+  it('model and effort both held: /model first, then /effort', async () => {
+    const d = deps({ liveSession: () => ({ id: 'new-session', model: BASE }) })
+    writeHold(d.holdFile, held({ effort: 'high', revert_effort: 'medium' }))
+    expect(await sweepModelHold(T0 + 60_000, d)).toBe('reapplied')
+    expect(d.sent).toEqual([`/model ${HELD}`, '/effort high'])
+  })
+
+  it('an expired hold is not re-sent: the normal revert runs', async () => {
+    const d = deps({ liveSession: () => ({ id: 'new-session', model: BASE }), measured: () => BASE })
+    writeHold(d.holdFile, held({ until: T0 + 30_000 }))
+    expect(await sweepModelHold(T0 + 60_000, d)).not.toBe('reapplied')
+    expect(d.sent).not.toContain(`/model ${HELD}`)
+  })
+
+  it('a refusal is reported once and not retried every sweep', async () => {
+    _resetMainModelForTest()
+    const d = deps({ liveSession: () => ({ id: 'new-session', model: BASE }) }, { reject: 'model not available' })
+    writeHold(d.holdFile, held())
+    expect(await sweepModelHold(T0 + 60_000, d)).toBe('reapplied')
+    expect(d.notes.length).toBe(1)
+    expect(d.notes[0]).toMatch(/Újraindulás után.*nem tudtam visszaállítani.*model not available/)
+    await sweepModelHold(T0 + 120_000, d)
+    expect(d.sent.filter(x => x.startsWith('/model'))).toEqual([`/model ${HELD}`])
+  })
+
+  it('a send that throws puts the session back: the next sweep tries again (Viktor 43389 LOW 1)', async () => {
+    let fail = true
+    const base = deps({ liveSession: () => ({ id: 'new-session', model: BASE }) })
+    const d = deps({
+      liveSession: () => ({ id: 'new-session', model: BASE }),
+      send: async (c) => { if (fail) throw new Error('tmux failed'); await base.send(c) },
+    })
+    writeHold(d.holdFile, held())
+    await expect(sweepModelHold(T0 + 60_000, d)).rejects.toThrow('tmux failed')
+    expect(readHold(d.holdFile).state?.applied_session).toBe('old-session')
+    fail = false
+    expect(await sweepModelHold(T0 + 120_000, d)).toBe('reapplied')
+    expect(base.sent).toEqual([`/model ${HELD}`])
+    expect(readHold(d.holdFile).state?.applied_session).toBe('new-session')
+  })
+
+  it('the re-sent effort is recorded for the /model status (Viktor 43389 V5)', async () => {
+    const d = deps({ liveSession: () => ({ id: 'new-session', model: HELD }) })
+    writeHold(d.holdFile, held({ effort: 'high', revert_effort: 'medium' }))
+    await sweepModelHold(T0 + 60_000, d)
+    expect(readEffortSent(effortSentFileFor(d.lastSentFile), null)?.level).toBe('high')
+  })
+
+  it('a stuck confirmation: reported once as confirm-stuck, no /effort typed into the dialog (Viktor 43389 V8, LOW 2)', async () => {
+    const d = deps({ liveSession: () => ({ id: 'new-session', model: BASE }) }, { confirm: 'stuck' })
+    writeHold(d.holdFile, held({ effort: 'high', revert_effort: 'medium' }))
+    expect(await sweepModelHold(T0 + 60_000, d)).toBe('confirm-stuck')
+    expect(d.notes.length).toBe(1)
+    expect(d.notes[0]).toMatch(/Újraindulás után.*elakadt/)
+    expect(d.sent).toEqual([`/model ${HELD}`])
+    expect(readHold(d.holdFile).state?.applied_session).toBe('new-session')
+  })
+
+  it('a hold file written before the field (no applied_session) counts as not yet applied', async () => {
+    const d = deps({ liveSession: () => ({ id: 'new-session', model: BASE }) })
+    const legacy: Record<string, unknown> = { ...held() }
+    delete legacy.applied_session
+    writeFileSync(d.holdFile, JSON.stringify(legacy))
+    expect(readHold(d.holdFile).state?.applied_session).toBeNull()
+    expect(await sweepModelHold(T0 + 60_000, d)).toBe('reapplied')
+    expect(d.sent).toEqual([`/model ${HELD}`])
+  })
+
+  it('/model records the session it was sent in', async () => {
+    writeChoices()
+    const d = deps({ liveSession: () => ({ id: 'this-session', model: BASE }) })
+    const r = await setModel(['opus'], d)
+    expect(r.ok).toBe(true)
+    expect(readHold(d.holdFile).state?.applied_session).toBe('this-session')
+    // and the sweep in the same session does not send it again
+    const before = d.sent.length
+    await sweepModelHold(T0 + 60_000, d)
+    expect(d.sent.length).toBe(before)
+  })
+})
+
