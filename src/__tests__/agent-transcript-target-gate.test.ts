@@ -28,12 +28,35 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // What the allowlist file returns for this test. `null` means the read throws,
 // which is what both a MISSING and an UNREADABLE file look like from here:
 // readFileOr() swallows every error and hands back its fallback.
-const allowlistFajl: { tartalom: string | null } = { tartalom: null }
+const allowlistFajl: { tartalom: string | null; olvasasok: number } = { tartalom: null, olvasasok: 0 }
+
+// readFileOr() reads through readRegularFileSync (open + fstat + read, card
+// e6e294a7), which a node:fs readFileSync substitution does not reach: the
+// allowlist then came from the real store/ (absent), every request got 403,
+// and the refusals below were measuring a missing file instead of the
+// substituted content. So the safe-read helper is substituted for the same
+// path, and every test asserts the substitute was actually consulted
+// (`olvasasok`): a refusal that never read the allowlist proves nothing.
+vi.mock('../web/safe-read.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../web/safe-read.js')>()
+  const readRegularFileSync = ((celpont: string, ...tobbi: unknown[]) => {
+    if (typeof celpont === 'string' && celpont.endsWith('transcript-allowlist.json')) {
+      allowlistFajl.olvasasok += 1
+      if (allowlistFajl.tartalom === null) {
+        throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
+      }
+      return allowlistFajl.tartalom
+    }
+    return (actual.readRegularFileSync as (...a: unknown[]) => string)(celpont, ...tobbi)
+  }) as typeof actual.readRegularFileSync
+  return { ...actual, readRegularFileSync }
+})
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>()
   const readFileSync = ((celpont: unknown, ...tobbi: unknown[]) => {
     if (typeof celpont === 'string' && celpont.endsWith('transcript-allowlist.json')) {
+      allowlistFajl.olvasasok += 1
       if (allowlistFajl.tartalom === null) {
         throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
       }
@@ -69,7 +92,7 @@ const WEB_DIR = join(PROJECT_ROOT, 'web')
 const EMBER: RouteContext['auth'] = { kind: 'session', user: 'viktor' }
 const TARGET_403 = { error: 'Transcript access is not enabled for this agent' }
 
-beforeEach(() => { allowlistFajl.tartalom = null })
+beforeEach(() => { allowlistFajl.tartalom = null; allowlistFajl.olvasasok = 0 })
 
 describe('transcript route: target gate (whose log may be read)', () => {
   it('refuses when the allowlist file is absent entirely -- fail closed', async () => {
@@ -81,6 +104,7 @@ describe('transcript route: target gate (whose log may be read)', () => {
     expect(await tryHandleAgents(ctx, WEB_DIR)).toBe(true)
     expect(out.status).toBe(403)
     expect(out.body).toEqual(TARGET_403)
+    expect(allowlistFajl.olvasasok, 'the gate never consulted the substituted allowlist').toBeGreaterThan(0)
   })
 
   it('refuses every unreadable or everyone-shaped allowlist, with no wildcard escape', async () => {
@@ -103,10 +127,12 @@ describe('transcript route: target gate (whose log may be read)', () => {
     ]
     for (const [cimke, tartalom] of alakok) {
       allowlistFajl.tartalom = tartalom
+      allowlistFajl.olvasasok = 0
       const { ctx, out } = fakeCtx(TRANSCRIPT, EMBER)
       expect(await tryHandleAgents(ctx, WEB_DIR), cimke).toBe(true)
       expect(out.status, cimke).toBe(403)
       expect(out.body, cimke).toEqual(TARGET_403)
+      expect(allowlistFajl.olvasasok, `${cimke}: the gate never consulted the substituted allowlist`).toBeGreaterThan(0)
     }
   })
 
@@ -121,6 +147,7 @@ describe('transcript route: target gate (whose log may be read)', () => {
     expect(out.status).not.toBe(403)
     expect(out.body).not.toEqual(TARGET_403)
     expect(out.body).toHaveProperty('agent', MAIN_AGENT_ID)
+    expect(allowlistFajl.olvasasok, 'the gate never consulted the substituted allowlist').toBeGreaterThan(0)
   })
 
   it('keeps the caller gate ahead of the target gate even when the allowlist would allow', async () => {

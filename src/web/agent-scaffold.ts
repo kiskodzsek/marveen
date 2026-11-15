@@ -9,7 +9,7 @@ import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, 
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
-import { readRegularFileSync } from './safe-read.js'
+import { readRegularFileSync, UnsafeFileError } from './safe-read.js'
 import { findDuplicateJsonKeys } from './json-dup-keys.js'
 import { logger } from '../logger.js'
 import { filterInheritableMcpServers, readInheritableMcpServerNames, logNotInherited } from './mcp-inheritance.js'
@@ -2826,6 +2826,12 @@ export function buildEvidenceBody(isMainAgent = false): string {
 // ensureAutonomySection(), so existing agents pick it up on respawn.
 //
 // Idempotency contract mirrors ensureFleetRosterSection (five rules apply).
+// Viktor 43021 LOW 2: an ensure*Section that cannot read the agent's CLAUDE.md skips it; when the reason is the
+// safe-read refusal (FIFO, device, over 1 MB) the generated blocks are NOT written back, so say so, with the agent.
+function warnRefusedAgentFile(err: unknown, name: string, path: string): void {
+  if (err instanceof UnsafeFileError) logger.warn({ agent: name, path, reason: err.message }, 'agent file refused (not a regular file or over the size cap): generated blocks not written')
+}
+
 export function ensureEvidenceSection(name: string): void {
   // The main agent's CLAUDE.md lives at PROJECT_ROOT, not inside agents/<name>/.
   const claudeMdPath = name === MAIN_AGENT_ID
@@ -2838,7 +2844,8 @@ export function ensureEvidenceSection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -2871,7 +2878,8 @@ export function ensureMcpListChannelSection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -2939,7 +2947,8 @@ export function ensureMessageCloseSection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -2971,7 +2980,8 @@ export function ensureAutonomySection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -3009,7 +3019,8 @@ export function ensureFleetRosterSection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -3037,7 +3048,8 @@ export function ensureProjectRootInClaudeMd(name: string): boolean {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return false
   }
   const r = rewriteForeignProjectRoot(existing, PROJECT_ROOT)
@@ -3121,7 +3133,8 @@ export function ensureSkillsPathTrapSection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -3192,7 +3205,8 @@ export function ensureSystemDirectiveAuthSection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -3255,7 +3269,8 @@ export function ensureAgentIdHeaderSection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -3522,7 +3537,8 @@ export function ensureThinChiefHandoffSection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -3608,7 +3624,8 @@ export function ensureMemorySearchLabelSection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -3708,7 +3725,8 @@ export function ensureFleetAuthSection(name: string): void {
   let existing: string
   try {
     existing = readRegularFileSync(claudeMdPath)
-  } catch {
+  } catch (err) {
+    warnRefusedAgentFile(err, name, claudeMdPath)
     return
   }
 
@@ -4171,7 +4189,7 @@ export function ensureFleetRulesSection(
 // The generated block, written (body) or removed (null). False on failure.
 function writeFleetRulesBlock(name: string, claudeMdPath: string, body: string | null): boolean {
   let existing: string
-  try { existing = readRegularFileSync(claudeMdPath) } catch { return false }
+  try { existing = readRegularFileSync(claudeMdPath) } catch (err) { warnRefusedAgentFile(err, name, claudeMdPath); return false }
   let updated: string
   if (body !== null) {
     const block = `${FLEETRULES_BEGIN}\n${body}\n${FLEETRULES_END}`

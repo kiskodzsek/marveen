@@ -43,6 +43,7 @@ import { readClaudePlansState } from './claude-plans-state.js'
 import { provisionMemoryBoundaryDir } from './memory-boundary.js'
 import { renameSharedCredentialsIfSafe } from './claude-credentials-guard.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { readRegularFileSync, CLAUDE_JSON_MAX_BYTES } from './safe-read.js'
 import { resolveOwnClaudeJsonPath, takeClaudeJsonSnapshot, restoreClaudeJsonAfterStop, waitForPidExit, describeShape, type ClaudeJsonSnapshot } from './claude-json-guard.js'
 import { paneOneLine } from './pane-text.js'
 import { withSessionSendLock, tryAcquireSessionSendLane, type SendLockMode } from './session-send-lock.js'
@@ -172,7 +173,14 @@ export function ownChannelProviderForScope(
  */
 export function syncTeamsDisplayName(envPath: string, displayName: string | null | undefined): boolean {
   if (!displayName) return false
-  const raw = existsSync(envPath) ? readFileSync(envPath, 'utf-8') : ''
+  let raw = ''
+  if (existsSync(envPath)) {
+    // A FIFO or a device in place of the .env would block the read and then the in-place write.
+    try { raw = readRegularFileSync(envPath) } catch (err) {
+      logger.warn({ envPath, err: (err as Error)?.message }, 'teams name-sync: .env is not a readable regular file, skipped')
+      return false
+    }
+  }
   const current = raw.match(/^TEAMS_BOT_DISPLAY_NAME=(.*)$/m)?.[1]?.trim()
   if (current === displayName) return false
   const line = `TEAMS_BOT_DISPLAY_NAME=${displayName}`
@@ -897,7 +905,7 @@ function stripProjectScopedCollisions(
 // no project-scope servers, so nothing can collide.
 function projectScopedServerNames(cwd: string): Set<string> {
   try {
-    const parsed = JSON.parse(readFileSync(join(cwd, '.mcp.json'), 'utf-8')) as Record<string, unknown>
+    const parsed = JSON.parse(readRegularFileSync(join(cwd, '.mcp.json'))) as Record<string, unknown>
     if (!isPlainObject(parsed.mcpServers)) return new Set()
     return new Set(Object.keys(parsed.mcpServers))
   } catch {
@@ -1007,7 +1015,7 @@ function provisionIsolatedConfigDir(
     const ownSettingsPath = join(cfg, 'settings.json')
     if (existsSync(ownSettingsPath)) {
       try {
-        const own = JSON.parse(readFileSync(ownSettingsPath, 'utf-8')) as unknown
+        const own = JSON.parse(readRegularFileSync(ownSettingsPath)) as unknown
         // A JSON array or `null` parses fine but is not a settings object;
         // spreading one would invent numeric keys instead of failing.
         if (isPlainObject(own)) {
@@ -1129,7 +1137,7 @@ function provisionIsolatedConfigDir(
         writeJsonAtomic(dotClaude, seed, { groupShared: perUser })
       } else {
         try {
-          const cur = JSON.parse(readFileSync(dotClaude, 'utf-8')) as Record<string, unknown>
+          const cur = JSON.parse(readRegularFileSync(dotClaude, CLAUDE_JSON_MAX_BYTES)) as Record<string, unknown>
           let dirty = false
           if (cur.hasCompletedOnboarding !== true) {
             cur.hasCompletedOnboarding = true
@@ -1174,7 +1182,7 @@ export function ensureSharedClaudeOnboarded(dotClaudePath: string = join(homedir
       logger.info({ dotClaudePath }, 'shared-config: created ~/.claude.json with hasCompletedOnboarding')
       return true
     }
-    const cur = JSON.parse(readFileSync(dotClaudePath, 'utf-8')) as Record<string, unknown>
+    const cur = JSON.parse(readRegularFileSync(dotClaudePath, CLAUDE_JSON_MAX_BYTES)) as Record<string, unknown>
     if (cur.hasCompletedOnboarding === true) return false
     cur.hasCompletedOnboarding = true
     atomicWriteFileSync(dotClaudePath, JSON.stringify(cur, null, 2) + '\n', { mode: 0o600 })
@@ -1205,7 +1213,7 @@ export function stampProjectTrustForDir(dotClaudePath: string, projectDir: strin
   try {
     let data: Record<string, unknown> = {}
     if (existsSync(dotClaudePath)) {
-      data = JSON.parse(readFileSync(dotClaudePath, 'utf-8')) as Record<string, unknown>
+      data = JSON.parse(readRegularFileSync(dotClaudePath, CLAUDE_JSON_MAX_BYTES)) as Record<string, unknown>
     }
     const dirs = new Set<string>([projectDir])
     try { dirs.add(realpathSync(projectDir)) } catch { /* dir may not resolve yet */ }
@@ -1364,7 +1372,7 @@ export function buildCustomProviderLaunchEnv(agentName: string): CustomProviderL
 export function stampFableOverageConsent(dotClaudePath: string): boolean {
   try {
     if (!existsSync(dotClaudePath)) return false
-    const data = JSON.parse(readFileSync(dotClaudePath, 'utf-8')) as Record<string, unknown>
+    const data = JSON.parse(readRegularFileSync(dotClaudePath, CLAUDE_JSON_MAX_BYTES)) as Record<string, unknown>
     const oauth = (data.oauthAccount && typeof data.oauthAccount === 'object' && !Array.isArray(data.oauthAccount))
       ? data.oauthAccount as Record<string, unknown>
       : null
@@ -2233,7 +2241,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
       // under test. Half-states should not survive a toggle.
       const mcpJsonPath = join(agentDir(name), '.mcp.json')
       try {
-        const existing = JSON.parse(readFileSync(mcpJsonPath, 'utf-8')) as { mcpServers?: Record<string, unknown> }
+        const existing = JSON.parse(readRegularFileSync(mcpJsonPath)) as { mcpServers?: Record<string, unknown> }
         if (existing?.mcpServers?.worksource) {
           delete existing.mcpServers.worksource
           writeFileSync(mcpJsonPath, JSON.stringify(existing, null, 2))
@@ -2245,7 +2253,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
     if (name !== MAIN_AGENT_ID) {
       const settingsPath = join(agentDir(name), '.claude', 'settings.json')
       try {
-        const s = JSON.parse(readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>
+        const s = JSON.parse(readRegularFileSync(settingsPath)) as Record<string, unknown>
         // When mcp.json is used for the telegram plugin, force enabledPlugins.telegram
         // to false so Claude Code does not ALSO load the plugin via the marketplace
         // enabledPlugins path -- that would spawn a second bun process and produce

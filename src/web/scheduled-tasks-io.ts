@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { MAIN_AGENT_ID } from '../config.js'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { readRegularFileSync } from './safe-read.js'
 import { readJsonObjectForWrite } from './agent-config.js'
 
 export const SCHEDULED_TASKS_DIR = join(homedir(), '.claude', 'scheduled-tasks')
@@ -188,7 +189,7 @@ export function parseChannelProvider(raw: unknown): ChannelProviderType | undefi
 }
 
 function readFileOr(path: string, fallback: string): string {
-  try { return readFileSync(path, 'utf-8') } catch { return fallback }
+  try { return readRegularFileSync(path) } catch { return fallback }
 }
 
 export function parseSkillMdFrontmatter(content: string): { name?: string; description?: string; body: string } {
