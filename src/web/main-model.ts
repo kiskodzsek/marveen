@@ -28,7 +28,7 @@ import { updateEnvFile } from '../env.js'
 import { isValidModelId } from '../model-id.js'
 import { contextLimitForModel } from '../context-guard.js'
 import { atomicWriteFileSync } from './atomic-write.js'
-import { readActiveModelFromProjectDir } from './active-model.js'
+import { readActiveModelFromProjectDir, readLiveSessionModel } from './active-model.js'
 import { configDirFor } from './main-transcript-root.js'
 import { readConfiguredMainModel } from './channel-monitor.js'
 import { gatherGateInputs, sendSlashCommand, sendKey, mainSessionName } from './context-restart-gate-runner.js'
@@ -225,6 +225,8 @@ export interface HoldState {
   verify_pending: boolean
   blocked_since: number | null
   block_alert_at: number | null
+  /** The session id the hold was last put on (null: not known, e.g. a hold file written before this field). */
+  applied_session?: string | null
 }
 
 export type HoldRead = { state: HoldState | null; error?: string }
@@ -262,6 +264,7 @@ export function readHold(file: string): HoldRead {
         verify_pending: p.verify_pending === true,
         blocked_since: typeof p.blocked_since === 'number' ? p.blocked_since : null,
         block_alert_at: typeof p.block_alert_at === 'number' ? p.block_alert_at : null,
+        applied_session: typeof p.applied_session === 'string' ? p.applied_session : null,
       },
     }
   } catch (err) {
@@ -324,6 +327,8 @@ export interface ModelDeps {
   key: (key: string) => Promise<void>
   /** Arm (untilMs) or disarm (null) the one-shot hold-expiry timer. */
   scheduleExpiry: (untilMs: number | null) => void
+  /** The live session id and the model of its newest assistant line; absent: a new session is not looked for. */
+  liveSession?: () => { id: string; model: string | null } | null
 }
 
 // Measured on the test pane: the CLI prints "Set model to ..." ~1.0-1.1 s after
@@ -379,6 +384,7 @@ export const liveModelDeps: ModelDeps = {
   pane: () => capturePane(mainSessionName()),
   sleep: (ms) => new Promise(r => setTimeout(r, ms)),
   scheduleExpiry: (untilMs) => scheduleHoldExpiry(untilMs),
+  liveSession: () => readLiveSessionModel(PROJECT_ROOT, configDirFor(MAIN_AGENT_ID)),
 }
 
 // MODELCONFIRM1005: on a cached conversation the CLI does not switch at once,
@@ -570,6 +576,7 @@ export async function setModel(args: string[], deps: ModelDeps = liveModelDeps):
       model: choice?.id ?? null, name: choice?.name ?? (effort as string), revert_to: choice ? configured : null,
       effort: effort ?? null, revert_effort: effort ? (baseEffort ?? EFFORT_AUTO) : null,
       until, set_at: now, verify_pending: choice !== null, blocked_since: null, block_alert_at: null,
+      applied_session: deps.liveSession?.()?.id ?? null,
     })
     deps.scheduleExpiry(until)
     const back = [choice ? shortName(configured, deps) : null, effort ? `effort ${effortName(baseEffort ?? EFFORT_AUTO)}` : null]
@@ -691,7 +698,7 @@ function writeEffortSent(file: string, level: string, at: number): void {
 
 export type SweepOutcome =
   | 'none' | 'corrupt' | 'verified' | 'mismatch' | 'waiting' | 'cleared-already-base'
-  | 'blocked' | 'block-alerted' | 'reverted' | 'confirm-stuck'
+  | 'blocked' | 'block-alerted' | 'reverted' | 'confirm-stuck' | 'reapplied'
 
 let corruptLogged = false
 
@@ -709,6 +716,50 @@ export async function sweepModelHold(nowMs: number, deps: ModelDeps = liveModelD
   if (!state) return 'none'
 
   let s = state
+  // A NEW session under a live hold (a context-guard restart, a respawn): it starts on the configured model and
+  // effort, so the held ones are sent again, once per session (card e6b7df37, Klodel 43384: measured 2026-11-15
+  // 23:00, the main session ran opus after the 22:58 restart while a fable hold had 1.5 h left, and nothing put it
+  // back). Only after the new session's first turn (its model is measured, and the turn shows it is up), and only
+  // when the pane is quiet; a busy pane waits for the next sweep.
+  if (nowMs < s.until && deps.liveSession) {
+    const live = deps.liveSession()
+    if (live && live.model && live.id !== s.applied_session) {
+      const modelOff = s.model !== null && modelsDiffer(s.model, live.model)
+      if (!modelOff && !s.effort) {
+        s = { ...s, applied_session: live.id }
+        writeHold(deps.holdFile, s)
+      } else if (deps.quiet(nowMs).quiet) {
+        // Recorded before the send, so an overlapping sweep does not send twice; a send that THROWS (tmux failed)
+        // puts the old value back, and the next sweep tries again (Viktor 43389 LOW 1: otherwise the hold was lost
+        // on this session without a word, the very failure this closes). A refusal or a stuck confirmation is
+        // reported once and stops here, before the /effort: it needs the owner anyway (Viktor 43389 LOW 2).
+        const held = s
+        s = { ...s, applied_session: live.id }
+        writeHold(deps.holdFile, s)
+        let out: SendOutcome | null = null
+        try {
+          if (modelOff && held.model) out = await sendModel(held.model, deps)
+          if (held.effort && (out === null || (out.rejected === null && !out.confirmStuck))) {
+            await deps.send(`/effort ${held.effort}`)
+            writeEffortSent(effortSentFileFor(deps.lastSentFile), held.effort, deps.now())
+          }
+        } catch (err) {
+          writeHold(deps.holdFile, held)
+          throw err
+        }
+        if (out?.confirmStuck && held.model) {
+          await deps.notify(`Újraindulás után a tartott modellt újraküldtem, de elakadt. ${confirmStuckText(held.model, deps)}`)
+          return 'confirm-stuck'
+        }
+        if (out && out.rejected !== null && held.model) {
+          await deps.notify(`Újraindulás után a tartott modellt nem tudtam visszaállítani: ${rejectedText(held.model, out.rejected)}`)
+          return 'reapplied'
+        }
+        logger.info({ session: live.id, model: modelOff ? held.model : null, effort: held.effort }, 'main-model: new session under a live hold, the hold sent again')
+        return 'reapplied'
+      }
+    }
+  }
   let outcome: SweepOutcome = 'waiting'
   if (s.verify_pending && s.model) {
     const measured = deps.measured(Math.floor(s.set_at / 1000))

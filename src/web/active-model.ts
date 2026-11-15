@@ -1,5 +1,5 @@
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { encodeClaudeProjectDir } from '../claude-project-dir.js'
 
@@ -214,6 +214,28 @@ export function readActiveModelFromProjectDir(workingDir: string, sinceUnixSec?:
   } catch { /* fall through */ }
   cache.set(cacheKey, { value, expiresAt: now + TTL_MS })
   return value
+}
+
+/**
+ * The live session (its transcript's file name, i.e. the session id) and the model of its newest assistant line
+ * (null before its first turn). A model hold uses it to see a NEW session: a restart starts on the configured model,
+ * and the held one has to be sent again (card e6b7df37, measured 2026-11-15 23:00: after the context-guard restart
+ * the main session ran opus while a fable hold had 1.5 h left). The live transcript is chosen as for the context
+ * reader (liveTranscriptIn: by its last conversation line, not by mtime alone) and read from its end.
+ */
+export function readLiveSessionModel(workingDir: string, configDir?: string): { id: string; model: string | null } | null {
+  try {
+    const dir = projectsDirFor(workingDir, configDir)
+    if (!existsSync(dir)) return null
+    const live = liveTranscriptIn(dir)
+    if (!live) return null
+    const model = lastAnswerInTranscript<string>('live-session-model', live.file, (entry) => {
+      if (entry?.type !== 'assistant') return undefined
+      const m = entry?.message?.model
+      return typeof m === 'string' && !m.startsWith('<') ? m : undefined
+    })
+    return { id: basename(live.file, '.jsonl'), model: model ?? null }
+  } catch { return null }
 }
 
 // Like readActiveModelFromProjectDir, but also says WHEN that assistant line
