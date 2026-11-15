@@ -32,13 +32,16 @@ LOG = os.path.join(HOME, 'log')
 def setup_tree():
     for d in ('.git', 'scripts/hooks', 'src', '.claude', 'store', 'agents/kernel/.claude-config/projects/x',
               'agents/pulzus/.claude-config/projects/x', 'agents/pulzus/scripts', 'agents/dave/repos/wt/scripts',
-              'agents/x/.claude', 'other/.git'):
+              'agents/x/.claude', 'other/.git', 'agents/kernel/.claude', 'agents/kernel/work',
+              'agents/x/.claude-config'):
         os.makedirs(os.path.join(P, d), exist_ok=True)
     for f in ('CLAUDE.md', '.mcp.json', 'package.json', 'package-lock.json', 'store/autonomy-config.json',
-              'store/verified-recipients.json', 'scripts/x.py', 'README.md'):
+              'store/verified-recipients.json', 'scripts/x.py', 'README.md', 'agents/kernel/agent-config.json',
+              'agents/x/agent-config.json', 'agents/x/.claude/settings.local.json'):
         open(os.path.join(P, f), 'w').close()
     open(WT + '/.git', 'w').write('gitdir: ' + P + '/.git/worktrees/wt\n')
     os.symlink(P + '/scripts', P + '/agents/kernel/lnk')
+    os.symlink(P + '/agents/x/.claude', P + '/agents/kernel/xclaude')
     os.symlink(P + '/agents/kernel/loop2', P + '/agents/kernel/loop1')
     os.symlink(P + '/agents/kernel/loop1', P + '/agents/kernel/loop2')
     os.makedirs(os.path.join(LOG, 'seen'), exist_ok=True)
@@ -136,7 +139,7 @@ BASH_ALLOW = [
     ('rm -rf /tmp/x', P), ('find /tmp/x -delete', P), ('echo hi 2>/dev/null', P), ('ls 2>&1', P),
     ('python3 -c "open(\'P/scripts/x\',\'w\')"', '/tmp'), ('touch *.txt', '/tmp'), ('rm $X', '/tmp'),
     ('echo x > P/README.md', '/tmp'), ('echo x > P/store/verified-recipients.json', '/tmp'),
-    ('mkdir -p P/agents/kernel/work/new', '/tmp'), ('touch P/agents/x/.claude/settings.json', '/tmp'),
+    ('mkdir -p P/agents/kernel/work/new', '/tmp'), ('touch P/agents/kernel/.claude/settings.local.json', '/tmp'),
     ('curl -s https://e > /tmp/x', P), ('git -C P/other checkout .', '/tmp'),
     ('node P/scripts/agent-msg.mjs < /tmp/in', '/tmp'), ('sed -n 1,5p scripts/x.py', P),
     ('python3 - <<"PY"\nopen("P/scripts/x","w")\nPY', '/tmp'), ('tar -tf a.tar', P), ('unzip -l a.zip', P),
@@ -175,7 +178,7 @@ class Decide(unittest.TestCase):
             self.assertEqual(d(write('/System/Volumes/Data' + P + '/scripts/x', tool)), 'deny', tool)
 
     def test_write_tools_allow(self):
-        for p in (P + '/agents/kernel/x', WT + '/scripts/x', P + '/agents/x/.claude/settings.json',
+        for p in (P + '/agents/kernel/x', WT + '/scripts/x', P + '/agents/kernel/.claude/settings.local.json',
                   P + '/store/verified-recipients.json', P + '/README.md', '/tmp/x', P + '/agents/kernel/loop1/x'):
             self.assertEqual(d(write(p)), 'allow', p)
 
@@ -252,6 +255,155 @@ class Decide(unittest.TestCase):
     def test_other_tools_allow(self):
         self.assertEqual(gate.decide({'tool_name': 'Read', 'tool_input': {'file_path': P + '/scripts/x'}},
                                      P, HOME)[0], 'allow')
+
+
+# card 17901b47 (Viktor): agent config files. The caller is kernel (SUB_TP); x is another agent.
+K = P + '/agents/kernel'
+CFG_FILES = ('agent-config.json', '.claude/settings.json', '.claude-config/settings.json')
+CFG_BASH = ('echo {{}} > {f}', 'printf x >> {f}', "sed -i '' s/a/b/ {f}", 'cp /tmp/a {f}', 'mv /tmp/a {f}',
+            'tee {f} < /dev/null', 'rm {f}', 'rm -f {f}', 'mv {f} /tmp/bak', 'chmod 600 {f}', 'ln -sf /tmp/a {f}',
+            'truncate -s 0 {f}', 'touch {f}', 'bash -c "echo x > {f}"')
+
+
+def cfg_deny_rows():
+    """(command, cwd): every Bash write form on own and other agent config files, absolute and home-relative"""
+    rows = []
+    for owner in ('kernel', 'x'):
+        for f in CFG_FILES:
+            for c in CFG_BASH:
+                rows.append((c.format(f=P + '/agents/' + owner + '/' + f), '/tmp'))
+                rows.append((c.format(f=f), P + '/agents/' + owner))
+    for c in CFG_BASH:   # another agent's settings.local.json
+        rows.append((c.format(f=P + '/agents/x/.claude/settings.local.json'), '/tmp'))
+        rows.append((c.format(f='../x/.claude/settings.local.json'), K))
+    return rows
+
+
+CFG_DENY_MORE = [
+    # case, firmlink, symlink, relative climbs
+    ('echo > ' + P + '/AGENTS/X/Agent-Config.JSON', '/tmp'), ('echo > /System/Volumes/Data' + P + '/agents/x/agent-config.json', '/tmp'),
+    ('echo > xclaude/settings.json', K), ('echo > xclaude/settings.local.json', K),
+    ('echo > ../x/agent-config.json', K), ('echo > ../../agents/x/.claude/settings.json', K),
+    ('cd ../x && echo > agent-config.json', K), ('cd .claude && echo {} > settings.json', K),
+    # destructive ops on the agent home / its config directories (an ancestor of the files)
+    ('rm -rf ' + P + '/agents/x', '/tmp'), ('rm -rf .claude', K), ('rm -rf .claude-config', K),
+    ('mv ' + P + '/agents/x/.claude /tmp/y', '/tmp'), ('chmod -R 777 ' + P + '/agents/x', '/tmp'),
+    ('rm -rf ' + P + '/agents/*', '/tmp'), ('rm *.json', K), ('rm -rf .c*', K), ('rm -rf *', K),
+    ('rmdir ' + P + '/agents', '/tmp'),
+    # into a directory: destination/basename(source)
+    ('mv /tmp/agent-config.json ' + P + '/agents/x/', '/tmp'), ('cp /tmp/settings.json ' + P + '/agents/x/.claude/', '/tmp'),
+    ('cp -t .claude /tmp/settings.json', K), ('mv -t ' + P + '/agents/x /tmp/agent-config.json', '/tmp'),
+    # unresolved agent name: the raw-text rule
+    ('echo x > ' + P + '/agents/$A/agent-config.json', '/tmp'), ('cd ' + P + '/agents/$A && echo > agent-config.json', '/tmp'),
+    ('echo x > ~/BASE/agents/$A/.claude/settings.json'.replace('BASE', BASE), '/tmp'),
+    ('echo x > "$HOME/BASE/agents/x/.claude-config/settings.json"'.replace('BASE', BASE), '/tmp'),
+    ('for a in x kernel; do echo > ' + P + '/agents/$a/agent-config.json; done', '/tmp'),
+    ('X=' + P + '/agents/x; echo > $X/agent-config.json', '/tmp'), ('echo "x ' + P + '/agents/x/agent-config.json', '/tmp'),
+    # a variable inside the name next to a literal: matched against the config names
+    ('echo > ' + K + '/$X-config.json', '/tmp'), ('echo > ' + P + '/agents/$A/.claude/settings.json', '/tmp'),
+    ('cp /tmp/s ' + K + '/$D/settings.json', '/tmp'), ('rm -f ' + P + '/agents/x/{agent-config,y}.json', '/tmp'),
+    ('rm -rf agents/x/$Y', P),
+    # the raw-text rule from an agent home (cwd unknown after `cd $X`): ../<name>/<config file>
+    ('cd $X; echo > ../x/agent-config.json', K), ('cd $X; echo > ./../../x/.claude/settings.json', K),
+]
+
+CFG_ALLOW = [
+    # reads
+    ('cat agent-config.json', K), ('cat ' + P + '/agents/x/agent-config.json', '/tmp'), ('jq . agent-config.json', K),
+    ('grep -n hook .claude/settings.json ../x/.claude/settings.json', K), ('ls -la .claude .claude-config', K),
+    ('python3 -c "import json; print(json.load(open(\'agent-config.json\')))"', K), ('cp agent-config.json /tmp/a.bak', K),
+    ('cat ' + P + '/agents/x/agent-config.json > /tmp/out', '/tmp'), ('shasum -a 256 .claude/settings.json', K),
+    ('diff .claude/settings.json ../x/.claude/settings.json', K), ('git -C ' + P + ' diff -- agents/x/agent-config.json', '/tmp'),
+    ('cat agent-config.json > "$OUT"', K), ('echo agent-config.json > /tmp/x', K),
+    ('grep -rl agent-config.json src > $LIST', K), ('cp .claude/settings.json "$B/"', K),
+    # the caller's own settings.local.json (its self-imposed hook gates)
+    ('echo {} > .claude/settings.local.json', K), ("sed -i '' s/a/b/ .claude/settings.local.json", K),
+    ('cp /tmp/s .claude/settings.local.json', K), ('mv /tmp/s ' + K + '/.claude/settings.local.json', '/tmp'),
+    ('tee .claude/settings.local.json < /tmp/s', K), ('cp .claude/settings.local.json .claude/settings.local.json.bak', K),
+    # writes elsewhere in the own home
+    ('echo > work/x', K), ('echo x > ' + K + '/work/x', '/tmp'), ('mkdir -p bin && cp /tmp/t bin/t', K),
+    ('rm -rf work/old', K), ('mv /tmp/r.md ' + K + '/', '/tmp'), ('mv /tmp/r.md .', K), ('rm *.log', K),
+    ('find . -name "*.pyc" -delete', K), ('mkdir -p .claude/skills/a && echo > .claude/skills/a/SKILL.md', K),
+    ('echo > .claude-config/projects/x/m.md', K), ('cp agent-config.json agent-config.json.bak', K),
+    ('mkdir -p ' + P + '/agents/newagent/work', '/tmp'), ('echo > work/$NAME', K), ('rm -rf work/*', K),
+    ('echo > ' + WT + '/agents/x/agent-config.json', '/tmp'), ('echo > ' + WT + '/.claude/settings.json', '/tmp'),
+    ('touch ' + K, '/tmp'), ('echo > ' + K + '/$F', '/tmp'),
+    # replay 17901b47: a HANDOFF backup with a substitution in the name, from the prod root cwd (the raw rule sees
+    # protected text there); a variable directory below the agents/ dir
+    ('cd ' + P + '; echo > store/x; cp ' + K + '/HANDOFF.md ' + K + '/HANDOFF.prev-$(date +%H%M)-1110.md', P),
+    ('cd ' + P + '; cat scripts/x.py > agents/kernel/HANDOFF.prev-$(date +%H%M).md', P),
+    ('echo > ' + P + '/agents/$A/work/x', '/tmp'), ('echo > ' + K + '/$F.log', '/tmp'),
+    ('cd $X; echo > ../x/work.txt', K), ('cd $X; echo > ../kernel/.claude/settings.local.json', K),
+]
+
+
+class AgentConfig(unittest.TestCase):
+    """card 17901b47: a sub-agent does not write any agent's agent-config.json / .claude/settings.json /
+    .claude-config/settings.json or another agent's .claude/settings.local.json; its own settings.local.json and the
+    rest of its home stay writable; reads stay free; the main agent is never gated."""
+
+    def test_write_tools_deny(self):
+        for tool in ('Write', 'Edit', 'MultiEdit'):
+            for owner in ('kernel', 'x', 'pulzus', 'nobody'):
+                for f in CFG_FILES:
+                    with self.subTest(tool=tool, path=owner + '/' + f):
+                        self.assertEqual(d(write(P + '/agents/' + owner + '/' + f, tool)), 'deny')
+            for p in (P + '/agents/x/.claude/settings.local.json', P + '/AGENTS/X/.Claude/Settings.json',
+                      K + '/xclaude/settings.json', K + '/xclaude/settings.local.json'):
+                with self.subTest(tool=tool, path=p):
+                    self.assertEqual(d(write(p, tool)), 'deny')
+            with self.subTest(tool=tool, path='relative'):
+                self.assertEqual(d(write('agent-config.json', tool, cwd=K)), 'deny')
+
+    def test_write_tools_allow(self):
+        for p in (K + '/.claude/settings.local.json', K + '/.Claude/Settings.Local.json', K + '/work/x',
+                  K + '/.claude/skills/a/SKILL.md', K + '/agent-config.json.bak', K + '/.claude',
+                  WT + '/agents/x/agent-config.json', WT + '/.claude/settings.json'):
+            with self.subTest(path=p):
+                self.assertEqual(d(write(p)), 'allow')
+
+    def test_bash_deny(self):
+        for cmd, cwd in cfg_deny_rows() + CFG_DENY_MORE:
+            with self.subTest(cmd=cmd, cwd=cwd):
+                self.assertEqual(gate.decide(bash(cmd, cwd), P, HOME)[0], 'deny')
+
+    def test_bash_allow(self):
+        for cmd, cwd in CFG_ALLOW:
+            with self.subTest(cmd=cmd, cwd=cwd):
+                r = gate.decide(bash(cmd, cwd), P, HOME)
+                self.assertEqual(r[0], 'allow', r)
+
+    def test_main_agent_never_denied(self):
+        for tp in (MAIN_TP, None):
+            open(os.path.join(LOG, 'gate.jsonl'), 'w').close()
+            for cmd, cwd in cfg_deny_rows() + CFG_DENY_MORE:
+                p = bash(cmd, cwd)
+                p['transcript_path'] = tp
+                with self.subTest(tp=tp, cmd=cmd):
+                    self.assertEqual(run(p), '')
+            for f in CFG_FILES + ('.claude/settings.local.json',):
+                p = write(P + '/agents/x/' + f)
+                p['transcript_path'] = tp
+                self.assertEqual(run(p), '')
+            if tp == MAIN_TP:
+                self.assertTrue(any(r['decision'] == 'would-deny' for r in log_rows()))
+
+    def test_own_settings_local_follows_identity(self):
+        """the same write is the caller's own for kernel (allow) and another's for pulzus (deny)"""
+        p = write(K + '/.claude/settings.local.json')
+        self.assertEqual(d(p), 'allow')
+        p['transcript_path'] = P + '/agents/pulzus/.claude-config/projects/x/s.jsonl'
+        self.assertEqual(d(p), 'deny')
+        p = bash('echo > ' + K + '/.claude/settings.local.json', '/tmp')
+        self.assertEqual(d(p), 'allow')
+        p['transcript_path'] = P + '/agents/pulzus/.claude-config/projects/x/s.jsonl'
+        self.assertEqual(d(p), 'deny')
+
+    def test_sub_agent_deny_via_run(self):
+        out = run(bash('echo {} > ' + P + '/agents/x/agent-config.json', '/tmp'))
+        msg = json.loads(out)['hookSpecificOutput']['permissionDecisionReason']
+        self.assertIn('agent-config.json', msg)
+        self.assertIn('saját .claude/settings.local.json szabad', msg)
 
 
 def run(payload, raw=None):

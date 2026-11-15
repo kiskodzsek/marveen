@@ -7,6 +7,8 @@ WHAT IT IS: an ACCIDENT guard, not a security boundary. It stops the frequent, l
 /Users/klodel/marveen/scripts/... by hand instead of in a worktree). It does NOT stop a script or an interpreter that
 writes (python -c, node -e, a .sh file), a path assembled at run time beyond what is resolved below, or an agent that
 rewrites its own config with the same uid. The durable boundary is a separate uid / root-owned tree (owner decision).
+The agent config files below (card 17901b47, Viktor) are the same kind of guard: every agent runs as the same uid, so
+it keeps an agent from rewriting its own or a colleague's securityProfile/toolDeny/hooks BY ACCIDENT, nothing more.
 
 WHO: identity comes from the hook payload's `transcript_path` (set by Claude Code from the session's config dir; the
 agent does not choose it per call). A path under <prod>/agents/<name>/.claude-config/ is the sub-agent <name>; every
@@ -18,6 +20,17 @@ PROTECTED (case-insensitive: APFS is, realpath does not fold case; K1): <prod>/s
 (the directories and everything under them), and the files <prod>/CLAUDE.md, .mcp.json, package.json,
 package-lock.json, store/autonomy-config.json (Klodel 42812). The firmlinked /System/Volumes/Data<prod> form counts.
 A path is checked both normalised and realpath-resolved (symlinks, `..`); either form protected = protected.
+AGENT CONFIG (card 17901b47): <prod>/agents/<any>/agent-config.json (securityProfile, toolDeny: read by the launcher at
+every spawn), agents/<any>/.claude/settings.json and agents/<any>/.claude-config/settings.json (hooks, permissions:
+written by the dashboard, agent-scaffold.ts / agent-process.ts provisionIsolatedConfigDir), the caller's own and any
+other agent's; agents/<OTHER>/.claude/settings.local.json too, while the caller's OWN settings.local.json stays
+writable (agents keep their self-imposed hook gates there; the caller = the transcript_path identity, so a main or
+unknown session owns none). For the destructive ops agents/, agents/<n> and its .claude, .claude-config directories
+count like an ancestor (rm -rf agents/x, mv agents/x/.claude ...), except a find starting point (filtered by -name)
+and a mv destination (moving a file INTO a home); a glob below them (`rm *.json` in a home) is matched against the
+config file names (a variable matches anything; a bare `$F` alone is unresolved: raw-text rule). Reading them, and
+writing anywhere else in a home
+(work/, bin/, .claude/skills/, .claude-config/projects/), stays free.
 
 WHAT IS DENIED for a sub-agent:
   - Write/Edit/MultiEdit/NotebookEdit on a protected path; a missing, non-string or unresolvable path = deny.
@@ -35,7 +48,8 @@ WHAT IS DENIED for a sub-agent:
     inside a protected directory (they rewrite files below their cwd).
   - Bash fallback (K2, 1a): a write target that cannot be resolved (`$VAR`, `$(...)`), a lexer error or a path
     resolution error = deny when the RAW command text (casefolded) names a protected path in any form (absolute,
-    ~/, $HOME/, the firmlink form, relative to a prod cwd, ../ from inside the tree, the root followed by a closer of
+    ~/, $HOME/, the firmlink form, relative to a prod cwd, ../ from inside the tree (../<agent>/agent-config.json
+    from an agent home), agents/<any word>/<agent config file>, the root followed by a closer of
     a substitution or quote, and -- when the cwd's repository is the prod checkout -- a `... rev-parse
     --show-toplevel` substitution directly in front of a protected part); otherwise allow + an `unresolved-allow`
     log line. A variable or a substitution of another form in front of a protected part is NOT a raw match (the E1
@@ -94,6 +108,10 @@ PROD = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(os.path.
 LOG_DIR = os.path.join(PROD, 'store', 'prod-tree-write-gate')
 PROTECTED_DIRS = ('scripts', 'src', '.claude')
 PROTECTED_FILES = ('CLAUDE.md', '.mcp.json', 'package.json', 'package-lock.json', 'store/autonomy-config.json')
+# <prod>/agents/<any>/...: the launcher reads these at every spawn, the dashboard writes them (card 17901b47)
+AGENT_FILES = ('agent-config.json', '.claude/settings.json', '.claude-config/settings.json')
+AGENT_OTHER_FILES = ('.claude/settings.local.json',)     # another agent's only: the caller's own stays writable
+AGENT_DIRS = ('.claude', '.claude-config')                 # with agents/ and agents/<n>: destructive ops count
 FIRMLINK = '/system/volumes/data'
 WRITE_TOOLS = {'Write': 'file_path', 'Edit': 'file_path', 'MultiEdit': 'file_path', 'NotebookEdit': 'notebook_path'}
 DEADLINE_S = 5            # managed-settings entry has "timeout": 15; a timed-out hook does not block
@@ -104,8 +122,10 @@ MAX_PATH = 4096
 LOG_INPUT = 200
 # What to do instead (Klodel 42825 (1)): every deny says it, so a night-time deploy does not stop without a word.
 DENY_HINT = ('a prod-fába (%s: scripts/, src/, .claude/ és a gyökér CLAUDE.md, .mcp.json, package*.json, '
-             'store/autonomy-config.json) sub-ágens nem ír. TEENDŐ: worktree + PR (scripts/worktree-add.sh); '
-             'ha a prod-fán tényleg kell, üzenj Klodelnek a pontos paranccsal')
+             'store/autonomy-config.json; agents/*/agent-config.json, .claude/settings.json, '
+             '.claude-config/settings.json, más ágens .claude/settings.local.json-ja) sub-ágens nem ír. TEENDŐ: '
+             'worktree + PR (scripts/worktree-add.sh); ágens-konfigot a dashboard ír, a saját '
+             '.claude/settings.local.json szabad; ha a prod-fán tényleg kell, üzenj Klodelnek a pontos paranccsal')
 DENY_HINT_PULZUS = (' ÁTVEZETÉSNÉL (Pulzus): az origin/main változatát a bash '
                     '/Users/klodel/marveen/agents/pulzus/scripts/restore-from-main.sh [--apply] veszi át; ha nem '
                     'fedi, üzenj Klodelnek a pontos paranccsal')
@@ -149,14 +169,19 @@ def fold(p):
 
 
 class Prod(object):
-    def __init__(self, root):
+    def __init__(self, root, caller=None):
         self.root = root
         self.cf = fold(root)
         self.dirs = tuple(self.cf + '/' + d for d in PROTECTED_DIRS)
         self.files = tuple(self.cf + '/' + f.casefold() for f in PROTECTED_FILES)
+        self.agents = self.cf + '/agents'
+        # the sub-agent whose own settings.local.json stays writable; main / unknown own none
+        self.caller = caller.casefold() if isinstance(caller, str) and caller not in ('main', 'unknown') else None
+        self.names = None         # agents/ listing, for a glob directly below agents/
 
     def kind_of(self, f):
-        """f: folded absolute path -> 'protected' | 'ancestor' | 'inside' (prod tree, not protected) | None."""
+        """f: folded absolute path -> 'protected' | 'ancestor' | 'cfg_ancestor' (agents/, agents/<n>, its .claude
+        and .claude-config) | 'inside' (prod tree, not protected) | None."""
         for d in self.dirs:
             if f == d or f.startswith(d + '/'):
                 return 'protected'
@@ -164,9 +189,46 @@ class Prod(object):
             return 'protected'
         if f == '/' or (self.cf + '/').startswith(f.rstrip('/') + '/'):
             return 'ancestor'
+        if f == self.agents:
+            return 'cfg_ancestor'
+        if f.startswith(self.agents + '/'):
+            name, _, rel = f[len(self.agents) + 1:].partition('/')
+            if rel in AGENT_FILES or (rel in AGENT_OTHER_FILES and name != self.caller):
+                return 'protected'
+            if rel == '' or rel in AGENT_DIRS:
+                return 'cfg_ancestor'
         if f.startswith(self.cf + '/'):
             return 'inside'
         return None
+
+    def agent_reach(self, path, pat, destructive):
+        """path: a directory of kind cfg_ancestor; pat: regex of the unknown rest below it. True when it can name an
+        agent config file (destructive: or an agent home / its .claude, .claude-config directory)."""
+        for d in set((fold(path), fold(os.path.realpath(path)))):
+            if self.kind_of(d) != 'cfg_ancestor':
+                continue
+            if d == self.agents:
+                if self.names is None:   # read once per decision (a long glob list would list it per word)
+                    try:
+                        self.names = [n.casefold() for n in sorted(os.listdir(os.path.join(self.root, 'agents')))[:500]]
+                    except OSError:
+                        self.names = []
+                names = self.names
+                below = ''
+            else:
+                name, _, below = d[len(self.agents) + 1:].partition('/')
+                names = [name]
+            for n in names:
+                cands = [n + '/' + r for r in AGENT_FILES]
+                cands += [n + '/' + r for r in AGENT_OTHER_FILES if n != self.caller]
+                if destructive:
+                    cands += [n] + [n + '/' + r for r in AGENT_DIRS]
+                pre = n + ('/' + below if below else '') + '/'
+                if d == self.agents:
+                    pre = ''
+                if any(pat.fullmatch(c[len(pre):]) for c in cands if c.startswith(pre)):
+                    return True
+        return False
 
     def classify(self, path):
         """absolute path -> the strictest kind of its normalised and its realpath form."""
@@ -178,7 +240,7 @@ class Prod(object):
         except Exception as e:   # realpath loop / OSError / ValueError
             raise ResolveError('realpath: %s' % type(e).__name__)
         kinds = [self.kind_of(f) for f in forms]
-        for k in ('protected', 'ancestor', 'inside'):
+        for k in ('protected', 'ancestor', 'cfg_ancestor', 'inside'):
             if k in kinds:
                 return k
         return None
@@ -563,6 +625,7 @@ class State(object):
         self.unknown = []         # raw text of write targets we could not resolve
         self.errors = []          # resolve / lex errors (1a)
         self.partial = ''
+        self.rest = []            # the unknown parts of the last 'dir' word_path result
         self.prod_cwd = False     # a cd / pushd / git -C in this command went to the prod root or a protected dir
         self.exec_raw = []        # executed command / script words: not a write mention for the raw-text rule
 
@@ -607,6 +670,7 @@ def word_path(w, st, cwd=None):
             rest = w.parts[idx:]
             break
     st.partial = ''
+    st.rest = rest or []
     if rest is None:
         if acc == '':
             return ('unknown', None)
@@ -695,6 +759,38 @@ def expand_loops(w, st, depth=0):
     return [w]
 
 
+def rest_pattern(partial, rest):
+    """the unknown tail of a word below its known directory -> (regex over that relative path, constrained), or None
+    for a bracket expansion or a nested / range brace. A variable / substitution matches anything (`.*`, a `/` too); constrained = a
+    literal, `*` or `?` is in it (a bare `$F` is not: it stays an unresolved target for the raw-text rule). The E1-style
+    replay (17901b47): `cp HANDOFF.md HANDOFF.prev-$(date +%H%M).md` in an agent home must not count."""
+    out, constrained, brace = [re.escape(partial.casefold())], partial != '', False
+    for k, t in rest:
+        if k == 'lit' and brace:
+            # `{a,b}rest` (the lexer keeps the brace text literal after a ('glob', '{') marker): one alternation
+            t = t.casefold()
+            j = t.find('}')
+            if not t.startswith('{') or j < 0 or '{' in t[1:j] or '..' in t[1:j]:
+                return None
+            out.append('(?:' + '|'.join(re.escape(a) for a in t[1:j].split(',')) + ')' + re.escape(t[j + 1:]))
+            constrained, brace = True, False
+        elif k == 'lit':
+            out.append(re.escape(t.casefold()))
+            constrained = constrained or t != ''
+        elif k == 'glob' and t in '*?':
+            out.append('[^/]*' if t == '*' else '[^/]')
+            constrained = True
+        elif k == 'glob' and t == '{':
+            brace = True
+        elif k == 'glob' and t == '[':
+            return None
+        else:
+            out.append('.*')
+    if brace:
+        return None
+    return re.compile(''.join(out), re.S), constrained
+
+
 def check_target(w, st, destructive=False, what='írás'):
     alts = expand_loops(w, st)
     if len(alts) != 1 or alts[0] is not w:
@@ -705,6 +801,8 @@ def check_target(w, st, destructive=False, what='írás'):
 
 
 def check_target_one(w, st, destructive=False, what='írás'):
+    """destructive: True = an ancestor of the prod root and an agent home / its config directory count;
+    'root' = only an ancestor of the prod root (find starting points, a mv destination)"""
     kind, p = word_path(w, st)
     if kind == 'unknown':
         st.unknown.append(w.raw[:120])
@@ -727,8 +825,22 @@ def check_target_one(w, st, destructive=False, what='írás'):
                 return
         if k in ('protected', 'ancestor'):
             st.deny.append('%s nem feloldható célja (%s) a védett fába vagy fölé mutat' % (what, w.raw[:80]))
+        elif k == 'cfg_ancestor':
+            rp = rest_pattern(st.partial, st.rest)
+            if rp is None:
+                st.unknown.append(w.raw[:120])
+                return
+            try:
+                hit = st.prod.agent_reach(p, rp[0], destructive is True)
+            except ResolveError as e:
+                st.errors.append('útfeloldás (%s): %s' % (e, w.raw[:80]))
+                return
+            if hit and rp[1]:
+                st.deny.append('%s nem feloldható célja (%s) ágens-konfigra mutathat' % (what, w.raw[:80]))
+            elif hit:
+                st.unknown.append(w.raw[:120])
         return
-    if k == 'protected' or (destructive and k == 'ancestor'):
+    if k == 'protected' or (destructive and k == 'ancestor') or (destructive is True and k == 'cfg_ancestor'):
         st.deny.append('%s a védett útra: %s' % (what, w.raw[:80]))
 
 
@@ -1053,11 +1165,19 @@ def analyze_simple(cmd, st, depth):
         st.unknown.append('xargs ' + name)
     if name in ALL_ARGS:
         opts, pos = split_opts(name, args)
-        for w in pos:
-            check_target(w, st, destructive=name in DESTRUCTIVE, what=name)
+        dest = None
         for k in range(len(opts) - 1):
             if opts[k].literal() in ('-t', '--target-directory') and name in ('mv', 'gmv'):
-                check_target(opts[k + 1], st, destructive=True, what=name)
+                dest = opts[k + 1]
+        if dest is None and name in ('mv', 'gmv') and len(pos) > 1:
+            dest, pos = pos[-1], pos[:-1]
+        for w in pos:
+            check_target(w, st, destructive=name in DESTRUCTIVE, what=name)
+        if dest is not None:
+            # moving INTO an agent home is no damage; the root (an ancestor) stays strict, and a source's basename
+            # in the destination directory is a write (`mv /tmp/agent-config.json agents/x/`)
+            check_target(dest, st, destructive='root', what=name)
+            dest_basenames(dest, pos, st, name)
         return
     if name in LAST_ARG:
         opts, pos = split_opts(name, args)
@@ -1082,14 +1202,7 @@ def analyze_simple(cmd, st, depth):
             return
         check_target(dest, st, destructive=name in ('rsync',) and any(
             (o.literal() or '').startswith('--delete') for o in opts), what=name)
-        dk, dp = word_path(dest, st)
-        if dk == 'path':
-            for s_ in srcs:
-                sl = s_.literal()
-                if sl:
-                    bn = os.path.basename(sl.rstrip('/'))
-                    if bn:
-                        check_target(Word([('lit', os.path.join(dp, bn))], dest.raw + '/' + bn), st, what=name)
+        dest_basenames(dest, srcs, st, name)
         return
     if name in ('sed', 'gsed', 'perl'):
         lt = lits(args)
@@ -1155,7 +1268,8 @@ def analyze_simple(cmd, st, depth):
             if not starts:
                 starts = [Word([('lit', '.')], '.')]
             for w in starts:
-                check_target(w, st, destructive=True, what='find -delete/-exec')
+                # 'root': a find under an agent home is filtered (-name ...); its config files themselves count
+                check_target(w, st, destructive='root', what='find -delete/-exec')
         return
     if name in PKG:
         lt, skip = [], False
@@ -1218,6 +1332,18 @@ def analyze_simple(cmd, st, depth):
         if not any(t in ('-l', '-t', '-v', '-p', '-Z') for t in lt):
             cwd_writer(st, 'unzip')
         return
+
+
+def dest_basenames(dest, srcs, st, name):
+    """cp/mv/ln/... into a directory: destination/basename(source) is a write too"""
+    dk, dp = word_path(dest, st)
+    if dk == 'path':
+        for s_ in srcs:
+            sl = s_.literal()
+            if sl:
+                bn = os.path.basename(sl.rstrip('/'))
+                if bn:
+                    check_target(Word([('lit', os.path.join(dp, bn))], dest.raw + '/' + bn), st, what=name)
 
 
 def strip_prefix(w, n):
@@ -1319,8 +1445,14 @@ def raw_protected(text, prod, home, cwd, bare_root=True):
             roots += [r'~/' + rel, r'\$home/' + rel, r'\$\{home\}/' + rel, r'~' + re.escape(os.path.basename(hf))
                       + '/' + rel]
     end = r'(?=$|[\s\'"`;&|)<>/])'
+    fend = r'(?=$|[\s\'"`;&|)<>])'
+    # agents/<any name, a variable too>/<config file>; settings.local.json only when the name is not the caller
+    name = r'[^\s\'"`/;&|()<>]+'
+    other = (r'(?!' + re.escape(prod.caller) + r'/)' if prod.caller else '') + name
+    acfg = r'(?:' + name + r'/+(?:agent-config\.json|\.claude/+settings\.json|\.claude-config/+settings\.json)|' + \
+        other + r'/+\.claude/+settings\.local\.json)' + fend
     prot = r'(?:scripts|src|\.claude)' + end + r'|(?:claude\.md|\.mcp\.json|package\.json|package-lock\.json|' \
-           r'store/autonomy-config\.json)(?=$|[\s\'"`;&|)<>])'
+           r'store/autonomy-config\.json)' + fend + r'|agents/+' + acfg
     root = r'(?:' + '|'.join(roots) + r')'
     # closers between the root and the protected part: the root yielded by a substitution or a quoted piece,
     # e.g. "$(echo P)"/scripts/x (Viktor 42855 L3)
@@ -1335,10 +1467,14 @@ def raw_protected(text, prod, home, cwd, bare_root=True):
             return True
         if k == 'protected':
             return True
-        if k in ('inside', 'ancestor') or fold(cwd) == prod.cf:
+        if k in ('inside', 'ancestor', 'cfg_ancestor') or fold(cwd) == prod.cf:
             if fold(cwd) == prod.cf and re.search(r'(?:^|[\s\'"`=:(;&|<>])(?:\./)*(?:' + prot + r')', low):
                 return True
             if re.search(r'\.\./(?:\.\./)*(?:\./)*(?:' + prot + r')', low):
+                return True
+            # another agent's config from an agent home: ../<name>/agent-config.json (a lookbehind, not a repeated
+            # `(\.\./)*` prefix: that is quadratic on a long ../../.. run)
+            if fold(cwd).startswith(prod.agents + '/') and re.search(r'(?<=\.\./)(?:\./)*' + acfg, low):
                 return True
             # Viktor 42855 L3, narrowed by the E1 replay (any substitution/variable anywhere in the prod repo gave 4
             # false denies in 14 days: every agent home agents/<name> is inside the prod repo): with the cwd anywhere
@@ -1381,11 +1517,13 @@ def identify(tp, prod):
 
 
 def decide(payload, prod_root=PROD, home=None):
-    """-> (decision 'deny'|'allow', reason, error_flag). Pure apart from realpath/lstat; never decides on identity."""
+    """-> (decision 'deny'|'allow', reason, error_flag). Pure apart from realpath/lstat/listdir; the identity only
+    tells the caller's own agents/<name>/.claude/settings.local.json (writable) from another agent's."""
     prod = Prod(prod_root)
     home = home_dir() if home is None else home
     if not isinstance(payload, dict):
         return ('allow', 'a bemenet nem JSON-objektum', True)
+    prod = Prod(prod_root, identify(payload.get('transcript_path'), prod))
     tool = payload.get('tool_name')
     inp = payload.get('tool_input')
     cwd = payload.get('cwd')
@@ -1558,7 +1696,7 @@ def run(raw, prod_root=PROD, log_dir=LOG_DIR, home=None, now=None):
             sub = agent not in ('main', 'unknown')
             if sub and tool in WRITE_TOOLS:
                 decision = 'deny'
-            elif sub and raw_protected(text[:MAX_CMD], Prod(prod_root), home_dir() if home is None else home,
+            elif sub and raw_protected(text[:MAX_CMD], Prod(prod_root, agent), home_dir() if home is None else home,
                                        payload.get('cwd') if isinstance(payload, dict) and
                                        isinstance(payload.get('cwd'), str) else None):
                 decision = 'deny'
