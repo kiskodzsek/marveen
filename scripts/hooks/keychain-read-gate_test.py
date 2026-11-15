@@ -388,9 +388,44 @@ BLOCK += ['declare -x ' + 'A ' * 100 + 'HOME=/x; git fetch', 'unset ' + 'A ' * 1
 # Viktor 42207 mutation survivors: the git call's own words past MAX_ARGS are not read (fail-closed: a reset after
 # them is not seen); a backtick starts a command
 BLOCK += ['HOME=/x git ' + '-C . ' * 40 + '-c cr3dential.helper= ls-remote x', 'echo `HOME=/x git fetch`']
+# card d11364a4 (Viktor 42835 / f526b8c6 verdict, pre-existing LOW): a quoted or escaped command name right where a
+# shell -c payload starts. Top-level forms block already; in the payload the escaping of the outer quotes (\" \\)
+# hid the name: 51 of 252 generated forms passed on f6d09386 (work/d11364a4/probe.py). The payload is now taken out
+# with bash's own quote rules and judged as a command of its own.
+def _dq(c):
+    return c.replace('\\', '\\\\').replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+
+
+_KC_NAMES = ['\\s3curity', 's3c""urity', "s3c''urity", 's3c\\urity', '"s3curity"', "'s3curity'"]
+_KC_SUBS = ['find-generic-password -a x -w', 'dump-keychain', 'find-internet-password -s x -w', 'export -o /tmp/x']
+for _sh in ('bash -c', 'sh -c', 'bash -lc', 'zsh -c', '"$SHELL" -c', 'bash -c -o pipefail'):
+    for _nm in _KC_NAMES:
+        for _sb in _KC_SUBS:
+            BLOCK.append(_sh + ' "' + _dq(_nm + ' ' + _sb) + '"')
+            if "'" not in _nm:
+                BLOCK.append(_sh + " '" + _nm + ' ' + _sb + "'")
+# nested: a payload inside a payload, and after a ; inside the payload
+BLOCK += ['bash -c "sh -c \\"\\\\\\"s3curity\\\\\\" dump-keychain\\""', "bash -c 'true; \"s3curity\" dump-keychain'",
+          'bash -c "echo a; \\"s3curity\\" export"']
+# MAX_PAYLOADS (64) distinct quoted payloads are read again; a 65th blocks ('payload-unread') instead of going unread
+BLOCK += ['bash -c ' + ' '.join("'\"a%d\"'" % i for i in range(65)),
+          'bash -c ' + ' '.join("'\"a%d\"'" % i for i in range(64)) + " '\"s3curity\" dump-keychain'"]
+# mutation survivors (work/d11364a4/mut.out, kill-probe.py): a payload PAYLOAD_OPEN opens (tmux new, do shell script,
+# eval around a shell) is read again too; an escaped quote opens none, so it cannot swallow the payload after it
+BLOCK += ['tmux new -d "' + _dq('"s3curity" dump-keychain') + '"',
+          "osascript -e 'do shell script \"" + _dq('"s3curity" dump-keychain') + "\"'",
+          'eval "' + _dq('bash -c "' + _dq('"s3curity" dump-keychain') + '"') + '"',
+          "eval \\'x ; bash -c '\"s3curity\" dump-keychain'"]
 
 ALLOW = [
     'ls -la',
+    # card d11364a4: a payload taken out and judged on its own stays allowed when it reads no secret
+    'bash -c "echo \\"s3curity\\" find-generic-password"',
+    "bash -c 'grep -c dump-keychain notes.txt'",
+    'bash -c "printf %s \'s3curity is a word\'"',
+    "sh -c '\"s3curity\" list-keychains'",
+    'bash -c ' + ' '.join("'\"a%d\"'" % i for i in range(64)),   # MAX_PAYLOADS distinct payloads: all read, none blocks
+    'bash -c ' + "'\"a\"' " * 500,                                # one text 500 times: read once
     's3curity list-keychains',
     's3curity find-identity -p codesigning -v',
     's3curity find-certificate -a -c Apple',
@@ -1071,6 +1106,13 @@ def script_cases():
         code, _ = bash_env('ls ' + d, d, {'KEYCHAIN_GATE_SCRIPT_BUDGET_S': '0'})
         if code != 0:
             fails.append(f'script: no script file, the budget does not apply (got {code})')
+        # card d11364a4: a payload with a quote in it is read again only inside the budget; past it the gate blocks
+        code, err = bash_env("bash -c '\"x\" y'", d, {'KEYCHAIN_GATE_SCRIPT_BUDGET_S': '0'})
+        if code != 2 or 'payload-too-slow' not in err:
+            fails.append(f'script: a quoted payload past the budget blocks (got {code} {err[-80:]!r})')
+        code, _ = bash_env("bash -c 'ls -la'", d, {'KEYCHAIN_GATE_SCRIPT_BUDGET_S': '0'})
+        if code != 0:
+            fails.append(f'script: a payload without a quote is not read again, the budget does not apply (got {code})')
         # ten 1 MB files of newlines (6.6 s unbudgeted, 2026-11-13): decided well inside the 10 s hook timeout,
         # and the seam cannot raise the budget (999 is capped at SCRIPT_BUDGET_S)
         for i in range(10):
@@ -1092,6 +1134,24 @@ def script_cases():
                                env={'PATH': '/usr/bin:/bin', 'KEYCHAIN_GATE_SCRIPT_BUDGET_S': val})
             if p.stdout.strip() != want:
                 fails.append(f'script: budget seam {val!r} -> {p.stdout.strip()!r}, want {want}')
+        # card d11364a4 (mutation survivor): past HALF the budget no payload is read again (one more read costs about
+        # what the outer text did, and a timed-out hook does not block); 3 s of the default 4 s gone, in-process
+        half = ('import importlib.util as u,sys; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
+                 ' s.loader.exec_module(m); m.T0 -= 3.0; print(",".join(m.hits(sys.argv[2])) or "-")')
+        for cmd, want in [("bash -c '\"x\" y'", 'payload-too-slow'), ("bash -c 'ls -la'", '-')]:
+            p = subprocess.run([sys.executable, '-I', '-c', half, HOOK, cmd], capture_output=True, text=True,
+                               timeout=20, env={'PATH': '/usr/bin:/bin'})
+            if p.stdout.strip() != want:
+                fails.append(f'script: past half the budget {cmd!r} -> {p.stdout.strip()!r}, want {want}')
+        # card d11364a4 (mutation survivor): an escaped quote opens no payload in hits(), so it cannot swallow the
+        # payload after it. The hook judges each command on its own too, so the hook blocks either way (measured,
+        # work/d11364a4/kill-probe-hook.py); this pins hits() itself.
+        inproc = half.replace('m.T0 -= 3.0; ', '')
+        cmd = fix("eval \\'x ; bash -c '\"s3curity\" dump-keychain'")
+        p = subprocess.run([sys.executable, '-I', '-c', inproc, HOOK, cmd], capture_output=True, text=True,
+                           timeout=20, env={'PATH': '/usr/bin:/bin'})
+        if 'secret-read' not in p.stdout.strip().split(','):
+            fails.append(f'script: hits() after an escaped quote {cmd!r} -> {p.stdout.strip()!r}, want secret-read')
         # more directories than MAX_BASES (32) before a script: blocks instead of leaving the rest unresolved
         code, err = bash_in('cd a && ' * 40 + 'python3 list.py', d)
         if code != 2 or 'script-too-many' not in err:
