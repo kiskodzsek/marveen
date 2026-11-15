@@ -560,11 +560,105 @@ def normalise(cmd, joined=False):
 # starts (`bash -c "\"security\" dump-..."`, `sh -c 'sec""urity ...'`, `bash -c "\\security ..."`) was in no pass:
 # the outer quote's escaping (\" \\) hid the name from the first, and the quote-free second pass loses the payload's
 # command position. The payload is now taken out with bash's own quote rules and judged as a command of its own.
-PAYLOAD_DEPTH = 3     # a payload in a payload in a payload; deeper is judged on the outer passes only
+PAYLOAD_DEPTH = 3     # a payload in a payload in a payload; one with a payload still unread blocks ('payload-too-deep')
 MAX_PAYLOADS = 64     # distinct payloads read again per text; past it the gate blocks ('payload-unread')
 PAYLOAD_QUOTED = re.compile(r'[\'"\\]')
 _DQ_BODY = re.compile(r'(?:[^"\\]|\\.)*', re.S)               # up to the closing " (or the end: judged anyway)
 _DQ_UNESCAPE = re.compile(r'\\([\\"$`])|\\\n')                # what bash takes off inside "..."
+# card aeee72df (Viktor 42941 LOW 2): a payload is the whole shell WORD its quote opens, not the first piece: bash
+# goes on after the closing quote, so `bash -c ''\''sec'\''urity dump-...'` runs `'sec'urity dump-...`, and the first
+# piece alone ('') read nothing. One piece per match, one way to read each: '...' as written, "..." and $"..." with the
+# _DQ_UNESCAPE escapes taken off, $'...' decoded (_ANSI_C), \x as x (backslash-newline: nothing), a plain run as
+# written. An unquoted blank or operator ends the word (`$(` too: what it runs is the outer passes' to judge).
+_PIECE_RX = re.compile(r"'([^']*)'?|\$?\"((?:[^\"\\]|\\.)*)\"?|\$'((?:[^'\\]|\\.)*)'|\\(.?)|([^\s;&|<>()'\"\\$]+|\$)",
+                       re.S)  # an unclosed $'... is a $ and an unclosed '...: read to the end like any other
+_ANSI_C = re.compile(r'\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|(.))', re.S)
+_ANSI_ESC = {'a': '\a', 'b': '\b', 'e': '\x1b', 'E': '\x1b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t', 'v': '\v',
+             '\\': '\\', "'": "'", '"': '"', '?': '?'}
+
+
+def _ansi_c(m):
+    x, o, ch = m.groups()
+    if x or o:
+        return chr(int(x, 16) if x else int(o, 8) & 0xff)
+    return _ANSI_ESC.get(ch, '\\' + ch)  # bash keeps an unknown escape as written
+
+
+def shell_word(text, i):
+    """(value, end) of the shell word starting at i, its quoted, escaped and plain pieces joined as bash joins them."""
+    out = []
+    while i < len(text):
+        m = _PIECE_RX.match(text, i)
+        if not m:
+            break
+        sq, dq, ansi, esc, plain = m.groups()
+        out.append(sq if sq is not None else _DQ_UNESCAPE.sub(lambda e: e.group(1) or '', dq) if dq is not None
+                   else _ANSI_C.sub(_ansi_c, ansi) if ansi is not None else ('' if esc == '\n' else esc)
+                   if esc is not None else plain)
+        i = m.end()
+    return ''.join(out), i
+
+
+# card aeee72df (Viktor 42941 LOW 4): a shell reads its stdin as a script, so `echo '"sec"urity dump-...' | bash` and
+# `bash <<< '"sec"urity dump-...'` run the quoted name the -c forms already block. The text of a pipeline that feeds
+# a shell (a shell word, wrappers before it allowed, right after its |), and the word after a <<< in a command with
+# a shell word in it (`<<< '...' bash` runs it too), are payloads too. A heredoc into a shell needs nothing: a body
+# line starts after a newline (a command position) and the quote-free second pass reads it.
+_SHELL_NAME = r'(?:(?:bash|sh|zsh|dash|ksh|fish|csh|tcsh|ash|rbash|pwsh)\d*|\$\{?(?:SHELL|BASH)|\$0)'  # a } or quote after: alone
+# The shell word stands alone: no word character, dot or dash glued to it (bashful, x.sh, my-bash), anything else
+# around it is a boundary (wider than SHELL_RX: here only a payload more is read).
+_ALONE = r'[\w.-]'
+STDIN_SHELL_RX = re.compile(r'(?<!' + _ALONE + r')' + _SHELL_NAME + r'(?!' + _ALONE + r')')
+# |& pipes too (zsh, bash 4); || and >| do not (the lookbehind rejects the second | of a ||, and the first one is
+# followed by no shell word)
+PIPE_SHELL_RX = re.compile(r'(?<![>|])\|&?[ \t]*' + CHAIN + r'[\'"]?(?:' + WORD + r'*/)?' + _SHELL_NAME
+                           + r'(?!' + _ALONE + r')')
+HERE_STRING_RX = re.compile(r'<<<[ \t]*')
+PIPELINE_START = ';&\n()`'  # a | does not end the pipeline the shell reads
+
+
+def stdin_payloads(text):
+    """(value, verbatim) of each word a shell reads on stdin: every quoted word of a pipeline that ends in `| <shell>`
+    (the quotes walked from the start of the text, so a quote of an earlier word is not taken for an opening one),
+    and the word after a <<< whose command has a shell word in it. verbatim: the value stands as written right
+    after the word's opening quote (a command position the outer passes judge) or is one plain word (no blank, so
+    no rule can match it). Linear: each quote and each word once."""
+    import bisect
+    pipes = [m.start() for m in PIPE_SHELL_RX.finditer(text)] if '|' in text else []
+    heres = [m for m in HERE_STRING_RX.finditer(text)] if '<<<' in text else []
+    if not pipes and not heres:
+        return []
+    starts = [i for i, ch in enumerate(text) if ch in PIPELINE_START]
+
+    def begin(pos, stops):
+        k = bisect.bisect_left(stops, pos)
+        return stops[k - 1] + 1 if k > 0 else 0
+
+    def word(s):
+        w, e = shell_word(text, s)
+        return (w, text.startswith(w, s + 1) if text[s:s + 1] in ('"', "'") else text.startswith(w, s)), e
+    words = []
+    if heres:
+        ends = [i for i, ch in enumerate(text) if ch in CMD_END]
+        shells = [m.start() for m in STDIN_SHELL_RX.finditer(text)]
+        for m in heres:
+            k = bisect.bisect_left(shells, begin(m.start(), ends))
+            j = bisect.bisect_left(ends, m.end())
+            if k < len(shells) and shells[k] < (ends[j] if j < len(ends) else len(text)):  # before or after the <<<
+                words.append(word(m.end())[0])
+    if pipes:
+        ranges = [(begin(p, starts), p) for p in pipes]
+        lo = [r[0] for r in ranges]
+        last = -1
+        for q in (i for i, ch in enumerate(text) if ch in '\'"'):
+            if q <= last or (q > 0 and text[q - 1] == '\\'):
+                continue
+            k = bisect.bisect_right(lo, q) - 1
+            wv, end = word(q - 1 if text[q] == "'" and q > 0 and text[q - 1] == '$' else q)
+            last = end - 1
+            if k >= 0 and q < ranges[k][1]:
+                words.append(wv)
+    return words
 
 
 def payload_texts(text):
@@ -573,11 +667,24 @@ def payload_texts(text):
     left to the payload around it. A quote inside an earlier payload belongs to it, so the walk is linear. Only a
     payload with a quote or a backslash in it is returned: one without stands verbatim after its opening quote (a
     command position) in the text the outer passes judge already, so reading it again adds nothing (and 30 000
-    `-c 'a'` paddings stay fast). Each distinct text once; None past MAX_PAYLOADS."""
+    `-c 'a'` paddings stay fast). Each distinct text once; None past MAX_PAYLOADS.
+    Card aeee72df: the whole shell word the quote opens is a payload too (shell_word(), LOW 2), when it is more than
+    its first piece, and so is what a shell reads on stdin (stdin_payloads(), LOW 4). Both only add texts: the walk
+    and the first-piece payloads are the ones before (a mark only ever adds a block)."""
     starts = set(payload_quotes(text))
     starts.update(m.end() - 1 for m in re.finditer(PAYLOAD_OPEN, text))
-    out, seen, last = [], set(), -1
-    for q in sorted(starts):
+    out, seen, last, word_end = [], set(), -1, 0
+
+    def add(p, verbatim):
+        if p in seen or (verbatim and not PAYLOAD_QUOTED.search(p)):
+            return True
+        if len(out) == MAX_PAYLOADS:
+            return False
+        seen.add(p)
+        out.append(p)
+        return True
+    marks = sorted(starts)
+    for q in marks:
         if q <= last or (q > 0 and text[q - 1] == '\\'):
             continue
         if text[q] == "'":
@@ -588,19 +695,31 @@ def payload_texts(text):
             e = _DQ_BODY.match(text, q + 1).end()
             p = _DQ_UNESCAPE.sub(lambda m: m.group(1) or '', text[q + 1:e])
         last = e
-        if p in seen or not PAYLOAD_QUOTED.search(p):
-            continue
-        if len(out) == MAX_PAYLOADS:
+        if not add(p, True):
             return None
-        seen.add(p)
-        out.append(p)
+    # The words keep a place of their own: the piece walk above reads $'it\'s' as two pieces ('it\' and an opening
+    # quote) and can run past the next word's first quote. Each word once, from its first mark (a $'...' from its $).
+    for q in marks:
+        if q < word_end or (q > 0 and text[q - 1] == '\\'):
+            continue
+        w, word_end = shell_word(text, q - 1 if text[q] == "'" and q > 0 and text[q - 1] == '$' else q)
+        if not add(w, text.startswith(w, q + 1)):
+            return None
+    for w, verbatim in stdin_payloads(text):
+        if not add(w, verbatim):
+            return None
     return out
 
 
 def hits(cmd, script=False, _depth=0):
     """Rule names the text matches; a script file's text (script=True) is not judged by GIT_RULES."""
     found = _hits(cmd, script)
-    if _depth < PAYLOAD_DEPTH:
+    if _depth >= PAYLOAD_DEPTH:
+        # card aeee72df (Viktor 42941 LOW 1): a payload this deep is not read again, so one still in it blocks, as
+        # past MAX_PAYLOADS (fail-closed); before, it was left to the outer passes, and a 4-deep quoted name ran
+        if payload_texts(cmd) != []:
+            found.append('payload-too-deep')
+    else:
         # A hook past its timeout does not block. Reading a payload again costs about what the outer text cost, so it
         # starts only inside half the budget; past it (or past the budget during the payloads) the gate blocks.
         slow = found + ([] if 'payload-too-slow' in found else ['payload-too-slow'])
