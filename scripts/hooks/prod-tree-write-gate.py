@@ -45,8 +45,9 @@ WHAT IS DENIED for a sub-agent:
     -type tests (no -o, !, -not, `,`; names case-insensitive, APFS) exclude every agent config file below the start
     (`find . -name "*.pyc" -delete`
     in a home stays free; a destructive -exec also counts the home and its config directories, the start included).
-  - Bash, directory writers (Viktor 43196 L4): rsync, cp/gcp/scp -r/-R/-a, ditto, tar -x (-C or the cwd), unzip (-d
-    or the cwd) whose effective target directory (the destination for a contents copy `src/`, `src/.`, ditto, an
+  - Bash, directory writers (Viktor 43196 L4): rsync, cp/gcp/scp -r/-R/-a, ditto, tar -x (-C or the cwd), unzip (-d,
+    joined `-dDIR` / `-qodDIR` too, Viktor 43257 A; or the cwd unless a listing/test/pipe mode letter comes before
+    any d or P in a cluster) whose effective target directory (the destination for a contents copy `src/`, `src/.`, ditto, an
     unresolved source, or a missing destination; else destination/basename(source)) is agents/, an agent home or its
     .claude / .claude-config, or the prod root: they can drop an agent-config.json without naming it.
   - Bash: git commands that write the production work tree (K3): checkout, switch, restore, reset, stash (not list/
@@ -1426,12 +1427,28 @@ def analyze_simple(cmd, st, depth):
         return
     if name == 'unzip':
         lt = lits(args)
+        listing = False
         for k, t in enumerate(lt):
-            if t == '-d' and k + 1 < len(args):
-                check_target(args[k + 1], st, destructive='tree', what='unzip -d')
-                return
-        # a listing / test / pipe / comment / zipinfo mode in any option cluster (`-qql`, `-Z1`; replay 17901b47 r2)
-        if not any(t and re.match(r'^-[A-Za-z^:]*[ltvpzZ]', t) for t in lt):
+            if not t or not t.startswith('-') or t.startswith('--'):
+                continue
+            # an option cluster, read left to right (Viktor 43257 A): `d` (exdir) and `P` (password) take the
+            # rest of the word, or the next word, as their value; a letter after them is not an option
+            for i, ch in enumerate(t[1:], 2):
+                if ch == 'd':
+                    if i < len(t):
+                        check_target(Word([('lit', t[i:])], args[k].raw), st, destructive='tree',
+                                     what='unzip -d')        # `-dscripts`, `-qodscripts`
+                        return
+                    if k + 1 < len(args):
+                        check_target(args[k + 1], st, destructive='tree', what='unzip -d')
+                        return
+                    break
+                if ch == 'P':
+                    break
+                if ch in 'ltvpzZ':
+                    # a listing / test / pipe / comment / zipinfo mode (`-qql`, `-Z1`; replay 17901b47 r2)
+                    listing = True
+        if not listing:
             cwd_writer(st, 'unzip', tree=True)
         return
 

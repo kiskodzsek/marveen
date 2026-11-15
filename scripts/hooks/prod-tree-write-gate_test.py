@@ -467,6 +467,11 @@ R2_DENY = [  # Viktor 43196 (card 17901b47 round 2)
     ('tar -C agents/x -PmxvU -f /tmp/e.tar', P), ('unzip -CMoq /tmp/e.zip', K),
     # Viktor 43196 mutant (b): a glob below a symlinked config directory / home (agent_reach's realpath form)
     ('rm -f xclaude/*.json', K), ('rm -f xhome/*-config.json', K), ('echo > xhome/agent-*.json', K),
+    # Viktor 43257 A: the letters of a joined -dDIR are not listing letters; d / P take the rest of the word
+    ('unzip -o /tmp/e.zip -dscripts', P), ('unzip -qodscripts /tmp/e.zip', P), ('unzip -Pl /tmp/e.zip', P),
+    ('unzip -o /tmp/e.zip -d' + P + '/agents/x', '/tmp'), ('unzip -qod' + P + '/agents/x /tmp/e.zip', '/tmp'),
+    ('unzip -qod ' + P + '/agents/x /tmp/e.zip', '/tmp'), ('unzip -l /tmp/e.zip -d agents/x', P),
+    ('unzip --l /tmp/e.zip', P),
 ]
 R2_ALLOW = [
     ('cat store/agent-config-seal.json', P), ('cp ' + SEAL + ' /tmp/s', '/tmp'),
@@ -500,6 +505,8 @@ R2_ALLOW = [
     ('tar -C agents/x -xOf /tmp/e.tar a', P), ('m=$(unzip -Z1 /tmp/e.whl | grep x)', K), ('unzip -qql /tmp/e.zip', K),
     ('unzip -p /tmp/e.zip a | grep x', K), ('unzip -t /tmp/e.zip', K), ('unzip -v /tmp/e.zip', K),
     ('unzip -z /tmp/e.zip', K), ('tar -PxOm -f /tmp/e.tar a', K), ('unzip -^:CMqql /tmp/e.zip', K),
+    ('unzip -o /tmp/e.zip -d/tmp/out', P), ('unzip -qod /tmp/out /tmp/e.zip', P), ('unzip -Z1 /tmp/e.zip', P),
+    ('unzip -qql /tmp/e.zip', P),
     ('find agents -wholename "*/work/*" -delete', P), ('find agents -iwholename "*/WORK/*" -delete', P),
     # mutation round 1 survivors: a stale relative value / joined flag, -type alone excluding
     ('N=x; M=$(mktemp); echo > agents/x/$M', P), ('D=$(dirname agents/x/f); echo > agents/$D/agent-config.json', P),
