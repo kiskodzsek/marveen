@@ -472,6 +472,26 @@ R2_DENY = [  # Viktor 43196 (card 17901b47 round 2)
     ('unzip -o /tmp/e.zip -d' + P + '/agents/x', '/tmp'), ('unzip -qod' + P + '/agents/x /tmp/e.zip', '/tmp'),
     ('unzip -qod ' + P + '/agents/x /tmp/e.zip', '/tmp'), ('unzip -l /tmp/e.zip -d agents/x', P),
     ('unzip --l /tmp/e.zip', P),
+    # Viktor 43257 B: find's leading options are not the end of the starting points
+    ('find -H ' + P + '/agents -path "*x*" -name agent-config.json -delete', K + '/work'),
+    ('find -L ' + P + '/agents -name agent-config.json -delete', K), ('find -x -s ' + P + '/agents -name agent-config.json -delete', '/tmp'),
+    ('find -Hx ' + P + '/agents -name agent-config.json -delete', '/tmp'), ('find -f ' + P + '/agents -name agent-config.json -delete', '/tmp'),
+    ('find -f' + P + '/agents -name agent-config.json -delete', '/tmp'), ('find -D tree ' + P + '/agents -name agent-config.json -delete', '/tmp'),
+    ('find -O3 ' + P + '/agents -name agent-config.json -delete', '/tmp'), ('find -P -E ' + P + '/agents -name agent-config.json -delete', '/tmp'),
+    # Viktor 43257 C: tar's directory joined, as --directory=, in a cluster, old style
+    ('tar -xf /tmp/e.tar --directory=' + P + '/agents/x', K + '/work'), ('tar -xf /tmp/e.tar -C' + P + '/agents/x', K + '/work'),
+    ('tar -xC ' + P + '/agents/x -f /tmp/e.tar', K + '/work'), ('tar xCf ' + P + '/agents/x /tmp/e.tar', K + '/work'),
+    ('tar -xzC' + P + '/agents/x -f /tmp/e.tgz', K + '/work'), ('tar xfC /tmp/e.tar ' + P + '/agents/x', K + '/work'),
+    # Viktor 43257 D: an O after the first valued letter is that letter's value, not --to-stdout
+    ('tar -xfO -C agents/x', P), ('tar -xf /tmp/e.tar -C agents/x -sOaObO', P),
+    # Viktor 43257 E: a relative literal value joins the cwd where it is used
+    ('F=agent-config.json; cd agents/x && echo x > $F', P), ('D=x; cd agents && echo x > $D/agent-config.json', P),
+    ('F=settings.json; cd agents/x/.claude; echo x > $F', P),
+    ('cd /tmp; F=agent-config.json; X=$F; cd ' + P + '/agents/x && echo x > $X', '/tmp'),   # X=$F keeps F's relative text
+    # Viktor 43289 F: unzip reads "-" as "not"; with a listing letter it extracts (into the cwd)
+    ('unzip -l --v /tmp/e.zip', P), ('unzip -l-l /tmp/e.zip', P), ('unzip -- -l /tmp/e.zip', P), ('unzip -t --t /tmp/e.zip', P),
+    # Viktor 43289 INFO (mutant U11): -D is a timestamp flag, not an exdir
+    ('unzip -D /tmp/e.zip', P),
 ]
 R2_ALLOW = [
     ('cat store/agent-config-seal.json', P), ('cp ' + SEAL + ' /tmp/s', '/tmp'),
@@ -507,6 +527,15 @@ R2_ALLOW = [
     ('unzip -z /tmp/e.zip', K), ('tar -PxOm -f /tmp/e.tar a', K), ('unzip -^:CMqql /tmp/e.zip', K),
     ('unzip -o /tmp/e.zip -d/tmp/out', P), ('unzip -qod /tmp/out /tmp/e.zip', P), ('unzip -Z1 /tmp/e.zip', P),
     ('unzip -qql /tmp/e.zip', P),
+    # Viktor 43257 B-E: the same shapes where nothing protected is reached
+    ('find -H ' + P + '/agents -name "*.log" -delete', '/tmp'), ('find -L /tmp/x -name agent-config.json -delete', P),
+    ('find -f /tmp/x -name agent-config.json -delete', P),
+    ('find -D agents /tmp/x -name agent-config.json -delete', P),   # -D takes its value word: no starting point
+    ('tar -xf /tmp/e.tar --directory=/tmp/out', P), ('tar xCf /tmp/out /tmp/e.tar', P), ('tar -xC/tmp/out -f /tmp/e.tar', P),
+    ('tar -xfC ' + P + '/agents/x', K + '/work'),     # f takes "C" (the archive), the cwd is a work dir
+    ('tar xfO /tmp/e.tar a', P),                      # old style: every letter is a flag, O = stdout
+    ('F=notes.md; cd agents/x && echo x > $F', P), ('F=agent-config.json; cd /tmp && echo x > $F', P),
+    ('B=agents/pulzus/backups/m-$(date +%H%M%S); cd /tmp; mkdir -p $B', P),
     ('find agents -wholename "*/work/*" -delete', P), ('find agents -iwholename "*/WORK/*" -delete', P),
     # mutation round 1 survivors: a stale relative value / joined flag, -type alone excluding
     ('N=x; M=$(mktemp); echo > agents/x/$M', P), ('D=$(dirname agents/x/f); echo > agents/$D/agent-config.json', P),

@@ -79,13 +79,16 @@ WHAT IS DENIED for a sub-agent:
   Not resolved: a cp/mv/ln of a glob or variable source WITHOUT -r into a home (`cp /tmp/e/* agents/x/`: the file
   names are unknown; the recursive forms and rsync are counted as directory writers above).
   Not modelled either (Viktor 43196 INFO 5): the in-place editors awk -i inplace, plutil -replace/-insert/-remove
-  (it rewrites the JSON), ed, ex/vim -es, and osascript `do shell script`.
+  (it rewrites the JSON), ed, ex/vim -es, and osascript `do shell script`; nor the archive and copy tools cpio -id,
+  pax -r, 7z x, jar xf and gunzip (it writes the .gz name without the suffix next to it) (Viktor 43257 INFO).
+  A Bash text longer than MAX_CMD (200 000 characters) gets the raw-text rule only (Viktor 43257 INFO).
   Out of reach of a path gate (Viktor 43196 INFO 6): a symlink created in the same command (`ln -s agents/x l &&
   echo > l/agent-config.json`: realpath cannot see it yet; one that already exists is resolved), and a hardlink
   (`ln agents/x/agent-config.json /tmp/h`, a later write to /tmp/h: the same inode under an unprotected name).
   Values the gate tracks inside one command: literal and prefix-known assignments (X=lit, B=dir/m-$(date); a
-  relative value counts joined with the cwd at the start of a word and as its own text in the middle of one:
-  `N=dave; echo > agents/$N/agent-config.json`, Viktor 43196 L2),
+  relative literal value counts as its own text, joined with the cwd the shell has where it is USED:
+  `N=dave; echo > agents/$N/agent-config.json`, Viktor 43196 L2; `F=agent-config.json; cd agents/x && echo > $F`,
+  Viktor 43257 E; a non-literal relative value keeps its assignment-time prefix at the start of a word),
   $(mktemp), $(pwd), $(dirname X), ${X%pat}, $(git [-C d] rev-parse --show-toplevel [2>/dev/null]) = the
   repository root of that directory, $(echo LIT), $(printf %s LIT), for-loop word lists, repos created by
   worktree add / clone / init.
@@ -685,6 +688,7 @@ class State(object):
         # word), this the text itself (mid-word: agents/$N/...; None = not literal, unresolved there; Viktor 43196 L2)
         self.relvals = {}
         self.joined = False       # the last word_path joined a relative text with the cwd
+        self.reltext = None       # ... and that relative text (a 'path' result)
         self.loops = {}           # for-loop variable -> the listed words
         self.new_repos = []       # paths a `git worktree add` / `git clone` / `git init` in this command creates
         self.deny = []            # reasons
@@ -721,9 +725,11 @@ def word_path(w, st, cwd=None):
             acc += st.home
         elif k == 'var' and t == 'PWD' and cwd:
             acc += cwd
-        elif k == 'var' and acc and t in st.relvals:
-            # mid-word: the assigned relative text, not its cwd-joined form (`N=dave; echo > agents/$N/x` gave
-            # agents//<cwd>/dave/x; Viktor 43196 L2); a non-literal one is unresolved here
+        elif k == 'var' and t in st.relvals and (acc or st.relvals[t] is not None):
+            # the assigned relative text, not its cwd-joined form: mid-word (`N=dave; echo > agents/$N/x` gave
+            # agents//<cwd>/dave/x; Viktor 43196 L2), and at the start of a word too, so it joins the cwd the shell
+            # has NOW (`F=agent-config.json; cd agents/x && echo > $F`; Viktor 43257 E); a non-literal one is
+            # unresolved mid-word, and at the start keeps its assignment-time prefix (`B=agents/x/m-$(date)`)
             if st.relvals[t] is None:
                 rest = w.parts[idx:]
                 break
@@ -747,12 +753,14 @@ def word_path(w, st, cwd=None):
     st.partial = ''
     st.rest = rest or []
     st.joined = False
+    st.reltext = None
     if rest is None:
         if acc == '':
             return ('unknown', None)
         if not acc.startswith('/'):
             if cwd is None:
                 return ('unknown', None)
+            st.reltext = acc
             acc = os.path.join(cwd, acc)
             st.joined = True
         return ('path', acc)
@@ -1350,13 +1358,37 @@ def analyze_simple(cmd, st, depth):
                     writes = True
                     destr = destr or ex is None or ex in DESTRUCTIVE or ex in SHELLS or ex == 'xargs'
         if writes:
+            # the options before the starting points (Viktor 43257 B): BSD -H -L -P -E -X -d -s -x (a cluster too),
+            # -f PATH (a starting point; attached -fPATH too), GNU -D DEBUGOPTS and -O<level>
             starts = []
-            for w in args:
+            i = 0
+            while i < len(args):
+                t = lt[i]
+                m = re.fullmatch(r'-[HLPEXdsx]*f(.*)', t or '')
+                if m:
+                    if m.group(1):
+                        starts.append(Word([('lit', m.group(1))], args[i].raw))
+                        i += 1
+                    elif i + 1 < len(args):
+                        starts.append(args[i + 1])
+                        i += 2
+                    else:
+                        i += 1
+                    continue
+                if t is not None and (re.fullmatch(r'-[HLPEXdsx]+', t) or re.fullmatch(r'-O\d*', t)):
+                    i += 1
+                    continue
+                if t == '-D':
+                    i += 2
+                    continue
+                break
+            for w in args[i:]:
                 t = w.literal()
                 if t is not None and (t.startswith('-') or t in ('(', '!', ')')):
                     break
                 starts.append(w)
-            tests = find_tests(lt[len(starts):])
+                i += 1
+            tests = find_tests(lt[i:])
             if not starts:
                 starts = [Word([('lit', '.')], '.')]
             for w in starts:
@@ -1412,14 +1444,9 @@ def analyze_simple(cmd, st, depth):
         if lt and (re.match(r'^-?[A-Za-z]*x', lt[0]) or '--extract' in lt or '--get' in lt or
                    any(re.match(r'^-[A-Za-z]*x[A-Za-z]*$', t) for t in lt)):   # `tar -C d -xf a.tar` too
             # -O / --to-stdout: extracted to stdout, nothing written (replay 17901b47 r2: `tar -xOf $F x.log | ...`)
-            # (an option cluster: the first word, old style `xOf` too, or a single-dash word; not a file name)
-            if '--to-stdout' in lt or any('O' in t for t in [lt[0]] + [x for x in lt[1:] if x.startswith('-')]
-                                          if re.match(r'^-?[A-Za-z]+$', t)):
+            if '--to-stdout' in lt or tar_to_stdout(lt):
                 return
-            cdir = None
-            for k, t in enumerate(lt):
-                if t in ('-C', '--directory') and k + 1 < len(args):
-                    cdir = args[k + 1]
+            cdir = tar_cdir(args, lt)
             if cdir is not None:
                 check_target(cdir, st, destructive='tree', what='tar -x -C')
             else:
@@ -1428,8 +1455,12 @@ def analyze_simple(cmd, st, depth):
     if name == 'unzip':
         lt = lits(args)
         listing = False
+        negated = False   # unzip reads "-" as "not": `-l --l`, `-l-l`, `-- -l` extract (Viktor 43289 F); then the cwd counts
         for k, t in enumerate(lt):
-            if not t or not t.startswith('-') or t.startswith('--'):
+            if not t or not t.startswith('-'):
+                continue
+            if t.startswith('--'):
+                negated = True
                 continue
             # an option cluster, read left to right (Viktor 43257 A): `d` (exdir) and `P` (password) take the
             # rest of the word, or the next word, as their value; a letter after them is not an option
@@ -1445,12 +1476,65 @@ def analyze_simple(cmd, st, depth):
                     break
                 if ch == 'P':
                     break
+                if ch == '-':
+                    negated = True
+                    continue
                 if ch in 'ltvpzZ':
                     # a listing / test / pipe / comment / zipinfo mode (`-qql`, `-Z1`; replay 17901b47 r2)
                     listing = True
-        if not listing:
+        if not listing or negated:
             cwd_writer(st, 'unzip', tree=True)
         return
+
+
+# tar options that take a value (bsdtar and GNU tar): in a single-dash cluster the first of them takes the rest of the
+# word (or the next word); in the old-style first word (`xCf DIR a.tar`) each takes the next word, in order.
+TAR_VALUED = set('fCsTXbILNVHF')
+
+
+def tar_to_stdout(lt):
+    """-O as an option (Viktor 43257 D): anywhere in the old-style first word, or before the first valued letter of a
+    single-dash cluster (`-xOf` yes; `-xfO` = the archive O, `-sOaObO` = an -s pattern: no)."""
+    if lt and lt[0] and not lt[0].startswith('-') and re.fullmatch(r'[A-Za-z]+', lt[0]) and 'O' in lt[0]:
+        return True
+    for t in lt:
+        if t and re.fullmatch(r'-[A-Za-z]+', t):
+            for ch in t[1:]:
+                if ch == 'O':
+                    return True
+                if ch in TAR_VALUED:
+                    break
+    return False
+
+
+def tar_cdir(args, lt):
+    """the -C / --directory word tar extracts into, or None (Viktor 43257 C: --directory=X, -CX, -xC X, xCf X a.tar
+    are read too). The last one counts, as for tar."""
+    cdir = None
+    if lt and lt[0] and not lt[0].startswith('-') and re.fullmatch(r'[A-Za-z]+', lt[0]):
+        n = 0
+        for ch in lt[0]:
+            if ch in TAR_VALUED:
+                n += 1
+                if ch == 'C' and n < len(args):
+                    cdir = args[n]
+    for k, t in enumerate(lt):
+        if t is None:
+            continue
+        if t in ('-C', '--directory') and k + 1 < len(args):
+            cdir = args[k + 1]
+        elif t.startswith('--directory='):
+            cdir = Word([('lit', t.split('=', 1)[1])], args[k].raw)
+        elif re.fullmatch(r'-[A-Za-z]+.*', t) and not t.startswith('--'):
+            for j, ch in enumerate(t[1:], 2):
+                if ch in TAR_VALUED:
+                    if ch == 'C':
+                        if j < len(t):
+                            cdir = Word([('lit', t[j:])], args[k].raw)
+                        elif k + 1 < len(args):
+                            cdir = args[k + 1]
+                    break
+    return cdir
 
 
 def dest_basenames(dest, srcs, st, name):
@@ -1580,7 +1664,8 @@ def set_var(st, name, w):
     """X=value in the shell: vars gets the value, relvals the relative text (see State.relvals)"""
     st.vars[name] = assign_value(w, st)
     if st.joined:
-        st.relvals[name] = w.literal()
+        # the relative text before the join (X=$F keeps F's text; a literal word is its own text)
+        st.relvals[name] = st.reltext if st.reltext is not None else w.literal()
     else:
         st.relvals.pop(name, None)
 
