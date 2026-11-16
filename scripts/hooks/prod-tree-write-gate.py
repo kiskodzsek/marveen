@@ -1459,8 +1459,17 @@ def analyze_simple(cmd, st, depth):
         lt = lits(args)
         listing = False
         negated = False   # unzip reads "-" as "not": `-l --l`, `-l-l`, `-- -l` extract (Viktor 43289 F); then the cwd counts
+        # card f72e8f27 (Viktor 43676 LELET 1): the words after the archive name are member patterns, only -d and -x
+        # stay options there (measured, Info-ZIP 6.00: `unzip z.zip evil.txt -l` / `-h` extract evil.txt). A listing
+        # letter counts only before the first non-option word; a word that is not plain text counts as that word.
+        archive_seen = False
+        skip_value = False
         for k, t in enumerate(lt):
+            if skip_value:        # the password word of a lone -P
+                skip_value = False
+                continue
             if not t or not t.startswith('-'):
+                archive_seen = True
                 continue
             if t.startswith('--'):
                 negated = True
@@ -1478,12 +1487,14 @@ def analyze_simple(cmd, st, depth):
                         return
                     break
                 if ch == 'P':
+                    skip_value = i >= len(t)   # -P alone: the next word is the password, not the archive
                     break
                 if ch == '-':
                     negated = True
                     continue
-                if ch in 'ltvpzZ':
-                    # a listing / test / pipe / comment / zipinfo mode (`-qql`, `-Z1`; replay 17901b47 r2)
+                if ch in 'ltvpzZh' and not archive_seen:
+                    # a listing / test / pipe / comment / zipinfo mode (`-qql`, `-Z1`; replay 17901b47 r2); `h` is the
+                    # help (card f72e8f27, Viktor 43370 INFO: measured, `unzip -h e.zip`, `-hh`, `-oh` extract nothing)
                     listing = True
         if not listing or negated:
             cwd_writer(st, 'unzip', tree=True)
@@ -1526,7 +1537,9 @@ def tar_absolute(lt):
         if not t:
             continue
         if t.startswith('--'):
-            if _tar_long(t, '--absolute-paths', 5)[0] or _tar_long(t, '--absolute-names', 5)[0]:
+            # card f72e8f27: --ab is already --absolute-paths (measured, bsdtar 3.5.3: `tar -xf abs.tar --ab` wrote the
+            # member to its absolute path, rc 0; --a is ambiguous, rc 1), so the shortest prefix is 4 characters
+            if _tar_long(t, '--absolute-paths', 4)[0] or _tar_long(t, '--absolute-names', 4)[0]:
                 return True
         elif re.fullmatch(r'-[A-Za-z]+', t):
             for ch in t[1:]:
