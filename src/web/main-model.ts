@@ -744,7 +744,20 @@ export async function sweepModelHold(nowMs: number, deps: ModelDeps = liveModelD
             writeEffortSent(effortSentFileFor(deps.lastSentFile), held.effort, deps.now())
           }
         } catch (err) {
-          writeHold(deps.holdFile, held)
+          // Compare-and-restore (Viktor 43393 LOW 1): the send can take seconds (it waits for the ack), and in that
+          // window the owner may have cleared the hold (/model back, keep: the file is gone) or put a new one (a
+          // fresh set_at). Writing back the snapshot taken before the send brought a cancelled hold back to life,
+          // or replaced the owner's new hold with the old one. So only when the file still holds THIS hold (same
+          // set_at: every hold the owner writes gets a fresh one) and still carries the session this sweep recorded
+          // is that one field put back; the rest of the file stays as it is now (a later write of the gate's own,
+          // e.g. blocked_since, is kept).
+          // An applied_session check alone would not do: a new hold from /model records the live session too.
+          const cur = readHold(deps.holdFile).state
+          if (cur && cur.set_at === held.set_at && cur.applied_session === live.id) {
+            writeHold(deps.holdFile, { ...cur, applied_session: held.applied_session ?? null })
+          } else {
+            logger.warn({ session: live.id }, 'main-model: the hold changed while the re-send ran; the session mark is not put back')
+          }
           throw err
         }
         if (out?.confirmStuck && held.model) {
