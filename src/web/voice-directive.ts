@@ -1,4 +1,5 @@
-import { readFileSync, existsSync } from 'node:fs'
+import { existsSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { STORE_DIR, WEB_PORT } from '../config.js'
@@ -45,8 +46,31 @@ export function inboundIsAudio(kind: string | null | undefined, fileId: string |
   return AUDIO_KINDS.has(String(kind ?? '').trim().toLowerCase())
 }
 
+// One shell word, single-quoted: nothing inside it is expanded.
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+// Terminator of the quoted heredoc that carries the agent's answer text: the
+// fixed prefix plus a fresh random suffix on every call. A fixed word would be
+// in every prompt, so a quoted foreign text could carry it as a line of its
+// own, end the heredoc early and run the lines after it (Viktor 43605 INFO 1).
+export const TTS_HEREDOC_PREFIX = 'MARVEEN_TTS_VALASZ_VEGE_'
+
 // Build a ready-to-run TTS directive block injected after the STT transcript.
-// Returns null if the dashboard token cannot be read.
+// Returns null if there is no dashboard token file.
+//
+// The directive goes into the agent's prompt, so it must not carry the token's
+// VALUE (it would land in the transcript and with the model provider on every
+// spoken answer): the curl reads the file itself, by absolute path, the way
+// every other fleet recipe does (a relative path would give an empty Bearer
+// from a sub-agent's own cwd). Kernel 43594, Viktor 43599 LOW.
+//
+// The answer text goes in on stdin through a QUOTED heredoc, not as a
+// double-quoted shell word: a backtick or $(...) in the answer (a quoted
+// message, say) would otherwise run as a command (Viktor 43599 INFO 1).
+// chat_id, state_dir and voice_model are jq --arg values, single-quoted, so a
+// quote or backslash in a path cannot break the JSON or the shell line.
 export function buildTtsDirective(opts: {
   chatId: string
   stateDir: string
@@ -55,16 +79,19 @@ export function buildTtsDirective(opts: {
   try {
     const tokenPath = join(STORE_DIR, '.dashboard-token')
     if (!existsSync(tokenPath)) return null
-    const token = readFileSync(tokenPath, 'utf-8').trim()
     const { chatId, stateDir, voiceModel } = opts
-    // Escape stateDir for embedding in a jq string argument
-    const escapedStateDir = stateDir.replace(/'/g, "'\\''")
+    const end = TTS_HEREDOC_PREFIX + randomBytes(12).toString('hex')
     return (
       `\n\n[Hang válasz direktíva]: A fenti hangüzenetre HANGBAN válaszolj. ` +
-      `Amikor megvan a válaszod szövege, futtasd le ezt a parancsot (a szöveget JSON-escape-elve add meg a --arg-ban):\n` +
+      `Amikor megvan a válaszod szövege, futtasd le ezt a parancsot, a szöveget a két sor közé írva, ` +
+      `escape nélkül, ahogy van:\n` +
       `\`\`\`bash\n` +
-      `jq -n --arg t "A_VÁLASZOD_SZÖVEGE" '{"text":$t,"chat_id":"${chatId}","state_dir":"${escapedStateDir}","voice_model":"${voiceModel}"}' | ` +
-      `curl -s -X POST http://localhost:${WEB_PORT}/api/voice/tts -H "Content-Type: application/json" -H "Authorization: Bearer ${token}" -d @-\n` +
+      `jq -Rs --arg c ${shellQuote(chatId)} --arg s ${shellQuote(stateDir)} --arg m ${shellQuote(voiceModel)} ` +
+      `'{"text":rtrimstr("\\n"),"chat_id":$c,"state_dir":$s,"voice_model":$m}' <<'${end}' | ` +
+      `curl -s -X POST http://localhost:${WEB_PORT}/api/voice/tts -H "Content-Type: application/json" ` +
+      `-H "Authorization: Bearer $(cat ${shellQuote(tokenPath)})" -d @-\n` +
+      `A_VÁLASZOD_SZÖVEGE\n` +
+      `${end}\n` +
       `\`\`\`\n` +
       `Szöveges választ NE küldj -- CSAK a fenti curl-t futtasd le a hangküldéshez.`
     )
