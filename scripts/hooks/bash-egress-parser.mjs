@@ -517,7 +517,11 @@ function visitFrame(t, cp, par, k0, out, shift) {
     const x = t.substs[k]
     const runs = CMD_FRAMES.has(x.kind) || (x.kind === '${' && /^[\s|]$/.test(cp[x.inner[0]] ?? ''))
     if (runs) {
-      out.push({ start: shift + x.start, end: shift + x.end, inner: cp.slice(x.inner[0], x.inner[1]).join('') })
+      const raw = cp.slice(x.inner[0], x.inner[1]).join('')
+      // card f7d4ead8: bash removes the backslash of \` \\ \$ in a backtick body before it runs the body, so
+      // `a \`curl x\`` runs curl in a nested substitution; the body is classified as bash runs it
+      const inner = x.kind === '`' ? raw.replace(/\\([`\\$])/g, '$1') : raw
+      out.push({ start: shift + x.start, end: shift + x.end, inner })
       continue
     }
     if (x.kind !== '${') out.push({ start: shift + x.start, end: shift + x.end, inner: null }) // arithmetic: blanked

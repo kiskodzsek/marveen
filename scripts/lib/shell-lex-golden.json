@@ -2089,9 +2089,10 @@
    "why": "an escaped backtick does not end a backtick body: the quote closes at the last backtick, ls is a command",
    "input": "echo `echo a \\` b '` ; ls",
    "want": {
-    "cls": "ccccccccccccceecccqcccccc",
+    "cls": "ccccccccccccccccccqcccccc",
     "problems": [
-     "unterminated-quote-'"
+     "unterminated-quote-'",
+     "unterminated-`"
     ],
     "heredocs": [],
     "substs": [
@@ -2101,6 +2102,15 @@
       "end": 20,
       "inner": [
        6,
+       19
+      ]
+     },
+     {
+      "kind": "`",
+      "start": 13,
+      "end": 19,
+      "inner": [
+       15,
        19
       ]
      }
@@ -2151,12 +2161,21 @@
         false
        ],
        [
-        "`",
+        "\\` b '",
         13,
-        15,
-        true,
-        false
-       ],
+        19,
+        false,
+        true
+       ]
+      ]
+     },
+     {
+      "start": 16,
+      "end": 19,
+      "depth": 2,
+      "frame": "`",
+      "frameAt": 1,
+      "words": [
        [
         "b",
         16,
@@ -2328,6 +2347,114 @@
         "ls",
         14,
         16,
+        false,
+        false
+       ]
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "backtick-nested",
+   "why": "inside a backtick an escaped backtick nests: b is a command (card f7d4ead8, oracle matrix)",
+   "input": "echo `a \\`b\\` c` d",
+   "want": {
+    "cls": "cccccccccccccccccc",
+    "problems": [],
+    "heredocs": [],
+    "substs": [
+     {
+      "kind": "`",
+      "start": 5,
+      "end": 16,
+      "inner": [
+       6,
+       15
+      ]
+     },
+     {
+      "kind": "`",
+      "start": 8,
+      "end": 13,
+      "inner": [
+       10,
+       11
+      ]
+     }
+    ],
+    "segments": [
+     {
+      "start": 0,
+      "end": 18,
+      "depth": 0,
+      "frame": "top",
+      "frameAt": -1,
+      "words": [
+       [
+        "echo",
+        0,
+        4,
+        false,
+        false
+       ],
+       [
+        "`a \\`b\\` c`",
+        5,
+        16,
+        false,
+        true
+       ],
+       [
+        "d",
+        17,
+        18,
+        false,
+        false
+       ]
+      ]
+     },
+     {
+      "start": 6,
+      "end": 15,
+      "depth": 1,
+      "frame": "`",
+      "frameAt": 0,
+      "words": [
+       [
+        "a",
+        6,
+        7,
+        false,
+        false
+       ],
+       [
+        "\\`b\\`",
+        8,
+        13,
+        false,
+        true
+       ],
+       [
+        "c",
+        14,
+        15,
+        false,
+        false
+       ]
+      ]
+     },
+     {
+      "start": 10,
+      "end": 11,
+      "depth": 2,
+      "frame": "`",
+      "frameAt": 1,
+      "words": [
+       [
+        "b",
+        10,
+        11,
         false,
         false
        ]

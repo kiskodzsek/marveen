@@ -1203,6 +1203,8 @@ def script_cases():
             ('printf %s "`./measure.py`" "`./measure.py`" ; set -x', d),
             # a comment inside a backtick ends at the closing backtick: the command after it runs
             ('echo `echo a #` ; ./measure.py', d),
+            # card f7d4ead8 (oracle matrix): an escaped backtick inside a backtick nests, bash runs ./measure.py
+            ('echo `true \\`./measure.py\\``', d),
             ('bash -c ./measure.py', d),
             ('sudo bash -c ./measure.py', d),
             ('"$SHELL" -c ./measure.py', d),

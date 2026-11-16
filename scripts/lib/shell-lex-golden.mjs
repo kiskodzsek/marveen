@@ -58,6 +58,7 @@ const CASES = [
   ['backtick-escaped-backtick', "echo `echo a \\` b '` ; ls", 'an escaped backtick does not end a backtick body: the quote closes at the last backtick, ls is a command'],
   ['backtick-escaped-backslash', 'echo `echo a \\\\` ; ls', 'an escaped backslash before a backtick: that backtick ends the body, ls is a command'],
   ['ansi-c-escaped-quote-hash', "echo $'a\\'#'; ls", "in $'..' an escaped quote does not close: the # is string text (mutant dollarq-escape)"],
+  ['backtick-nested', 'echo `a \\`b\\` c` d', 'inside a backtick an escaped backtick nests: b is a command (card f7d4ead8, oracle matrix)'],
   ['ansi-c', "echo $'a\\'b;c'", "$'..' with an escaped quote"],
   ['ansi-c-escapes', "echo $'\\x2e/m\\056py\\u00e9\\cA\\q\\x'", 'hex, octal, \\u, \\c and unknown escapes are decoded'],
   ['dquote-dollar-end', 'echo "a$" b', 'a $ before the closing quote is a literal $'],
