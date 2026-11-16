@@ -2934,6 +2934,124 @@ def vni_word_list_not_loading_blocks(root):
     return 'nem futott le (ModuleNotFoundError)' in r
 
 
+# Klodel 43404 (Patrik private TG 18585): "ATNEZO: patrik-kerte-szuro-nelkul TG <n>" passes the idea gate only with the
+# plugin's proof that <n> is the owner's fresh message in this chat asking for an unfiltered answer; and an image whose
+# .ok KERES asks for an idea runs the idea gate although the text avoids the idea words. The ask below is SYNTHETIC
+# (same shape as TG 18585: no accents, a typo, "friss szemmel", "csak te"); the private text is not in the repo.
+def _why(ok, detail):
+    """A case result as a bool; the detail goes to stderr when it fails (a returned tuple would always be truthy)."""
+    if not ok:
+        print('   detail:', detail, file=sys.stderr)
+    return bool(ok)
+
+
+UNF_ASK = 'Teljesen friss szemmel mintha eloszor latnal.. csak te a modell adj 3 vallalkozasi lehetoseget'
+UNF_LINE = '\nATNEZO: patrik-kerte-szuro-nelkul TG 18585'
+
+
+def owner_asked(root, text=UNF_ASK, user=PRIV, chat=PRIV, age_s=60, mid='18585'):
+    at = (time.time() - age_s) * 1000
+    tg_state(root, senders=[{'chat_id': chat, 'message_id': mid, 'user_id': user, 'at': at}],
+             evidence=[{'chat_id': chat, 'message_id': mid, 'text': text, 'at': at}])
+
+
+def keres_image(root, keres):
+    kapu = os.path.join(root, 'store', 'kep-kapu')
+    os.makedirs(kapu, exist_ok=True)
+    img = os.path.join(root, 'valasz.png')
+    open(img, 'wb').write(b'\x89PNG')
+    open(os.path.join(kapu, 'valasz.png.ok'), 'w', encoding='utf-8').write(f'KERES: {keres}\n')
+    return img
+
+
+@case
+def unfiltered_proven_passes_whole_idea_gate(root):
+    # No ÖTLET-KAPU, no MAJSZTRO line, a refused direction named: Patrik asked for the model's answer unfiltered.
+    owner_asked(root)
+    rc, err = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet, szó szerint: ügynökség, kurzus.' + UNF_LINE})
+    return _why(rc == 0, err)
+
+
+@case
+def unfiltered_negatives_blocked(root):
+    res = {}
+    owner_asked(root, user=BALAZS)                                # not the owner
+    res['not_owner'] = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})
+    owner_asked(root, text='Mi a helyzet a kampánnyal? adj 3 otletet')  # no unfiltered ask
+    res['no_ask'] = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})
+    owner_asked(root, age_s=7 * 3600)                             # too old
+    res['stale'] = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})
+    owner_asked(root, chat=GROUP)                                 # asked in another chat
+    res['other_chat'] = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})
+    at = (time.time() - 60) * 1000                                 # sender row here, evidence row in another chat
+    tg_state(root, senders=[{'chat_id': PRIV, 'message_id': '18585', 'user_id': PRIV, 'at': at}],
+             evidence=[{'chat_id': GROUP, 'message_id': '18585', 'text': UNF_ASK, 'at': at}])
+    res['evidence_other_chat'] = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})
+    tg_state(root, senders=[{'chat_id': GROUP, 'message_id': '18585', 'user_id': PRIV, 'at': at}],
+             evidence=[{'chat_id': PRIV, 'message_id': '18585', 'text': UNF_ASK, 'at': at}])
+    res['sender_other_chat'] = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})
+    owner_asked(root)
+    res['other_id'] = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.\nATNEZO: patrik-kerte-szuro-nelkul TG 18586'})
+    res['no_tg'] = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.\nATNEZO: patrik-kerte-szuro-nelkul kérte'})
+    res['not_line_start'] = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet. Megjegyzés:' + UNF_LINE.replace('\n', ' ')})
+    tg_state(root)                                                 # no records at all
+    res['no_record'] = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})
+    bad = {k: v for k, v in res.items() if v[0] != 2}
+    explained = all('43404' in res[k][1] for k in ('not_owner', 'no_ask', 'stale', 'other_chat', 'evidence_other_chat',
+                                                    'sender_other_chat', 'other_id', 'no_tg', 'no_record'))
+    return _why(not bad and explained, (bad, {k: v[1][:160] for k, v in res.items() if '43404' not in v[1]}))
+
+
+@case
+def unfiltered_ask_folded_accents_and_case(root):
+    out = []
+    for ask in ('Kérlek SZŰRŐ  NÉLKÜL válaszolj', 'szuro nelkul kerem', 'Előzmény nélkül, friss szemmel'):
+        owner_asked(root, text=ask)
+        out.append(run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})[0])
+    owner_asked(root, text='Csak tegnap kérdeztem, adj ötletet')   # "csak te" needs a word end: "csak tegnap" is no ask
+    out.append(run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})[0])
+    return _why(out == [0, 0, 0, 2], out)
+
+
+@case
+def idea_words_vallalkozasi_lehetoseg_trigger(root):
+    rc, err = run_idea(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három vállalkozási lehetőség, amibe belekezdhetsz.'})
+    rc2, _ = run_idea(root, {'chat_id': GROUP, 'text': 'Két üzleti lehetőség jött.'})
+    return _why(rc == 2 and rc2 == 2 and 'ÖTLET-KAPU' in err, (rc, rc2))
+
+
+@case
+def keres_idea_image_runs_idea_gate(root):
+    # The detour of TG 18590/18591: the answer on an image, a text without the idea words.
+    img = keres_image(root, 'Patrik 3 vállalkozási lehetőséget kért (TG 18585), ez az')
+    rc, err = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Itt a válasz, szó szerint.', 'files': [img]})
+    owner_asked(root)
+    rc_ok, err_ok = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Itt a válasz, szó szerint.' + UNF_LINE, 'files': [img]})
+    return _why(rc == 2 and 'KERES' in err and rc_ok == 0, (rc, err[:200], rc_ok, err_ok[:200]))
+
+
+@case
+def keres_without_idea_or_without_ok_private_media_passes(root):
+    # Patrik TG 18439/18448/18453: private media is not held by the media checks; a non-idea KERES or no .ok stays free.
+    img = keres_image(root, 'Patrik a karácsonyi borítót kérte')
+    a = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Itt a borító.', 'files': [img]})[0]
+    os.unlink(os.path.join(root, 'store', 'kep-kapu', 'valasz.png.ok'))
+    b = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Itt a kép.', 'files': [img]})[0]
+    c = []
+    for k in ('Patrik új irányt kért', 'Vazolj 5 potens uzleti iranyt', 'üzleti ötletet kért', 'Üzleti lehetőség',
+              'vállalkozásba kezdeni'):
+        keres_image(root, k)
+        c.append(run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Itt a kép.', 'files': [img]})[0])
+    d = []
+    # Measured false hits of a bare "irány"/"ötlet" on the real .ok files (style, feedback, a caption idea), and irányít-.
+    for k in ('Apple-irányú nyitóoldal', 'amilyen irányba mentek', 'nem rossz irány de', 'adj ötletet a szöveghez',
+              'képek a termékötletről', 'Patrik az irányítópultot kérte'):
+        keres_image(root, k)
+        d.append(run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Itt a kép.', 'files': [img]})[0])
+    return _why((a, b, c, d) == (0, 0, [2] * 5, [0] * 6), (a, b, c, d))
+
+
+
 def main():
     bad = 0
     for fn in CASES:
