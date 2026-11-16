@@ -480,6 +480,16 @@ BLOCK += ["echo '\"s3c\"urity dump-keychain' | tr a a | bash", "echo '\"s3c\"uri
           "echo '\"s3c\"urity dump-keychain' | \"sh\"", "echo '\"s3c\"urity dump-keychain' |\tbash",
           "echo '\"s3c\"urity dump-keychain' | bash -s", "bash <<<\t'\"s3c\"urity dump-keychain'",
           "(echo '\"s3c\"urity dump-keychain' | bash)", "echo '\"s3c\"urity dump-keychain' | bash>/dev/null"]
+# card 74586987 (Viktor 42794 INFO): an UNQUOTED word a shell reads on stdin (the first three passed the live gate
+# d85d82e3, measured 2026-11-16), source /dev/stdin and . /dev/fd/0 as stdin readers, a group before the pipe
+BLOCK += ['echo s3curity dump-keychain | bash', 'echo s3curity find-generic-password -w | sh',
+          'echo s3curity dump-keychain | . /dev/fd/0', 'echo s3curity export -o x | source /dev/stdin',
+          'printf "%s %s\\n" s3curity dump-keychain | bash', 'echo -n s3curity dump-keychain | tee /dev/null | zsh',
+          '(echo s3curity dump-keychain) | bash', '{ echo s3curity dump-keychain; } | bash',
+          'echo s3c\\urity dump-keychain | bash', 'echo /usr/bin/s3curity dump-keychain | bash',
+          "echo '\"s3c\"urity dump-keychain' | source /dev/stdin", "echo '\"s3c\"urity dump-keychain' | . /dev/fd/0",
+          # mutation r2 w2: an escaped blank keeps one word, which only its own line shows at a command position
+          "printf '%s\\n' s3curity\\ dump-keychain x | bash"]
 # $'...' escapes as bash 3.2 reads them (each measured with the proxy rule): one hex digit before a non-hex, two octal
 # digits, hex letters in both cases
 BLOCK += ["bash -c $'s3curity\\x9\\x20dump-keychain'", "bash -c $'s3curity\\11dump-keychain'",
@@ -514,6 +524,11 @@ ALLOW = [
     'echo ' + ' '.join("'\"a%d\"'" % i for i in range(64)) + ' ' + ' '.join("'b%d'" % i for i in range(10)) + ' | bash',
     'bash -c ' + ' '.join("'\"a%d\"'" % i for i in range(64)) + ' ' + ' '.join("'b%d'" % i for i in range(10)),
     'ls -la',
+    # card 74586987: the unquoted words are read only in the pipeline that feeds a shell on stdin
+    'echo s3curity dump-keychain | cat', 'echo s3curity dump-keychain; echo hi | bash',
+    'echo hi | bash; echo s3curity dump-keychain', '(echo s3curity dump-keychain); echo hi | bash',
+    'echo s3curity dump-keychain | source ./notes', 'echo s3curity dump-keychain | . /dev/stdin2',
+    'echo s3curity dump-keychain | bash.x', 'echo s3curity dump-keychain >| bash', 'echo the s3curity team | bash',
     # card d11364a4: a payload taken out and judged on its own stays allowed when it reads no secret
     'bash -c "echo \\"s3curity\\" find-generic-password"',
     "bash -c 'grep -c dump-keychain notes.txt'",
@@ -1247,6 +1262,70 @@ def script_cases():
             # card fae0712e: a data command's mask stops at its own frame: a nested command's quotes are its own
             ("echo $(awk 'BEGIN{system(\"./measure.py\")}')", d),
             ("echo \"$(awk 'BEGIN{system(\"./measure.py\")}')\"", d),
+            # card 74586987 (Viktor 42794 INFO; the first eight passed the live gate d85d82e3, measured 2026-11-16): a
+            # pipeline into a shell runs what it prints, quoted or not
+            ('echo ./measure.py | bash', d),
+            ('echo "./measure.py" | bash', d),
+            ("printf %s './measure.py' | tee /dev/null | sh", d),
+            ('echo -n "./measure.py" | source /dev/stdin', d),
+            ("printf '%s\\n' 'python3 measure.py' | tee /dev/null | bash", d),
+            ('echo python3 measure.py | sh', d),
+            ("echo 'python3 measure.py' | bash -s", d),
+            ('echo ./dump.sh | zsh', d),
+            ('echo ./measure.py | . /dev/stdin', d),
+            ('echo ./measure.py | source /dev/fd/0', d),
+            ('echo ./measure.py | source /proc/self/fd/0', d),
+            ("echo ./measure.py | source '/dev/stdin'", d),
+            ('echo ./measure.py | bash /dev/stdin', d),
+            ('echo ./measure.py | bash -', d),
+            ('echo ./measure.py | env bash', d),
+            ('echo ./measure.py | sudo -n bash', d),
+            ('echo ./measure.py |& bash', d),
+            ('echo ./measure.py |bash', d),
+            ('echo ./measure.py | bash 2>/dev/null', d),
+            ('echo ./measure.py | "$SHELL"', d),
+            ('echo ./measure.py | /bin/bash', d),
+            ('echo ./measure.py | tr a a | bash', d),
+            ('echo sh dump.sh | bash', d),
+            ('echo source measure.py | bash', d),
+            ('echo cd sub \\; ./deep.py | bash', d),  # an escaped ; is printed, the shell reads it as a separator
+            ('cd sub; echo ./deep.py | bash', d),  # a cd before the pipeline moves where the word is looked up
+            ('echo python3 -m measure | bash', d),
+            # a word that names the file at no command position: printf puts it after the interpreter
+            ("printf 'python3 %s\\n' measure.py | bash", d),
+            ('X=./measure.py; echo $X | bash', d),  # an assignment in the text (expand())
+            # a group right before the pipe is read whole
+            ('(echo ./measure.py) | bash', d),
+            ('{ echo ./measure.py; } | bash', d),
+            ('true; { echo ./measure.py; } | bash', d),
+            ('( (echo ./measure.py) ) | bash', d),
+            ('(echo ./measure.py) | (cat) | bash', d),
+            ('(echo a; echo ./measure.py) | bash', d),
+            ('{ echo a; echo ./measure.py; } |& sh', d),
+            # mutation round r2 survivors: a quoted ")" leaves the group's real closer unmatched: read from the text's
+            # start, not after it (g3); a quoted "(" inside a { } group is popped, not taken for the brace's opener
+            # (g5); a word with an escaped blank is a command line of its own (w2); a word's blank-separated pieces
+            # are looked up, when only printf's format puts them after the interpreter (w3)
+            ('(echo ./measure.py; echo ")") | bash', d),
+            ('{ echo ./measure.py; echo "("; } | bash', d),
+            ("printf '%s %s\\n' python3 'measure.py x' | bash", d),
+            # a heredoc body's pipes stay pipelines unless the heredoc is data (data_body_pipes_masked): a shell or a
+            # non-data recipient, an unquoted delimiter, a redefined recipient, the look-alike agent-msg.sh, something
+            # after the operator on its line, a second heredoc in the command
+            ("bash <<'EOF'\necho ./measure.py | bash\nEOF", d),
+            ("cat <<'EOF'\necho ./measure.py | bash\nEOF", d),
+            ("curl -d @- http://h <<J\necho ./measure.py | bash\nJ", d),
+            ("curl() { bash; }; curl -d @- http://h <<'J'\necho ./measure.py | bash\nJ", d),
+            ("bash agent-msg.sh dave v - <<'M'\necho ./measure.py | sh\nM", d),
+            ("curl -d @- http://h <<'J' -o out\necho ./measure.py | bash\nJ", d),
+            ("curl -d @- http://h <<'J' 3<<'K'\necho ./measure.py | bash\nJ\nx\nK", d),
+            ("x=$(curl -d @- http://h <<'J'\necho ./measure.py | bash\nJ\n)", d),  # only a top-level command's heredoc
+            ("cd /tmp\nbash scripts/agent-msg.sh dave v - <<'M'\necho " + d + "/measure.py | sh\nM", AM_ROOT),
+            ('{ echo a; echo python3 -m measure; } | bash', d),  # each command's words joined apart (not "a echo ...")
+            ('echo "$(echo a)" ./measure.py | bash', d),  # a substitution's ")" before the pipe is no group start
+            # over-read on purpose: a word that names a keychain-reading file in a pipeline into a shell
+            ('echo hi measure.py | bash', d),
+            ('cat measure.py | bash', d),
         ]
         prose = 'mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
         allow = [
@@ -1477,6 +1556,36 @@ def script_cases():
             ("echo \"$(( (1) ))\" 'python3 measure.py'", d),
             ('echo $"python3 measure.py"', d),
             ("echo 'python3 measure.py' \\\n'x'", d),
+            # card 74586987: only a pipeline that feeds a shell on stdin, only that pipeline, only the words before it
+            ('echo ./measure.py | cat', d),
+            ('echo ./list.py | bash', d),
+            ('echo measure.py | grep m', d),
+            ('echo measure.py | tee log.txt', d),
+            ('grep -l x measure.py | wc -l', d),
+            ('echo hi | bash', d),
+            ('echo ./measure.py; echo hi | bash', d),
+            ('echo ./measure.py\necho hi | bash', d),
+            ('echo ./measure.py && echo hi | bash', d),
+            ('echo hi | bash; echo ./measure.py', d),
+            ('echo hi | bash ./measure.py.txt', d),
+            ('(echo ./measure.py); echo hi | bash', d),  # the group ends an earlier command, not this pipeline
+            ('{ echo ./measure.py; }; echo hi | bash', d),
+            ('echo ./measure.py >| bash', d),  # noclobber redirection, no pipe
+            ('echo ./measure.py || bash', d),  # an or-list, no pipe
+            ('echo ./measure.py | bashful', d),
+            ('echo ./measure.py | source ./notes.py', d),  # source a file: no stdin reader
+            ('echo ./measure.py | source /dev/stdin.bak', d),
+            # replay r2 (a card comment of this card blocked as secret-read): prose in the body of a quoted heredoc
+            # into a data recipient is no pipeline, with steps before it the data-heredoc walk does not take (ID=)
+            ('T="Authorization: Bearer x"; ID=$(curl -s -H "$T" http://h/k | python3 -I -c \'print(1)\')\n'
+             'curl -s -X POST "http://h/k/$ID/c" -H "$T" --data-binary @- <<\'JSON\'\n'
+             '{"content":"unquoted echo ' + fix('s3curity') + ' dump-keychain | bash, echo ./measure.py | bash"}\n'
+             'JSON', d),
+            ("git commit -F - <<'MSG'\nfix: echo " + fix('s3curity') + " dump-keychain | bash is read now\nMSG", d),
+            ("curl -d @- http://h <<'J'\necho ./measure.py | bash\nJ", d),
+            ("bash " + AM_ROOT + "/scripts/agent-msg.sh dave v - <<'M'\necho ./measure.py | sh\nM", d),
+            ('echo ./measure.py | . /dev/stdinx', d),
+            ('echo ./measure.py | dot /dev/stdin', d),
         ]
         for cmd, cwd in block:
             code, err = bash_in(cmd, cwd)
@@ -1488,6 +1597,17 @@ def script_cases():
             code, err = bash_in(cmd, cwd)
             if code != 0:
                 fails.append(f'script: should allow (got {code}): {cmd[:80]!r} {err[:120]}')
+        # card 74586987: with the hook's stdout a FILE, /dev/stdout is no script of the command (it took /dev/fd/1 for
+        # a regular file, could not read it, and blocked with PermissionError; found by the fleet replay)
+        # write-only, as the replay worker's file was (mutation r2 d1: a read-write file let the gate read /dev/fd/1,
+        # empty, and allow, so turning the /dev skip off survived)
+        with open(os.path.join(d, 'hook-stdout.txt'), 'wb') as out:
+            p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps(
+                {'tool_name': 'Bash', 'tool_input': {'command': 'echo x | tee /dev/stdout | bash'}, 'cwd': d}).encode(),
+                stdout=out, stderr=subprocess.PIPE, env={'PATH': '/usr/bin:/bin'}, timeout=20)
+        if p.returncode != 0:
+            fails.append(f'script: /dev/stdout with a file stdout should allow (got {p.returncode}): '
+                         f'{p.stderr.decode()[:160]}')
         # the cap (MAX_SCRIPTS = 10): ten clean files pass, an eleventh blocks instead of going unread
         for i in range(11):
             w(f'c{i}.py', 'print(1)\n')
@@ -1702,6 +1822,12 @@ def script_cases():
             # 10 000 chars took 2.5 s in segments_of() unbounded, 1 000 x `f(` 255 s.
             ('echo $(true) ' * 64 + 'x ' * 20000, 0), ('echo `true` ' * 64 + "'a; ./measure.py' " * 2000, 0),
             ('f(' * 64 + ' x' * 5000, 0), ('f(' * 1000, 0), ('$(' * 64 + ')' * 64, 0),
+            # card 74586987: the pipeline walk stays linear: a chain of groups, many pipes after one stop, nested
+            # groups each piped again, a long blank run before a "}"; a repeated word is looked up once; past MAX_TRIES
+            # distinct lookups it blocks (fail-closed), fast. ('(x)|bash ' * 10000 blocked on the base too: bash's words)
+            ('(x)|bash ' * 10000, 2), ('echo a ' + '| bash ' * 20000, 0), ('(' * 5000 + 'a' + ')|bash' * 5000, 0),
+            ('true;' + ' ' * 50000 + '} | bash' * 5000, 0), ('{ a; }|bash;' * 10000, 0), ('echo ' + 'a ' * 20000 + '| bash', 0),
+            ('echo ' + ' '.join('a%d' % i for i in range(5000)) + ' | bash', 2),
         ]
         for cmd, want in payload_redos:
             t = _t.monotonic()
@@ -1724,7 +1850,7 @@ def script_cases():
             fails.append(f'script: 30 000 interpreter calls took {took:.1f} s (want under 2 s)')
         corpus_fails, corpus_n = corpus_cases(d)
         fails += corpus_fails
-        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos) + 6 + corpus_n + 1
+        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos) + 6 + corpus_n + 1 + 1
 
 
 def corpus_cases(d):
