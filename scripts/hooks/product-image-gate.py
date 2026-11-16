@@ -1256,11 +1256,18 @@ def idea_majsztro_check(t):
 # "ATNEZO: patrik-kerte-szuro-nelkul TG <n>". It passes the whole idea gate only when message <n> is the OWNER's
 # (inbound-senders.jsonl: same chat, user_id = the owner), at most UNFILTERED_MAX_AGE_S old, and its text
 # (inbound-evidence.jsonl, the plugin's record, never the sent text) asks for an unfiltered answer: one of
-# UNFILTERED_ASK, matched without accents and case (Patrik types without accents). No record = no pass (fail closed).
+# UNFILTERED_ASK, matched without accents and case (Patrik types without accents), not negated ("ne", "nem", "soha"
+# in the UNFILTERED_NEG_WINDOW characters before it). No record = no pass (fail closed). Viktor 43481 LOW 1: one ask
+# passes at most UNFILTERED_MAX_USES messages (an answer may take a few), each use a reply_marks.reserve_once token
+# spent only when the whole hook passes; "csak te" and "friss szem" alone were too wide ("ezt csak te tudod",
+# "friss szemszögből").
 ATNEZO_UNFILTERED_RE = re.compile(r'(?mi)^\s*ATN[EÉ]Z[OŐ]:\s*patrik-kerte-sz[uű]r[oő]-n[eé]lk[uü]l\b[ \t]*(.*)$')
 ATNEZO_UNFILTERED_TG = re.compile(r'^TG\s*(\d{1,12})\b', re.I)
-UNFILTERED_ASK = ('szuro nelkul', 'szures nelkul', 'szuretlen', 'friss szem', 'csak te ', 'eloszor beszel',
+UNFILTERED_ASK = ('szuro nelkul', 'szures nelkul', 'szuretlen', 'friss szemmel', 'eloszor beszel',
                   'elozmeny nelkul', 'elozmenyek nelkul')
+UNFILTERED_NEG = re.compile(r'(?<!\w)(?:ne|nem|soha)(?!\w)')
+UNFILTERED_NEG_WINDOW = 25
+UNFILTERED_MAX_USES = 3
 UNFILTERED_MAX_AGE_S = 6 * 3600
 
 
@@ -1291,10 +1298,18 @@ def unfiltered_ask_proof(chat, tg_id, now=None):
         return f'a TG {tg_id} nem Patrik friss (max. {UNFILTERED_MAX_AGE_S // 3600} órás) üzenete ebben a chatben'
     for r in _jsonl_rows('inbound-evidence.jsonl'):
         if norm_chat(r.get('chat_id')) == chat and str(r.get('message_id')) == tg_id:
-            body = fold(str(r.get('text') or '')) + ' '
-            if any(k in body for k in UNFILTERED_ASK):
+            body = fold(str(r.get('text') or ''))
+            if any(unfiltered_asked(body, k) for k in UNFILTERED_ASK):
                 return None
-    return f'a TG {tg_id} szövege nem kér szűrő nélküli választ (' + ', '.join(k.strip() for k in UNFILTERED_ASK) + ')'
+    return (f'a TG {tg_id} szövege nem kér szűrő nélküli választ (tagadás nélkül: ' + ', '.join(UNFILTERED_ASK) + ')')
+
+
+def unfiltered_asked(body, phrase):
+    """True if the folded <body> holds <phrase> at a word start with no negation shortly before it."""
+    for m in re.finditer(r'(?<!\w)' + re.escape(phrase), body):
+        if not UNFILTERED_NEG.search(body[max(0, m.start() - UNFILTERED_NEG_WINDOW):m.start()]):
+            return True
+    return False
 
 
 def unfiltered_check(t, chat):
@@ -1313,7 +1328,11 @@ def unfiltered_check(t, chat):
         except Exception as e:  # an unreadable record is no proof (fail closed)
             err = f'a plugin-napló nem olvasható ({type(e).__name__})'
         if err is None:
-            return None
+            chat_n = norm_chat(chat)
+            for i in range(UNFILTERED_MAX_USES):
+                if reply_marks.reserve_once(f'UNFILTERED-ASK:{chat_n}:{tg.group(1)}:{i}'):
+                    return None
+            err = f'a TG {tg.group(1)} szűrő nélküli kérésére már {UNFILTERED_MAX_USES} üzenet ment; új kérés kell'
         why.append(err)
     return ('ÖTLET-KAPU (Klodel 43404): "ATNEZO: patrik-kerte-szuro-nelkul TG <n>" csak akkor megy, ha a TG <n> Patrik '
             'friss üzenete ebben a chatben, és szűrő nélküli választ kér. Most: ' + '; '.join(why) + '.')
