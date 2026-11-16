@@ -792,13 +792,26 @@ function hasExternalLiteral(text, vendorHosts, vendorDomains) {
 //   - a leading `in`: a case header broken before it (`case $x` NEWLINE `in a) curl ...`) leaves a
 //     span that starts with `in` (Viktor L1, decfb196).
 // Fail-closed direction: a word wrongly stepped over only lets a LATER word be judged as curl.
+// subscriptEnd: the index of the word that closes an array subscript the lexer split at a blank (`V[0 ]=x`), when
+// it ends in `]=` / `]+=` within 8 words; -1 otherwise (Viktor 43724 LELET 1).
+function subscriptEnd(mw, i) {
+  for (let k = i + 1; k < mw.length && k < i + 8; k++) {
+    if (mw[k].includes(']')) return /^[^\]]*\]\+?=/.test(mw[k]) ? k : -1
+  }
+  return -1
+}
 function commandWordAt(mw) {
   let i = 0
   while (i < mw.length) {
     const w = mw[i]
     const base = w.includes('/') ? w.split('/').pop() : w
     if (WRAPPERS.has(base)) i = skipWrapperOptions(mw, i + 1, base)
-    else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || PREFIX_WORDS.has(w)) i++
+    // NAME+=value is an assignment prefix too (`V+=x curl <url>` runs curl; card 772cd001: read as the command word it
+    // hid the curl, and with a variable command word every `A+=$B` span was expanded as a command). An array element
+    // (`V[0]=x curl <url>`, Viktor 43715 LELET 1) is an assignment prefix in bash as well.
+    else if (/^[A-Za-z_][A-Za-z0-9_]*(?:\[[\s\S]*\])?\+?=/.test(w) || PREFIX_WORDS.has(w)) i++
+    // a subscript the lexer split at a blank (`V[0 ]=x curl`, `V[ 0]=x curl`): bash still reads one assignment
+    else if (/^[A-Za-z_][A-Za-z0-9_]*\[[^\]]*$/.test(w) && subscriptEnd(mw, i) !== -1) i = subscriptEnd(mw, i) + 1
     else if (w === 'case') { const at = mw.indexOf('in', i + 1); i = at === -1 ? mw.length : at + 1 }
     else if (w === 'in' && i === 0) i++
     else if (w === 'function') i += mw[i + 2] === '{' ? 3 : 2
@@ -1041,6 +1054,34 @@ function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
     const cStrings = shellCStrings(mw)
     const evalText = evalString(mw, i)
     if (evalText !== null) cStrings.push(evalText)
+    // Card 772cd001: a command word that is a variable (`f=curl; $f <url>`, `for f in curl; do $f <url>; done`,
+    // `f=bash; $f -c '...'`, `f=eval; $f curl <url>`) passed: every rule below read the lexer's word, `$f`. Bash runs the
+    // EXPANDED word (split, so `f="curl -s"` runs curl), so each reading (the plain one and every loop reading) is lexed
+    // and its own command word judged, here for -c / eval and in the walk below for curl and one-liners. A word that
+    // stays unresolved (set in an earlier Bash call, the environment, `read`, a substitution) or a loop reading past
+    // the variant limit cannot be read; with an external URL literal in the command it denies (`command-unresolved`).
+    const cmdVar = i < mw.length && mw[i].includes('$')
+    let plain = null, variants = null, cmdSw = null, cmdUnresolved = false
+    if (cmdVar) {
+      plain = expand(text0, env, loopOrder(loops))
+      variants = loopVariants(text0, env, loops)
+      if (variants === null) cmdUnresolved = true
+      // Unresolved is judged on the variant readings only (n > 0): in the plain reading a loop variable is still a $NAME
+      // (`for f in curl; do $f ...`). There is always at least one variant, with or without a loop, so ANY command word
+      // still holding a $ there (`$HOME/bin/x`, `$CURLBIN`, a positional `"$@"`) denies with an external URL literal
+      // anywhere in the command (Viktor 43715 INFO 2: a conservative false positive, kept on purpose).
+      cmdSw = [plain, ...(variants ?? [])].map((text, n) => {
+        const sw = shellWords(text)
+        const a = commandWordAt(sw)
+        if (a < sw.length) {
+          if (n > 0 && sw[a].includes('$')) cmdUnresolved = true
+          for (const str of shellCStrings(sw)) if (!cStrings.includes(str)) cStrings.push(str)
+          const ev = evalString(sw, a)
+          if (ev !== null && !cStrings.includes(ev)) cStrings.push(ev)
+        }
+        return { sw, a }
+      })
+    }
     if (cStrings.length && depth < 4) {
       const inner = { env, loops, externalLiteral: outer.externalLiteral }
       for (const str of cStrings) { const res = classify(str, depth + 1, vendorHosts, vendorDomains, inner); if (res.deny) return res }
@@ -1048,6 +1089,7 @@ function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
       return { deny: true, reason: 'shell-c-too-deep', hosts: [] }
     }
     if (i >= mw.length) continue
+    if (cmdUnresolved && outer.externalLiteral) return { deny: true, reason: 'command-unresolved', hosts: [] }
     // The program arrives on stdin (heredoc, here-string, or the previous span of a pipe): judge the
     // program text itself, with the same localhost / private / vendor rules as everywhere else.
     // The words are read with this command's assignments expanded: a quoted word is a word now (card
@@ -1077,17 +1119,23 @@ function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
     // Every loop reading AND the plain one: a loop variable can share its name with an assignment
     // elsewhere in the command (`for u in <local>; do ...; done; u=<external>; curl "$u"`), and a
     // loop-only reading would let the assigned value go unjudged.
-    const plain = expand(text0, env, loopOrder(loops))
-    const variants = loopVariants(text0, env, loops)
+    if (!cmdVar) {
+      plain = expand(text0, env, loopOrder(loops))
+      variants = loopVariants(text0, env, loops)
+    }
     // The two unresolved-destination reserves below read the loop readings' curl argv: noted here from the argv this
     // walk already lexes (card f2a0f976: lexing each reading again per reserve made 64 values x 4 500 curl spans 3x
     // slower, 3.6 s), and applied after the walk, in the order they had (an external host found in ANY reading wins).
     let varUnresolved = false, opUnresolved = false
     for (const [n, text] of [plain, ...(variants ?? [])].entries()) {
-      const cmd = mw[i].split('/').pop()
+      // A variable command word: this reading's own lexed words and command word (772cd001, see above).
+      const rd = cmdVar ? cmdSw[n] : null
+      const cw = rd ? rd.sw : mw
+      const ci = rd ? rd.a : i
+      const cmd = (cw[ci] ?? '').split('/').pop()
       let target = null
       if (cmd === 'curl') target = 'curl'
-      else if (INTERPRETER.test(cmd) && mw.slice(i + 1).some((w) => CODE_FLAG.has(w)) && NET_PRIMITIVE.test(text)) target = 'one-liner'
+      else if (INTERPRETER.test(cmd) && cw.slice(ci + 1).some((w) => CODE_FLAG.has(w)) && NET_PRIMITIVE.test(text)) target = 'one-liner'
       if (!target) continue
       // curl: the destination is read from the ARGV only. A URL inside a flag VALUE (-d, -e, -H, a
       // JSON payload) is data sent to wherever curl connects, not a destination. The fleet reports PR
@@ -1095,7 +1143,7 @@ function classifyRead(command, depth, vendorHosts, vendorDomains, scope) {
       // with URL_RE denied exactly that (#1514 re-review, measured on the merged head). An interpreter
       // one-liner has no argv to read, so its code is still scanned with URL_RE.
       let found
-      const argv = target === 'curl' ? shellWords(text) : null
+      const argv = target === 'curl' ? (rd ? rd.sw : shellWords(text)) : null
       const at = argv ? argv.findIndex((w) => w.split('/').pop() === 'curl') : -1
       if (at !== -1) found = curlDestinations(argv.slice(at + 1))
       else found = [...text.matchAll(URL_RE)].map((m) => m[0]).filter(isExternal).map(hostOf)
