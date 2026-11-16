@@ -25,20 +25,22 @@ P1 (vásárlás/belépés nem működik). Azonnal Klodel (és Viktor, ha biztons
 ## 4. Javítás: SORREND (Tanulság 12)
 Mindegyik lépés külön, kimondott Patrik "mehet" kell, kivéve az előre adott incidens-felhatalmazást (CLAUDE.md "Kiadás és éles üzem").
 
+Előfeltétel (Viktor, 2026-11-16): ez a sorrend CSAK akkor áll, ha Viktor biztonsági ítélete (2. pont 6.) NEM gyanú. Gyanú IGEN vagy ISMERETLEN esetén a restart nem javítás: a kulcscsere és a régi kulcsok visszavonása az első (kieses-runbook.md sorrendje).
+
 **ELSŐ: a Supabase-projekt újraindítása (Patrik indítja a dashboardon).**
 - Miért első: 2026-10-12-n ez megszüntette a hibát (16:44:30 indítás, 16:47:05 kész; admin-belépés 16:48, az eredeti `sb_secret_` 5/5 próbán működött), és nincs mellékhatása a kulcsokra.
 - A mi tokenünk nem tudja elindítani (403, nincs project_admin_write; Tanulság 12). Hogy kapjon-e ilyen jogot, Viktor és Patrik döntése: NEM döntöttük el.
 - Hatás: rövid kiesés a restart alatt (a hossza 10-12-n: ~2,5 perc, egyetlen mérés).
 - Utána: 2. pont próbái, Vercel log, `/vasarlas/*` füstpróba.
 
-**MÁSODIK, csak ha a restart nem segít: kulcscsere** (2026-10-12: legacy `service_role` kulcsra, `SUPABASE_SECRET_KEY` Vercel env + redeploy, pipe-ban, sehol nem mentve). Mellékhatásokkal jár, ezért előtte a kulcs-felhasználók listája (Tanulság 11):
+**MÁSODIK, csak ha a restart nem segít: kulcscsere** (2026-10-12: legacy `service_role` kulcsra, `SUPABASE_SECRET_KEY` Vercel env + redeploy, pipe-ban, sehol nem mentve). Legacy `service_role` kulcsra váltva az hosszú lejáratú JWT, egyenként nem vonható vissza, csak a JWT-titok cseréjével (Viktor szerint a Supabase-dokumentáció alapján; NEM mért): ez ideiglenes megoldás, a visszaállás `sb_secret_` kulcsra határidős teendő a helyreállás után. Mellékhatásokkal jár, ezért előtte a kulcs-felhasználók listája (Tanulság 11):
 - PostgREST (szerveroldali kliensek);
 - edge functionök: a support-chat a kulcs AZONOSSÁGÁT ellenőrzi (`SUPABASE_SECRET_KEYS`), cserénél eltört (AI-súgó);
-- HMAC-származtatás a `SUPABASE_SECRET_KEY`-ből: `src/lib/auth/post-purchase-link.ts`, `src/lib/auth/email-proof.ts`, `src/lib/print-renderer/render-auth.ts` (a csere előtt kiadott belépőlinkek, jelszó-visszaállító sütik, 10 perces render-linkek érvénytelenek);
+- HMAC-aláírás: a belépőlink (`src/lib/auth/post-purchase-link.ts`), az email-proof (`email-proof.ts`) és a render-token (`src/lib/print-renderer/render-auth.ts`) a `linkSigningSecrets()`-en át a `MARABEL_LINK_SIGNING_SECRET`-tel ír alá, ha az be van állítva, és csak nélküle esik vissza a `SUPABASE_SECRET_KEY`-re (`link-signing.ts`, marabel main f682d3868; Viktor átnézte). MÉRVE 2026-11-16 (Pulzus, Vercel env-metaadat, érték nélkül): a `MARABEL_LINK_SIGNING_SECRET` production, sensitive, frissítve 2026-10-14 15:36, tehát a kulcscsere ezeket NEM érvényteleníti. Ha a változó hiányzik vagy 32 karakternél rövid, a csere a kiadott belépőlinkeket, a jelszó-visszaállító sütiket és a 10 perces render-linkeket érvényteleníti: csere előtt újra kell mérni (`GET /v9/projects/<prj>/env`, csak key/target/type/updatedAt).
 - külső hívók: NEM mért lista, a csere előtt Dave-vel kimérendő.
 A GUEST_AUTH_SECRET-re épülők (vendég/mesélő session, leiratkozó link, question-prompt token, rate-limit) nem érintettek.
 
-A jóváhagyás-kérés a pontos lépést nevezi meg a CLAUDE.md "JÓVÁHAGYÁS KELL" alakjában; hallgatás nem jóváhagyás (Tanulság 6). Javaslat Patriknak, döntésre: előre adott, a tünethez kötött P1-felhatalmazás a restartra/kulcscserére (NINCS megadva; most nem él).
+A jóváhagyás-kérés a pontos lépést nevezi meg a CLAUDE.md "JÓVÁHAGYÁS KELL" alakjában; hallgatás nem jóváhagyás (Tanulság 6). Előre adott, a tünethez kötött P1-felhatalmazás csak a RESTARTRA javasolható, a kulcscserére nem (mellékhatások, kulcs-kezelés; Viktor, 2026-11-16). Egyik sincs megadva, most nem él; a döntés Patriké.
 
 ## 4a. Mit csinál MÁR a kód (mérve: marabel origin/main f682d3868, `src/lib/supabase/clock-skew-retry.ts` fejléc és konstansok, 2026-11-16)
 Ezt a diagnózis előtt tudni kell: a rövid óraeltérést a kód elnyeli, ezért egy tartós PGRST303 már azt jelenti, hogy a 3,5 s-os próbák és a tartalék is elbukott.
@@ -47,7 +49,7 @@ Ezt a diagnózis előtt tudni kell: a rövid óraeltérést a kód elnyeli, ezé
 - Naplósor: `Supabase JWT clock-skew (PGRST303), retrying` (útvonal, lekérdezés-paraméter és kulcs nélkül) - ez a Vercel logban a keresendő minta enyhébb eltérésnél. `supabase-admin pgrst303_retry=1` az edge function oldalon.
 - `/vasarlas/[slug]`: az újrapróbák után is PGRST303 esetén a "most nem elérhető" oldal, nem 500 (page.tsx 145-147. sor környéke). A watchdog státuszkód-alapú ellenőrzése ettől még vak lehet: a törzset kell nézni (1. pont).
 - TARTALÉK KULCS: ha a `SUPABASE_SECRET_KEY_FALLBACK` be van állítva (csak legacy service_role JWT lehet; `sb_` előtagú vagy nem JWT alakú figyelmen kívül marad), az első elutasítás után a szerveroldali service kulcsos kérés azonnal a tartalékkal megy. Nyom: `[ALERT] SUPABASE_SECRET_KEY_FALLBACK_USED` a logban, és az 5 perces health check `security.supabase_secret_key_fallback_used` riasztása (system_alerts). Visszavont/hibás elsődleges kulcsnál (nem PGRST303) NINCS váltás: a visszavonás leállítja a hozzáférést.
-- A tartalék kulcs engedélye a kód kommentje szerint "legfeljebb 30 nap" volt (Viktor 2026-10-12 este); a kód maga nem jár le. Hogy a `SUPABASE_SECRET_KEY_FALLBACK` MA be van-e állítva élesben: MÉRVE 2026-11-16 (Pulzus, marabel-ops-api, Vercel projekt env-metaadat, érték nélkül): NINCS beállítva (51 változó, nincs FALLBACK/SERVICE/LEGACY/JWT nevű kulcs, nincs lapozás). A `SUPABASE_SECRET_KEY` frissítve 2026-10-12 16:59 (production, sensitive). Ismétlés: `GET /v9/projects/<prj>/env` a vq.sh-val, kimenet csak key/target/type/updatedAt.
+- A tartalék kulcs engedélye legfeljebb 30 napra szólt (Viktor, 2026-10-12-től), tehát 2026-11-11-én LEJÁRT (Viktor, 2026-11-16); a kód maga nem jár le. Döntve: lejárt, nincs beállítva. A beállítatlan kódút nem csinál semmit (`src/lib/supabase/server-keys.ts`), így maradhat; a `SUPABASE_SECRET_KEY_FALLBACK` újbóli beállítása env- és kulcsművelet: új Viktor-átnézés és Patrik "mehet". Hogy a `SUPABASE_SECRET_KEY_FALLBACK` MA be van-e állítva élesben: MÉRVE 2026-11-16 (Pulzus, marabel-ops-api, Vercel projekt env-metaadat, érték nélkül): NINCS beállítva (51 változó, nincs FALLBACK/SERVICE/LEGACY/JWT nevű kulcs, nincs lapozás). A `SUPABASE_SECRET_KEY` frissítve 2026-10-12 16:59 (production, sensitive). Ismétlés: `GET /v9/projects/<prj>/env` a vq.sh-val, kimenet csak key/target/type/updatedAt.
 - Következmény a diagnózisra: ha a logban `SUPABASE_SECRET_KEY_FALLBACK_USED` van, az eltérés Supabase-oldali és ismétlődik, de a vásárlás addig él; ha a tartalék nincs beállítva vagy az is elutasít, a 3,5 s fölötti tartós hiba megy át a hívóhoz, és ez az a P1 helyzet, amit az 1-3. pont kezel.
 
 ## 5. Lezárás
@@ -56,9 +58,9 @@ Ezt a diagnózis előtt tudni kell: a rövid óraeltérést a kód elnyeli, ezé
 - Incidens-jelentés (sablon: Pulzus CLAUDE.md), hatásos rendelés/aktiváció számmal.
 
 ## 6. Nyitott pontok (nem mért / nem eldöntött)
-- A restart-jog a tokenünknek (Viktor + Patrik).
+- A restart-jog a tokenünknek: Viktor ajánlása NEM, amíg nincs olyan jog, ami csak restartot enged, a `project_admin_write`-nál szélesebb írást nem (hogy ilyen hatókör létezik-e: NEM mért); a döntés Patriké, Klodelen át.
 - Kulcstól független külső figyelő a riasztó némasága ellen (Tanulság 9): a watchdog ilyen, a dead man's switch nincs mérve.
 - A smoke-hiba (GitHub Daily E2E) gazdája (Tanulság 10).
 - A kód-oldali kezelés újraolvasva (4a. szakasz, main f682d3868); a #423, #424, #430, #463, #476 egyenkénti PR-szintű visszakeresése nem történt meg, a main forrása a mérvadó.
-- A `SUPABASE_SECRET_KEY_FALLBACK` élő beállítottsága: MÉRVE (2026-11-16), nincs beállítva a Vercelen, tehát PGRST303 esetén tartalék kulcs NINCS: a tartós hiba átmegy a hívóhoz (lásd a 2. pont következményét). Nyitott maradt: a 30 napos engedély sorsa (Viktor 2026-10-12) és az edge function titkok (Supabase-oldal, nem a Vercel env) NEM mértek.
+- A `SUPABASE_SECRET_KEY_FALLBACK` élő beállítottsága: MÉRVE (2026-11-16), nincs beállítva a Vercelen, tehát PGRST303 esetén tartalék kulcs NINCS: a tartós hiba átmegy a hívóhoz (lásd a 2. pont következményét). A 30 napos engedély 2026-11-11-én lejárt, döntve: nincs beállítva (4a. szakasz). Nyitott maradt: az edge function titkok (Supabase-oldal, nem a Vercel env) NEM mértek.
 - A forrás-incidens iratai (`agents/pulzus/incidents/2026-10-12-*`) nem kerülnek a repóba; a hivatkozott Tanulság-számok azokra mutatnak.
