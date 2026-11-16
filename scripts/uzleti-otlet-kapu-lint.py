@@ -2,7 +2,7 @@
 """Üzleti ötlet kapu lint (Klodel, 2026-11-10, Patrik TG 4607/4617/4634).
 Minden '## N.' kezdetű ötlet-szakaszban minden mezőnek 'MEZO: IGEN'-nel kell kezdődnie,
 és az ötlet címe nem lehet a már elutasított irányok között. Kilépés: 0 = mehet, 1 = nem."""
-import re, sys
+import re, sys, unicodedata
 MEZOK = ["UJ", "AI-SKALA", "NEM-SOFTWARE-KLON", "NEM-FIZIKAI", "HOGYAN", "NINCS-ELOFELTETEL",
          "BIZALOM", "KIEMELKEDES", "KONKRET", "NEM-NAGYVALLALAT", "ERTHETO", "BEVALT", "VIRALIS",
          "ARC-NELKUL", "CHATGPT-VEL-NEM", "KULFOLD", "PENZ"]  # PENZ: Patrik TG 4830 (fő mérce)
@@ -206,18 +206,35 @@ def main(path):
 # --cimek <fájl> (Klodel 43400): CSAK a '## N.' címsorokat veti össze az ELUTASITOTT listával, a
 # mezőktől függetlenül. Ok: a 12. kör stratégája más mezőket kért, ezért a teljes lintet nem futtatta, és a már
 # elutasított családból hozott jelölteket. Ez a mód minden formátumú jelöltfájlon fut; találatnál rc 1.
+# Viktor 43455 LOW 1 (card 2d35a448): with one exact '## N.' heading in a file, every other numbered heading shape was
+# skipped silently and the file passed (rc 0). Every numbered heading counts as a title now: a '#' heading of any level,
+# '**N.**', a bullet '- N.', with a 'Jelölt' word, any spacing or indentation, full-width '＃' (NFKC), the number
+# followed by '.', ')' or ':'. Not a title: an unnumbered heading ('## Módszer', Viktor INFO 3) and a line with text
+# before the number ('- PIAC: 2. hely'). A shape other than '## N.' is marked in the output, so the author sees it.
+# Viktor 43498 LOW 1: a bold marker after a '#' heading or a bullet ('### **2. Cím**', '- **2.** Cím', also after the
+# 'Jelölt' word) is a title too; '__' counts as bold. The tail is greedy (INFO 4: a lazy '.*?' before '[ \t]*$' was
+# quadratic on a long run of trailing blanks; .strip() drops them anyway).
+CIM_SOR = re.compile(r"(?mi)^[ \t]*(#{1,6}[ \t]*|[-*+][ \t]+|(?:\*\*|__)[ \t]*)"
+                     r"(?:jel[öo]lt[ \t]*)?(?:(?:\*\*|__)[ \t]*)?(\d+[ \t]*[.):].*)$")
+
+
 def cimek(path):
-    t = open(path, encoding="utf-8").read()
-    cims = [m.group(1).strip() for m in re.finditer(r"(?m)^## (\d+\..*)$", t)]
+    t = unicodedata.normalize("NFKC", open(path, encoding="utf-8").read())
+    cims = []
+    for m in CIM_SOR.finditer(t):
+        cim = re.sub(r"\*\*|__", "", m.group(2)).strip()
+        pontos = re.match(r"## \d+\.", m.group(0)) is not None
+        cims.append((cim, pontos))
     if not cims:
-        print("HIBA: nincs '## N.' címsor"); return 1
+        print("HIBA: nincs számozott címsor ('## N.')"); return 1
     bad = 0
-    for cim in cims:
+    for cim, pontos in cims:
+        jel = "" if pontos else "  (eltérő alakú címsor)"
         talalat = [k for k in ELUTASITOTT if szokezdet(k, cim.lower())]
         if talalat:
-            bad += 1; print(f"NEM MEGY  {cim}: elutasított irány: " + ", ".join(talalat))
+            bad += 1; print(f"NEM MEGY  {cim}: elutasított irány: " + ", ".join(talalat) + jel)
         else:
-            print(f"MEHET     {cim}")
+            print(f"MEHET     {cim}{jel}")
     print(f"\n{len(cims)-bad}/{len(cims)} cím mehet")
     return 1 if bad else 0
 if __name__ == "__main__":

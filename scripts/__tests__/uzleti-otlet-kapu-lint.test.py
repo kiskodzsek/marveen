@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LINT = os.path.join(HERE, "..", "uzleti-otlet-kapu-lint.py")
@@ -249,8 +250,54 @@ with tempfile.TemporaryDirectory() as d:
     body_only = os.path.join(d, "body.md")
     open(body_only, "w", encoding="utf-8").write(
         "## 1. Kertészeti napló\n- EGY-MONDAT: nem könyvelőiroda, hanem kert\n- PIAC: 2. hely a könyvelőiroda-piac mögött\n"
-        "### 3. Könyvelőiroda (alfejezet, nem jelölt)\n")
-    check("--cimek reads the '## N.' title, not a numbered body line or a ### subheading", cimek_run(body_only)[0], 0)
+        "## Módszer: miért nem könyvelőiroda\n")
+    check("--cimek reads numbered titles, not a numbered body line or an unnumbered heading (Viktor 43455 INFO 3)",
+          cimek_run(body_only)[0], 0)
+    # Viktor 43455 LOW 1: one exact '## N.' title must not hide a refused title written in another heading shape.
+    variants = ("##  2. Könyvelőiroda", "## 2) Könyvelőiroda", "### 2. Könyvelőiroda", "**2.** Könyvelőiroda",
+                "## Jelölt 2: Könyvelőiroda", "  ## 2. Könyvelőiroda", "##\t2. Könyvelőiroda", "＃＃ 2. Könyvelőiroda",
+                "- 2. Könyvelőiroda", "# 2. Könyvelőiroda", "##2. Könyvelőiroda", "## 2. Könyvelőiroda\r")
+    got = []
+    for i, v in enumerate(variants):
+        f = os.path.join(d, f"var{i}.md")
+        open(f, "w", encoding="utf-8", newline="").write("## 1. Kertészeti napló\n" + v + "\n")
+        rc_v, out_v = cimek_run(f)
+        got.append(rc_v == 1 and "NEM MEGY  2" in out_v)
+    check("negative: --cimek refuses a refused title in every other numbered heading shape (Viktor 43455 LOW 1)",
+          got, [True] * len(variants))
+    rc_m, out_m = cimek_run(f)
+    check("--cimek marks the exact '## N.' shape as exact", "eltérő" in out_m, False)
+    # Viktor 43498 LOW 1: a bold number after a heading mark or a bullet, also after the 'Jelölt' word.
+    doubles = ("### **2. Könyvelőiroda**", "- **2. Könyvelőiroda**", "## **2.** Könyvelőiroda",
+               "#### **2.** Könyvelőiroda", "### Jelölt **2.** Könyvelőiroda", "- **2.** Könyvelőiroda",
+               "- __2. Könyvelőiroda__", "__2.__ Könyvelőiroda")
+    got2 = []
+    for i, v in enumerate(doubles):
+        f2 = os.path.join(d, f"dbl{i}.md")
+        open(f2, "w", encoding="utf-8").write("## 1. Kertészeti napló\n" + v + "\n")
+        rc_v, out_v = cimek_run(f2)
+        got2.append(rc_v == 1 and "NEM MEGY  2. Könyvelőiroda: elutasított irány" in out_v)
+    check("negative: --cimek refuses a refused title behind a heading/bullet mark AND a bold mark (Viktor 43498 LOW 1)",
+          got2, [True] * len(doubles))
+    # Viktor 43498 INFO 3: the other-shape mark is on the NEM MEGY line too, not only on MEHET.
+    bold_bad = os.path.join(d, "boldbad.md")
+    open(bold_bad, "w", encoding="utf-8").write("## 1. Kertészeti napló\n**2.** Könyvelőiroda\n")
+    out_bb = cimek_run(bold_bad)[1]
+    check("--cimek marks an other-shape NEM MEGY line", any(l.startswith("NEM MEGY  2. Könyvelőiroda")
+          and l.endswith("(eltérő alakú címsor)") for l in out_bb.splitlines()), True)
+    # Viktor 43498 INFO 4: a long blank run inside a title line stays linear. Measured in-process on this shape
+    # (30000 ' \t' pairs, then text): the lazy '.*?' before '[ \t]*$' took about 8 s, the greedy tail 0.0 s.
+    blanks = os.path.join(d, "blanks.md")
+    open(blanks, "w", encoding="utf-8").write("## 1. Kertészeti napló" + " \t" * 30000 + "vége\n")
+    t0 = time.monotonic()
+    rc_bl, out_bl = cimek_run(blanks)
+    check("--cimek: a 60000-blank run inside a title finishes fast (Viktor 43498 INFO 4)",
+          (rc_bl, "MEHET     1. Kertészeti napló" in out_bl, time.monotonic() - t0 < 4), (0, True, True))
+    mixed = os.path.join(d, "mixed.md")
+    open(mixed, "w", encoding="utf-8").write("## 1. Kertészeti napló\n**2.** Társkereső\n")
+    rc_x, out_x = cimek_run(mixed)
+    check("--cimek checks a clean other-shape title too, marks it, and passes", (rc_x, "2/2 cím mehet" in out_x,
+          "MEHET     2. Társkereső  (eltérő alakú címsor)" in out_x), (0, True, True))
     mid_word = os.path.join(d, "mid.md")
     open(mid_word, "w", encoding="utf-8").write("## 1. Tankönyvelőrendelés iskoláknak\n")
     rc_mid, out_mid = cimek_run(mid_word)
