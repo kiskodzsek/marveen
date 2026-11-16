@@ -3052,6 +3052,57 @@ def keres_without_idea_or_without_ok_private_media_passes(root):
 
 
 
+@case
+def unfiltered_ask_limited_uses(root):
+    # Viktor 43481 LOW 1 (a): one ask passes at most UNFILTERED_MAX_USES (3) messages, then a new ask is needed.
+    owner_asked(root)
+    rcs = [run(root, {'chat_id': PRIV, 'text': PRIV_OK + f'Három ötlet, {i}. rész.' + UNF_LINE})[0] for i in range(4)]
+    last_err = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet, még egy.' + UNF_LINE})[1]
+    owner_asked(root, mid='18600')                                   # a new ask: passes again
+    fresh = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.\nATNEZO: patrik-kerte-szuro-nelkul TG 18600'})[0]
+    return _why(rcs == [0, 0, 0, 2] and 'új kérés kell' in last_err and fresh == 0, (rcs, last_err[-120:], fresh))
+
+
+@case
+def unfiltered_ask_negated_or_too_wide_is_no_ask(root):
+    # Viktor 43481 LOW 1 (b)(c): a negated ask, "csak te tudod" and "friss szemszögből" are not an unfiltered ask.
+    out = []
+    for ask in ('NE válaszolj szűrő nélkül, légy óvatos', 'Ezt csak te tudod megmondani, adj ötletet',
+                'Nézd meg friss szemszögből az ötleteket', 'Soha ne előzmény nélkül dolgozz'):
+        owner_asked(root, text=ask)
+        out.append(run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})[0])
+    return _why(out == [2, 2, 2, 2], out)
+
+
+@case
+def unfiltered_message_id_must_match_both_logs(root):
+    # Viktor 43481 INFO 5 (M03/M08): the owner's row and the ask text must belong to message <n> itself.
+    at = (time.time() - 60) * 1000
+    tg_state(root, senders=[{'chat_id': PRIV, 'message_id': '18584', 'user_id': PRIV, 'at': at},
+                            {'chat_id': PRIV, 'message_id': '18585', 'user_id': BALAZS, 'at': at}],
+             evidence=[{'chat_id': PRIV, 'message_id': '18585', 'text': UNF_ASK, 'at': at}])
+    a = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})[0]
+    tg_state(root, senders=[{'chat_id': PRIV, 'message_id': '18585', 'user_id': PRIV, 'at': at}],
+             evidence=[{'chat_id': PRIV, 'message_id': '18584', 'text': UNF_ASK, 'at': at},
+                       {'chat_id': PRIV, 'message_id': '18585', 'text': 'Mi a helyzet?', 'at': at}])
+    b = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})[0]
+    return _why((a, b) == (2, 2), (a, b))
+
+
+@case
+def unfiltered_future_time_and_broken_log_blocked(root):
+    # Viktor 43481 INFO 5 (M05, M17): a future timestamp is no fresh ask; an unreadable log line fails closed.
+    owner_asked(root, age_s=-3600)
+    fut = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})[0]
+    owner_asked(root)
+    ev = os.path.join(root, '.claude', 'channels', 'telegram', 'inbound-evidence.jsonl')
+    with open(ev, 'ab') as f:
+        f.write(b'{"chat_id": "x", "text": "\xff\xfe"}\n')
+    rc, err = run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.' + UNF_LINE})
+    return _why(fut == 2 and rc == 2 and 'nem olvasható' in err, (fut, rc, err[-120:]))
+
+
+
 def main():
     bad = 0
     for fn in CASES:
