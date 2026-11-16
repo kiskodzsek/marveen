@@ -843,11 +843,67 @@ def script_cases():
             ('python3 -m `true`measure', d),
             ('python3 `echo -m` measure', d),
             ('python3 $(echo -m) measure', d),
+            # ... with a quote in the module word: its unquoted form is a module name too (mutant w2-no-module-forms)
+            ('python3 $(echo -m) "meas"ure', d),
             # ... and -m after an option: the module word is found from -m's own index (generated mutants 033/038/043
             # read words[1] / words[2] and survived while every case had -m first)
             ('python3 -I -m $(true) measure', d),
             ('python3 -I -m `true` measure', d),
             ('python3 -B -I -m $(true)measure', d),
+            # card 70c94516 (Viktor 43662 LELET 1): a quote inside the word, not only an outer pair (real bash ran the
+            # stub; main: allow); with a substitution, quoted or glued; $'...' decoded, its \x escape too
+            ('python3 "meas"ure.py', d),
+            ('python3 m"easure".py', d),
+            ("python3 'meas'ure.py", d),
+            ("python3 $'meas'ure.py", d),
+            ("python3 $'\\x6deasure.py'", d),
+            ("python3 $'\\x6deasure.py'$(true)", d),
+            ("python3 $(true)$'measure.py'", d),
+            ('python3 "$(true)"measure.py', d),
+            ('python3 measure"$(true)".py', d),
+            ('python3 measure.py"$(true)"', d),
+            ('python3 "`true`"measure.py', d),
+            ('python3 `true`"measure.py"', d),
+            ('python3 "$(echo $(true))"measure.py', d),
+            ('python3 "$(true)"me"asure".py', d),
+            ('python3 measure\\.py', d),   # an escaped character outside quotes is that character
+            # a path word past ARGS_WINDOW is not read (without_substs loops per nesting level): it blocks
+            ('./"' + 'a' * 5000 + '"', d),
+            ('bash "$(true)"dump.sh', d),
+            # (LELET 2) source / . and a direct ./script get the same readings; a first word that only a substitution
+            # makes (`source $(true) dump.sh`) may print nothing: the next word is then the file
+            ('source $(true) dump.sh', d),
+            ('. $(true) dump.sh', d),
+            ('source $(true)dump.sh', d),
+            ('source `true` dump.sh', d),
+            ('source "$(true)"dump.sh', d),
+            ('source $(echo a b) dump.sh', d),
+            ('source "du"mp.sh', d),
+            ('source runner.sh "meas"ure.py', d),
+            ('./dump$(true).sh', d),
+            ('./"dump".sh', d),
+            ("./$'\\x64'ump.sh", d),
+            ('x=$(./dump"".sh)', d),
+            # a quoted path inside $( ): read without the closing ) too. The lexer's view hands the body over
+            # without it; a lexer problem (a heredoc in a substitution: heredoc-in-subst) takes the old path,
+            # where the ) is still on the word (mutant d2-no-paren-strip; main allows the last one)
+            ('echo $(./"dump".sh)', d),
+            ('x=$(./du"mp".sh)', d),
+            ('x=$(cat <<E\nhi\nE\n); echo $(./"dump".sh)', d),
+            # (LELET 3) a module name the gate cannot read (a substitution or a variable in it) blocks: any module may
+            # run; joined and quoted names are read without their quotes, after python's no-argument flags too
+            ('python3 -m $(echo measure)', d),
+            ('python3 -m "$(echo measure)"', d),
+            ('python3 -m `echo measure`', d),
+            ('python3 -m $(echo meas)ure', d),
+            ('python3 -m ${M:-measure}', d),
+            ('python3 -m $M', d),
+            ('python3 -m$(echo measure)', d),
+            ('python3 -m"measure"', d),
+            ("python3 -m'meas'ure", d),
+            ('python3 -Immeasure', d),   # -I, then -m with "measure" (`-Imeasure` would be the module "easure")
+            ('python3 -BImmeasure', d),
+            ('python3 -m "meas"ure', d),
             # past LEX_MAX_SUBSTS the lexer gives no reading: then no backtick ends a call (mutation m4)
             ('echo ' + '`true` ' * 65 + '; python3 `true` measure.py', d),
             # card 31045f4d (B): in a non-shell heredoc only a "(" after a blank stops being a command position
@@ -1365,6 +1421,21 @@ def script_cases():
             # a substitution that prints ")" glued to the word: bash runs ")measure.py", not measure.py (generated
             # mutant 032, a span regex that let ")" into $( ), cut the word to measure.py)
             ('python3 $(echo ")")measure.py', d),
+            # card 70c94516: quotes taken off a word that names no keychain-reading file, and the ordinary -m / source
+            # / ./ shapes stay allowed
+            # (a non-plain script word keeps the old walk, as on main: `python3 "st"at.py regiszter.jsonl` judges the
+            # data file too and blocks there; accepted, conservative)
+            ('python3 "st"at.py', d),
+            ("python3 $'\\x73'tat.py", d),
+            ('python3 "no"tes.py stat.py', d),
+            ('python3 -m "notes"', d),
+            ('python3 -Inotes', d),
+            ('python3 -m json.tool regiszter.jsonl', d),
+            ('python3 -W ignore -m notes', d),
+            ('source "$(true)"runner.sh', d),
+            ('. "$(dirname "$0")/notes.py"', d),
+            ('./"no"tes.py', d),
+            ('echo "a b" \'c d\' $\'e\'', d),
             # an EVEN run of backslashes is escaped backslashes: the backtick after them closes the substitution, and
             # measure.py is no word of bash's call (mutation m11: counting one backslash read it as bash's $2)
             ('x=`bash runner.sh a\\\\` measure.py', d),
