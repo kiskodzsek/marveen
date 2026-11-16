@@ -139,6 +139,70 @@ class Quota(Base):
                 self.assertNotEqual(self.out('quota'), 'SKIP')
 
 
+class OwnSeat(Base):
+    """card 6db4cc15 (Klodel 43760): an own Team seat at its weekly limit wakes the round too."""
+    def q(self, own, fleet=9, age_s=60):
+        seats = {'fleet': {'sevenDay': {'pct': fleet}, 'status': 'ok'}}
+        if own is not None:
+            seats['own:dave'] = own
+        with open(self.m.QUOTA_FILE, 'w') as f:
+            f.write(json.dumps({'seats': seats, 'ts': self.now - age_s}) + '\n')
+
+    def test_watched_seat_list_is_dave(self):
+        self.assertEqual(self.m.OWN_SEATS, ('own:dave',))
+
+    def test_own_seat_under_the_limit_skips(self):
+        for pct in (0, 99.9):
+            with self.subTest(pct=pct):
+                self.q({'sevenDay': {'pct': pct}, 'status': 'ok'})
+                self.assertEqual(self.out('quota'), 'SKIP')
+
+    def test_own_seat_at_or_over_the_limit_wakes(self):
+        for pct in (100, 130):
+            with self.subTest(pct=pct):
+                self.q({'sevenDay': {'pct': pct}, 'status': 'ok'})
+                self.assertEqual(self.out('quota'), f'PRECHECK: own:dave 7d pct {pct:g} (>= 100), status ok.')
+
+    def test_both_seats_over_report_both(self):
+        self.q({'sevenDay': {'pct': 100}, 'status': 'ok'}, fleet=100)
+        out = self.out('quota')
+        self.assertIn('fleet 7d pct 100', out)
+        self.assertIn('own:dave 7d pct 100', out)
+
+    def test_fleet_over_own_under_reports_fleet_only(self):
+        self.q({'sevenDay': {'pct': 5}, 'status': 'ok'}, fleet=100)
+        out = self.out('quota')
+        self.assertIn('fleet 7d pct 100', out)
+        self.assertNotIn('own:dave', out)
+
+    def test_a_seat_the_sampler_no_longer_reads_is_ignored(self):
+        # after the switch to the fleet seat the own seat turns stale, then leaves the line (11-15 17:09)
+        for own in ({'sevenDay': {'pct': 100}, 'status': 'stale'}, {'sevenDay': {'pct': 100}, 'status': 'missing'},
+                    {'sevenDay': {'pct': 100}}, None, 'x', [1]):
+            with self.subTest(own=str(own)[:30]):
+                self.q(own)
+                self.assertEqual(self.out('quota'), 'SKIP')
+
+    def test_other_seats_are_not_watched(self):
+        with open(self.m.QUOTA_FILE, 'w') as f:
+            f.write(json.dumps({'seats': {'fleet': {'sevenDay': {'pct': 9}, 'status': 'ok'},
+                                          'tok:a85a93b8': {'sevenDay': {'pct': 100}, 'status': 'ok'},
+                                          'own:mira': {'sevenDay': {'pct': 100}, 'status': 'ok'}},
+                                'ts': self.now - 60}) + '\n')
+        self.assertEqual(self.out('quota'), 'SKIP')
+
+    def test_unreadable_own_pct_never_skips(self):
+        for own in ({'sevenDay': {'pct': None}, 'status': 'ok'}, {'sevenDay': None, 'status': 'ok'},
+                    {'sevenDay': {'pct': True}, 'status': 'ok'}, {'status': 'ok'}):
+            with self.subTest(own=str(own)[:40]):
+                self.q(own)
+                self.assertNotEqual(self.out('quota'), 'SKIP')
+
+    def test_stale_line_still_wins(self):
+        self.q({'sevenDay': {'pct': 100}, 'status': 'ok'}, age_s=3601)
+        self.assertIn('min old', self.out('quota'))
+
+
 class Disk(Base):
     def free(self, nbytes):
         st = types.SimpleNamespace(f_bavail=nbytes // 4096, f_frsize=4096)

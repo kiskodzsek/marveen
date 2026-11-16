@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """preCheck for Kernel's three silent-by-default heartbeats (Klodel 42455/42460).
 
-  kernel_heartbeat_precheck.py quota      kernel-flotta-keret (cron */15): the fleet seat's 7-day pct >= 100
+  kernel_heartbeat_precheck.py quota      kernel-flotta-keret (cron */15): the fleet seat's 7-day pct >= 100,
+                                          or an own seat's (OWN_SEATS) while the sampler reads it
   kernel_heartbeat_precheck.py disk       kernel-lemez-10gib  (cron */30): free space < 10 GiB
   kernel_heartbeat_precheck.py gitconfig  kernel-gitconfig-or (cron 17 * * * *): ~/.gitconfig vs the guard baseline
 
@@ -41,6 +42,7 @@ QUOTA_FILE = os.path.join(ROOT, 'store', 'fleet-quota.jsonl')
 QUOTA_MAX_AGE_S = 3600          # an older last line means the sampler stopped: wake the round to say so
 QUOTA_MAX_FUTURE_S = 300        # a ts further ahead (ms instead of s, a wrong clock) also wakes the round
 QUOTA_LIMIT_PCT = 100           # the task's own threshold ("ha >=100")
+OWN_SEATS = ('own:dave',)       # own-seat agents the task watches too (card 6db4cc15, Klodel 43760)
 DISK_PATH = ROOT
 DISK_MIN_GIB = 10               # the task's own threshold ("< 10 GiB"); GiB = 2**30 bytes, as df -k / host-monitor
 GUARD_STATE = os.path.join(ROOT, 'agents', 'kernel', 'state', 'gitconfig-guard.json')
@@ -79,9 +81,23 @@ def quota():
     if not (-QUOTA_MAX_FUTURE_S <= age <= QUOTA_MAX_AGE_S):
         when = 'in the future' if age < 0 else f'{int(age // 60)} min old'
         return f'PRECHECK: the last fleet-quota.jsonl line is {when} (pct {pct:g}); check the sampler.'
+    out = []
     if not (pct < QUOTA_LIMIT_PCT):
-        return f'PRECHECK: fleet 7d pct {pct:g} (>= {QUOTA_LIMIT_PCT}), status {status}.'
-    return 'SKIP'
+        out.append(f'PRECHECK: fleet 7d pct {pct:g} (>= {QUOTA_LIMIT_PCT}), status {status}.')
+    # An agent on its own Team seat (authMode own_team) stops at that seat's weekly limit since the Team org has no
+    # usage credits left (card 6db4cc15, Klodel 43760): the round reports it so the agent is moved to the fleet seat.
+    # Only a seat the sampler still reads ('ok') counts: after the switch it turns stale and then drops out of the
+    # line. The seat name in the output is this file's constant, never the file's text.
+    for name in OWN_SEATS:
+        own = d['seats'].get(name)
+        if not isinstance(own, dict) or own.get('status') != 'ok':
+            continue
+        own_pct = own['sevenDay']['pct']
+        if not _finite(own_pct):
+            raise ValueError(f'{name} pct is not a finite number')   # fail-open, as for the fleet seat
+        if not (own_pct < QUOTA_LIMIT_PCT):
+            out.append(f'PRECHECK: {name} 7d pct {own_pct:g} (>= {QUOTA_LIMIT_PCT}), status ok.')
+    return ' '.join(out) if out else 'SKIP'
 
 
 def disk():
