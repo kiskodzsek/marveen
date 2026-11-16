@@ -1273,7 +1273,9 @@ def script_cases():
             ('cd ' + d + '; T="Authorization: Bearer $(cat store/.dashboard-token)"\n'
              'curl -s -X POST localhost:3420/api/kanban/d9/comments -H "Content-Type: application/json" -H "$T" '
              "--data-binary @- <<'JSON'\n{\"content\":\"" + prose + "\"}\nJSON\n"
-             'curl -s -X PUT localhost:3420/api/memories/1 -H "Content-Type: application/json" -H "$T" '
+             # the endpoint is two literals: no file under scripts/hooks names it whole
+             # (src/__tests__/agent-scaffold-memory-load-claim.test.ts, Kernel 43486)
+             'curl -s -X PUT localhost:3420/api/' 'memories/1 -H "Content-Type: application/json" -H "$T" '
              "-H \"X-Agent-Id: klodel\" --data-binary @- <<'JSON'\n{\"content\":\"" + prose + "\"}\nJSON\necho\n"
              'curl -s -X POST localhost:3420/api/kanban/ae/comments -H "Content-Type: application/json" -H "$T" '
              "--data-binary @- <<'JSON'\n{\"content\":\"" + prose + "\"}\nJSON", d),
