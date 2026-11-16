@@ -8,7 +8,7 @@ import { parseExtraChannels } from './agent-extra-channels.js'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { logger } from '../logger.js'
 import { safeJoin } from './sanitize.js'
-import { registerSealModelResolver, runtimeClassOf, sealDashboardWrite } from './agent-config-seal.js'
+import { registerSealModelResolver, runtimeClassOf, sealClassMove, sealDashboardWrite } from './agent-config-seal.js'
 import { isValidModelId, InvalidModelIdError } from '../model-id.js'
 import {
   resolveAgentModelFromConfig,
@@ -236,10 +236,11 @@ export function writeAgentModelProfile(name: string, profile: string | null, by?
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
+  const classBefore = runtimeClassOf(config)
   if (profile === null) delete config.modelProfile
   else config.modelProfile = profile
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
-  sealDashboardWrite(name, 'runtimeClass', runtimeClassOf(config), by) // card ec665017: the derived class only
+  sealClassMove(name, classBefore, runtimeClassOf(config), by) // card ec665017: the derived class only
 }
 
 export function writeAgentModel(name: string, model: string, by?: string): void {
@@ -247,9 +248,10 @@ export function writeAgentModel(name: string, model: string, by?: string): void 
   const configPath = join(agentDir(name), 'agent-config.json')
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
+  const classBefore = runtimeClassOf(config)
   config.model = model
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
-  sealDashboardWrite(name, 'runtimeClass', runtimeClassOf(config), by) // card ec665017: the derived class only
+  sealClassMove(name, classBefore, runtimeClassOf(config), by) // card ec665017: the derived class only
 }
 
 export function readAgentDisplayName(name: string): string {
@@ -876,9 +878,10 @@ export function writeAgentCustomProvider(name: string, id: string | null, by?: s
   let config: Record<string, unknown> = {}
   config = readJsonObjectForWrite(configPath)
   const trimmed = id && id.trim() ? id.trim() : undefined
+  const classBefore = runtimeClassOf(config)
   if (trimmed) config.customProvider = trimmed
   else delete config.customProvider
   atomicWriteFileSync(configPath, JSON.stringify(config, null, 2))
   sealDashboardWrite(name, 'customProvider', trimmed, by) // card 17901b47: this field only
-  sealDashboardWrite(name, 'runtimeClass', runtimeClassOf(config), by) // card ec665017: and the class it decides
+  sealClassMove(name, classBefore, runtimeClassOf(config), by) // card ec665017: and the class it decides
 }

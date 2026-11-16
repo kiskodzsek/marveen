@@ -120,10 +120,23 @@ export function storedValue(v: unknown): unknown {
   return s.length > FIELD_VALUE_CAP ? { $sha256: sha(s), length: s.length } : (v === undefined ? null : v)
 }
 
+// Viktor 43337 LOW 2: a value typed into the CONFIG in the marker's own shape ({ $sha256, length }, copied from the seal
+// file) read as that marker, so a sealed over-cap value (a long toolDeny or capabilities list) could be swapped for it
+// with no change seen. A config value of the marker's shape is therefore always stored as ITS OWN hash; only the seal
+// file's side (sealedFieldsOf) keeps a stored marker as it is.
+function isMarkerShaped(v: unknown): boolean {
+  return isPlainObject(v) && Object.keys(v).sort().join(',') === '$sha256,length'
+}
+export function configStoredValue(v: unknown): unknown {
+  if (!isMarkerShaped(v)) return storedValue(v)
+  const s = canonicalJson(v)
+  return { $sha256: sha(s), length: s.length }
+}
+
 export function sealedView(config: Record<string, unknown>): SealedView {
   const out = {} as SealedView
   for (const f of SEALED_FIELDS) {
-    out[f] = storedValue(f === 'runtimeClass' ? runtimeClassOf(config) : Object.hasOwn(config, f) ? config[f] : null)
+    out[f] = configStoredValue(f === 'runtimeClass' ? runtimeClassOf(config) : Object.hasOwn(config, f) ? config[f] : null)
   }
   return out
 }
@@ -250,6 +263,7 @@ export type SealCheck =
   | { status: 'ok' }
   | { status: 'no-config' }
   | { status: 'first-seal' }
+  | { status: 'first-seal-refused' } // the seal file could not take the new entry (its read cap): NOT sealed
   | { status: 'changed'; fields: SealedField[]; cardId: string | null }
   | { status: 'seal-invalid'; scope: 'file' | 'entry'; reason: string; cardId: string | null }
 
@@ -295,6 +309,11 @@ function describeChange(name: string, fields: SealedField[], sealed: SealEntry, 
 // never rewritten). Set only after a card was filed, so a failed filing retries at the next spawn. A dashboard restart
 // forgets it: at most one more card for the same broken state.
 const invalidAlerts = new Map<string, string>()
+
+// Viktor 43337 INFO 1: a change's alert mark (alertedHash) lives in the seal file; when that write is refused (the file
+// is at its read cap) the mark is lost and every spawn filed the card again (measured). The mark is kept in the process
+// too, per seal file and agent; back on the seal clears it, so a new departure is a new card. A restart forgets it.
+const changeAlerts = new Map<string, { hash: string; cardId: string }>()
 
 function alertInvalid(key: string, title: string, description: string, logCtx: Record<string, unknown>, deps: SealDeps): string | null {
   logger.error(logCtx, 'agent-config seal: the seal is invalid; not trusted, not overwritten (see the kanban card)')
@@ -346,7 +365,13 @@ export function checkAgentConfigSeal(name: string, p: SealPaths = DEFAULT_SEAL_P
     const raw: unknown = file.agents[name]
     if (raw === undefined) {
       file.agents[name] = { hash, fields: current, sealedAt: deps.now(), by: 'first-spawn' }
-      alertSize(writeSealFile(p, file), p, deps)
+      const bytes = writeSealFile(p, file)
+      alertSize(bytes, p, deps)
+      if (bytes < 0) {
+        // Viktor 43337 INFO 1: the write was refused, so nothing is sealed; the size card says why, the next spawn retries
+        logger.error({ agent: name }, 'agent-config seal: no seal for this agent yet, and the seal file could not take it (over its read cap): NOT sealed')
+        return { status: 'first-seal-refused' }
+      }
       logger.warn({ agent: name, sealFile: read.kind === 'missing' ? 'created' : 'existing' }, 'agent-config seal: no seal for this agent yet, the current security fields are sealed (trust on first use)')
       return { status: 'first-seal' }
     }
@@ -367,7 +392,9 @@ export function checkAgentConfigSeal(name: string, p: SealPaths = DEFAULT_SEAL_P
       entry.hash = viewHash(sealedNow)
       dirty = true
     }
+    const alertKey = `${p.sealPath}|${name}`
     if (entry.hash === hash) {
+      changeAlerts.delete(alertKey)
       // back on the seal: the next departure from it is a new event and files a new card (A -> B -> A -> B)
       if (entry.alertedHash !== undefined || entry.alertCardId !== undefined) {
         delete entry.alertedHash
@@ -383,6 +410,11 @@ export function checkAgentConfigSeal(name: string, p: SealPaths = DEFAULT_SEAL_P
       if (dirty) alertSize(writeSealFile(p, file), p, deps)
       return { status: 'changed', fields, cardId: entry.alertCardId ?? null }
     }
+    const kept = changeAlerts.get(alertKey)
+    if (kept?.hash === hash) {
+      if (dirty) alertSize(writeSealFile(p, file), p, deps)
+      return { status: 'changed', fields, cardId: kept.cardId }
+    }
     let cardId: string | null = null
     try {
       cardId = deps.fileCard(`INTEGRITÁS: ${name} agent-config.json biztonsági mezője megváltozott (${fields.join(', ')})`,
@@ -394,6 +426,7 @@ export function checkAgentConfigSeal(name: string, p: SealPaths = DEFAULT_SEAL_P
     if (cardId) {
       entry.alertedHash = hash
       entry.alertCardId = cardId
+      changeAlerts.set(alertKey, { hash, cardId })
       dirty = true
     }
     if (dirty) alertSize(writeSealFile(p, file), p, deps)
@@ -491,7 +524,7 @@ export function sealDashboardWrite(name: string, field: SealedField, value: unkn
     }
     const entry = raw as SealEntry
     // as the file will read it back: JSON drops an undefined member, which would otherwise read as a change
-    const stored = storedValue(value === undefined ? null : JSON.parse(JSON.stringify(value)))
+    const stored = configStoredValue(value === undefined ? null : JSON.parse(JSON.stringify(value))) // a config value
     entry.fields = { ...entry.fields, [field]: stored }
     entry.hash = viewHash(entry.fields)
     entry.sealedAt = now()
@@ -500,6 +533,24 @@ export function sealDashboardWrite(name: string, field: SealedField, value: unkn
   } catch (err) {
     logger.error({ agent: name, field, err }, 'agent-config seal: moving the seal after a dashboard write failed')
   }
+}
+
+/** A dashboard write that may change the derived runtimeClass moves the sealed class ONLY when the sealed class still
+ *  equals the class the file had BEFORE this write: a hand edit of the model (not sealed) made earlier has then not been
+ *  absorbed by an unrelated dashboard write (Viktor 43313 LOW 1). */
+export function sealClassMove(name: string, before: RuntimeClass, after: RuntimeClass, by: string = 'internal', p: SealPaths = DEFAULT_SEAL_PATHS): void {
+  try {
+    const read = readSealFile(p)
+    if (read.kind === 'invalid') return
+    const raw: unknown = read.file.agents[name]
+    if (raw === undefined || entryProblem(raw) !== null) return
+    const sealed = (raw as SealEntry).fields.runtimeClass
+    if (sealed !== undefined && sealed !== before) {
+      logger.warn({ agent: name, sealed, before, after }, 'agent-config seal: the sealed runtime class differs from the file before this write; NOT moved (the next spawn reports it)')
+      return
+    }
+  } catch { return }
+  sealDashboardWrite(name, 'runtimeClass', after, by, p)
 }
 
 /** For GET /api/agents/<name>/config-seal: the seal and whether the file matches it. */

@@ -17,7 +17,7 @@ vi.mock('../logger.js', () => ({
 
 import {
   acceptAgentConfigSeal, agentConfigSealStatus, canonicalJson, checkAgentConfigSeal, describeValue, mayAcceptSeal,
-  sealCaller, sealDashboardWrite, SEALED_FIELDS, VALUE_CAP, FIELD_VALUE_CAP, SEAL_FILE_ALARM_BYTES, registerSealModelResolver,
+  sealCaller, sealClassMove, sealDashboardWrite, SEALED_FIELDS, VALUE_CAP, FIELD_VALUE_CAP, SEAL_FILE_ALARM_BYTES, registerSealModelResolver,
   runtimeClassOf, sealedWriteRefusal, storedValue, viewHash,
   type SealDeps, type SealPaths,
 } from '../web/agent-config-seal.js'
@@ -136,11 +136,31 @@ describe('agent-config seal', () => {
       expect(checkAgentConfigSeal('zza', paths, deps)).toEqual({ status: 'ok' })
       expect(cards).toHaveLength(0)
     })
+    it('Viktor 43337 LOW 1: a hand edit across the class, then an unrelated dashboard write, does not move the sealed class', () => {
+      writeCfg('zza', CODEX)
+      checkAgentConfigSeal('zza', paths, deps)
+      expect(seal().agents.zza.fields.runtimeClass).toBe('other')
+      writeCfg('zza', { model: 'claude-sonnet-5-5', displayName: 'M' }) // by hand, past the writers
+      // a harmless writer then runs (a modelProfile cleared): the class before and after that write is 'claude'
+      sealClassMove('zza', 'claude', 'claude', 'token', paths)
+      expect(seal().agents.zza.fields.runtimeClass).toBe('other')
+      expect(checkAgentConfigSeal('zza', paths, deps)).toEqual({ status: 'changed', fields: ['runtimeClass'], cardId: 'C1' })
+    })
+    it('sealClassMove moves the class when the write itself crosses it from the sealed class (a dashboard model change)', () => {
+      writeCfg('zza', CODEX)
+      checkAgentConfigSeal('zza', paths, deps)
+      writeCfg('zza', { model: 'claude-sonnet-5-5', displayName: 'M' })
+      sealClassMove('zza', 'other', 'claude', 'session:p', paths)
+      expect(seal().agents.zza.fields.runtimeClass).toBe('claude')
+      expect(checkAgentConfigSeal('zza', paths, deps)).toEqual({ status: 'ok' })
+      expect(cards).toHaveLength(0)
+    })
     it('runtimeClassOf: a customProvider wins, then the resolved model (the registered resolver: aliases, profiles)', () => {
       expect(runtimeClassOf({ model: 'claude-x', customProvider: 'p' })).toBe('custom')
       expect(runtimeClassOf({ model: 'claude-x', customProvider: '  ' })).toBe('claude')
       expect(runtimeClassOf({ model: 'anthropic/claude-x' })).toBe('other')
       expect(runtimeClassOf({})).toBe('other')
+      expect(runtimeClassOf({ model: 'claudex-1' })).toBe('other') // Viktor 43337 INFO 3: the prefix is claude-
       try {
         registerSealModelResolver(c => (c.model === 'opus' ? 'claude-opus-5-5' : String(c.model ?? '')))
         expect(runtimeClassOf({ model: 'opus' })).toBe('claude')
@@ -164,6 +184,20 @@ describe('agent-config seal', () => {
       writeCfg('zza', { model: 'claude-sonnet-5-5' })
       expect(checkAgentConfigSeal('zza', paths, deps)).toMatchObject({ status: 'changed', fields: ['runtimeClass'] })
     })
+    it('sealClassMove on an entry without a sealed class (written before runtimeClass existed) seals the new class at once', () => {
+      writeCfg('zza', CODEX)
+      checkAgentConfigSeal('zza', paths, deps)
+      const f = seal()
+      delete f.agents.zza.fields.runtimeClass
+      f.agents.zza.hash = viewHash(f.agents.zza.fields)
+      writeFileSync(paths.sealPath, JSON.stringify(f))
+      writeCfg('zza', { model: 'claude-sonnet-5-5', displayName: 'M' })
+      sealClassMove('zza', 'other', 'claude', 'session:p', paths)
+      expect(seal().agents.zza.fields.runtimeClass).toBe('claude')
+      expect(seal().agents.zza.by).toBe('dashboard:runtimeClass:session:p')
+      expect(checkAgentConfigSeal('zza', paths, deps)).toEqual({ status: 'ok' })
+      expect(cards).toHaveLength(0)
+    })
   })
 
   describe('card ec665017: the size of the seal file (Viktor 43223 LOW 1)', () => {
@@ -180,6 +214,26 @@ describe('agent-config seal', () => {
       writeCfg('zza', { ...BASE, capabilities: [...big.slice(1), 'email:thread-reply'] })
       expect(checkAgentConfigSeal('zza', paths, deps)).toMatchObject({ status: 'changed', fields: ['capabilities'] })
       expect(cards[0].description).toContain('$sha256')
+    })
+    it('Viktor 43337 LOW 2: the sealed marker copied into the config is a change, not the sealed value', () => {
+      const big = Array.from({ length: 300 }, (_, i) => `cap:${i}`)
+      writeCfg('zza', { ...BASE, capabilities: big })
+      checkAgentConfigSeal('zza', paths, deps)
+      const marker = seal().agents.zza.fields.capabilities
+      expect(marker).toEqual({ $sha256: expect.stringMatching(/^[0-9a-f]{64}$/), length: canonicalJson(big).length })
+      writeCfg('zza', { ...BASE, capabilities: marker }) // the short object instead of the list
+      expect(checkAgentConfigSeal('zza', paths, deps)).toEqual({ status: 'changed', fields: ['capabilities'], cardId: 'C1' })
+      writeCfg('zza', { ...BASE, capabilities: { length: marker.length, $sha256: marker.$sha256 } }) // key order
+      expect(checkAgentConfigSeal('zza', paths, deps)).toMatchObject({ status: 'changed', fields: ['capabilities'] })
+    })
+    it('a marker-shaped value the dashboard itself writes reads back as the same (no false card)', () => {
+      writeCfg('zza', BASE)
+      checkAgentConfigSeal('zza', paths, deps)
+      const odd = { $sha256: 'not-a-hash', length: 3 }
+      writeCfg('zza', { ...BASE, capabilities: odd })
+      sealDashboardWrite('zza', 'capabilities', odd, 'session:p', paths, deps.now)
+      expect(checkAgentConfigSeal('zza', paths, deps)).toEqual({ status: 'ok' })
+      expect(cards).toHaveLength(0)
     })
     it("the dashboard writer stores an over-cap value as its marker too (Viktor's probe went through the writer)", () => {
       const big = Array.from({ length: 10_000 }, (_, i) => `cap:${'x'.repeat(24)}${i}`)
@@ -247,11 +301,31 @@ describe('agent-config seal', () => {
       expect(Buffer.byteLength(sealText())).toBe(SAFE_READ_MAX_BYTES - 300)
       const before = sealText()
       writeCfg('zzc', BASE)
-      checkAgentConfigSeal('zzc', paths, deps)
+      expect(checkAgentConfigSeal('zzc', paths, deps)).toEqual({ status: 'first-seal-refused' }) // Viktor 43337 INFO 1
       expect(sealText()).toBe(before) // refused: the old file is still the valid one
+      expect(seal().agents.zzc).toBeUndefined()
       expect(cards.map(c => c.title).some(t => t.includes('nem íródott'))).toBe(true)
       expect(checkAgentConfigSeal('zza', paths, deps)).toEqual({ status: 'ok' }) // the others still read
     })
+  })
+
+  it('Viktor 43337 INFO 1: a change seen while the seal file is full files ONE card, not one per spawn', () => {
+    writeCfg('zza', BASE)
+    checkAgentConfigSeal('zza', paths, deps)
+    const f = seal()
+    const fields = f.agents.zza.fields
+    f.agents.zzpad = { hash: viewHash(fields), fields, sealedAt: 1, by: 'p' }
+    writeFileSync(paths.sealPath, JSON.stringify(f, null, 2) + '\n')
+    const pad = f.agents.zzpad.by.length + (SAFE_READ_MAX_BYTES - 40 - Buffer.byteLength(sealText()))
+    f.agents.zzpad.by = 'p'.repeat(pad)
+    writeFileSync(paths.sealPath, JSON.stringify(f, null, 2) + '\n')
+    expect(Buffer.byteLength(sealText())).toBe(SAFE_READ_MAX_BYTES - 40) // the alert mark (alertedHash) no longer fits
+    writeCfg('zza', { ...BASE, securityProfile: 'yolo' })
+    const first = checkAgentConfigSeal('zza', paths, deps)
+    const second = checkAgentConfigSeal('zza', paths, deps)
+    expect(first).toMatchObject({ status: 'changed', fields: ['securityProfile'] })
+    expect(second).toMatchObject({ status: 'changed', fields: ['securityProfile'], cardId: (first as { cardId: string }).cardId })
+    expect(cards.filter(c => c.title.includes('megváltozott'))).toHaveLength(1)
   })
 
   it('Viktor 43223 INFO: an entry whose hash does not match its fields is a broken entry (a hand edit of one of them)', () => {
@@ -684,9 +758,9 @@ describe('agent-config seal: wired where it must be (source pins)', () => {
     ['agent-team.ts', 'writeAgentTeam', ["sealDashboardWrite(name, 'team', team, by)"]],
     ['agent-config.ts', 'writeAgentAuthMode', ["sealDashboardWrite(name, 'authMode', mode, by)"]],
     ['agent-config.ts', 'writeAgentClaudePlan', ["sealDashboardWrite(name, 'claudePlan', trimmed || undefined, by)"]],
-    ['agent-config.ts', 'writeAgentCustomProvider', ["sealDashboardWrite(name, 'customProvider', trimmed, by)", "sealDashboardWrite(name, 'runtimeClass', runtimeClassOf(config), by)"]],
-    ['agent-config.ts', 'writeAgentModel', ["sealDashboardWrite(name, 'runtimeClass', runtimeClassOf(config), by)"]],
-    ['agent-config.ts', 'writeAgentModelProfile', ["sealDashboardWrite(name, 'runtimeClass', runtimeClassOf(config), by)"]],
+    ['agent-config.ts', 'writeAgentCustomProvider', ["sealDashboardWrite(name, 'customProvider', trimmed, by)"]],
+    ['agent-config.ts', 'writeAgentModel', []],
+    ['agent-config.ts', 'writeAgentModelProfile', []],
     ['agent-config.ts', 'writeAgentCapabilities', ["sealDashboardWrite(name, 'capabilities', capabilities, by)"]],
     ['agent-config.ts', 'writeAgentRemoteConfig', [
       "sealDashboardWrite(name, 'remoteHost', undefined, by)", "sealDashboardWrite(name, 'remoteWorkdir', undefined, by)",
@@ -704,6 +778,19 @@ describe('agent-config seal: wired where it must be (source pins)', () => {
     const moved = [...body.matchAll(/sealDashboardWrite\(name, '(\w+)'/g)].map(m => m[1])
     expect(new Set(moved)).toEqual(new Set(calls.map(c => /'(\w+)'/.exec(c)![1])))
   })
+
+  it.each(['writeAgentCustomProvider', 'writeAgentModel', 'writeAgentModelProfile'])(
+    '%s moves the sealed class only from the class the file had before the write (sealClassMove, Viktor 43337 LOW 1)', fn => {
+      const body = fnBody(src('agent-config.ts'), fn)
+      const before = body.indexOf('const classBefore = runtimeClassOf(config)')
+      const firstChange = body.search(/\n\s*(?:if \([^\n]*\) )?(?:config\.\w+\s*=(?!=)|delete config\.)/)
+      const write = body.indexOf('atomicWriteFileSync(configPath')
+      const move = body.indexOf('sealClassMove(name, classBefore, runtimeClassOf(config), by)')
+      expect(before, fn).toBeGreaterThan(0)
+      expect(firstChange, fn).toBeGreaterThan(before)
+      expect(move, fn).toBeGreaterThan(write)
+      expect(body, fn).not.toContain("sealDashboardWrite(name, 'runtimeClass'")
+    })
 
   it('every write of a sealed field in src/web moves the seal in the same function (except import/restore)', () => {
     const files: string[] = []
