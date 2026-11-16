@@ -10,6 +10,7 @@ import {
   readModelChoices,
   readHold,
   writeHold,
+  clearHold,
   parseHold,
   parseModelArgs,
   windowWarning,
@@ -946,6 +947,62 @@ describe('a new session under a live hold gets the held model (and effort) again
     expect(await sweepModelHold(T0 + 120_000, d)).toBe('reapplied')
     expect(base.sent).toEqual([`/model ${HELD}`])
     expect(readHold(d.holdFile).state?.applied_session).toBe('new-session')
+  })
+
+  it('a hold the owner cleared during a send that throws stays cleared (Viktor 43393 LOW 1)', async () => {
+    let d: ReturnType<typeof deps>
+    d = deps({
+      liveSession: () => ({ id: 'new-session', model: BASE }),
+      send: async () => { clearHold(d.holdFile); throw new Error('tmux failed') },
+    })
+    writeHold(d.holdFile, held())
+    await expect(sweepModelHold(T0 + 60_000, d)).rejects.toThrow('tmux failed')
+    expect(existsSync(d.holdFile)).toBe(false) // not resurrected, and no stub file either (a stub reads as null too)
+  })
+
+  it('a newer session recorded meanwhile on the same hold is not overwritten with the old one', async () => {
+    let d: ReturnType<typeof deps>
+    d = deps({
+      liveSession: () => ({ id: 'new-session', model: BASE }),
+      send: async () => {
+        const cur = readHold(d.holdFile).state as HoldState
+        writeHold(d.holdFile, { ...cur, applied_session: 'newer-session' }) // an overlapping sweep, after a 2nd restart
+        throw new Error('tmux failed')
+      },
+    })
+    writeHold(d.holdFile, held())
+    await expect(sweepModelHold(T0 + 60_000, d)).rejects.toThrow('tmux failed')
+    expect(readHold(d.holdFile).state?.applied_session).toBe('newer-session')
+  })
+
+  it('a new hold the owner put during a send that throws is kept as the owner wrote it (Viktor 43393 LOW 1)', async () => {
+    const OTHER = 'claude-sonnet-5-5'
+    const fresh = held({ model: OTHER, name: 'sonnet', set_at: T0 + 30_000, until: T0 + 7200_000, applied_session: 'new-session' })
+    let d: ReturnType<typeof deps>
+    d = deps({
+      liveSession: () => ({ id: 'new-session', model: BASE }),
+      send: async () => { writeHold(d.holdFile, fresh); throw new Error('tmux failed') },
+    })
+    writeHold(d.holdFile, held())
+    await expect(sweepModelHold(T0 + 60_000, d)).rejects.toThrow('tmux failed')
+    expect(readHold(d.holdFile).state).toEqual(fresh)
+  })
+
+  it('the same hold changed only by the gate: just the session mark goes back, the other write stays', async () => {
+    let d: ReturnType<typeof deps>
+    d = deps({
+      liveSession: () => ({ id: 'new-session', model: BASE }),
+      send: async () => {
+        const cur = readHold(d.holdFile).state as HoldState
+        writeHold(d.holdFile, { ...cur, blocked_since: T0 + 50_000 })
+        throw new Error('tmux failed')
+      },
+    })
+    writeHold(d.holdFile, held())
+    await expect(sweepModelHold(T0 + 60_000, d)).rejects.toThrow('tmux failed')
+    const after = readHold(d.holdFile).state
+    expect(after?.applied_session).toBe('old-session')
+    expect(after?.blocked_since).toBe(T0 + 50_000)
   })
 
   it('the re-sent effort is recorded for the /model status (Viktor 43389 V5)', async () => {
