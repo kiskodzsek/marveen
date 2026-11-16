@@ -2,7 +2,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { execSync } from 'node:child_process'
-import { PROJECT_ROOT, OLLAMA_URL } from '../../config.js'
+import { PROJECT_ROOT, OLLAMA_URL, MAIN_AGENT_ID } from '../../config.js'
+import { connectorWriteRefusal } from '../connector-write-gate.js'
 import { logger } from '../../logger.js'
 import {
   slugify as slugifyMcp,
@@ -133,6 +134,11 @@ export function vaultAndBindEnvSecrets(
 
 export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
+
+  // Card 4cd20267: a sub-agent's token call does not change MCP connector configuration (assign, DELETE, add,
+  // external paths, GitHub repos, the catalog's install / uninstall); checked here, before any body is read or file written (connector-write-gate.ts).
+  const connectorRefusal = connectorWriteRefusal(ctx.auth, MAIN_AGENT_ID, path, method)
+  if (connectorRefusal) { json(res, { error: connectorRefusal }, 403); return true }
 
   // GET /api/connectors -- list every MCP server visible to Claude Code,
   // pulled from the local config files plus the cached `claude mcp list`
