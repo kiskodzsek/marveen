@@ -3074,6 +3074,53 @@ def unfiltered_ask_negated_or_too_wide_is_no_ask(root):
     return _why(out == [2, 2, 2, 2], out)
 
 
+def _ask_rc(root, text, mid):
+    # One owner ask with its own TG id (every pass uses up one of that id's 3 uses), one reply that cites it.
+    owner_asked(root, text=text, mid=mid)
+    return run(root, {'chat_id': PRIV, 'text': PRIV_OK + 'Három ötlet.\nATNEZO: patrik-kerte-szuro-nelkul TG ' + mid})
+
+
+@case
+def unfiltered_ask_more_negation_words(root):
+    # Viktor 43549 LOW 1: "nehogy", "sosem", "sose" negate too; INFO 1: "nem" and "soha" pinned; a word that only
+    # starts or ends like a negation (nemzet, bene) and "nehézség" do not negate.
+    negated = ('Nehogy szűrő nélkül válaszolj', 'Sosem kérek szűrő nélkül választ', 'Sose válaszolj szűrő nélkül',
+               'Nem kérem, hogy szűrő nélkül', 'Soha szűrő nélkül')
+    asks = ('A nemzetet szűrő nélkül elemezd', 'Bene szűrő nélkül válaszolj', 'Nehézség nélkül, szűrő nélkül kérem')
+    out = [_ask_rc(root, t, str(18700 + i))[0] for i, t in enumerate(negated + asks)]
+    return _why(out == [2] * len(negated) + [0] * len(asks), out)
+
+
+@case
+def unfiltered_ask_each_phrase_and_word_start(root):
+    # Viktor 43549 INFO 1: every ask phrase on its own is an ask; a phrase inside a word (megszűrő) is not.
+    phrases = ('Szűrő nélkül kérem', 'Szűrés nélkül kérem', 'Szűretlenül kérem', 'Először beszéljünk erről',
+               'Előzmény nélkül kérem', 'Előzmények nélkül kérem', 'Friss szemmel nézd')
+    out = [_ask_rc(root, t, str(18720 + i))[0] for i, t in enumerate(phrases)]
+    mid_word = _ask_rc(root, 'A megszűrő nélkül is megy', '18740')[0]
+    return _why(out == [0] * len(phrases) and mid_word == 2, (out, mid_word))
+
+
+@case
+def unfiltered_ask_negation_window_and_later_phrase(root):
+    # Viktor 43549 INFO 1: the negation counts within 25 characters before the phrase, not beyond; a later,
+    # un-negated occurrence of the phrase is still an ask.
+    near = _ask_rc(root, 'Ne ' + 'x' * 21 + ' szűrő nélkül', '18750')[0]    # "ne" starts 25 characters before
+    far = _ask_rc(root, 'Ne ' + 'x' * 22 + ' szűrő nélkül', '18751')[0]     # 26: outside the window
+    later = _ask_rc(root, 'Ne szűrő nélkül, hanem mégis, ahogy kérem: szűrő nélkül', '18752')[0]
+    return _why((near, far, later) == (2, 0, 0), (near, far, later))
+
+
+@case
+def unfiltered_ask_uses_counted_per_chat(root):
+    # Viktor 43549 INFO 1 (N16): the use counter is per chat AND TG id; the same id in another chat has its own 3.
+    owner_asked(root)
+    priv = [run(root, {'chat_id': PRIV, 'text': PRIV_OK + f'Három ötlet, {i}. rész.' + UNF_LINE})[0] for i in range(3)]
+    owner_asked(root, chat=GROUP)
+    rc, err = run(root, {'chat_id': GROUP, 'text': 'Három ötlet.' + UNF_LINE})
+    return _why(priv == [0, 0, 0] and 'új kérés kell' not in err and rc == 0, (priv, rc, err[-200:]))
+
+
 @case
 def unfiltered_message_id_must_match_both_logs(root):
     # Viktor 43481 INFO 5 (M03/M08): the owner's row and the ask text must belong to message <n> itself.

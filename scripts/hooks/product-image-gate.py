@@ -1265,7 +1265,9 @@ ATNEZO_UNFILTERED_RE = re.compile(r'(?mi)^\s*ATN[EÉ]Z[OŐ]:\s*patrik-kerte-sz[u
 ATNEZO_UNFILTERED_TG = re.compile(r'^TG\s*(\d{1,12})\b', re.I)
 UNFILTERED_ASK = ('szuro nelkul', 'szures nelkul', 'szuretlen', 'friss szemmel', 'eloszor beszel',
                   'elozmeny nelkul', 'elozmenyek nelkul')
-UNFILTERED_NEG = re.compile(r'(?<!\w)(?:ne|nem|soha)(?!\w)')
+# Viktor 43549 LOW 1: "nehogy", "sosem", "sose" negate too (fail closed: "sose bánd, szűrő nélkül mondd" is no ask);
+# "se" is left out, it is too common as a plain conjunction.
+UNFILTERED_NEG = re.compile(r'(?<!\w)(?:ne(?:hogy)?|nem|soha|sosem|sose)(?!\w)')
 UNFILTERED_NEG_WINDOW = 25
 UNFILTERED_MAX_USES = 3
 UNFILTERED_MAX_AGE_S = 6 * 3600
