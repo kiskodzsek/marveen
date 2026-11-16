@@ -94,7 +94,7 @@ file a command runs is read and judged too:
     (`python3 -c "..."`, `python3 - <<'PY' ... PY`).
   Not seen: a module the script imports, a file the script builds or downloads, a name assembled at run time
   ('sec' + 'urity'), keychain APIs (Security.framework, keyring), a variable set outside the command, a quoted path
-  with spaces, a Ruby %w list, a payload a quote opens after other commands (`command '...'`, `time '...'` run a
+  with spaces, an interpreter whose own name a substitution makes (`$(echo python3) m.py`; Viktor 43662 INFO 1), a Ruby %w list, a payload a quote opens after other commands (`command '...'`, `time '...'` run a
   command literally named so, which fails). A wrapped script (`sudo -u root python3 m.py`, `ssh localhost python3
   m.py`, `sg staff 'python3 m.py'`) is read like any other (card 3085a683; for ssh the file is looked up here, which
   is right for localhost and a fail-closed guess for a remote host). The gate's own test assembles its fixtures at
@@ -949,7 +949,10 @@ CODE_FLAG_RX = re.compile(r'-[a-zA-Z]*[ce]|--eval(?:=.*)?|--command(?:=.*)?')
 # python -m runs a module, and from the cwd that is a file: `python3 -m measure` runs ./measure.py, `-m pkg.sub` runs
 # pkg/__init__.py and pkg/sub.py, `-m pkg` also pkg/__main__.py (measured 2026-11-13; not with -I, judged anyway).
 MODULE_FLAG_RX = re.compile(r'-[a-zA-Z]*m')
-MODULE_ATTACHED_RX = re.compile(r'-m([A-Za-z_][\w.]*)')
+# `-mmod`, and after python's no-argument flags `-Imod` / `-Bqmmod` (card 70c94516: the old `-m...` only at the start
+# let `-Imevil` pass); read on the word with its quotes removed (`-m"evil"`)
+# (a name, a quote or a substitution after the m: `-m)` is the end of `$(echo -m)`, no module)
+MODULE_JOINED_RX = re.compile(r'-[bBdEhiIOPqsSuvVx]*m([A-Za-z_\'"$`].*)')
 MODULE_NAME_RX = re.compile(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){0,7}')
 # The script on stdin (Viktor 41715 LOW d): `python3 < m.py`, `python3 - < m.py`, `cat m.py | python3`. Only when the
 # command runs an interpreter.
@@ -976,6 +979,9 @@ def module_files(mod):
 # A redirection right after the path ends it too (`./m.py>>log`, `./m.py<in`: the shell runs m.py; found by the
 # differential fuzz, card fae0712e)
 DIRECT_RX = re.compile(SCRIPT_POSITION + r'''['"]?((?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*)['"]?(?=\s|$|[;&|)<>])''')
+# Card 70c94516 (Viktor 43662 LELET 2): the whole path word up to a blank, when DIRECT_RX stops at a quote or a
+# substitution inside it (`./x$(true).sh`, `./"ev"il.sh` run x.sh / evil.sh); read with word_forms' rules
+DIRECT_WORD_RX = re.compile(SCRIPT_POSITION + r'''(['"]?(?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*['"`$]\S*)''')
 # A literal naming the binary: 'security', "/usr/bin/security", `security` (a JS template), or a shell assignment
 # SEC=security. The assignment branch walks path segments, not \S*: `=\s*['"]?(?:\S*/)?security` ran to the end of every
 # space-free run and searched back for "/" at each "=", quadratic: 100 000 "=" took 9 s, 1 MB never returned within the
@@ -997,6 +1003,23 @@ def literal_hit(text):
 def strip_quotes(word):
     # a backslash too: the escaped quote that closes `do shell script \"python3 m.py\"` left "m.py\"
     return word[1:-1] if len(word) >= 2 and word[0] == word[-1] and word[0] in '\'"' else word.strip('\'"\\')
+
+
+def shell_unquote(word):
+    """Card 70c94516 (Viktor 43662 LELET 1): bash's quote removal over the WHOLE word, not only an outer pair:
+    `"ev"il.py`, `e"vil".py`, `'ev'il.py` and `$'ev'il.py` all run evil.py. The pieces are read by shell_word (the
+    payload reader's rules: '...', "..." / $"..." unescaped, $'...' decoded, \\x as x); a character no piece reads
+    (a paren of a substitution, an operator) is kept as written, so the result is one more name to look up, never
+    fewer (the caller keeps strip_quotes' form as well)."""
+    out, i = [], 0
+    while i < len(word):
+        value, j = shell_word(word, i)
+        out.append(value)
+        if j == i:
+            out.append(word[i])
+            j = i + 1
+        i = j
+    return ''.join(out)
 
 
 def expand(text):
@@ -1069,9 +1092,11 @@ class TooManyArgs(Exception):
 
 class SourceGroup:
     """`source f a b`: the rest (a, b) is judged only when f is an existing regular file; `over` names why the rest
-    is not all read (past MAX_ARGS or ARGS_WINDOW), and then such a call blocks."""
-    def __init__(self, first, rest, over):
-        self.first, self.rest, self.over = first, rest, over
+    is not all read (past MAX_ARGS or ARGS_WINDOW), and then such a call blocks. Card 70c94516: `firsts` are the
+    readings of f (as written, quotes removed, substitutions removed, the next word when f may print nothing); the
+    rest is judged when any of them is a file."""
+    def __init__(self, firsts, rest, over):
+        self.firsts, self.rest, self.over = firsts, rest, over
 
 
 # `>`, `2>>`, `>&`, `&>`, `>|` alone (target next) or with it; the & and | of a redirection no longer end the words
@@ -1178,15 +1203,37 @@ def has_subst(w):
     return '`' in w or '$(' in w
 
 
-def merged_word(all_words, i):
+def merged_span(all_words, i):
     """The call's words are split at blanks, so a substitution with a blank in it (`$(echo $(true))m.py`) is in
-    pieces: join the pieces from i while a backtick or a "(" is still open (at most MAX_ARGS pieces)."""
+    pieces: join the pieces from i while a backtick or a "(" is still open (at most MAX_ARGS pieces).
+    -> (the joined word, the index of its last piece)."""
     s = all_words[i]
     j = i
     while (s.count('`') % 2 or s.count('(') > s.count(')')) and j + 1 < len(all_words) and j - i < MAX_ARGS:
         j += 1
         s += ' ' + all_words[j]
-    return s
+    return s, j
+
+
+def merged_word(all_words, i):
+    return merged_span(all_words, i)[0]
+
+
+def needs_forms(raw):
+    """A word bash reads otherwise than strip_quotes does: a substitution, or a quote / backslash anywhere in it."""
+    return has_subst(raw) or '\\' in raw or bool(QUOTE_RX.search(raw[1:-1] if len(raw) > 1 else ''))
+
+
+def word_forms(all_words, i):
+    """Card 70c94516 (Viktor 43662 LELET 1): the other names bash may run for word i, besides strip_quotes' form:
+    the whole-word quote removal (`"ev"il.py`), and with a substitution in it (pieces joined) the word without the
+    substitutions, before and after the quote removal (`"$(true)"evil.py`, `evil"$(true)".py`). Distinct, in order;
+    "" when a substitution may leave nothing. The caller adds them to the strip_quotes form: never fewer words."""
+    raw = merged_word(all_words, i) if has_subst(all_words[i]) else all_words[i]
+    forms = [shell_unquote(raw)]
+    if has_subst(raw):
+        forms += [without_substs(strip_quotes(raw)), shell_unquote(without_substs(raw))]
+    return list(dict.fromkeys(forms))
 
 
 def interp_groups(text, expanded=False):
@@ -1213,9 +1260,24 @@ def interp_groups(text, expanded=False):
             idx = next((i for i, w in enumerate(all_words[:2]) if not w.startswith('-')), None)  # `. -- f.sh` too
             first = strip_quotes(all_words[idx]) if idx is not None else ''
             if first:
+                # card 70c94516 (Viktor 43662 LELET 2): f read as bash does (quotes, substitutions); when a
+                # substitution may leave nothing of it (`source $(true) x.sh`), the next word is the file
+                firsts = [first]
+                if needs_forms(all_words[idx]):
+                    forms = word_forms(all_words, idx)
+                    firsts += [f for f in forms if f and f not in firsts]
+                    end = merged_span(all_words, idx)[1]
+                    if '' in forms and end + 1 < len(all_words):
+                        firsts.append(strip_quotes(all_words[end + 1]))
                 tail = all_words[idx + 1:]
                 over = clipped or len(all_words) > MAX_ARGS
-                groups.append(SourceGroup(first, [strip_quotes(w) for w in tail[:MAX_ARGS] if not w.startswith('-')],
+                rest = []
+                for k, w in enumerate(tail[:MAX_ARGS], idx + 1):
+                    if not w.startswith('-'):
+                        rest.append(strip_quotes(w))
+                        if needs_forms(w):
+                            rest += [f for f in word_forms(all_words, k) if f and not f.startswith('-')]
+                groups.append(SourceGroup(firsts, rest,
                                           f'source: {len(all_words)} szó, MAX_ARGS {MAX_ARGS}' if len(all_words) > MAX_ARGS
                                           else (f'source: a parancs hosszabb a {ARGS_WINDOW} karakteres ablaknál'
                                                 if over else '')))
@@ -1243,20 +1305,23 @@ def interp_groups(text, expanded=False):
                     argv_data = False
                 i += 2 if kind == 2 else 1
                 continue
-            attached = MODULE_ATTACHED_RX.fullmatch(w) if python else None
-            if attached:
-                groups += [[c] for c in module_files(attached.group(1))]
+            # card 70c94516 (Viktor 43662 LELET 3): a module name the gate cannot read -- a substitution or a variable
+            # in it (`-m $(echo evilmod)`, `-m ${M:-evilmod}`, `-m $(echo evil)mod`) -- blocks: any module may run.
+            # Joined (`-mevil`, `-Imevil`, `-m"evil"`) and quoted forms are read with the quotes removed.
+            joined = MODULE_JOINED_RX.fullmatch(shell_unquote(all_words[i])) if python else None
+            if joined:
+                if '$' in all_words[i] or '`' in all_words[i]:
+                    raise TooManyArgs('python -m: a modulnév helyettesítés vagy változó, nem olvasható')
+                groups += [[c] for c in module_files(joined.group(1))]
                 stopped = True
                 break
             if python and MODULE_FLAG_RX.fullmatch(w):
                 if i + 1 < len(words):
+                    raw = all_words[i + 1]
+                    if '$' in raw or '`' in raw:
+                        raise TooManyArgs('python -m: a modulnév helyettesítés vagy változó, nem olvasható')
                     groups += [[c] for c in module_files(words[i + 1])]
-                    # card 4bdf7309 (LELET 1 c): `-m \x60true\x60 evilmod` runs evilmod: a module word with a substitution
-                    # is also read without it, and when nothing is left, the next word is the module
-                    if has_subst(all_words[i + 1]):
-                        bare = without_substs(words[i + 1])
-                        mod = bare if bare else (words[i + 2] if i + 2 < len(words) else '')
-                        groups += [[c] for c in module_files(mod)]
+                    groups += [[c] for c in module_files(shell_unquote(raw))]
                 stopped = True
                 break
             if w == '-' or CODE_FLAG_RX.fullmatch(w):
@@ -1274,19 +1339,19 @@ def interp_groups(text, expanded=False):
                     argv_data = False  # an option the gate does not know: every word is judged, as before
                 i += 1  # (a -W / -X cluster, kind 2, never gets here: PY_ATTACHED_RX above takes it and its argument)
                 continue
+            # card 4bdf7309 (LELET 1 b): `\x60true\x60evil.py` runs evil.py: the word without its substitutions; card
+            # 70c94516 (LELET 1): `"ev"il.py`, `"$(true)"evil.py`: the word with every quote removed (word_forms)
+            forms = word_forms(all_words, i) if needs_forms(all_words[i]) else []
             if python and subst_seen and not w.startswith('-') and w:
                 # card 4bdf7309 (LELET 1 c): after a substitution word, any word may be a module name (`python3
                 # \x60echo -m\x60 evilmod` runs evilmod.py): judged as one too, never fewer words
-                groups += [[c] for c in module_files(without_substs(w))]
-            bare = ''
+                for f in dict.fromkeys([without_substs(w)] + forms):
+                    groups += [[c] for c in module_files(f)]
             if has_subst(all_words[i]):
                 subst_seen = True
-                # card 4bdf7309 (LELET 1 b): `\x60true\x60evil.py` runs evil.py: the word without its substitutions
-                bare = without_substs(strip_quotes(merged_word(all_words, i)))
             if not w.startswith('-') and w:
                 group.append(w)
-                if bare and bare != w and not bare.startswith('-'):
-                    group.append(bare)
+                group += [f for f in forms if f and f != w and not f.startswith('-')]
                 # the script: the words after it are its arguments (see DATA_ARGV_RX). Only a plain word: an unset
                 # $X or a glob may vanish or become another file (`python3 $X m.py` runs m.py), and a word the
                 # window cut may be longer than what was read
@@ -1314,6 +1379,13 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
     norm = normalise(cmd) if normalised is None else normalised
     text = expand(norm)
     groups = interp_groups(text, text != norm) + [[w] for w in extra]
+    # card 70c94516 (Viktor 43662 LELET 1): normalise() takes the backslash of a $'\x65' escape (`\x` -> `x`), which
+    # bash decodes in a word (`python3 $'\x65vil.py'` runs evil.py): such a command is read without it too
+    word_texts = [text]
+    if "$'" in cmd and '\\' in cmd:
+        raw = expand(cmd)
+        groups += interp_groups(raw, raw != cmd)
+        word_texts.append(raw)
     if INTERP_RX.search(text):  # the script on stdin: only when an interpreter runs
         groups += [[m.group(1)] for m in REDIRECT_RX.finditer(text)]
         for m in CAT_RX.finditer(text):
@@ -1322,6 +1394,12 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
                 raise TooManyArgs(f'cat: {len(cat_words)} szó, MAX_ARGS {MAX_ARGS}')
             groups += [[strip_quotes(w)] for w in cat_words if not w.startswith('-')]
     groups += [[m.group(1)] for m in DIRECT_RX.finditer(text)]
+    for m in (m for t in word_texts for m in DIRECT_WORD_RX.finditer(t)):
+        raw = m.group(1).rstrip(';&|<>')
+        if len(raw) > ARGS_WINDOW:  # without_substs is a loop per nesting level: an unbounded word is not read
+            raise TooManyArgs(f'egy útvonal-szó hosszabb {ARGS_WINDOW} karakternél')
+        # a ")" may close the substitution the path stands in (`$(./x"y".sh)`): read with and without it
+        groups.append([f for r in dict.fromkeys([raw, raw.rstrip(')')]) for f in word_forms([r], 0) if f])
     bases = cd_bases(text, cwd)
     if groups and len(bases) > MAX_BASES:
         return [''] * (MAX_SCRIPTS + 1)
@@ -1363,9 +1441,12 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
             else:
                 group = [group.first] + group.rest
         if isinstance(group, SourceGroup):
-            first = resolve(group.first)
-            if first is None:
-                return [''] * (MAX_SCRIPTS + 1)
+            first = False
+            for f in group.firsts:
+                r = resolve(f)
+                if r is None:
+                    return [''] * (MAX_SCRIPTS + 1)
+                first = first or r
             if first:  # bash runs it and hands it the rest
                 if group.over:
                     raise TooManyArgs(group.over)
