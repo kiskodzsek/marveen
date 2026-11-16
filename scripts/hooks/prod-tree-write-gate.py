@@ -1482,8 +1482,9 @@ def analyze_simple(cmd, st, depth):
                 if ch == '-':
                     negated = True
                     continue
-                if ch in 'ltvpzZ':
-                    # a listing / test / pipe / comment / zipinfo mode (`-qql`, `-Z1`; replay 17901b47 r2)
+                if ch in 'ltvpzZh':
+                    # a listing / test / pipe / comment / zipinfo mode (`-qql`, `-Z1`; replay 17901b47 r2); `h` is the
+                    # help (card f72e8f27, Viktor 43370 INFO: measured, `unzip -h e.zip`, `-hh`, `-oh` extract nothing)
                     listing = True
         if not listing or negated:
             cwd_writer(st, 'unzip', tree=True)
@@ -1526,7 +1527,9 @@ def tar_absolute(lt):
         if not t:
             continue
         if t.startswith('--'):
-            if _tar_long(t, '--absolute-paths', 5)[0] or _tar_long(t, '--absolute-names', 5)[0]:
+            # card f72e8f27: --ab is already --absolute-paths (measured, bsdtar 3.5.3: `tar -xf abs.tar --ab` wrote the
+            # member to its absolute path, rc 0; --a is ambiguous, rc 1), so the shortest prefix is 4 characters
+            if _tar_long(t, '--absolute-paths', 4)[0] or _tar_long(t, '--absolute-names', 4)[0]:
                 return True
         elif re.fullmatch(r'-[A-Za-z]+', t):
             for ch in t[1:]:

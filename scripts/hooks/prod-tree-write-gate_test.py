@@ -496,6 +496,9 @@ R2_DENY = [  # Viktor 43196 (card 17901b47 round 2)
     # the attached one alone (agents/kernel/work/x) and allowed what the parent denied
     ('tar -xf /tmp/e.tar -C ../.. -Cx', K + '/work'), ('tar -xf /tmp/e.tar -C ../.. -C x', K + '/work'),
     ('tar -xf /tmp/e.tar -C /tmp/a -C ' + P + '/agents/x', '/tmp'),   # an absolute one starts the chain again
+    # card f72e8f27 (Viktor 43370 C2): every element of the chain is checked, not only the first (out is a scratch
+    # dir; out/../../../x is agents/x)
+    ('tar -xf /tmp/e.tar -C out -C ../../../x', K + '/work'),
     # Viktor 43347 LOW 2: bsdtar's --cd and the unique prefixes of --directory
     ('tar -xf /tmp/e.tar --cd ' + P + '/agents/x', K + '/work'), ('tar -xf /tmp/e.tar --cd=' + P + '/agents/x', K + '/work'),
     ('tar -xf /tmp/e.tar --dir ' + P + '/agents/x', K + '/work'), ('tar -xf /tmp/e.tar --direc=' + P + '/agents/x', K + '/work'),
@@ -503,6 +506,9 @@ R2_DENY = [  # Viktor 43196 (card 17901b47 round 2)
     # Viktor 43347 LOW 3: -P / --absolute-names: the archive's member names are the targets
     ('tar -xPf /tmp/abs.tar', K + '/work'), ('tar -x --absolute-names -f /tmp/abs.tar', '/tmp'), ('tar xPf /tmp/abs.tar', '/tmp'),
     ('tar -x --absolute-paths -f /tmp/abs.tar', '/tmp'),
+    # card f72e8f27 (Viktor 43370 A1): --ab is already --absolute-paths in bsdtar (measured: the member went to its
+    # absolute path); the old 5-character minimum let it through
+    ('tar -x --ab -f /tmp/abs.tar', '/tmp'), ('tar -xf /tmp/abs.tar --abs', K + '/work'),
     # Viktor 43347 mutant B7: a -f start point as its own word, before a protected start point
     ('find -f /tmp/ok agents/x -name agent-config.json -delete', P),
     # mutant b7: -f takes the next word even when it starts with "-" (measured on macOS find: `find -f -x/../../t`
@@ -559,6 +565,13 @@ R2_ALLOW = [
     ('tar -xf /tmp/e.tar --cd /tmp/o', K + '/work'), ('tar -xf /tmp/e.tar --dir=/tmp/o', K + '/work'),
     # mutant t6: --di is ambiguous in bsdtar (--disable-copyfile, --directory; measured rc 1, nothing extracted)
     ('tar -xf /tmp/e.tar --di=' + P + '/agents/x', K + '/work'),
+    # card f72e8f27 (Viktor 43370 L3, A1): --c and --a are ambiguous in bsdtar (measured rc 1, nothing extracted), so
+    # the minimum prefixes are --cd (4) and --ab (4)
+    ('tar -xf /tmp/e.tar --c=' + P + '/agents/x', K + '/work'), ('tar -xf /tmp/abs.tar --a', K + '/work'),
+    # card f72e8f27 (Viktor 43370 C3): an absolute -C starts the chain again; bsdtar extracts into /tmp/a only
+    ('tar -xf /tmp/e.tar -C agents/x -C /tmp/a', P),
+    # card f72e8f27 (Viktor 43370 INFO): unzip -h / -hh is the help; measured, with an archive too it extracts nothing
+    ('unzip -hh', P), ('unzip -h /tmp/e.zip', P), ('unzip -oh /tmp/e.zip', P),
     # mutant t12: in -xfP the f takes the rest of the word: P is the archive name, not -P (measured: "P: No such file")
     ('tar -xfP /tmp/e.tar', K + '/work'),
     ('F=notes.md; cd agents/x && echo x > $F', P), ('F=agent-config.json; cd /tmp && echo x > $F', P),
