@@ -980,8 +980,9 @@ def _argv_option(w, python):
 
 def backtick_openers(text):
     """Card 217f551b: {start: end} of the backtick substitutions that OPEN at a position of text, from the shared
-    lexer; None when text has a backtick the lexer did not read (not loaded, past its bounds, a problem)."""
-    if '`' not in text:
+    lexer; None when text has a backtick the lexer did not read (not loaded, past its bounds, a problem). Card 4bdf7309
+    (Viktor 43448 LELET 1, his proposed diff): the $( ) substitutions too, the same way."""
+    if '`' not in text and '$(' not in text:
         return {}
     if shell_lex is None:
         return None
@@ -991,7 +992,7 @@ def backtick_openers(text):
         return None
     if lx['problems']:
         return None
-    return {s['start']: s['end'] for s in lx['substs'] if s['kind'] == '`'}
+    return {s['start']: s['end'] for s in lx['substs'] if s['kind'] in ('`', '$(')}
 
 
 def _call_end(rest, base, openers):
@@ -1001,25 +1002,59 @@ def _call_end(rest, base, openers):
     closes the substitution the call stands in (`x=\x60python3 m.py\x60`) still ends it. An escaped backtick (after an
     odd run of backslashes) is a character of a word, or inside a backtick substitution a nested one, which the lexer
     does not list (`x=\x60python3 \\\x60true\\\x60 m.py\x60` runs m.py): it never ends a call. Without the lexer's
-    reading (openers None) no backtick ends a call: more words are judged, never fewer."""
+    reading (openers None) no backtick ends a call: more words are judged, never fewer. Card 4bdf7309: a $( ) that
+    opens inside the call's words is a word of it too (`python3 $(true) m.py` runs m.py); the ")" of the one the call
+    stands in (`x=$(python3 m.py)`) still ends it."""
     pos = 0
     while True:
         end = _CALL_END_RX.search(rest, pos)
         if end is None:
             return len(rest)
         k = end.start()
-        if rest[k] != '`':
-            return k
-        j = k
-        while j > 0 and rest[j - 1] == '\\':
-            j -= 1
-        if openers is None or (k - j) % 2:
-            pos = end.end()
-            continue
-        close = openers.get(base + end.start())
-        if close is None:
-            return end.start()
-        pos = max(end.end(), close - base)
+        if rest[k] == '`':
+            j = k
+            while j > 0 and rest[j - 1] == '\\':
+                j -= 1
+            if openers is None or (k - j) % 2:
+                pos = end.end()
+                continue
+        # any substitution (backtick or dollar-paren) that STARTS inside the call's words and still holds this
+        # character is one word of the call: jump to its end. One that started before the call (the one the call stands
+        # in) is not in range here, so its closing backtick or paren still ends the call.
+        if openers:
+            a = base + k
+            inner = [e for st, e in openers.items() if base <= st <= a < e]
+            if inner:
+                pos = max(end.end(), max(inner) - base)
+                continue
+        return k
+
+
+_SUBST_SPAN_RX = re.compile(r'`[^`]*`|\$\([^()]*\)')
+
+
+def without_substs(w):
+    """Card 4bdf7309 (Viktor 43448 LELET 1 b): the word as bash reads it when every substitution in it prints nothing
+    (`python3 \x60true\x60evil.py` and `python3 $(true)./evil.py` run evil.py). Inner $( ) first, then the outer."""
+    prev = None
+    while prev != w:
+        prev, w = w, _SUBST_SPAN_RX.sub('', w)
+    return w
+
+
+def has_subst(w):
+    return '`' in w or '$(' in w
+
+
+def merged_word(all_words, i):
+    """The call's words are split at blanks, so a substitution with a blank in it (`$(echo $(true))m.py`) is in
+    pieces: join the pieces from i while a backtick or a "(" is still open (at most MAX_ARGS pieces)."""
+    s = all_words[i]
+    j = i
+    while (s.count('`') % 2 or s.count('(') > s.count(')')) and j + 1 < len(all_words) and j - i < MAX_ARGS:
+        j += 1
+        s += ' ' + all_words[j]
+    return s
 
 
 def interp_groups(text, expanded=False):
@@ -1063,6 +1098,7 @@ def interp_groups(text, expanded=False):
         words = [strip_quotes(w) for w in all_words[:MAX_ARGS]]
         group = []
         stopped = False
+        subst_seen = False
         i = 0
         while i < len(words):
             w = words[i]
@@ -1083,6 +1119,12 @@ def interp_groups(text, expanded=False):
             if python and MODULE_FLAG_RX.fullmatch(w):
                 if i + 1 < len(words):
                     groups += [[c] for c in module_files(words[i + 1])]
+                    # card 4bdf7309 (LELET 1 c): `-m \x60true\x60 evilmod` runs evilmod: a module word with a substitution
+                    # is also read without it, and when nothing is left, the next word is the module
+                    if has_subst(all_words[i + 1]):
+                        bare = without_substs(words[i + 1])
+                        mod = bare if bare else (words[i + 2] if i + 2 < len(words) else '')
+                        groups += [[c] for c in module_files(mod)]
                 stopped = True
                 break
             if w == '-' or CODE_FLAG_RX.fullmatch(w):
@@ -1100,8 +1142,19 @@ def interp_groups(text, expanded=False):
                     argv_data = False  # an option the gate does not know: every word is judged, as before
                 i += 1  # (a -W / -X cluster, kind 2, never gets here: PY_ATTACHED_RX above takes it and its argument)
                 continue
+            if python and subst_seen and not w.startswith('-') and w:
+                # card 4bdf7309 (LELET 1 c): after a substitution word, any word may be a module name (`python3
+                # \x60echo -m\x60 evilmod` runs evilmod.py): judged as one too, never fewer words
+                groups += [[c] for c in module_files(without_substs(w))]
+            bare = ''
+            if has_subst(all_words[i]):
+                subst_seen = True
+                # card 4bdf7309 (LELET 1 b): `\x60true\x60evil.py` runs evil.py: the word without its substitutions
+                bare = without_substs(strip_quotes(merged_word(all_words, i)))
             if not w.startswith('-') and w:
                 group.append(w)
+                if bare and bare != w and not bare.startswith('-'):
+                    group.append(bare)
                 # the script: the words after it are its arguments (see DATA_ARGV_RX). Only a plain word: an unset
                 # $X or a glob may vanish or become another file (`python3 $X m.py` runs m.py), and a word the
                 # window cut may be longer than what was read
