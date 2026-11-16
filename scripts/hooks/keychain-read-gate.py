@@ -149,8 +149,12 @@ REDIR = r'\d*(?:&?>>?\|?|<{1,3}-?)&?[ \t]*[^\s;&|(){}`\'"<>]' + WORD + r'*'
 # watchdog, measured 2026-11-14; card 15896271).
 AMP = r'(?<![<>])&(?!>)'
 PIPE = r'(?<!>)\|'  # a | right after > is the noclobber redirection `>|f`, no command end
+# Card 946937b7 (Viktor 45520): an assignment's value may hold quoted blanks (`A="a b" python3 m.py`, an everyday
+# shape): a quoted run is part of the value. Each alternative starts with its own char (WORD has no quote), and a
+# quoted run ends at the next quote or newline, so a token still reads one way only.
+ASSIGN_VALUE = r'(?:' + WORD + r'|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')*'
 CHAIN = (r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|' + REDIR + r'|[+.]?\d[\w.]*|\w+='
-         + WORD + r'*)[ \t]+)*')
+         + ASSIGN_VALUE + r')[ \t]+)*')
 POSITION = r'(?:^|[;(){}\n`\'"]|' + PIPE + r'|' + AMP + r'|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*' + CHAIN
 # The script rules below (an interpreter, a path run directly, cat into an interpreter) take a quote as a command
 # position only where a shell -c payload opens (`bash -c "./x.sh"`, `bash -lc '...'`). With every quote a position, the
@@ -1101,7 +1105,8 @@ class SourceGroup:
 
 # `>`, `2>>`, `>&`, `&>`, `>|` alone (target next) or with it; the & and | of a redirection no longer end the words
 # (_CALL_END_RX, Viktor 42251 LOW 2), so `python3 2>&1 ./x.py` and `python3 >& out.txt x.py` read x.py.
-OUT_REDIR_RX = re.compile(r'(?:\d*>>?[&|]?|&>>?)(\S+)?$')
+# the target may hold a quoted or escaped blank since card 946937b7 (`>"x y"`, `>x\\ y`: one word from the lexer)
+OUT_REDIR_RX = re.compile(r'(?:\d*>>?[&|]?|&>>?)([\s\S]+)?$')
 # the end of an interpreter call's words: a ; newline ) backtick, a | or & that is no part of a redirection (`>&2`, `2>&1`, `&>f`, `>|f`)
 _CALL_END_RX = re.compile(r'[;\n)`]|' + PIPE + r'|' + AMP)
 
@@ -1152,7 +1157,7 @@ def backtick_openers(text):
     return {s['start']: s['end'] for s in lx['substs'] if s['kind'] in ('`', '$(')}
 
 
-def _call_end(rest, base, openers):
+def _call_end(rest, base, openers, cls=None):
     """The end of an interpreter call's words in rest (rest starts at text index base). Card 217f551b: a backtick that
     OPENS a substitution is part of a word, not the end of the call: bash runs `true` in `python3 \x60true\x60 m.py`,
     pastes its (empty) output and runs m.py; the old reader stopped at the backtick and judged nothing. A backtick that
@@ -1168,6 +1173,11 @@ def _call_end(rest, base, openers):
         if end is None:
             return len(rest)
         k = end.start()
+        if cls is not None and cls[base + k] != 'c':
+            # card 946937b7: a ; & | ) or newline inside a quote or after a backslash is word text (`>"x&"`, `>x\\&`,
+            # `-W "a;b"`): bash goes on with the call (lexer class c = code; the lexer read the whole text)
+            pos = end.end()
+            continue
         if rest[k] == '`':
             j = k
             while j > 0 and rest[j - 1] == '\\':
@@ -1185,6 +1195,39 @@ def _call_end(rest, base, openers):
                 pos = max(end.end(), max(inner) - base)
                 continue
         return k
+
+
+_QUOTED_RX = re.compile(r'[\'"\\]')
+_BLANK_RUN_RX = re.compile(r'\s+')
+
+
+def _code_words(seg, base, cls):
+    """Card 946937b7: seg (text[base:base + len(seg)]) split at the blanks the lexer reads as code; a quoted or
+    escaped blank stays in its word, quotes and backslashes kept (word_forms and strip_quotes read them). cls None:
+    the old blank split. In a run of blanks the quoted or escaped ones come first (a quote or a backslash opens them),
+    so the word ends at the run's first code blank."""
+    if cls is None:
+        return seg.split()
+    out, start = [], 0
+    for m in _BLANK_RUN_RX.finditer(seg):
+        at = next((i for i in range(m.start(), m.end()) if cls[base + i] == 'c'), None)
+        if at is None:
+            continue
+        if at > start:
+            out.append(seg[start:at])
+        start = m.end()
+    if start < len(seg):
+        out.append(seg[start:])
+    return out
+
+
+def _odd_quote_word(seg):
+    """A blank-split word of seg with an odd number of unescaped " or ': the split cut inside a quote."""
+    for w in seg.split():
+        w = re.sub(r'\\.', '', w)
+        if w.count('"') % 2 or w.count("'") % 2:
+            return True
+    return False
 
 
 _SUBST_SPAN_RX = re.compile(r'`[^`]*`|\$\([^()]*\)')
@@ -1340,6 +1383,12 @@ def interp_groups(text, expanded=False):
     Raises TooManyArgs when a call's words run past MAX_ARGS or ARGS_WINDOW and the walk did not stop before."""
     groups = []
     openers = backtick_openers(text)
+    # card 946937b7 (Viktor 45520): which chars are code, not quoted or escaped; a blank or an operator in a quote is
+    # word text (`python3 -W "a b" m.py`, `python3 >"x y" m.py`, `python3 "a b.py"`). No quote, no backslash: the
+    # blank split is the shell's, and the lexer is not run.
+    quoted = bool(_QUOTED_RX.search(text))
+    lx = lex_or_none(text) if quoted else None
+    cls = lx['cls'] if lx else None
     redir_cache = {}
     for m in INTERP_RX.finditer(text):
         python = 'python' in m.group(0).lower()
@@ -1348,8 +1397,12 @@ def interp_groups(text, expanded=False):
         # (expanded: expand() read a VAR=value anywhere in the text as this shell's assignment; the real value may be empty
         # (X=a python3 $X m.py, unset X, a comment) and the script the second word: such a text keeps the old walk)
         rest = text[m.end():m.end() + ARGS_WINDOW]  # a window, not the rest: 6 000 calls x the rest was quadratic
-        cut = _call_end(rest, m.end(), openers)
-        all_words = split_redirections(rest[:cut].split(), redir_cache)
+        cut = _call_end(rest, m.end(), openers, cls)
+        if cls is None and quoted and _odd_quote_word(rest[:cut]):
+            # card 946937b7 (Viktor 45520, fail-closed): the lexer could not read the text, and a quote in the call's
+            # words leaves the old blank split unsure which word is the script
+            raise TooManyArgs('az interpreter-hívás szavaiban páratlan idézőjel, a lexer nem olvasta (fail-closed)')
+        all_words = split_redirections(_code_words(rest[:cut], m.end(), cls), redir_cache)
         # the window ended inside this command: what follows it is not read
         clipped = cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text)
         if name in ('.', 'source'):
@@ -1357,6 +1410,14 @@ def interp_groups(text, expanded=False):
             # m.py in `source runner.sh m.py` (Viktor 41831 LOW 1). The rest is judged only when the first word is an
             # existing file (script_paths): prose after a ")" made a sentence-ending "." read as source of a file
             # named later in the sentence (an agent-msg heredoc, 2026-11-14), and there the next word is no file.
+            # card 946937b7: an output redirection before the file is no file (`source >"a b" x.sh` runs x.sh)
+            lead = 0
+            while lead < len(all_words):
+                rd = OUT_REDIR_RX.match(all_words[lead])
+                if not rd:
+                    break
+                lead += 1 if rd.group(1) else 2
+            all_words = all_words[lead:]
             idx = next((i for i, w in enumerate(all_words[:2]) if not w.startswith('-')), None)  # `. -- f.sh` too
             first = strip_quotes(all_words[idx]) if idx is not None else ''
             if first:

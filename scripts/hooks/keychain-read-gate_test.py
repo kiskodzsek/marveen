@@ -731,6 +731,10 @@ def script_cases():
         w('list.py', "import subprocess\nsubprocess.run(['" + S + "', 'list-keychains'])\n")
         w('notes.py', "# the gate blocks find-generic-password in a shell\nprint('ok')\n")
         w('ok.js', "console.log('ok');\n")
+        w('a b.py', "import subprocess\nSEC = '/usr/bin/" + S + "'\n"  # card 946937b7: a script name with a blank
+                    "subprocess.run([SEC, 'find-generic-password', '-a', 'acct', '-s', 'svc'])\n")
+        os.makedirs(os.path.join(d, 'evilmod'), exist_ok=True)
+        w(os.path.join('evilmod', '__main__.py'), "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         w('runner.sh', 'python3 "$1"\n')  # runs its first argument: `source runner.sh m.py` runs m.py
         w('word.py', "print('the " + S + " team writes find-generic-password docs')\n")
         # card 31045f4d (Klodel 43233, Viktor 43235): a data file whose text names the blocked call (the error
@@ -1474,6 +1478,31 @@ def script_cases():
             # the script; bash ran measure.py)
             ('python3 12>err.log measure.py', d),
             ('python3 12>/dev/null measure.py', d),
+            # card 946937b7 (Viktor 45520, MEDIUM; all allow on ed110117 and da7d6cb8, bash and zsh ran the script):
+            # a quoted or escaped blank or ; & | in a word before the script is word text, and a quoted value of an
+            # assignment before the interpreter is part of it
+            ('python3 -W "a b" measure.py', d),
+            ('python3 -W "ignore;x" measure.py', d),
+            ('python3 -W ignore\\;x measure.py', d),
+            ('python3 -X "a&b" measure.py', d),
+            ("python3 -W $'a b' measure.py", d),
+            ('python3 -X "a b" -m evilmod', d),
+            ('python3 >"x y" measure.py', d),
+            ('python3 >x\\ y measure.py', d),
+            ('python3 >"x&" measure.py', d),
+            ("python3 >'x;' measure.py", d),
+            ('python3 2>x\\& measure.py', d),
+            ('python3 -u >x\\& measure.py', d),
+            ('bash >x\\& dump.sh', d),
+            ('source >"a b" dump.sh', d),
+            ('source > x dump.sh', d),
+            ('A="a b" python3 measure.py', d),
+            ("A='a b' python3 measure.py", d),
+            ('env A="a b" python3 measure.py', d),
+            ('A="x\\"y z" python3 measure.py', d),
+            ('python3 "a b.py"', d),
+            ("python3 'a b.py'", d),
+            ('python3 a\\ b.py', d),
             # ... and without a blank (mutation round 1: the quote, escape, $'..', $( ) and backtick tracking of the cut)
             ('python3 `true>&2`measure.py>/dev/null', d),
             ('python3 $(true>&2)measure.py>/dev/null', d),
@@ -1808,6 +1837,12 @@ def script_cases():
             ("python3 'measure.py>x'", d),
             ("python3 measure.py'>x'", d),
             ('python3 $(true x)> measure.py stat.py', d),
+            # card 946937b7: a quoted argument after the script is argv data, a written target with a blank is written
+            ('python3 stat.py "a b" measure.py', d),
+            ('python3 stat.py > "measure.py x"', d),
+            ('A="a b" python3 stat.py', d),
+            ('python3 "x y.py"', d),
+            ('source >"dump.sh" stat.py', d),  # the redirection's target is written, the file is stat.py
             ('python3 "x measure.py>y"', d),
             ('python3 stat.py "a b>c"', d),
             ('python3 stat.py>"a b"', d),
