@@ -492,6 +492,16 @@ R2_DENY = [  # Viktor 43196 (card 17901b47 round 2)
     ('unzip -l --v /tmp/e.zip', P), ('unzip -l-l /tmp/e.zip', P), ('unzip -- -l /tmp/e.zip', P), ('unzip -t --t /tmp/e.zip', P),
     # Viktor 43289 INFO (mutant U11): -D is a timestamp flag, not an exdir
     ('unzip -D /tmp/e.zip', P),
+    # card f72e8f27 (Viktor 43676 LELET 1): after the archive name a word is a member pattern, not an option
+    # (measured, Info-ZIP 6.00: every one of these extracts evil.txt into the cwd); 7 HOLE-NEW (-h), 8 HOLE-OLD
+    ('unzip /tmp/z.zip evil.txt -h', P), ('unzip /tmp/z.zip evil.txt -hh', P), ('unzip /tmp/z.zip evil.txt -qh', P),
+    ('unzip /tmp/z.zip nomatch evil.txt -h', P), ("unzip /tmp/z.zip '*' -h", P), ('unzip /tmp/z.zip -h evil.txt', P),
+    ('unzip /tmp/z.zip evil.txt -x -h', P),
+    ('unzip /tmp/z.zip evil.txt -l', P), ('unzip /tmp/z.zip evil.txt -t', P), ('unzip /tmp/z.zip evil.txt -v', P),
+    ('unzip /tmp/z.zip evil.txt -p', P), ('unzip /tmp/z.zip evil.txt -z', P), ('unzip /tmp/z.zip evil.txt -Z', P),
+    ('unzip /tmp/z.zip -l evil.txt', P), ('unzip -o /tmp/z.zip evil.txt -l', P), ('unzip "$Z" evil.txt -l', P),
+    ('unzip $A -l /tmp/e.zip', P),   # an unknown word may be the archive: the -l after it is then a member pattern
+    ('unzip -Ppw /tmp/z.zip -l evil.txt', P),   # a joined -Ppw takes no next word: /tmp/z.zip is the archive
     # Viktor 43347 LOW 1: several -C are applied in order (bsdtar: -C o1 -C sub extracts to o1/sub); last-wins read
     # the attached one alone (agents/kernel/work/x) and allowed what the parent denied
     ('tar -xf /tmp/e.tar -C ../.. -Cx', K + '/work'), ('tar -xf /tmp/e.tar -C ../.. -C x', K + '/work'),
@@ -572,6 +582,9 @@ R2_ALLOW = [
     ('tar -xf /tmp/e.tar -C agents/x -C /tmp/a', P),
     # card f72e8f27 (Viktor 43370 INFO): unzip -h / -hh is the help; measured, with an archive too it extracts nothing
     ('unzip -hh', P), ('unzip -h /tmp/e.zip', P), ('unzip -oh /tmp/e.zip', P),
+    # card f72e8f27 (Viktor 43676 LELET 1): a lone -P takes the next word (the password), so it is not the archive
+    # name and a listing letter after it still counts; listing before the archive, -d after it, stay as they were
+    ('unzip -P pw -l /tmp/e.zip', P), ('unzip -qql /tmp/e.zip a -x b', P), ('unzip -l /tmp/e.zip -d /tmp/o', P),
     # mutant t12: in -xfP the f takes the rest of the word: P is the archive name, not -P (measured: "P: No such file")
     ('tar -xfP /tmp/e.tar', K + '/work'),
     ('F=notes.md; cd agents/x && echo x > $F', P), ('F=agent-config.json; cd /tmp && echo x > $F', P),
