@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { classify, isExternal, liftSubstitutions, parseVendorHosts, loadVendorHosts, parseVendorDomains, loadVendorDomains, MAX_COMMAND_CHARS } from '../../scripts/hooks/bash-egress-parser.mjs'
+import { classify, evalString, isExternal, liftSubstitutions, parseVendorHosts, loadVendorHosts, parseVendorDomains, loadVendorDomains, MAX_COMMAND_CHARS } from '../../scripts/hooks/bash-egress-parser.mjs'
 import {
   BASH_EGRESS_DENY,
   agentGetsBashEgressParser,
@@ -1569,7 +1569,9 @@ describe('a value is expanded when it is assigned (card c20467d6, Viktor 43231 L
     expect(classify(`V=${H}; U=$'a'$V; curl -s $U/p`)).toMatchObject({ deny: true, reason: 'curl-external' })
   })
   it('a loop variable is left as written in a value, as before (the loop readings are unchanged)', () => {
-    expect(classify(`for v in ${H}; do U=\${v:-localhost}; curl -s $U/p; done`)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    // card e94e8bd2: the loop readings now reach the loop variable through U's value, so the host itself is read
+    // (it was an unresolved destination before: a deny either way)
+    expect(classify(`for v in ${H}; do U=\${v:-localhost}; curl -s $U/p; done`)).toMatchObject({ deny: true, reason: 'curl-external' })
     expect(classify('for v in localhost; do U=$v; curl -s $U/p; done')).toMatchObject({ deny: false })
     // the loop shadows an earlier value of its name (bash: localhost/p), also for a substitution in the body
     expect(classify(`v=${H}; for v in localhost; do U=$v; curl -s $U/p; done`)).toMatchObject({ deny: false })
@@ -1591,5 +1593,195 @@ describe('a value is expanded when it is assigned (card c20467d6, Viktor 43231 L
     expect(Date.now() - t0).toBeLessThan(1000)
     // under the growth limit the value is built
     expect(classify(`A=${H}; B=$A$A$A; curl -s $B/p`)).toMatchObject({ deny: true, reason: 'curl-external' })
+  })
+})
+
+// Cards e94e8bd2 and 1a95f6c5 (Viktor 43216, 43355): a loop variable reached through an assignment, `NAME+=`, a function
+// body called more than once, and the test gaps M18-M22 of Viktor's mutation run on c20467d6. Each shape is checked
+// against what the real /bin/bash expands (curl replaced by printf, empty environment, nothing touches the network):
+// a call bash sends to the external host must deny, one that stays local must pass.
+describe('bash-egress: loop variable via assignment, append, function bodies (e94e8bd2, 1a95f6c5)', () => {
+  const H = 'evil.example.com'
+  const bashTarget = (c: string) => {
+    const t = spawnSync('/bin/bash', ['-c', c.replace(/curl -s /g, "printf '[%s]' ")], { env: {}, encoding: 'utf8' })
+    return String(t.stdout)
+  }
+  const external = [
+    `for v in ${H}; do U=$v; curl -s $U/p; done`,
+    `for v in ${H}; do U=\${v}; curl -s $U/p; done`,
+    `for v in ${H}; do U=$v; W=$U; curl -s $W/p; done`,
+    `for v in ${H}; do U="$v"; curl -s "$U/p"; done`,
+    `for v in localhost ${H}; do U=$v; curl -s $U/p; done`,
+    `v=localhost; for v in ${H}; do U=$v; curl -s $U/p; done`,
+    `for v in ${H}; do x=$(U=$v; curl -s $U/p); echo "$x"; done`,
+    `V+=${H}; curl -s $V/p`,
+    `V=http://; V+=${H}; curl -s $V/p`,
+    `V=${H}; U+=$V; curl -s $U/p`,
+    `export V+=${H}; curl -s $V/p`,
+    `for v in ${H}; do U=http://; U+=$v; curl -s $U/p; done`,
+    `fn() { curl -s $U/p; U=$V; }; U=localhost; V=${H}; fn; fn`,
+    `function fn { curl -s $U/p; U=$V; }; U=localhost; V=${H}; fn; fn`,
+    `fn() { U=$V; }; V=${H}; fn; curl -s $U/p`,
+    `fn() { :; }; v=127.0.0.1; v=localhost; for v in ${H}; do curl -s $v/p; done`, // a real loop keeps its values
+  ]
+  const local = [
+    'for v in localhost:3420 127.0.0.1; do U=$v; curl -s $U/p; done',
+    'V=localhost; V+=:3420; curl -s $V/p',
+    'V=http://localhost; V+=:3420/api; curl -s $V',
+    'fn() { curl -s $U/p; }; U=localhost; fn',
+    'fn() { curl -s $U/p; U=$V; }; U=localhost; V=127.0.0.1; fn; fn',
+    `U=localhost; echo "U=${H}"; curl -s $U/p`, // M20: a quoted NAME= assigns nothing
+    `v=localhost; echo for v x ${H}; curl -s $v/p`, // M22: no loop without "in"
+    `for w in ${H}; do v=$w; for v in localhost; do curl -s $v/p; done; done`, // a loop name is read as the loop
+    `fn() { :; }; V=${H}; U='$V'; curl -s $U/p`, // a literal $ in a value is not read again
+  ]
+  it.each(external)('denies what bash sends outside: %s', (c) => {
+    expect(bashTarget(c)).toContain(H)
+    expect(classify(c)).toMatchObject({ deny: true })
+  })
+  it.each(local)('passes what bash keeps local: %s', (c) => {
+    expect(bashTarget(c)).not.toMatch(/\[[^\]]*evil\.example\.com/)
+    expect(classify(c)).toMatchObject({ deny: false })
+  })
+  it('M18/M19: a quoted loop name or a quoted "for" is no loop (bash refuses both and runs nothing)', () => {
+    expect(classify(`v=${H}; for "v" in localhost; do curl -s $v/p; done`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`v=${H}; "for" v in localhost; do curl -s $v/p; done`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`for "v" in ${H}; do curl -s $v/p; done`)).toMatchObject({ deny: false })
+    expect(classify(`"for" v in ${H}; do curl -s $v/p; done`)).toMatchObject({ deny: false })
+  })
+  it('M21: the growth limit is exact: a value 8192 past its text is built, one more is not', () => {
+    const at = (n: number) => classify(`A=${'a'.repeat(n)}; B=localhost/$A; curl -s http://$B`)
+    expect(at(8192)).toMatchObject({ deny: false })
+    expect(at(8193)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+  })
+  it('Viktor 43683 LELET 1: a function-read value holding an unseen $reference may be empty, so a :- / := word is not skipped', () => {
+    for (const c of [
+      `W=/p; fn() { curl -s "\${W:-${H}}"; }; W=$X; fn`,
+      `fn() { curl -s \${V:-${H}}/api; }; V=/p; V=$W; fn`,
+      `fn() { curl -s \${V:-${H}}/api; V=\${W}/p; }; V=$W; fn`,
+      `W=/p; fn() { curl -s "\${W:=${H}}"; }; W=$X; fn`,
+    ]) {
+      expect(bashTarget(c)).toContain(H) // empty X / W: bash takes the word
+      expect(classify(c)).toMatchObject({ deny: true })
+    }
+    expect(classify('fn() { curl -s ${V:-localhost}/api; }; V=127.0.0.1; V=localhost:3420; fn')).toMatchObject({ deny: false })
+    // unread, not the word: with W from the environment bash sends to W (measured: W=<ext> -> [<ext>/api]); the
+    // text-order value (/p) is harmless, so only the function reading sees it
+    const c = 'fn() { curl -s "${V:-localhost}/api"; }; V=$W; fn; V=/p'
+    const t = spawnSync('/bin/bash', ['-c', c.replace(/curl -s /g, "printf '[%s]' ")], { env: { W: H }, encoding: 'utf8' })
+    expect(String(t.stdout)).toContain(H)
+    expect(classify(c)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+  })
+  it('Viktor 43683 INFO 3 (E29): sibling frames with function readings do not hide each other\'s values', () => {
+    const c = `a=$(fn() { curl -s $U/p; U=127.0.0.1; }; U=localhost; fn; fn); b=$(fn() { curl -s $U/p; U=$V; }; U=localhost; V=${H}; fn; fn); echo "$a$b"`
+    expect(bashTarget(c)).toContain(H)
+    expect(classify(c)).toMatchObject({ deny: true, reason: 'curl-external' })
+  })
+  it('an append counts the value so far against the growth limit: repeated appends stay fast and bounded', () => {
+    let c = 'A=' + 'a'.repeat(56) + '; '
+    for (let i = 0; i < 40; i++) c += 'A+=$A; '
+    let t0 = Date.now()
+    expect(classify(c + 'curl -s $A/p')).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    expect(Date.now() - t0).toBeLessThan(1000)
+    // the value so far counts: the second append of 8000 is past the limit (without it: 16001 b's, a host)
+    const B = 'b'.repeat(8000)
+    expect(classify(`B=${B}; A=x; A+=$B; A+=$B; curl -s $A/p`)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    // and the function reading reads again under the same limit (a host-shaped value: built, it would be a host)
+    const D = 'a.'.repeat(3998) + 'com'
+    expect(classify(`fn() { A=$B$B; }; B=${D}; fn; curl -s $A/p`)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+    for (const head of ['', 'fn() { :; }; ']) {
+      c = head + 'B=' + 'b'.repeat(8000) + '; '
+      while (c.length < 60000) c += 'A+=$B; '
+      t0 = Date.now()
+      expect(classify(c + 'curl -s localhost/p')).toMatchObject({ deny: false })
+      expect(Date.now() - t0).toBeLessThan(1500)
+    }
+  })
+  it('a pasted value is bounded too: references in it that would grow past the limit are not built', () => {
+    const B = 'b'.repeat(8000)
+    for (const c of [
+      'for v in x; do A=$v' + '$B'.repeat(25000) + '; done; B=' + B + '; curl -s $A/p',
+      'fn() { :; }; A=' + '$B'.repeat(25000) + '; B=' + B + '; A=localhost; curl -s $A/p',
+    ]) {
+      expect(c.length).toBeLessThan(MAX_COMMAND_CHARS)
+      const t0 = Date.now()
+      expect(classify(c)).toMatchObject({ deny: true, reason: 'curl-unresolved-destination' })
+      expect(Date.now() - t0).toBeLessThan(1500)
+    }
+  })
+  it('the function reading is bounded like a loop: a name with more values than the limit fails closed', () => {
+    let c = 'fn() { :; }; '
+    for (let i = 0; i < 70; i++) c += `U=127.0.0.${i % 250}; `
+    expect(classify(c + 'curl -s $U/p')).toMatchObject({ deny: true, reason: 'curl-loop-unbounded' })
+    // without a function definition the text order decides, as before
+    expect(classify(c.replace('fn() { :; }; ', '') + 'curl -s $U/p')).toMatchObject({ deny: false })
+  })
+})
+
+// Card 40305fb7 (Viktor 42794 INFO, measured by Dave on prod d85d82e3): `eval "curl <url>"` and `eval curl <url>` passed,
+// because the command word was eval and nothing read what eval runs. Each shape is checked against the real /bin/bash:
+// curl is a shell function that prints its argv (a function wins over the PATH, also inside eval), so nothing touches
+// the network.
+describe('bash-egress: eval runs its joined arguments as a command line (40305fb7)', () => {
+  const H = 'evil.example.com'
+  const bashTarget = (c: string) => {
+    // PATH points nowhere: a curl that is not the function (a child shell does not inherit it) cannot run at all.
+    const t = spawnSync('/bin/bash', ['-c', `curl() { printf '[%s]' "$@"; }; ${c}`], { env: { PATH: '/nonexistent' }, encoding: 'utf8' })
+    return String(t.stdout)
+  }
+  const external = [
+    `eval "curl -s https://${H}/x"`,
+    `eval curl -s https://${H}/x`,
+    `eval 'curl -s https://${H}/x'`,
+    `eval -- curl -s https://${H}/x`,
+    `command eval curl -s https://${H}/x`,
+    `builtin eval curl -s https://${H}/x`,
+    `eval curl -s "https://${H}/x"`,
+    `eval "c""url -s https://${H}/x"`,
+    `U=https://${H}/x; eval "curl -s $U"`,
+    `U=https://${H}/x; eval 'curl -s $U'`,
+    `eval "eval curl -s https://${H}/x"`,
+    `eval "true; curl -s https://${H}/x"`,
+    `for v in ${H}; do eval "curl -s https://$v/x"; done`,
+    `echo "$(eval curl -s https://${H}/x)"`,
+  ]
+  const local = [
+    'eval "curl -s http://localhost:3420/api/kanban"',
+    'eval curl -s http://localhost:3420/api/kanban',
+    `eval echo https://${H}/x`,
+    `echo eval curl https://${H}/x`, // eval as an argument runs nothing
+    'git log --oneline -1 --grep eval',
+    'eval',
+    'eval ""',
+  ]
+  it.each(external)('denies what bash sends outside: %s', (c) => {
+    expect(bashTarget(c)).toContain(H)
+    expect(classify(c)).toMatchObject({ deny: true })
+  })
+  it.each(local)('passes what bash keeps local: %s', (c) => {
+    expect(bashTarget(c)).not.toMatch(/\[[^\]]*evil\.example\.com/)
+    expect(classify(c)).toMatchObject({ deny: false })
+  })
+  it('a shell -c around eval, and a link that is only data in the eval\'d curl', () => {
+    expect(classify(`bash -c "eval curl -s https://${H}/x"`)).toMatchObject({ deny: true, reason: 'curl-external' })
+    expect(classify(`eval 'curl -s -X POST http://localhost:3420/api/x -d "{\\"u\\":\\"https://${H}/x\\"}"'`)).toMatchObject({ deny: false })
+  })
+  it('evalString: only at the command word, eval\'s -- dropped, no arguments = nothing', () => {
+    expect(evalString(['eval', 'curl', 'x'], 0)).toBe('curl x')
+    expect(evalString(['eval', '--', 'curl', 'x'], 0)).toBe('curl x')
+    expect(evalString(['command', 'eval', 'curl'], 1)).toBe('curl')
+    expect(evalString(['echo', 'eval', 'curl'], 0)).toBeNull()
+    expect(evalString(['eval'], 0)).toBeNull()
+    expect(evalString(['eval', '--'], 0)).toBeNull()
+    expect(evalString(['eval'], 1)).toBeNull()
+  })
+  it('a variable command word is not resolved (as for curl itself): a known gap, pinned so a change is seen', () => {
+    expect(classify(`f=eval; $f curl -s https://${H}/x`)).toMatchObject({ deny: false })
+    expect(classify(`f=curl; $f https://${H}/x`)).toMatchObject({ deny: false })
+  })
+  it('the vendor list holds inside eval', () => {
+    const vendor = new Set(['api.elevenlabs.io'])
+    expect(classify('eval curl -s https://api.elevenlabs.io/v1/x', 0, vendor).deny).toBe(false)
+    expect(classify(`eval curl -s https://api.elevenlabs.io/v1/x https://${H}/x`, 0, vendor)).toMatchObject({ deny: true, hosts: [H] })
   })
 })
