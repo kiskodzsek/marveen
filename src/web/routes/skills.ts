@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { execSync } from 'node:child_process'
 import { logger } from '../../logger.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
+import { skillWriteRefusal } from '../skill-write-gate.js'
 import { AGENTS_BASE_DIR, listAgentNames, readFileOr, agentDir } from '../agent-config.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../../config.js'
 import { generateSkillMd } from '../agent-scaffold.js'
@@ -52,6 +53,11 @@ function getSkillAgents(skillDirName: string): string[] {
 
 export async function tryHandleSkills(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
+
+  // Card 0069544d: a sub-agent's token call does not write or remove a global SKILL.md (skill-write-gate.ts);
+  // checked here, before any body is read or file written.
+  const skillRefusal = skillWriteRefusal(ctx.auth, MAIN_AGENT_ID, path, method)
+  if (skillRefusal) { json(res, { error: skillRefusal }, 403); return true }
 
   if (path === '/api/skills' && method === 'GET') {
     type SkillEntry = {

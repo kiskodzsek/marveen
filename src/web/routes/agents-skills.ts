@@ -6,6 +6,7 @@ import { execSync } from 'node:child_process'
 import { logger } from '../../logger.js'
 import { MAIN_AGENT_ID } from '../../config.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
+import { skillWriteRefusal } from '../skill-write-gate.js'
 import { agentDir } from '../agent-config.js'
 import { generateSkillMd } from '../agent-scaffold.js'
 import { parseMultipart } from '../multipart.js'
@@ -67,6 +68,11 @@ function scanSkillDir(dir: string, source: 'agent' | 'global', deletable: boolea
 
 export async function tryHandleAgentsSkills(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
+
+  // Card 0069544d: a sub-agent's token call does not write or remove a SKILL.md (skill-write-gate.ts); checked here,
+  // before any body is read or file written.
+  const skillRefusal = skillWriteRefusal(ctx.auth, MAIN_AGENT_ID, path, method)
+  if (skillRefusal) { json(res, { error: skillRefusal }, 403); return true }
 
   const skillImportMatch = path.match(/^\/api\/agents\/([^/]+)\/skills\/import$/)
   if (skillImportMatch && method === 'POST') {
