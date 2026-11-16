@@ -804,6 +804,35 @@ def script_cases():
             ('python3 a\\`b measure.py', d),
             # bash: "`true`" is an empty argument (python3 '' fails); read on, as for "$X"
             ('python3 "`true`" measure.py', d),
+            # card 4bdf7309 (Viktor 43448 LELET 1 a): a $( ) that opens inside the call's words is a word too (the ")"
+            # ended the call, as the backtick did before 217f551b; main: allow, real bash ran the script)
+            ('python3 $(true) measure.py', d),
+            ('python3 -I $(true) measure.py', d),
+            ('python3 $(echo -I) measure.py', d),
+            ('python3 $(true;true) measure.py', d),
+            ('python3 $(true) `true` measure.py', d),
+            ('ruby $(true) measure.py', d),
+            ('bash $(true) measure.py', d),
+            ('echo "$(python3 $(true) measure.py)"', d),
+            ('python3 "$(true)" measure.py', d),  # over-read, as "`true`": an empty argument, python3 '' fails
+            # (LELET 1 b) a word glued to a substitution: bash runs what is left when it prints nothing
+            ('python3 `true`measure.py', d),
+            ('python3 `true`./measure.py', d),
+            ('python3 `true``true`measure.py', d),
+            ('python3 $(true)measure.py', d),
+            ('python3 $(echo $(true))measure.py', d),
+            ('bash `true`measure.py', d),
+            # (LELET 1 c) a module name through a substitution: -m `true` mod, or a substitution that prints -m
+            ('python3 -m `true` measure', d),
+            ('python3 -m $(true) measure', d),
+            ('python3 -m `true`measure', d),
+            ('python3 `echo -m` measure', d),
+            ('python3 $(echo -m) measure', d),
+            # ... and -m after an option: the module word is found from -m's own index (generated mutants 033/038/043
+            # read words[1] / words[2] and survived while every case had -m first)
+            ('python3 -I -m $(true) measure', d),
+            ('python3 -I -m `true` measure', d),
+            ('python3 -B -I -m $(true)measure', d),
             # past LEX_MAX_SUBSTS the lexer gives no reading: then no backtick ends a call (mutation m4)
             ('echo ' + '`true` ' * 65 + '; python3 `true` measure.py', d),
             # card 31045f4d (B): in a non-shell heredoc only a "(" after a blank stops being a command position
@@ -1240,6 +1269,21 @@ def script_cases():
             ('x=`python3 stat.py \\`true\\` regiszter.jsonl`', d),
             ('python3 stat.py `true` regiszter.jsonl', d),  # after the plain script: argv data, as before
             ("python3 stat.py '`' measure.py", d),
+            # card 4bdf7309: the ")" that CLOSES the $( ) the call stands in still ends its words, and after the plain
+            # script a substitution is argv data, as for the backtick
+            ('x=$(python3 stat.py) measure.py', d),
+            ('echo $(python3 stat.py) measure.py', d),
+            ('echo "$(python3 stat.py)" measure.py', d),
+            ('python3 stat.py $(true) regiszter.jsonl', d),
+            ('python3 stat.py $(true)regiszter.jsonl', d),
+            ("python3 stat.py '$(' measure.py", d),
+            # a call end RIGHT AFTER a substitution inside the call's words still ends the call (the lexer's end is
+            # exclusive; mutation a5, "a <= e", read on into the next command)
+            ('python3 $(true); echo measure.py', d),
+            ('python3 `true`; echo measure.py', d),
+            # a substitution that prints ")" glued to the word: bash runs ")measure.py", not measure.py (generated
+            # mutant 032, a span regex that let ")" into $( ), cut the word to measure.py)
+            ('python3 $(echo ")")measure.py', d),
             # an EVEN run of backslashes is escaped backslashes: the backtick after them closes the substitution, and
             # measure.py is no word of bash's call (mutation m11: counting one backslash read it as bash's $2)
             ('x=`bash runner.sh a\\\\` measure.py', d),
