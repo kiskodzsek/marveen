@@ -37,7 +37,7 @@ Előfeltétel (Viktor, 2026-11-16): ez a sorrend CSAK akkor áll, ha Viktor bizt
 - PostgREST (szerveroldali kliensek);
 - edge functionök: a support-chat a kulcs AZONOSSÁGÁT ellenőrzi (`SUPABASE_SECRET_KEYS`), cserénél eltört (AI-súgó);
 - HMAC-aláírás: a belépőlink (`src/lib/auth/post-purchase-link.ts`), az email-proof (`email-proof.ts`) és a render-token (`src/lib/print-renderer/render-auth.ts`) a `linkSigningSecrets()`-en át a `MARABEL_LINK_SIGNING_SECRET`-tel ír alá, ha az be van állítva, és csak nélküle esik vissza a `SUPABASE_SECRET_KEY`-re (`link-signing.ts`, marabel main f682d3868; Viktor átnézte). MÉRVE 2026-11-16 (Pulzus, Vercel env-metaadat, érték nélkül): a `MARABEL_LINK_SIGNING_SECRET` production, sensitive, frissítve 2026-10-14 15:36, tehát a kulcscsere ezeket NEM érvényteleníti. Ha a változó hiányzik vagy 32 karakternél rövid, a csere a kiadott belépőlinkeket, a jelszó-visszaállító sütiket és a 10 perces render-linkeket érvényteleníti: csere előtt újra kell mérni (`GET /v9/projects/<prj>/env`, csak key/target/type/updatedAt).
-- külső hívók: NEM mért lista, a csere előtt Dave-vel kimérendő.
+- külső hívó (Dave, marabel origin/main 9453ea38, a workflow-fájlokat és a szkriptet olvastam én is): a GitHub Actions `.github/workflows/daily-e2e-smoke.yml` mindkét jobja (content-pipeline smoke, guest answer UI smoke) a `prod-smoke` environment `secrets.SUPABASE_SECRET_KEY`-ével fut (`scripts/e2e/daily-content-pipeline-smoke.mjs`). Kulcscserénél ezt a GitHub-environment secretet is cserélni kell, különben a napi smoke piros (Tanulság 10); ez is kulcsművelet, Patrik "mehet" kell hozzá. Kézi szkript: `scripts/billingo-test-proforma.mjs --order` (env-ből olvas, nem ütemezett). NEM ezt használják: a pg_cron workerek (saját vault-titkok), az `edge-deploy.yml` (csak `SUPABASE_ACCESS_TOKEN`). Nem mért: a GitHub-environment secret tényleges értéke (csak a hivatkozást olvastuk), és a repón kívüli hívó (pl. más gépen futó szkript).
 A GUEST_AUTH_SECRET-re épülők (vendég/mesélő session, leiratkozó link, question-prompt token, rate-limit) nem érintettek.
 
 A jóváhagyás-kérés a pontos lépést nevezi meg a CLAUDE.md "JÓVÁHAGYÁS KELL" alakjában; hallgatás nem jóváhagyás (Tanulság 6). Előre adott, a tünethez kötött P1-felhatalmazás csak a RESTARTRA javasolható, a kulcscserére nem (mellékhatások, kulcs-kezelés; Viktor, 2026-11-16). Egyik sincs megadva, most nem él; a döntés Patriké.
@@ -54,7 +54,7 @@ Ezt a diagnózis előtt tudni kell: a rövid óraeltérést a kód elnyeli, ezé
 
 ## 5. Lezárás
 - Helyreállás MÉRÉSSEL: `/h` próba 404, `/vasarlas/*` füstpróba, Vercel log tiszta, vevői út (post-deploy-buyer-path-check).
-- Ellenőrizni a kulcscsere mellékhatásait (edge function, belépőlinkek) listából.
+- Ellenőrizni a kulcscsere mellékhatásait (edge function, belépőlinkek, GitHub `prod-smoke` secret) listából.
 - Incidens-jelentés (sablon: Pulzus CLAUDE.md), hatásos rendelés/aktiváció számmal.
 
 ## 6. Nyitott pontok (nem mért / nem eldöntött)
