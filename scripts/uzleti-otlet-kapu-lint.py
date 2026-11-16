@@ -18,7 +18,15 @@ ELUTASITOTT = ["ágenscsapat", "ügynökség", "tanácsadás", "képzés", "kurz
     "repülőjárat-kártérítés", "járat-kártérítés", "lejárat-őr", "robotpilóta", "bébiszitter", "előfizetés-őr",
     "számlaőr", "kalkulátor-portál", "trend-oldal", "fordítás", "szalon",  # Patrik 11-11 TG 17467/17473/17479/17480 (Klodel 38081)
     "társasjáték", "kártyajáték",
-    "egyedi dal", "ai dal", "dalrendelés", "dal rendelés", "dal ajándék"]  # Patrik TG 18004 (11-12): "ez egy undorito termék átverése az embereknek.."  # Patrik TG 17490 "utalom a tarsasjatekokat nem érdekel" (Klodel 38096)
+    "egyedi dal", "ai dal", "dalrendelés", "dal rendelés", "dal ajándék",  # Patrik TG 18004 (11-12): "ez egy undorito termék átverése az embereknek.."  # Patrik TG 17490 "utalom a tarsasjatekokat nem érdekel" (Klodel 38096)
+    # A közvetítő szakma AI-first családja (Klodel 43400):
+    # 11-08-án elé került, nem választotta (privát TG 16424/16426/16429), és a 12. kör stratégája 5 jelöltet mégis innen
+    # hozott (shared/k-f/10ev-iranyok-1115/atnezo-itelet.md). A "lakáskiad" és az "ellenőrzött árajánlat" Kernel
+    # kiegészítése: a kért tövek a szórend miatt nem fogták a család két címét ("Lakáskiadás kezelő nélkül",
+    # "Valós árak, ellenőrzött árajánlat").
+    "könyvelőiroda", "könyvelő", "ingatlanos", "ingatlanközvetít", "lakáskezel", "lakáseladás", "biztosítási alkusz",
+    "hitelközvetít", "árajánlat-ellenőr", "bérösszevet", "valós fizetések", "közös kassza", "osztálypénz",
+    "lakáskiad", "ellenőrzött árajánlat"]
 # --problema mód (Patrik TG 4847: "valos nagy kozonseget erinto problema"): a magyar-specifikus
 # probléma nem lehet külföldön bevált/virális, ezért ezek nem kötelezők; helyettük PROBLEMA kell számmal.
 PROBLEMA_OPCIONALIS = ["BEVALT", "VIRALIS", "KULFOLD", "PENZ"]
@@ -195,6 +203,23 @@ def main(path):
             print(f"MEHET     {cim}")
     print(f"\n{len(parts)-bad}/{len(parts)} mehet")
     return 1 if bad else 0
+# --cimek <fájl> (Klodel 43400): CSAK a '## N.' címsorokat veti össze az ELUTASITOTT listával, a
+# mezőktől függetlenül. Ok: a 12. kör stratégája más mezőket kért, ezért a teljes lintet nem futtatta, és a már
+# elutasított családból hozott jelölteket. Ez a mód minden formátumú jelöltfájlon fut; találatnál rc 1.
+def cimek(path):
+    t = open(path, encoding="utf-8").read()
+    cims = [m.group(1).strip() for m in re.finditer(r"(?m)^## (\d+\..*)$", t)]
+    if not cims:
+        print("HIBA: nincs '## N.' címsor"); return 1
+    bad = 0
+    for cim in cims:
+        talalat = [k for k in ELUTASITOTT if szokezdet(k, cim.lower())]
+        if talalat:
+            bad += 1; print(f"NEM MEGY  {cim}: elutasított irány: " + ", ".join(talalat))
+        else:
+            print(f"MEHET     {cim}")
+    print(f"\n{len(cims)-bad}/{len(cims)} cím mehet")
+    return 1 if bad else 0
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    sys.exit(main(args[0]))
+    sys.exit(cimek(args[0]) if "--cimek" in sys.argv else main(args[0]))

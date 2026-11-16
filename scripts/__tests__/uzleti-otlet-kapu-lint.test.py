@@ -215,6 +215,47 @@ with tempfile.TemporaryDirectory() as d:
     check("negative: budi-b without the App Store 404 line fails ITTHON (site line does not count)",
           any(re.search(r"(?<!-)ITTHON", l) for l in lint_lines(mut, "--zseni", "--itthon")), True)
 
+# Klodel 43400: the intermediary-profession AI-first family (rejected 11-08, private TG 16424/16426/16429) is banned,
+# and --cimek checks the '## N.' titles of a file by themselves, whatever fields the sections carry.
+CIM = os.path.join(HERE, "fixtures", "idea-gate-cimek-1115", "jeloltek-cimek.md")
+
+
+def cimek_run(path):
+    p = subprocess.run([sys.executable, "-I", LINT, "--cimek", path], capture_output=True, text=True, timeout=20)
+    return p.returncode, p.stdout
+
+
+rc, out = cimek_run(CIM)
+check("negative: --cimek on the strategist's titles (other fields) exits 1", rc, 1)
+for n in (1, 3, 4, 5, 6, 7):
+    check(f"negative: --cimek refuses title {n} of the family",
+          any(l.startswith(f"NEM MEGY  {n}.") for l in out.splitlines()), True)
+check("--cimek lets title 2 (Társkereső, not the family) pass", any(l.startswith("MEHET     2.") for l in out.splitlines()), True)
+check("--cimek counts the titles", "1/7 cím mehet" in out, True)
+for word in ("könyvelőiroda", "könyvelő", "ingatlanos", "ingatlanközvetít", "lakáskezel", "lakáseladás",
+             "biztosítási alkusz", "hitelközvetít", "árajánlat-ellenőr", "bérösszevet", "valós fizetések",
+             "közös kassza", "osztálypénz", "lakáskiad", "ellenőrzött árajánlat"):
+    check(f"negative: '{word.capitalize()} ...' is banned (full lint, --problema)", banned(f"{word.capitalize()} platform"), True)
+check("negative: 'AI-first könyvelőiroda' (word start inside the title) is banned", banned("AI-first könyvelőiroda"), True)
+check("'önkönyvelő' (not at a word start) is NOT banned by 'könyvelő'", banned("Önkönyvelő napló"), False)
+with tempfile.TemporaryDirectory() as d:
+    ok_file = os.path.join(d, "ok.md")
+    open(ok_file, "w", encoding="utf-8").write("## 1. Társkereső, ami bemutat\n- EGY-MONDAT: x\n## 2. Kertészeti napló\n")
+    rc_ok, out_ok = cimek_run(ok_file)
+    check("--cimek: a file with no banned title exits 0", rc_ok, 0)
+    none_file = os.path.join(d, "none.md")
+    open(none_file, "w", encoding="utf-8").write("# Jelöltek\nnincs számozott cím\n")
+    check("negative: --cimek on a file without '## N.' titles exits 1", cimek_run(none_file)[0], 1)
+    body_only = os.path.join(d, "body.md")
+    open(body_only, "w", encoding="utf-8").write(
+        "## 1. Kertészeti napló\n- EGY-MONDAT: nem könyvelőiroda, hanem kert\n- PIAC: 2. hely a könyvelőiroda-piac mögött\n"
+        "### 3. Könyvelőiroda (alfejezet, nem jelölt)\n")
+    check("--cimek reads the '## N.' title, not a numbered body line or a ### subheading", cimek_run(body_only)[0], 0)
+    mid_word = os.path.join(d, "mid.md")
+    open(mid_word, "w", encoding="utf-8").write("## 1. Tankönyvelőrendelés iskoláknak\n")
+    rc_mid, out_mid = cimek_run(mid_word)
+    check("--cimek: 'könyvelő' inside a word (Tankönyvelőrendelés) is NOT a hit", (rc_mid, "MEHET     1." in out_mid), (0, True))
+
 if FAILS:
     print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
     sys.exit(1)
