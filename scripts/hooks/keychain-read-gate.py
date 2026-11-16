@@ -623,8 +623,11 @@ _ALONE = r'[\w.-]'
 STDIN_SHELL_RX = re.compile(r'(?<!' + _ALONE + r')' + _SHELL_NAME + r'(?!' + _ALONE + r')')
 # |& pipes too (zsh, bash 4); || and >| do not (the lookbehind rejects the second | of a ||, and the first one is
 # followed by no shell word)
-PIPE_SHELL_RX = re.compile(r'(?<![>|])\|&?[ \t]*' + CHAIN + r'[\'"]?(?:' + WORD + r'*/)?' + _SHELL_NAME
-                           + r'(?!' + _ALONE + r')')
+# card 74586987 (Viktor 42794 INFO): `source /dev/stdin` and `. /dev/fd/0` read the pipe as a script too (measured
+# 2026-11-16 on the live gate: `echo ./measure.py | source /dev/stdin` passed)
+STDIN_SOURCE = r'(?:source|\.)[ \t]+[\'"]?(?:/dev/stdin|/dev/fd/0|/proc/self/fd/0)[\'"]?(?![\w./-])'
+PIPE_SHELL_RX = re.compile(r'(?<![>|])\|&?[ \t]*' + CHAIN + r'(?:[\'"]?(?:' + WORD + r'*/)?' + _SHELL_NAME
+                           + r'(?!' + _ALONE + r')|' + STDIN_SOURCE + r')')
 HERE_STRING_RX = re.compile(r'<<<[ \t]*')
 PIPELINE_START = ';&\n()`'  # a | does not end the pipeline the shell reads
 
@@ -673,7 +676,122 @@ def stdin_payloads(text):
     return words
 
 
-def payload_texts(text):
+# card 74586987 (Viktor 42794 INFO, measured 2026-11-16 on the live gate d85d82e3): what a shell reads on its stdin
+# was judged as text only, and only its QUOTED words (stdin_payloads). `echo ./measure.py | bash`, `printf %s
+# './measure.py' | tee /dev/null | sh`, `echo python3 measure.py | sh`, `echo -n ./measure.py | source /dev/stdin`
+# ran the script unread, and `echo security dump-keychain | bash` (no quote) passed too. Now every word of the
+# pipeline that feeds a shell is read, decoded as bash decodes it:
+#   lines: each word alone, and each command's words after its name joined by a blank (what echo prints), a
+#          command line of its own: hits_in() judges them (the binary and a subcommand) and the script rules read
+#          them (`./x.py`, `python3 x.py`, `cd d; ./x.py`, a $X the text assigns);
+#   words: each blank-separated piece of each word, a path the script rules look up as a file (`printf 'python3
+#          %s\n' x.py | bash` runs x.py, which no line names at a command position).
+# Over-read on purpose, as everywhere in this gate: a word in such a pipeline that names a keychain-reading file
+# blocks, run or not (`echo hi measure.py | bash`). The lookups count against MAX_TRIES (past it: block).
+# Not seen (as everywhere in this gate): a name the pipeline COMPUTES (printf's format gluing pieces, `printf %s ./mea
+# sure.py`, rev, base64 -d, a substitution's output): only the words as written are read.
+# A group before the pipe is read whole: `(echo ./x.py) | bash` and `{ echo ./x.py; } | bash` (the pipeline's start
+# moves to the opener that matches the ")" or "}" right before the pipe; an unmatched closer reads from the text's
+# start). Linear: the pipes with the same start are read once, up to the last of them.
+_GROUP_CLOSE = {')': '(', '}': '{'}
+_BRACE_AFTER_RX = re.compile(r'[ \t]*\}')  # no newline: a newline is a stop of its own (a run of them stays linear)
+_SEG_STOP = ';&|\n(){}<>'
+
+
+def _group_openers(text):
+    """For each ")" / "}" position, the position of the opener that matches it (one stack pass; quotes are not
+    tracked, so a bracket in a quote may pair wrongly: that only moves the start, and an unmatched closer maps to
+    -1, the text's start: never a shorter read than without the group)."""
+    stack, match = [], {}
+    for i, ch in enumerate(text):
+        if ch in '({':
+            stack.append((ch, i))
+        elif ch in _GROUP_CLOSE:
+            while stack and stack[-1][0] != _GROUP_CLOSE[ch]:
+                stack.pop()
+            match[i] = stack.pop()[1] if stack else -1
+    return match
+
+
+def stdin_pipelines(text):
+    """(lines, words) of every pipeline that feeds a shell on stdin (see the block above)."""
+    import bisect
+    pipes = [m.start() for m in PIPE_SHELL_RX.finditer(text)] if '|' in text else []
+    if not pipes:
+        return [], []
+    stops = [i for i, ch in enumerate(text) if ch in PIPELINE_START]
+    openers = None
+    memo = {}  # a position -> the start it leads to: each position is walked once (a chain of groups stays linear)
+    brace = {}  # a stop -> the "}" right after it (blanks between), or None
+    spans = {}
+    for p in pipes:
+        b, path = p, []
+        while True:  # the pipeline's start, moved past a group that closes right before it
+            if b in memo:
+                b = memo[b]
+                break
+            path.append(b)
+            k = bisect.bisect_left(stops, b)
+            s = stops[k - 1] if k > 0 else -1
+            closer = None
+            if s >= 0 and text[s] == ')':
+                closer = s
+            else:
+                if s not in brace:  # once per stop: many pipes after one stop do not rescan its blanks
+                    m = _BRACE_AFTER_RX.match(text, s + 1)
+                    brace[s] = m.end() - 1 if m else None
+                if brace[s] is not None and brace[s] < b:
+                    closer = brace[s]
+            if closer is None:
+                b = s + 1
+                break
+            if openers is None:
+                openers = _group_openers(text)
+            o = openers.get(closer, -1)
+            if not 0 <= o < b:
+                b = 0
+                break
+            b = o
+        for x in path:
+            memo[x] = b
+        spans[b] = max(spans.get(b, p), p)
+    merged = []  # overlapping spans (a pipe inside a group that is piped again) read once, as their union
+    for b, p in sorted(spans.items()):
+        if merged and b <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], p)
+        else:
+            merged.append([b, p])
+    lines, words = [], []
+    for b, p in merged:
+        seg = text[b:p]
+        cmds, cur, i = [], [], 0
+        while i < len(seg):
+            ch = seg[i]
+            if ch in ' \t' or ch in _SEG_STOP:
+                if ch in ';&|\n(){}' and cur:
+                    cmds.append(cur)
+                    cur = []
+                i += 1
+                continue
+            v, e = shell_word(seg, i)
+            if e <= i:
+                i += 1
+                continue
+            cur.append(v)
+            i = e
+        if cur:
+            cmds.append(cur)
+        for cw in cmds:
+            lines.extend(cw)
+            if len(cw) > 1:
+                lines.append(' '.join(cw[1:]))
+            for v in cw:
+                words.extend(v.split())
+    # each once: a word repeated in many pipelines is one lookup, not one per pipeline (MAX_TRIES)
+    return list(dict.fromkeys(lines)), list(dict.fromkeys(words))
+
+
+def payload_texts(text, script=False):
     """The text of each payload a quote opens (payload_quotes(), PAYLOAD_OPEN): '...' as written, "..." with \\ \" \\$
     \\` and backslash-newline unescaped, as bash reads it. An escaped opening quote (`do shell script \\"...\\"`) is
     left to the payload around it. A quote inside an earlier payload belongs to it, so the walk is linear. Only a
@@ -717,7 +835,12 @@ def payload_texts(text):
         w, word_end = shell_word(text, q - 1 if text[q] == "'" and q > 0 and text[q - 1] == '$' else q)
         if not add(w, text.startswith(w, q + 1)):
             return None
-    for w, verbatim in stdin_payloads(text):
+    # card 74586987 (replay r2): a "| bash" in a data heredoc's body is prose, no pipeline (data_body_pipes_masked;
+    # the same length, so every position stays; not on a script file's text, which is not lexed)
+    src = text
+    if not script and '|' in text and '<<' in text:
+        src = data_body_pipes_masked(text, lex_or_none(text), None)
+    for w, verbatim in stdin_payloads(src):
         if not add(w, verbatim):
             return None
     return out
@@ -729,15 +852,15 @@ def hits(cmd, script=False, _depth=0):
     if _depth >= PAYLOAD_DEPTH:
         # card aeee72df (Viktor 42941 LOW 1): a payload this deep is not read again, so one still in it blocks, as
         # past MAX_PAYLOADS (fail-closed); before, it was left to the outer passes, and a 4-deep quoted name ran
-        if payload_texts(cmd) != []:
+        if payload_texts(cmd, script) != []:
             found.append('payload-too-deep')
     else:
         # A hook past its timeout does not block. Reading a payload again costs about what the outer text cost, so it
         # starts only inside half the budget; past it (or past the budget during the payloads) the gate blocks.
         slow = found + ([] if 'payload-too-slow' in found else ['payload-too-slow'])
         if time.monotonic() - T0 > script_budget() / 2:
-            return slow if PAYLOAD_QUOTED.search(cmd) and payload_texts(cmd) != [] else found
-        payloads = payload_texts(cmd)
+            return slow if PAYLOAD_QUOTED.search(cmd) and payload_texts(cmd, script) != [] else found
+        payloads = payload_texts(cmd, script)
         if payloads is None:
             return found + ([] if 'payload-unread' in found else ['payload-unread'])
         for p in payloads:
@@ -750,6 +873,15 @@ def hits(cmd, script=False, _depth=0):
 def _hits(cmd, script=False):
     """The passes on one text, its payloads not read again (hits() does that)."""
     found = hits_in(normalise(cmd), script)
+    # card 74586987: the words a shell reads on stdin, quoted or not, as command lines of their own (stdin_pipelines)
+    # (the pipes of a data heredoc's body are prose: data_body_pipes_masked; not on a script file's text, which is
+    # not lexed, see below)
+    src = cmd
+    if not script and '|' in cmd and '<<' in cmd:
+        src = data_body_pipes_masked(cmd, lex_or_none(cmd), None)
+    lines = stdin_pipelines(normalise(src))[0]
+    if lines:
+        found += [h for h in hits_in('\n'.join(lines), script) if h not in found]
     # card fae0712e: normalise() joins every backslash-newline, also one whose backslash ends a comment or is half of
     # an escaped backslash, and the next line (a command for the shell) became part of a word: `: |#\` + newline +
     # `security dump-keychain` passed. The command text with only the shell's own joins (lexer_normalise) is judged TOO,
@@ -1175,12 +1307,13 @@ def interp_groups(text, expanded=False):
     return groups
 
 
-def script_paths(cmd, cwd, normalised=None):
+def script_paths(cmd, cwd, normalised=None, extra=()):
     """The script files the command runs (resolved, existing regular files), at most MAX_SCRIPTS (an eleventh file
-    or more than MAX_BASES directories returns MAX_SCRIPTS + 1 entries: the caller blocks). Raises TooManyArgs."""
+    or more than MAX_BASES directories returns MAX_SCRIPTS + 1 entries: the caller blocks). Raises TooManyArgs.
+    extra: more words to look up as files (a pipeline into a shell, card 74586987)."""
     norm = normalise(cmd) if normalised is None else normalised
     text = expand(norm)
-    groups = interp_groups(text, text != norm)
+    groups = interp_groups(text, text != norm) + [[w] for w in extra]
     if INTERP_RX.search(text):  # the script on stdin: only when an interpreter runs
         groups += [[m.group(1)] for m in REDIRECT_RX.finditer(text)]
         for m in CAT_RX.finditer(text):
@@ -1206,6 +1339,11 @@ def script_paths(cmd, cwd, normalised=None):
             if tries[0] > MAX_TRIES:
                 return None
             real = os.path.realpath(t)
+            # card 74586987: /dev/stdout, /dev/fd/1 and the like name THIS hook's own descriptors, never a file of the
+            # command (its shell's fds exist only when it runs). A hook whose stdout was a file (the replay worker)
+            # took /dev/fd/1 for a regular file, could not read it and blocked (PermissionError, fail-closed).
+            if real == '/dev' or real.startswith('/dev/'):
+                continue
             try:
                 st = os.stat(real)
             except OSError:
@@ -1777,6 +1915,49 @@ def _agent_msg_is_ours(path, cwd, moved):
     return os.path.realpath(path) == AGENT_MSG
 
 
+def data_body_pipes_masked(cmd, lx, cwd):
+    """Card 74586987 (replay r2, a card comment blocked as secret-read): cmd (same length) with every "|" made a blank
+    inside the body of a quoted-delimiter heredoc whose recipient only stores or sends it (DATA_RECIPIENT_RX: git
+    commit -F -, curl -d @-, this repo's agent-msg.sh), for stdin_pipelines() only. Such a body is data, never code of
+    this shell, so prose in it (`... echo security dump-keychain | bash`) is no pipeline into a shell. The same checks
+    as lexer_data_spans() on the heredoc itself (top level, one heredoc in its command, quoted delimiter, nothing after
+    the operator on its line, no REDEF_RX in the text's code, agent-msg.sh only as ours, a relative one only without a
+    cd before it), but not its walk over the steps before: those decide whether the script rules may skip the body,
+    and no step before changes that a data recipient's body is data (a redefinition is REDEF_RX's). Everything else
+    still reads the body as before: hits(), the script rules, the payloads."""
+    if lx is None or not lx['heredocs'] or '|' not in cmd:
+        return cmd
+    cls = lx['cls']
+    code = ''.join(ch if cls[p] == 'c' else ' ' for p, ch in enumerate(cmd))
+    if REDEF_RX.search(code):
+        return cmd
+    chars = None
+    for seg in lx['segments']:
+        if seg['depth'] != 0 or seg['frame'] != 'top':
+            continue
+        hs = [h for h in lx['heredocs'] if seg['start'] <= h['op'] < seg['end']]
+        if len(hs) != 1:
+            continue
+        h = hs[0]
+        if not h['quoted'] or not re.search('[\'"]', cmd[h['op']:h['opEnd']]):
+            continue
+        line_end = cmd.find('\n', h['opEnd'])
+        if line_end < 0 or cmd[h['opEnd']:line_end].strip() or h['bodyStart'] != line_end + 1:
+            continue
+        rec = DATA_RECIPIENT_RX.match(cmd[seg['start']:h['op']] + ' ')
+        if not rec:
+            continue
+        if rec.group('msg') is not None and not _agent_msg_is_ours(
+                rec.group('msg'), cwd, bool(re.search(r'(?<![\w.-])cd(?![\w.-])', code[:seg['start']]))):
+            continue
+        if '|' in cmd[h['bodyStart']:h['bodyEnd']]:
+            chars = chars or list(cmd)
+            for p in range(h['bodyStart'], h['bodyEnd']):
+                if chars[p] == '|':
+                    chars[p] = ' '
+    return ''.join(chars) if chars else cmd
+
+
 def lexer_data_spans(cmd, cwd, lx):
     """[(bodyStart, bodyEnd)] of the data heredocs (see the block above), in order; [] when none."""
     cls = lx['cls']
@@ -1910,6 +2091,19 @@ def script_hits(cmd, cwd):
         blanked = nonshell_prose_masked(blanked, cmd, lx)
         view, extras = lexer_view(blanked, cmd, lx, cwd)  # both normalised already
         text = view + ''.join('\n' + e for e in extras)
+    # card 74586987: a pipeline into a shell runs what it prints: its words as command lines, and every piece of them
+    # as a file the script rules look up (stdin_pipelines); the pipes of a data heredoc's body are prose
+    # (data_body_pipes_masked: only the pipeline reading changes, the script rules read `text` as before)
+    pipe_src = text
+    masked = data_body_pipes_masked(cmd, lx, cwd) if lx is not None else cmd
+    if masked != cmd:  # the same steps as above, on the masked text (same length as cmd)
+        pb = blank_span(masked, span)
+        for s in lexer_data_spans(cmd, cwd, lx):
+            pb = blank_span(pb, s)
+        pview, pextras = lexer_view(nonshell_prose_masked(pb, cmd, lx), cmd, lx, cwd)
+        pipe_src = pview + ''.join('\n' + e for e in pextras)
+    pipe_lines, pipe_words = stdin_pipelines(pipe_src)
+    text += ''.join('\n' + ln for ln in pipe_lines)
     marks = payload_quotes(text)
     if marks:
         chars = list(text)
@@ -1922,7 +2116,7 @@ def script_hits(cmd, cwd):
     if bounded is None:
         return found + ['wrapper-unread']
     try:
-        paths = script_paths(cmd, cwd, text)
+        paths = script_paths(cmd, cwd, text, pipe_words)
         if bounded != text:
             paths += [p for p in script_paths(cmd, cwd, bounded) if p not in paths]
     except TooManyArgs as e:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
