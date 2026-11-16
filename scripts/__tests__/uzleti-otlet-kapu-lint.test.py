@@ -279,6 +279,28 @@ with tempfile.TemporaryDirectory() as d:
         got2.append(rc_v == 1 and "NEM MEGY  2. Könyvelőiroda: elutasított irány" in out_v)
     check("negative: --cimek refuses a refused title behind a heading/bullet mark AND a bold mark (Viktor 43498 LOW 1)",
           got2, [True] * len(doubles))
+    # Viktor 43527 LOW 1: italic and bold-italic numbers, "Jelölt" inside the bold; INFO 1: a blank after the bold.
+    emph = ("***2.*** Könyvelőiroda", "- ***2.*** Könyvelőiroda", "## *2.* Könyvelőiroda", "## _2._ Könyvelőiroda",
+            "- *2. Könyvelőiroda*", "## ****2.**** Könyvelőiroda", "- **Jelölt 2.** Könyvelőiroda",
+            "### **Jelölt 2. Könyvelőiroda**", "## **Jelölt** 2. Könyvelőiroda", "### ** 2. Könyvelőiroda")
+    got3 = []
+    for i, v in enumerate(emph):
+        f3 = os.path.join(d, f"emph{i}.md")
+        open(f3, "w", encoding="utf-8").write("## 1. Kertészeti napló\n" + v + "\n")
+        rc_v, out_v = cimek_run(f3)
+        got3.append(rc_v == 1 and "NEM MEGY  2. Könyvelőiroda: elutasított irány" in out_v)
+    check("negative: --cimek refuses a refused title behind italic/bold-italic marks or 'Jelölt' in the bold (Viktor 43527)",
+          got3, [True] * len(emph))
+    under = os.path.join(d, "under.md")
+    open(under, "w", encoding="utf-8").write("## 1. Kertészeti napló\n## 2. A base_url mező _kiemelve_\n")
+    out_u = cimek_run(under)[1]
+    check("--cimek keeps a '_' inside a word and drops it at a word edge (Viktor 43527)",
+          "MEHET     2. A base_url mező kiemelve" in out_u, True)
+    nospace = os.path.join(d, "nospace.md")
+    open(nospace, "w", encoding="utf-8").write("## 1. Kertészeti napló\n## 2.Társkereső\n")
+    out_n = cimek_run(nospace)[1]
+    check("--cimek takes '## 2.Cím' (no blank after the dot) as the exact shape, unmarked (Viktor 43527 INFO 2)",
+          ("MEHET     2.Társkereső" in out_n, "eltérő" in out_n), (True, False))
     # Viktor 43498 INFO 3: the other-shape mark is on the NEM MEGY line too, not only on MEHET.
     bold_bad = os.path.join(d, "boldbad.md")
     open(bold_bad, "w", encoding="utf-8").write("## 1. Kertészeti napló\n**2.** Könyvelőiroda\n")

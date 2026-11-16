@@ -214,15 +214,19 @@ def main(path):
 # Viktor 43498 LOW 1: a bold marker after a '#' heading or a bullet ('### **2. Cím**', '- **2.** Cím', also after the
 # 'Jelölt' word) is a title too; '__' counts as bold. The tail is greedy (INFO 4: a lazy '.*?' before '[ \t]*$' was
 # quadratic on a long run of trailing blanks; .strip() drops them anyway).
-CIM_SOR = re.compile(r"(?mi)^[ \t]*(#{1,6}[ \t]*|[-*+][ \t]+|(?:\*\*|__)[ \t]*)"
-                     r"(?:jel[öo]lt[ \t]*)?(?:(?:\*\*|__)[ \t]*)?(\d+[ \t]*[.):].*)$")
+# Viktor 43527 LOW 1 (his tested proposal): any emphasis run ('*', '**', '***', '_', '__', more) after the heading
+# mark or the bullet, on its own, or inside it after 'Jelölt' ('***2.***', '## *2.*', '- **Jelölt 2.** Cím',
+# '## **Jelölt** 2. Cím'). One optional emphasis group per position: two adjacent optional '*' groups were cubic in
+# his timing. The title drops every '*', and '_' only at a word edge (a 'base_url' word stays).
+CIM_SOR = re.compile(r"(?mi)^[ \t]*(?:#{1,6}[ \t]*(?:[*_]+[ \t]*)?|[-*+][ \t]+(?:[*_]+[ \t]*)?|[*_]+[ \t]*)"
+                     r"(?:jel[öo]lt[ \t]*(?:[*_]+[ \t]*)?)?(\d+[ \t]*[.):].*)$")
 
 
 def cimek(path):
     t = unicodedata.normalize("NFKC", open(path, encoding="utf-8").read())
     cims = []
     for m in CIM_SOR.finditer(t):
-        cim = re.sub(r"\*\*|__", "", m.group(2)).strip()
+        cim = re.sub(r"\*+|(?<!\w)_+|_+(?!\w)", "", m.group(1)).strip()
         pontos = re.match(r"## \d+\.", m.group(0)) is not None
         cims.append((cim, pontos))
     if not cims:
