@@ -151,8 +151,10 @@ AMP = r'(?<![<>])&(?!>)'
 PIPE = r'(?<!>)\|'  # a | right after > is the noclobber redirection `>|f`, no command end
 # Card 946937b7 (Viktor 45520): an assignment's value may hold quoted blanks (`A="a b" python3 m.py`, an everyday
 # shape): a quoted run is part of the value. Each alternative starts with its own char (WORD has no quote), and a
-# quoted run ends at the next quote or newline, so a token still reads one way only.
-ASSIGN_VALUE = r'(?:' + WORD + r'|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')*'
+# quoted run ends at the next quote or newline, so a token still reads one way only. An escaped char is part of it
+# too (Viktor 45626 R4a: `A=a\ b python3 m.py` ran m.py); the plain run has no backslash, so the alternatives do not
+# overlap, and the unrolled loop has no possessive quantifier (the fleet's /usr/bin/python3 is 3.9).
+ASSIGN_VALUE = r'[^\s;&|(){}`\'"\\]*(?:(?:\\[\s\S]|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')[^\s;&|(){}`\'"\\]*)*'
 CHAIN = (r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|' + REDIR + r'|[+.]?\d[\w.]*|\w+='
          + ASSIGN_VALUE + r')[ \t]+)*')
 POSITION = r'(?:^|[;(){}\n`\'"]|' + PIPE + r'|' + AMP + r'|\$\(|\s-(?:exec|execdir|ok)(?=\s))[ \t]*' + CHAIN
@@ -636,14 +638,14 @@ HERE_STRING_RX = re.compile(r'<<<[ \t]*')
 PIPELINE_START = ';&\n()`'  # a | does not end the pipeline the shell reads
 
 
-def stdin_payloads(text):
+def stdin_payloads(text, pipes=True):
     """(value, verbatim) of each word a shell reads on stdin: every quoted word of a pipeline that ends in `| <shell>`
     (the quotes walked from the start of the text, so a quote of an earlier word is not taken for an opening one),
     and the word after a <<< whose command has a shell word in it. verbatim: the value stands as written right
     after the word's opening quote (a command position the outer passes judge) or is one plain word (no blank, so
     no rule can match it). Linear: each quote and each word once."""
     import bisect
-    pipes = [m.start() for m in PIPE_SHELL_RX.finditer(text)] if '|' in text else []
+    pipes = [m.start() for m in PIPE_SHELL_RX.finditer(text)] if pipes and '|' in text else []  # False: <<< only
     heres = [m for m in HERE_STRING_RX.finditer(text)] if '<<<' in text else []
     if not pipes and not heres:
         return []
@@ -1107,6 +1109,9 @@ class SourceGroup:
 # (_CALL_END_RX, Viktor 42251 LOW 2), so `python3 2>&1 ./x.py` and `python3 >& out.txt x.py` read x.py.
 # the target may hold a quoted or escaped blank since card 946937b7 (`>"x y"`, `>x\\ y`: one word from the lexer)
 OUT_REDIR_RX = re.compile(r'(?:\d*>>?[&|]?|&>>?)([\s\S]+)?$')
+# card 946937b7 (Viktor 45626 R3): before source's file an input redirection or a here-doc / here-string is no file
+# either (`source </dev/null x.sh`, `source <<<x x.sh`, `source <&0 x.sh` run x.sh)
+SRC_REDIR_RX = re.compile(r'(?:\d*(?:>>?[&|]?|<<<|<<-?|<>|<&|<)|&>>?)([\s\S]+)?$')
 # the end of an interpreter call's words: a ; newline ) backtick, a | or & that is no part of a redirection (`>&2`, `2>&1`, `&>f`, `>|f`)
 _CALL_END_RX = re.compile(r'[;\n)`]|' + PIPE + r'|' + AMP)
 
@@ -1200,6 +1205,7 @@ def _call_end(rest, base, openers, cls=None):
 _QUOTED_RX = re.compile(r'[\'"\\]')
 _OPENS_RX = re.compile(r'[(`]')  # a substitution (or a subshell) may open here: interp_groups' fail-closed
 _BLANK_RUN_RX = re.compile(r'\s+')
+_ESC_SEP_RX = re.compile(r'\\[\s;&|)<>]')
 
 
 def _code_words(seg, base, cls):
@@ -1451,10 +1457,27 @@ def interp_groups(text, expanded=False):
             # short (`python3 $(true)m.py; echo` and 64 more substitutions ran m.py). No "(" and no backtick before
             # the cut: the cut is the call's own end, the old reading stands
             raise TooManyArgs('a lexer nem olvasta a szöveget, és a hívás szavaiban helyettesítés nyílik (fail-closed)')
-        if cls is None and quoted and _odd_quote_word(rest[:cut]):
+        if cls is None and quoted and (_odd_quote_word(rest[:cut]) or _ESC_SEP_RX.search(rest, 0, cut + 1)):
             # card 946937b7 (Viktor 45520, fail-closed): the lexer could not read the text, and a quote in the call's
-            # words leaves the old blank split unsure which word is the script
+            # words leaves the old blank split unsure which word is the script; so does an escaped blank or operator
+            # (Viktor 45626 R4b: `python3 2>x\& m.py` with 66 substitutions in the text ran m.py)
             raise TooManyArgs('az interpreter-hívás szavaiban páratlan idézőjel, a lexer nem olvasta (fail-closed)')
+        # card 946937b7 (Viktor 45626 R2): a call the lexer read as quoted text (an eval payload, a heredoc body)
+        # keeps the old blank split above, which a quoted blank fools (`eval 'python3 -W "a b" m.py'`). Its own
+        # text, lexed alone (without the payload's closing quote if it does not read otherwise), is read as code
+        # too: its groups are ADDED, the old reading stays
+        if ccls is None and cls is not None and not expanded and _QUOTED_RX.search(rest, 0, cut):
+            seg = rest[:cut]
+            for s2 in (seg, seg.rstrip()[:-1] if seg.rstrip()[-1:] in ('"', "'") else None):
+                if s2 is None or shell_lex is None:
+                    continue
+                try:
+                    lx2 = shell_lex.lex(s2)
+                except Exception:
+                    continue
+                if not lx2['problems']:
+                    groups += interp_groups(name + s2)
+                    break
         all_words = split_redirections(_code_words(rest[:cut], m.end(), ccls), redir_cache)
         # the window ended inside this command: what follows it is not read
         clipped = cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text)
@@ -1463,10 +1486,10 @@ def interp_groups(text, expanded=False):
             # m.py in `source runner.sh m.py` (Viktor 41831 LOW 1). The rest is judged only when the first word is an
             # existing file (script_paths): prose after a ")" made a sentence-ending "." read as source of a file
             # named later in the sentence (an agent-msg heredoc, 2026-11-14), and there the next word is no file.
-            # card 946937b7: an output redirection before the file is no file (`source >"a b" x.sh` runs x.sh)
+            # card 946937b7: a redirection before the file is no file (`source >"a b" x.sh`, `source </dev/null x.sh`)
             lead = 0
             while lead < len(all_words):
-                rd = OUT_REDIR_RX.match(all_words[lead])
+                rd = SRC_REDIR_RX.match(all_words[lead])
                 if not rd:
                     break
                 lead += 1 if rd.group(1) else 2
@@ -2412,6 +2435,10 @@ def script_hits(cmd, cwd):
         pipe_src = pview + ''.join('\n' + e for e in pextras)
     pipe_lines, pipe_words = stdin_pipelines(pipe_src)
     text += ''.join('\n' + ln for ln in pipe_lines)
+    # card 946937b7 (Viktor 45626 R1): a here-string a shell reads (`bash <<<'python3 m.py'`, `<<<'./m.sh' sh`) runs
+    # its word as a command line: read like a pipeline's lines (stdin_payloads knows which <<< feeds a shell)
+    if '<<<' in pipe_src:
+        text += ''.join('\n' + w for w, _ in stdin_payloads(pipe_src, pipes=False))
     marks = payload_quotes(text)
     if marks:
         chars = list(text)

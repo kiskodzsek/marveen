@@ -760,6 +760,9 @@ def script_cases():
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'find-generic-password', '-s', 'x'])\n")
         with open(os.path.join(d, 'fdname', 'ok.py'), 'w', encoding='utf-8') as f:
             f.write("print(1)\n")
+        os.makedirs(os.path.join(d, 'tspace'))  # card 946937b7 (Viktor 45626 m21): a script name that ends in a blank
+        with open(os.path.join(d, 'tspace', 'measure.py '), 'w', encoding='utf-8') as f:
+            f.write("import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         w('tmpl.mjs', "import { execSync } from 'node:child_process';\nconst B = `/usr/bin/" + S + "`;\n"
                       "execSync(`${B} find-generic-password -s x`);\n")
         for i, form in enumerate(LIT_FORMS):
@@ -1543,6 +1546,43 @@ def script_cases():
             ('./$(true)dump.sh; echo ' + '$(true)' * 70, d),
             ('python3 $(true)measure.py; echo ' + '$(true)' * 59 + ' ' + 'a' * 60000, d),  # LEX_MAX_WORK, 60 substitutions
             ('x=$(python3 measure.py) ; echo ' + '$(true)' * 70, d),  # no "(" before the cut: the old reading blocks
+            # card 946937b7 (Viktor 45626; bash ran the script in every row). R1 MEDIUM, a regression from 348e7dd4: a
+            # here-string a shell reads is a command line (the fleet gate caught it by chance, through the old split)
+            ("bash <<<'python3 measure.py'", d),
+            ("bash <<<'python3 -W \"a b\" measure.py'", d),
+            ("sh <<<'./dump.sh'", d),
+            ("bash -s <<<'python3 measure.py'", d),
+            ('bash <<< "python3 measure.py"', d),
+            ("<<<'python3 measure.py' bash", d),
+            ("zsh <<<'./dump.sh'", d),
+            # R2 MEDIUM: a quoted blank in a call the lexer reads as quoted text (an eval payload, a heredoc body)
+            ("eval 'python3 -W \"a b\" measure.py'", d),
+            ("eval \"python3 >'x y' measure.py\"", d),
+            ("eval 'python3 >\"x y\" measure.py'", d),
+            ('bash <<EOF\npython3 -W "a b" measure.py\nEOF', d),
+            ("bash <<'EOF'\npython3 -W \"a b\" measure.py\nEOF", d),
+            ('cat <<EOF\n$(python3 >"x y" measure.py)\nEOF', d),
+            # R3 LOW: an input redirection, a here-doc or a here-string before source's file
+            ('source </dev/null dump.sh', d),
+            ('. </dev/null dump.sh', d),
+            ('source <"a b" dump.sh', d),
+            ('source 0<"a b" dump.sh', d),
+            ('source <<<x dump.sh', d),
+            ('source <&0 dump.sh', d),
+            ('source <>/dev/null dump.sh', d),
+            # R4 MEDIUM: an escaped blank in an assignment's value; past the lexer's bounds an escaped blank or operator
+            ('A=a\\ b python3 measure.py', d),
+            ('A=a\\ b\\ c python3 measure.py', d),
+            ('python3 2>x\\& measure.py; echo' + ' $(true)' * 66, d),
+            ('python3 >x\\ y measure.py; echo' + ' $(true)' * 66, d),
+            ('python3 -W a\\;b measure.py; echo' + ' $(true)' * 66, d),
+            ('bash >x\\& dump.sh; echo' + ' $(true)' * 66, d),
+            # mutation survivors of Viktor's round on ab672f53: the odd-quote fail-closed (m03), a backtick that opens
+            # past the lexer's bounds (m17), the FIRST code blank of a run ends the word (m21: bash runs "measure.py ")
+            ('python3 -W "a b" measure.py; echo' + ' $(true)' * 66, d),
+            ('python3 `true \\)`measure.py; echo' + ' $(true)' * 66, d),
+            ("python3 'measure.py '  x", os.path.join(d, 'tspace')),
+            ('python3 measure.py\\   x "q"', os.path.join(d, 'tspace')),
             # ... and without a blank (mutation round 1: the quote, escape, $'..', $( ) and backtick tracking of the cut)
             ('python3 `true>&2`measure.py>/dev/null', d),
             ('python3 $(true>&2)measure.py>/dev/null', d),
@@ -1880,6 +1920,15 @@ def script_cases():
             ('A="a b" python3 stat.py', d),
             ('python3 "x y.py"', d),
             ('source >"dump.sh" stat.py', d),  # the redirection's target is written, the file is stat.py
+            # card 946937b7 (Viktor 45626): a here-string to a program that is no shell is data, and a quoted payload
+            # that only names a script is prose; an escaped blank ends no assignment (bash sets A="x python3" and looks
+            # up measure.py on PATH: no python runs)
+            ("grep x <<<'python3 measure.py'", d),
+            ("cat <<<'python3 measure.py'", d),
+            ("python3 stat.py <<<'a b'", d),
+            ("echo \"python3 -W 'a b' measure.py\"", d),
+            ('git commit -m "python3 isn\'t ready"', d),
+            ('A=x\\ python3 measure.py', d),
             # card 946937b7 (Viktor 45532): the same substitutions before a harmless script, or as data
             ("echo $(true ')')measure.py", d),
             ("python3 '$(true)'stat.py", d),
@@ -2023,6 +2072,15 @@ def script_cases():
                            env={'PATH': '/usr/bin:/bin'})
         if p.stdout.strip() != 'True True True':
             fails.append(f'script: the shared lexer is not loaded or not fail-closed: {p.stdout.strip()!r} {p.stderr[-200:]!r}')
+        # card 946937b7 (Viktor 45626, mutation m08 survived): without the lexer (not loaded), a substitution with a
+        # quoted ")" before the script still blocks (bash ran dump.sh); the hook test above always has the lexer
+        nolex = half.replace('m.T0 -= 3.0; ', 'm.shell_lex = None; ').replace('m.hits(sys.argv[2])',
+                                                                             'm.script_hits(sys.argv[2], sys.argv[3])')
+        for cmd in ("./$(true ')')dump.sh", './$(true ")")dump.sh'):
+            p = subprocess.run([sys.executable, '-I', '-c', nolex, HOOK, cmd, d], capture_output=True, text=True,
+                               timeout=20, env={'PATH': '/usr/bin:/bin'})
+            if p.stdout.strip() in ('', '-'):
+                fails.append(f'script: without the lexer {cmd!r} should block -> {p.stdout.strip()!r} {p.stderr[-120:]!r}')
         # card aeee72df: hits() itself, where the hook blocks on another rule (script-inline after ||, the 4096
         # window): a <<< with no word after it raises nothing, || is no pipe into a shell, |& is one (zsh, bash 4)
         S3 = fix('s3curity')
