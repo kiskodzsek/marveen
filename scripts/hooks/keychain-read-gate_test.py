@@ -731,6 +731,10 @@ def script_cases():
         w('list.py', "import subprocess\nsubprocess.run(['" + S + "', 'list-keychains'])\n")
         w('notes.py', "# the gate blocks find-generic-password in a shell\nprint('ok')\n")
         w('ok.js', "console.log('ok');\n")
+        w('a b.py', "import subprocess\nSEC = '/usr/bin/" + S + "'\n"  # card 946937b7: a script name with a blank
+                    "subprocess.run([SEC, 'find-generic-password', '-a', 'acct', '-s', 'svc'])\n")
+        os.makedirs(os.path.join(d, 'evilmod'), exist_ok=True)
+        w(os.path.join('evilmod', '__main__.py'), "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         w('runner.sh', 'python3 "$1"\n')  # runs its first argument: `source runner.sh m.py` runs m.py
         w('word.py', "print('the " + S + " team writes find-generic-password docs')\n")
         # card 31045f4d (Klodel 43233, Viktor 43235): a data file whose text names the blocked call (the error
@@ -756,6 +760,9 @@ def script_cases():
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'find-generic-password', '-s', 'x'])\n")
         with open(os.path.join(d, 'fdname', 'ok.py'), 'w', encoding='utf-8') as f:
             f.write("print(1)\n")
+        os.makedirs(os.path.join(d, 'tspace'))  # card 946937b7 (Viktor 45626 m21): a script name that ends in a blank
+        with open(os.path.join(d, 'tspace', 'measure.py '), 'w', encoding='utf-8') as f:
+            f.write("import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         w('tmpl.mjs', "import { execSync } from 'node:child_process';\nconst B = `/usr/bin/" + S + "`;\n"
                       "execSync(`${B} find-generic-password -s x`);\n")
         for i, form in enumerate(LIT_FORMS):
@@ -1474,6 +1481,108 @@ def script_cases():
             # the script; bash ran measure.py)
             ('python3 12>err.log measure.py', d),
             ('python3 12>/dev/null measure.py', d),
+            # card 946937b7 (Viktor 45520, MEDIUM; all allow on ed110117 and da7d6cb8, bash and zsh ran the script):
+            # a quoted or escaped blank or ; & | in a word before the script is word text, and a quoted value of an
+            # assignment before the interpreter is part of it
+            ('python3 -W "a b" measure.py', d),
+            ('python3 -W "ignore;x" measure.py', d),
+            ('python3 -W ignore\\;x measure.py', d),
+            ('python3 -X "a&b" measure.py', d),
+            ("python3 -W $'a b' measure.py", d),
+            ('python3 -X "a b" -m evilmod', d),
+            ('python3 >"x y" measure.py', d),
+            ('python3 >x\\ y measure.py', d),
+            ('python3 >"x&" measure.py', d),
+            ("python3 >'x;' measure.py", d),
+            ('python3 2>x\\& measure.py', d),
+            ('python3 -u >x\\& measure.py', d),
+            ('bash >x\\& dump.sh', d),
+            ('source >"a b" dump.sh', d),
+            ('source > x dump.sh', d),
+            ('A="a b" python3 measure.py', d),
+            ("A='a b' python3 measure.py", d),
+            ('env A="a b" python3 measure.py', d),
+            ('A="x\\"y z" python3 measure.py', d),
+            ('python3 "a b.py"', d),
+            ("python3 'a b.py'", d),
+            ('python3 a\\ b.py', d),
+            # card 946937b7 (Viktor 45532; all allow on ed110117, da7d6cb8 and 348e7dd4, bash and zsh ran the script): a
+            # quoted or escaped paren in a $( ) before the script; without_substs' regex ended it at the first )
+            ("python3 $(true ')')measure.py", d),
+            ('python3 $(true ")")measure.py', d),
+            ("python3 $(true '(')measure.py", d),
+            ('python3 $(true \\))measure.py', d),
+            ("bash $(true ')')dump.sh", d),
+            ("python3 $(true ')')measure.py>/dev/null", d),
+            ('python3 "$(true \')\')"measure.py', d),
+            ("python3 $(true ')' $(true '('))measure.py", d),
+            ("source $(true ')' ) dump.sh", d),
+            ('python3 $(true \')\' "x")measure.py', d),
+            # was an allow row (generated mutant 032): bash runs ")measure.py" here, but the gate reads a substitution as
+            # printing nothing (it cannot know echo from true), and `python3 $(true ")")measure.py` runs measure.py
+            ('python3 $(echo ")")measure.py', d),
+            ('python3 $(true ")")measure.py', d),
+            # ... Viktor 45533 (wider): a direct path, source / ., other commands in the substitution
+            ("./$(true ')')dump.sh", d),
+            ("./$(true '(')dump.sh", d),
+            ("./$(true ')' )dump.sh", d),
+            ("source $(true ')')dump.sh", d),
+            (". $(true ')')dump.sh", d),
+            ("python3 $(: ')')measure.py", d),
+            ("python3 $(echo ')' >/dev/null)measure.py", d),
+            ("bash -e $(true ')')dump.sh", d),
+            # ... and a word past the lexer's bounds (65+ substitutions): its quotes leave the regex reading unsure,
+            # fail-closed
+            ("python3 $(true ')')" + '$(true)' * 70 + 'measure.py', d),
+            ("./$(true ')')" + '$(true)' * 70 + 'dump.sh', d),
+            # card 946937b7 (Viktor 45543, MEDIUM, all allow on ed110117; bash and zsh ran the script): the lexer does
+            # not read the text (65+ substitutions, or LEX_MAX_WORK with fewer) and a ")" of a substitution in the
+            # call's words cut the call: fail-closed when a "(" or a backtick is before the cut
+            ('python3 $(true)measure.py; echo ' + '$(true)' * 70, d),
+            ('python3 ' + '$(true)' * 70 + 'measure.py', d),
+            ('x=$(python3 $(true)measure.py); echo ' + '$(true)' * 70, d),
+            ('source $(true)dump.sh; echo ' + '$(true)' * 70, d),
+            ('. $(true)dump.sh; echo ' + '$(true)' * 70, d),
+            ('./$(true)dump.sh; echo ' + '$(true)' * 70, d),
+            ('python3 $(true)measure.py; echo ' + '$(true)' * 59 + ' ' + 'a' * 60000, d),  # LEX_MAX_WORK, 60 substitutions
+            ('x=$(python3 measure.py) ; echo ' + '$(true)' * 70, d),  # no "(" before the cut: the old reading blocks
+            # card 946937b7 (Viktor 45626; bash ran the script in every row). R1 MEDIUM, a regression from 348e7dd4: a
+            # here-string a shell reads is a command line (the fleet gate caught it by chance, through the old split)
+            ("bash <<<'python3 measure.py'", d),
+            ("bash <<<'python3 -W \"a b\" measure.py'", d),
+            ("sh <<<'./dump.sh'", d),
+            ("bash -s <<<'python3 measure.py'", d),
+            ('bash <<< "python3 measure.py"', d),
+            ("<<<'python3 measure.py' bash", d),
+            ("zsh <<<'./dump.sh'", d),
+            # R2 MEDIUM: a quoted blank in a call the lexer reads as quoted text (an eval payload, a heredoc body)
+            ("eval 'python3 -W \"a b\" measure.py'", d),
+            ("eval \"python3 >'x y' measure.py\"", d),
+            ("eval 'python3 >\"x y\" measure.py'", d),
+            ('bash <<EOF\npython3 -W "a b" measure.py\nEOF', d),
+            ("bash <<'EOF'\npython3 -W \"a b\" measure.py\nEOF", d),
+            ('cat <<EOF\n$(python3 >"x y" measure.py)\nEOF', d),
+            # R3 LOW: an input redirection, a here-doc or a here-string before source's file
+            ('source </dev/null dump.sh', d),
+            ('. </dev/null dump.sh', d),
+            ('source <"a b" dump.sh', d),
+            ('source 0<"a b" dump.sh', d),
+            ('source <<<x dump.sh', d),
+            ('source <&0 dump.sh', d),
+            ('source <>/dev/null dump.sh', d),
+            # R4 MEDIUM: an escaped blank in an assignment's value; past the lexer's bounds an escaped blank or operator
+            ('A=a\\ b python3 measure.py', d),
+            ('A=a\\ b\\ c python3 measure.py', d),
+            ('python3 2>x\\& measure.py; echo' + ' $(true)' * 66, d),
+            ('python3 >x\\ y measure.py; echo' + ' $(true)' * 66, d),
+            ('python3 -W a\\;b measure.py; echo' + ' $(true)' * 66, d),
+            ('bash >x\\& dump.sh; echo' + ' $(true)' * 66, d),
+            # mutation survivors of Viktor's round on ab672f53: the odd-quote fail-closed (m03), a backtick that opens
+            # past the lexer's bounds (m17), the FIRST code blank of a run ends the word (m21: bash runs "measure.py ")
+            ('python3 -W "a b" measure.py; echo' + ' $(true)' * 66, d),
+            ('python3 `true \\)`measure.py; echo' + ' $(true)' * 66, d),
+            ("python3 'measure.py '  x", os.path.join(d, 'tspace')),
+            ('python3 measure.py\\   x "q"', os.path.join(d, 'tspace')),
             # ... and without a blank (mutation round 1: the quote, escape, $'..', $( ) and backtick tracking of the cut)
             ('python3 `true>&2`measure.py>/dev/null', d),
             ('python3 $(true>&2)measure.py>/dev/null', d),
@@ -1487,6 +1596,14 @@ def script_cases():
             # ... but macOS bash 3.2 runs a FILE named {fd} there (measured 11-16; mutation round 2, fd-rx-no-brace)
             ('python3 {fd}>/dev/null ok.py', os.path.join(d, 'fdname')),
             ("bash -c 'python3 {fd}>/dev/null ok.py'", os.path.join(d, 'fdname')),
+            # card 946937b7: the same fleet shapes as the allow rows (the gate's view has an odd quote, the command
+            # lexes cleanly), with the script that reads the keychain
+            ('python3 -c "import sys; print(\'a b\')" && python3 measure.py "a b"', d),
+            ("python3 -c 'print(1)' && python3 measure.py \"it's x\"", d),
+            (": <<'NOTE'\npython3 isn't ready\nNOTE\npython3 measure.py", d),
+            ('nohup sh -c "python3 measure.py > /tmp/k.log 2>&1" > /dev/null 2>&1 &', d),
+            ("TMPDIR=/x sh -c 'unset TMPDIR; python3 measure.py x' 2>&1 | tail -3", d),
+            ("python3 -c 'print(1)' && python3 measure.py \"it's x\"; echo" + ' $(true)' * 66, d),
         ]
         prose = 'mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
         allow = [
@@ -1521,9 +1638,6 @@ def script_cases():
             # exclusive; mutation a5, "a <= e", read on into the next command)
             ('python3 $(true); echo measure.py', d),
             ('python3 `true`; echo measure.py', d),
-            # a substitution that prints ")" glued to the word: bash runs ")measure.py", not measure.py (generated
-            # mutant 032, a span regex that let ")" into $( ), cut the word to measure.py)
-            ('python3 $(echo ")")measure.py', d),
             # card 70c94516: quotes taken off a word that names no keychain-reading file, and the ordinary -m / source
             # / ./ shapes stay allowed
             # (a non-plain script word keeps the old walk, as on main: `python3 "st"at.py regiszter.jsonl` judges the
@@ -1808,11 +1922,60 @@ def script_cases():
             ("python3 'measure.py>x'", d),
             ("python3 measure.py'>x'", d),
             ('python3 $(true x)> measure.py stat.py', d),
+            # card 946937b7: a quoted argument after the script is argv data, a written target with a blank is written
+            ('python3 stat.py "a b" measure.py', d),
+            ('python3 stat.py > "measure.py x"', d),
+            ('A="a b" python3 stat.py', d),
+            ('python3 "x y.py"', d),
+            ('source >"dump.sh" stat.py', d),  # the redirection's target is written, the file is stat.py
+            # card 946937b7 (Viktor 45626): a here-string to a program that is no shell is data, and a quoted payload
+            # that only names a script is prose; an escaped blank ends no assignment (bash sets A="x python3" and looks
+            # up measure.py on PATH: no python runs)
+            ("grep x <<<'python3 measure.py'", d),
+            ("cat <<<'python3 measure.py'", d),
+            ("python3 stat.py <<<'a b'", d),
+            ("echo \"python3 -W 'a b' measure.py\"", d),
+            ('git commit -m "python3 isn\'t ready"', d),
+            ('A=x\\ python3 measure.py', d),
+            # card 946937b7 (Viktor 45532): the same substitutions before a harmless script, or as data
+            ("echo $(true ')')measure.py", d),
+            ("python3 '$(true)'stat.py", d),
+            ("git log $(true ')')measure.py", d),
+            ("python3 $(true ')')stat.py", d),
+            ("python3 $(true ')' $(true '('))stat.py", d),
+            ("python3 -c 'print(1)' $(true ')')", d),
+            ("./$(true ')')stat.py", d),
+            ("echo ./$(true ')')dump.sh", d),
+            ("./stat.py $(true ')') dump.sh", d),
+            # card 946937b7 (Viktor 45543): past the lexer's bounds, a call with no "(" and no backtick before its
+            # cut keeps its old reading: no block
+            ('python3 stat.py; echo ' + '$(true)' * 70, d),
+            ('echo ' + '$(true)' * 70, d),
+            ('x=$(python3 stat.py) ; echo ' + '$(true)' * 70, d),
+            ('echo ' + '$(true)' * 70 + '; python3 stat.py', d),
+            ('python3 stat.py; echo ' + '$(true)' * 59 + ' ' + 'a' * 60000, d),
             ('python3 "x measure.py>y"', d),
             ('python3 stat.py "a b>c"', d),
             ('python3 stat.py>"a b"', d),
             ("python3 'x y'>measure.py", d),
             ('python3 stat.py "$(true x)" >/dev/null', d),
+            # card 946937b7 (replay of 59811cb0: 916 fleet commands blocked): the command as written lexes cleanly,
+            # only the gate's own view of it (a payload's quotes) has an odd quote; the old reading stands
+            ('python3 -c "import sys; print(\'a b\')" && python3 stat.py "a b"', d),
+            ("python3 -c 'print(1)' && python3 stat.py \"it's x\"", d),
+            # ... and where the call's own words do not lex alone either (mutation round 3: _CMD_READ always False
+            # survived): only the reading of the command as written lets them pass
+            ('nohup sh -c "python3 stat.py x > /tmp/k.log 2>&1" > /dev/null 2>&1 &', d),
+            ("TMPDIR=/x sh -c 'unset TMPDIR; python3 stat.py x' 2>&1 | tail -3", d),
+            ("python3 -c \"open('c.txt','w').write('python3 evil\\\\\\\\.py\\n./\\\"' + 'a'*50 + '\\\"\\n')\" && head -c 40 c.txt",
+             d),
+            # ... and past the lexer's bounds, a call whose own words lex alone keeps their reading (mutation round 3:
+            # _call_alone_groups always None survived)
+            ("python3 -c 'print(1)' && python3 stat.py \"it's x\"; echo" + ' $(true)' * 66, d),
+            ("python3 stat.py \"it's x\"; echo" + ' $(true)' * 66, d),
+            # ... the same for a substitution that opens in the gate's view of a call (mutation round 3b:
+            # the _CMD_READ guard of the substitution fail-closed survived)
+            ('C=\'export -- A=1; /usr/bin/printenv A\'; echo "bash $(/bin/bash -c "$C") zsh $(/bin/zsh -c "$C")"', d),
         ]
         for cmd, cwd in block:
             code, err = bash_in(cmd, cwd)
@@ -1934,6 +2097,15 @@ def script_cases():
                            env={'PATH': '/usr/bin:/bin'})
         if p.stdout.strip() != 'True True True':
             fails.append(f'script: the shared lexer is not loaded or not fail-closed: {p.stdout.strip()!r} {p.stderr[-200:]!r}')
+        # card 946937b7 (Viktor 45626, mutation m08 survived): without the lexer (not loaded), a substitution with a
+        # quoted ")" before the script still blocks (bash ran dump.sh); the hook test above always has the lexer
+        nolex = half.replace('m.T0 -= 3.0; ', 'm.shell_lex = None; ').replace('m.hits(sys.argv[2])',
+                                                                             'm.script_hits(sys.argv[2], sys.argv[3])')
+        for cmd in ("./$(true ')')dump.sh", './$(true ")")dump.sh'):
+            p = subprocess.run([sys.executable, '-I', '-c', nolex, HOOK, cmd, d], capture_output=True, text=True,
+                               timeout=20, env={'PATH': '/usr/bin:/bin'})
+            if p.stdout.strip() in ('', '-'):
+                fails.append(f'script: without the lexer {cmd!r} should block -> {p.stdout.strip()!r} {p.stderr[-120:]!r}')
         # card aeee72df: hits() itself, where the hook blocks on another rule (script-inline after ||, the 4096
         # window): a <<< with no word after it raises nothing, || is no pipe into a shell, |& is one (zsh, bash 4)
         S3 = fix('s3curity')
@@ -2191,8 +2363,10 @@ def main():
                   ('ssh h ' * 20000 + sec, 2), ('nice -n 5 sudo -u a ' * 10000 + sec, 2),
                   # card e05330a4 r3: a call in the $( ) of another is a word of it, so the windows overlap, and each
                   # open piece is scanned once (the joined word rescanned per piece ran these into the 6 s watchdog;
-                  # main 0.4-2.6 s, new 1.5-3.0 s, measured under load; main blocks the last one, past MAX_ARGS)
-                  ('python3 x.py $(' * 20000, 0), ('python3 x.py a $(' * 10000, 0), ('python3 x.py>x $(' * 10000, 0)]
+                  # main 0.4-2.6 s, new 1.5-3.0 s, measured under load; main blocks the last one, past MAX_ARGS).
+                  # Card 946937b7 (Viktor 45543): 0 -> 2, the lexer does not read 10 000+ substitutions and a "$(" is
+                  # in the call's words: fail-closed; the same 5 s cap
+                  ('python3 x.py $(' * 20000, 2), ('python3 x.py a $(' * 10000, 2), ('python3 x.py>x $(' * 10000, 2)]
     # card aeee72df: the word join and the stdin walk are linear (each quote and each word once), and a <<< at the
     # very end has no word (an IndexError there blocked every such command before it was caught). The two `<<<`
     # runs past 4096 characters block on the script rules ('script-too-many-args', main too): timed here, their
