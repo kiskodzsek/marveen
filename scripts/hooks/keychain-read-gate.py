@@ -1439,12 +1439,16 @@ def interp_groups(text, expanded=False):
         # (expanded: expand() read a VAR=value anywhere in the text as this shell's assignment; the real value may be empty
         # (X=a python3 $X m.py, unset X, a comment) and the script the second word: such a text keeps the old walk)
         rest = text[m.end():m.end() + ARGS_WINDOW]  # a window, not the rest: 6 000 calls x the rest was quadratic
-        cut = _call_end(rest, m.end(), openers, cls)
+        # the lexer's classes read a call whose name is code; one inside a quoted payload (`eval "python3 m.py"`,
+        # `tmux new 'python3 m.py'`) is all quoted text to them, and its words would never split: it keeps the old
+        # reading here, and the payload pass reads the payload's own text as code
+        ccls = cls if cls is not None and cls[m.end() - 1] == 'c' else None
+        cut = _call_end(rest, m.end(), openers, ccls)
         if cls is None and quoted and _odd_quote_word(rest[:cut]):
             # card 946937b7 (Viktor 45520, fail-closed): the lexer could not read the text, and a quote in the call's
             # words leaves the old blank split unsure which word is the script
             raise TooManyArgs('az interpreter-hívás szavaiban páratlan idézőjel, a lexer nem olvasta (fail-closed)')
-        all_words = split_redirections(_code_words(rest[:cut], m.end(), cls), redir_cache)
+        all_words = split_redirections(_code_words(rest[:cut], m.end(), ccls), redir_cache)
         # the window ended inside this command: what follows it is not read
         clipped = cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text)
         if name in ('.', 'source'):

@@ -1515,6 +1515,10 @@ def script_cases():
             ("python3 $(true ')' $(true '('))measure.py", d),
             ("source $(true ')' ) dump.sh", d),
             ('python3 $(true \')\' "x")measure.py', d),
+            # was an allow row (generated mutant 032): bash runs ")measure.py" here, but the gate reads a substitution as
+            # printing nothing (it cannot know echo from true), and `python3 $(true ")")measure.py` runs measure.py
+            ('python3 $(echo ")")measure.py', d),
+            ('python3 $(true ")")measure.py', d),
             # ... Viktor 45533 (wider): a direct path, source / ., other commands in the substitution
             ("./$(true ')')dump.sh", d),
             ("./$(true '(')dump.sh", d),
@@ -1575,9 +1579,6 @@ def script_cases():
             # exclusive; mutation a5, "a <= e", read on into the next command)
             ('python3 $(true); echo measure.py', d),
             ('python3 `true`; echo measure.py', d),
-            # a substitution that prints ")" glued to the word: bash runs ")measure.py", not measure.py (generated
-            # mutant 032, a span regex that let ")" into $( ), cut the word to measure.py)
-            ('python3 $(echo ")")measure.py', d),
             # card 70c94516: quotes taken off a word that names no keychain-reading file, and the ordinary -m / source
             # / ./ shapes stay allowed
             # (a non-plain script word keeps the old walk, as on main: `python3 "st"at.py regiszter.jsonl` judges the
