@@ -104,6 +104,18 @@ const IDLE_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on(?: \(shift\+tab to cycle\)| �
 // without a `·` of its own; the input-box condition below is unchanged.
 const IDLE_TASK_PILL_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on · (?:[^·\n]{1,60} · ){0,2}(?:\S+ )?(?:\d+ [A-Za-z][\w ,-]*?|dreaming|auto-mode scan|memory import(?: \d+\/\d+)?)[ \t]*$/
 
+// The footer cut by the pane width: tmux starts a detached session at its
+// default 80 columns, and Claude Code shortens the footer to the width with a
+// trailing `…`. Measured 2026-11-17 09:50 on the kernel pane (Klodel 45908,
+// session-stuck 45907): `⏵⏵ bypass permissions on · install gh for PR status ·
+// 1 monitor · ↓ to mana…`. IDLE_FOOTER_RX needs the whole `↓ to manage`, the
+// pill shape needs the pill at the end, so the pane read 'unknown' and four
+// messages waited 10+ minutes. Accepted only like the bare pill: as the last
+// non-blank line with the whole live input box above it (idleFooterIndex); the
+// cut is an ellipsis Claude Code adds, so prose in scrollback rarely has it,
+// and where it does, it does not sit under a live box.
+const IDLE_TRUNCATED_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on · [^\n]*\u2026[ \t]*$/
+
 // How far above the bare pill footer the input box's bottom separator may sit.
 // The box is followed by an optional statusline row (`Opus 5.5 | ctx 22% ...`)
 // and then the footer, so 3 rows leaves one row of slack.
@@ -225,7 +237,7 @@ function idleFooterIndex(lines: string[]): number {
   while (last >= 0 && lines[last].trim() === '') last--
   if (last < 0) return -1
   if (IDLE_FOOTER_RX.test(lines[last])) return last
-  if (!IDLE_TASK_PILL_FOOTER_RX.test(lines[last])) return -1
+  if (!IDLE_TASK_PILL_FOOTER_RX.test(lines[last]) && !IDLE_TRUNCATED_FOOTER_RX.test(lines[last])) return -1
   // The whole live input box must sit above the pill, not just one rule: a
   // `cat`-ed report with a ─ line over a quoted pill must not read idle
   // (Viktor review R1, 2026-10-17).

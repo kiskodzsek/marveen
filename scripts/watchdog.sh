@@ -239,7 +239,9 @@ for AGENT_DIR in "$INSTALL_DIR/agents"/*/; do
 
   CMD="${ISO_ENV}export PATH=\"${FLEET_VENV_PREFIX}/opt/homebrew/bin:\$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:\$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN DISCORD_BOT_TOKEN && export CLAUDE_CODE_DISABLE_AGENT_VIEW=1 && { [ \"\$(id -u)\" != 0 ] || export IS_SANDBOX=1; } && export ${STATE_ENV_VAR}=\"$CHAN_DIR\" && cd \"$AGENT_DIR\" && ${CLAUDE_BIN} --dangerously-skip-permissions --model '$MODEL' --channels plugin:${AGENT_PROVIDER}@claude-plugins-official"
 
-  tmux new-session -d -s "$SESSION_NAME" "$CMD" 2>/dev/null
+  # 120x30 like the dashboard's agent sessions (src/web/agent-pane-size.ts, card 0db274d2): at the 80-column
+  # default the footer is cut and the router reads the pane as unknown.
+  tmux new-session -d -x 120 -y 30 -s "$SESSION_NAME" "$CMD" 2>/dev/null
   sleep 2
 
   if tmux has-session -t "=$SESSION_NAME:" 2>/dev/null; then

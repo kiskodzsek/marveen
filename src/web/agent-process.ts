@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, lstatSync, symlinkSync, rmSync, realpathSync, renameSync, statSync, chmodSync, mkdtempSync, unlinkSync } from 'node:fs'
+import { AGENT_PANE_SIZE_ARGS } from './agent-pane-size.js'
 import { encodeClaudeProjectDir } from '../claude-project-dir.js'
 import { join } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
@@ -1800,7 +1801,7 @@ function startRemoteAgentProcess(
   const cmd = buildRemoteLaunchCommand({ workdir, model, continue: hasPriorSession })
 
   try {
-    runTmux(host, ['new-session', '-d', '-s', session, cmd], { timeout: 10000 })
+    runTmux(host, ['new-session', '-d', ...AGENT_PANE_SIZE_ARGS, '-s', session, cmd], { timeout: 10000 })
     logger.info({ name, session, host, workdir }, 'Remote agent tmux session started')
     // Fire-and-forget: scheduleIdentitySetup only schedules delayed timers and
     // resolves immediately; startRemoteAgentProcess stays synchronous (out of scope).
@@ -2646,7 +2647,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
     // reported ok, no session existed under the agent's user, and the first
     // capture-pane failed against the router's empty tmux server.
     const startTarget = agentTmuxTarget(name)
-    runTmux(startTarget, ['new-session', '-d', '-s', session, buildLaunchCmd(dir)], { timeout: 10000 })
+    runTmux(startTarget, ['new-session', '-d', ...AGENT_PANE_SIZE_ARGS, '-s', session, buildLaunchCmd(dir)], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir, runAsUser: startTarget.runAsUser ?? null }, 'Agent tmux session started')
     // APRO920 (c)(2): the --model value actually passed, with the config-chain
@@ -2721,7 +2722,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
             if (existsSync(agentClaudeMd)) {
               try { symlinkSync(agentClaudeMd, join(fallbackCwd, 'CLAUDE.md')) } catch { /* degrade to context-less */ }
             }
-            runTmux(null, ['new-session', '-d', '-s', session, buildLaunchCmd(fallbackCwd)], { timeout: 10000 })
+            runTmux(null, ['new-session', '-d', ...AGENT_PANE_SIZE_ARGS, '-s', session, buildLaunchCmd(fallbackCwd)], { timeout: 10000 })
             logger.warn({ name, session, fallbackCwd }, 'Agent --channels EPERM in trusted dir; relaunched from /tmp fallback')
           } catch (err) {
             logger.error({ err, name, session }, 'EPERM /tmp fallback relaunch failed')
