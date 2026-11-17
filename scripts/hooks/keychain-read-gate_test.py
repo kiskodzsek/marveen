@@ -1434,6 +1434,23 @@ def script_cases():
             ('env bash -e dump.sh', d),
             ('bash -e dump.sh arg', d),
             ('cd sub2 && bash -e only.py', d),
+            # card e05330a4 (Viktor 45589 R1, MEDIUM, a G2 regression): a -c cluster whose c is not the last letter
+            # (-cx, -cu, -co, -cex) is code to the word reading, so its command string must be read; -ce / -lce were
+            # open on the fleet gate too (bash ran dump.sh / measure.py in every row)
+            ('bash -cx ./dump.sh', d),
+            ('sh -cu ./dump.sh', d),
+            ('bash -cl ./dump.sh', d),
+            ('bash -cv ./dump.sh', d),
+            ("bash -cex 'python3 measure.py'", d),
+            ('bash -co pipefail ./dump.sh', d),
+            ('bash -cx "./dump.sh; true"', d),
+            ('bash -ce ./dump.sh', d),
+            ("bash -ce 'python3 measure.py'", d),
+            ('bash -lce ./dump.sh', d),
+            ('zsh -ce ./dump.sh', d),
+            # ... with a capital letter on either side of the c (mutation round 6, cflag-lower-after / -before)
+            ('bash -cE ./dump.sh', d),
+            ('bash -Ec ./dump.sh', d),
             # card e05330a4 (G1 with a blank, allow on fcba0fe6, measured; real bash and zsh ran the stub): a quote or
             # substitution open over a blank goes on into the next piece, the glued redirection still ends the word
             ('python3 measure.py>"a b"', d),
@@ -1763,6 +1780,11 @@ def script_cases():
             ('bash -Ec x=1 dump.sh', d),
             ('sh -ce x=1 dump.sh', d),
             ('bash -cE x=1 dump.sh', d),
+            # ... and a -c cluster with letters after the c: its string is the code, dump.sh is $0 (Viktor 45589 R1)
+            ('bash -cx "echo hi" dump.sh', d),
+            ('bash -ce "echo hi"', d),
+            # a -cv cluster after a non-shell word is no shell flag (grep counts, it runs nothing)
+            ("grep -cv 'python3 measure.py' data.jsonl", d),
             # node's -e is code: the word after it is the code, not a file (G2 is shell-only)
             ("node -e 'console.log(1)' measure.py", d),
             # card e05330a4: none of these runs measure.py (real bash and zsh, measured): x<( is one word, \& is part of

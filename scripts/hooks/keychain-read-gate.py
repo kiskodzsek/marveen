@@ -1891,7 +1891,7 @@ REDEF_RX = re.compile(r'(?<![\w$-])(?:alias|unalias|function|eval|source|hash|en
                       r'|PROMPT_COMMAND|BASH_COMMAND|preexec|precmd|ps|pgrep|lsof|PPID|procargs2?)(?![\w-])|\(\s*\)'
                       r'|(?<![\w$])(?:PATH|path|FPATH|fpath)\+?=|\$\{?_(?!\w)')
 SHELL_WORD_RX = re.compile(r'(?:.*/)?(?:bash|sh|zsh|dash|ksh|fish|csh|tcsh|ash|rbash|pwsh)\d*|\$\{?(?:SHELL|BASH)\}?|\$0')
-C_FLAG_RX = re.compile(r'-[A-Za-z]*c')
+C_FLAG_RX = re.compile(r'-[A-Za-z]*c[A-Za-z]*')  # any cluster with a c, as SHELL_CODE_FLAG_RX: `bash -cx ./m.sh`
 CODE_FRAMES = ('`', '$(', '<(', '>(', '(')
 
 
