@@ -1198,6 +1198,7 @@ def _call_end(rest, base, openers, cls=None):
 
 
 _QUOTED_RX = re.compile(r'[\'"\\]')
+_OPENS_RX = re.compile(r'[(`]')  # a substitution (or a subshell) may open here: interp_groups' fail-closed
 _BLANK_RUN_RX = re.compile(r'\s+')
 
 
@@ -1444,6 +1445,12 @@ def interp_groups(text, expanded=False):
         # reading here, and the payload pass reads the payload's own text as code
         ccls = cls if cls is not None and cls[m.end() - 1] == 'c' else None
         cut = _call_end(rest, m.end(), openers, ccls)
+        if openers is None and _OPENS_RX.search(rest, 0, cut):
+            # card 946937b7 (Viktor 45543, fail-closed): without the lexer's reading (not loaded, past LEX_MAX_SUBSTS or
+            # LEX_MAX_WORK, a lexer bug) a ")" may close a substitution that opened inside the call's words and cut it
+            # short (`python3 $(true)m.py; echo` and 64 more substitutions ran m.py). No "(" and no backtick before
+            # the cut: the cut is the call's own end, the old reading stands
+            raise TooManyArgs('a lexer nem olvasta a szöveget, és a hívás szavaiban helyettesítés nyílik (fail-closed)')
         if cls is None and quoted and _odd_quote_word(rest[:cut]):
             # card 946937b7 (Viktor 45520, fail-closed): the lexer could not read the text, and a quote in the call's
             # words leaves the old blank split unsure which word is the script

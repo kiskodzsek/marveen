@@ -1532,6 +1532,17 @@ def script_cases():
             # fail-closed
             ("python3 $(true ')')" + '$(true)' * 70 + 'measure.py', d),
             ("./$(true ')')" + '$(true)' * 70 + 'dump.sh', d),
+            # card 946937b7 (Viktor 45543, MEDIUM, all allow on ed110117; bash and zsh ran the script): the lexer does
+            # not read the text (65+ substitutions, or LEX_MAX_WORK with fewer) and a ")" of a substitution in the
+            # call's words cut the call: fail-closed when a "(" or a backtick is before the cut
+            ('python3 $(true)measure.py; echo ' + '$(true)' * 70, d),
+            ('python3 ' + '$(true)' * 70 + 'measure.py', d),
+            ('x=$(python3 $(true)measure.py); echo ' + '$(true)' * 70, d),
+            ('source $(true)dump.sh; echo ' + '$(true)' * 70, d),
+            ('. $(true)dump.sh; echo ' + '$(true)' * 70, d),
+            ('./$(true)dump.sh; echo ' + '$(true)' * 70, d),
+            ('python3 $(true)measure.py; echo ' + '$(true)' * 59 + ' ' + 'a' * 60000, d),  # LEX_MAX_WORK, 60 substitutions
+            ('x=$(python3 measure.py) ; echo ' + '$(true)' * 70, d),  # no "(" before the cut: the old reading blocks
             # ... and without a blank (mutation round 1: the quote, escape, $'..', $( ) and backtick tracking of the cut)
             ('python3 `true>&2`measure.py>/dev/null', d),
             ('python3 $(true>&2)measure.py>/dev/null', d),
@@ -1879,6 +1890,13 @@ def script_cases():
             ("./$(true ')')stat.py", d),
             ("echo ./$(true ')')dump.sh", d),
             ("./stat.py $(true ')') dump.sh", d),
+            # card 946937b7 (Viktor 45543): past the lexer's bounds, a call with no "(" and no backtick before its
+            # cut keeps its old reading: no block
+            ('python3 stat.py; echo ' + '$(true)' * 70, d),
+            ('echo ' + '$(true)' * 70, d),
+            ('x=$(python3 stat.py) ; echo ' + '$(true)' * 70, d),
+            ('echo ' + '$(true)' * 70 + '; python3 stat.py', d),
+            ('python3 stat.py; echo ' + '$(true)' * 59 + ' ' + 'a' * 60000, d),
             ('python3 "x measure.py>y"', d),
             ('python3 stat.py "a b>c"', d),
             ('python3 stat.py>"a b"', d),
@@ -2262,8 +2280,10 @@ def main():
                   ('ssh h ' * 20000 + sec, 2), ('nice -n 5 sudo -u a ' * 10000 + sec, 2),
                   # card e05330a4 r3: a call in the $( ) of another is a word of it, so the windows overlap, and each
                   # open piece is scanned once (the joined word rescanned per piece ran these into the 6 s watchdog;
-                  # main 0.4-2.6 s, new 1.5-3.0 s, measured under load; main blocks the last one, past MAX_ARGS)
-                  ('python3 x.py $(' * 20000, 0), ('python3 x.py a $(' * 10000, 0), ('python3 x.py>x $(' * 10000, 0)]
+                  # main 0.4-2.6 s, new 1.5-3.0 s, measured under load; main blocks the last one, past MAX_ARGS).
+                  # Card 946937b7 (Viktor 45543): 0 -> 2, the lexer does not read 10 000+ substitutions and a "$(" is
+                  # in the call's words: fail-closed; the same 5 s cap
+                  ('python3 x.py $(' * 20000, 2), ('python3 x.py a $(' * 10000, 2), ('python3 x.py>x $(' * 10000, 2)]
     # card aeee72df: the word join and the stdin walk are linear (each quote and each word once), and a <<< at the
     # very end has no word (an IndexError there blocked every such command before it was caught). The two `<<<`
     # runs past 4096 characters block on the script rules ('script-too-many-args', main too): timed here, their
