@@ -314,8 +314,9 @@ describe('first-run gate wiring contracts', () => {
     // The launch target used to be a bare `null`. Since agents can own their OS user it is
     // `startTarget` (agentTmuxTarget(name)), so the old literal matched nothing and the
     // assertion passed a -1 into the ordering check. The contract under test is the ORDER,
-    // not the argument, so match the current spawn line.
-    const launchIdx = AGENT_PROCESS.indexOf("runTmux(startTarget, ['new-session', '-d', '-s', session, buildLaunchCmd(dir)]")
+    // not the argument, so match the current spawn line (since card 0db274d2 it carries the
+    // fixed pane size, AGENT_PANE_SIZE_ARGS).
+    const launchIdx = AGENT_PROCESS.indexOf("runTmux(startTarget, ['new-session', '-d', ...AGENT_PANE_SIZE_ARGS, '-s', session, buildLaunchCmd(dir)]")
     expect(stampIdx).toBeGreaterThan(0)
     // Both anchors must actually be FOUND. Without this a renamed call site makes indexOf
     // return -1, and the ordering assertion below goes red for the wrong reason: it reads as

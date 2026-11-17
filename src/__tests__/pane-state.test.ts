@@ -2944,3 +2944,49 @@ describe('detectPaneState: background-agent panel under the footer', () => {
     expect(detectPaneState(noBox)).toBe('unknown')
   })
 })
+
+describe('detectPaneState: the footer cut by the pane width (0db274d2)', () => {
+  // Verbatim from the kernel pane at 80 columns, 2026-11-17 09:50 (Klodel 45908, session-stuck 45907).
+  const CUT = '  ⏵⏵ bypass permissions on · install gh for PR status · 1 monitor · ↓ to mana…'
+
+  it('reads the cut footer under the live input box as idle', () => {
+    expect(detectPaneState(modeFooter(CUT))).toBe('idle')
+    expect(isReadyForPrompt(modeFooter(CUT))).toBe(true)
+    // With the statusline row between the box and the footer.
+    const withStatus = ['', SEP, '❯ ', SEP, '  Opus 5.5 | ctx 22% | 5h 21% | 7d 71%', CUT].join('\n')
+    expect(detectPaneState(withStatus)).toBe('idle')
+    // Other modes and cuts at other widths.
+    expect(detectPaneState(modeFooter('  ⏵⏵ accept edits on · 2 shells · ↓ to…'))).toBe('idle')
+    expect(detectPaneState(modeFooter('  ⏸ plan mode on · install gh for PR st…'))).toBe('idle')
+  })
+
+  it('the control: the same footer before this change read unknown, the full one idle', () => {
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · install gh for PR status · 1 monitor · ↓ to manage'))).toBe('idle')
+    // Without the ellipsis the cut text is neither a full footer nor a pill.
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · install gh for PR status · 1 monitor · ↓ to mana'))).toBe('unknown')
+  })
+
+  it('stays busy while a turn runs, whatever the footer', () => {
+    const busy = [
+      '· Swooping… (1m 59s · ↓ 9.6k tokens)',
+      SEP,
+      '❯ ',
+      SEP,
+      CUT,
+    ].join('\n')
+    expect(detectPaneState(busy)).toBe('busy')
+    expect(isReadyForPrompt(busy)).toBe(false)
+  })
+
+  it('does NOT accept a cut footer outside the live footer position', () => {
+    // Quoted in scrollback: not the last line.
+    expect(detectPaneState([CUT, 'later output', SEP, '❯ ', SEP].join('\n'))).not.toBe('idle')
+    // Printed by a plain shell as the last line, no input box.
+    expect(detectPaneState(['user@host ~ $ tail notes.txt', CUT].join('\n'))).toBe('unknown')
+    // One rule only, or two rules without a ❯ row between them.
+    expect(detectPaneState([SEP, CUT].join('\n'))).toBe('unknown')
+    expect(detectPaneState([SEP, 'quoted text', SEP, CUT].join('\n'))).toBe('unknown')
+    // Prose with an ellipsis that is not a mode footer.
+    expect(detectPaneState(modeFooter('  and so it goes on and on…'))).toBe('unknown')
+  })
+})

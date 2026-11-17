@@ -91,22 +91,22 @@ describe('every tmux launch string ends with the claude invocation', () => {
     const s = read('scripts/watchdog.sh')
     const cmd = s.match(/^\s*CMD="(\$\{ISO_ENV\}.*)"$/m)?.[1] ?? ''
     expect(shellControlAfterClaude(cmd, '${CLAUDE_BIN} ')).toEqual([])
-    expect(s).toMatch(/tmux new-session -d -s "\$SESSION_NAME" "\$CMD" 2>/)
+    expect(s).toMatch(/tmux new-session -d -x 120 -y 30 -s "\$SESSION_NAME" "\$CMD" 2>/)
   })
 
   it('agent-process.ts buildLaunchCmd, the only command of both new-session calls', () => {
     const s = read('src/web/agent-process.ts')
     const cmd = s.match(/const buildLaunchCmd = \(launchCwd: string\) => `(.*)`\.trimEnd\(\)$/m)?.[1] ?? ''
     expect(shellControlAfterClaude(cmd, '${claudeBin()} ')).toEqual([])
-    expect([...s.matchAll(/\['new-session', '-d', '-s', session, buildLaunchCmd\(\w+\)\]/g)]).toHaveLength(2)
+    expect([...s.matchAll(/\['new-session', '-d', \.\.\.AGENT_PANE_SIZE_ARGS, '-s', session, buildLaunchCmd\(\w+\)\]/g)]).toHaveLength(2)
   })
 
   it('agent-process.ts remote launch runs buildRemoteLaunchCommand as is', () => {
-    expect(read('src/web/agent-process.ts')).toMatch(/const cmd = buildRemoteLaunchCommand\([^\n]*\n\n\s*try \{\n\s*runTmux\(host, \['new-session', '-d', '-s', session, cmd\]/)
+    expect(read('src/web/agent-process.ts')).toMatch(/const cmd = buildRemoteLaunchCommand\([^\n]*\n\n\s*try \{\n\s*runTmux\(host, \['new-session', '-d', \.\.\.AGENT_PANE_SIZE_ARGS, '-s', session, cmd\]/)
   })
 
   it('agent-worker.ts: the claude word is the last piece of the bash -lc string', () => {
-    const m = read('src/web/agent-worker.ts').match(/`\$\{shArg\(claudeLaunchBin\)\}([^`]*)`\n\s*execFileSync\(TMUX, \['new-session', '-d', '-s', ctx\.session, '-c', ctx\.home, 'bash', '-lc', launch\]/)
+    const m = read('src/web/agent-worker.ts').match(/`\$\{shArg\(claudeLaunchBin\)\}([^`]*)`\n\s*execFileSync\(TMUX, \['new-session', '-d', \.\.\.AGENT_PANE_SIZE_ARGS, '-s', ctx\.session, '-c', ctx\.home, 'bash', '-lc', launch\]/)
     expect(m).not.toBeNull()
     expect(shellControlAfterClaude(`claude${m![1]}`, 'claude')).toEqual([])
   })
