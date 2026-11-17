@@ -1596,6 +1596,14 @@ def script_cases():
             # ... but macOS bash 3.2 runs a FILE named {fd} there (measured 11-16; mutation round 2, fd-rx-no-brace)
             ('python3 {fd}>/dev/null ok.py', os.path.join(d, 'fdname')),
             ("bash -c 'python3 {fd}>/dev/null ok.py'", os.path.join(d, 'fdname')),
+            # card 946937b7: the same fleet shapes as the allow rows (the gate's view has an odd quote, the command
+            # lexes cleanly), with the script that reads the keychain
+            ('python3 -c "import sys; print(\'a b\')" && python3 measure.py "a b"', d),
+            ("python3 -c 'print(1)' && python3 measure.py \"it's x\"", d),
+            (": <<'NOTE'\npython3 isn't ready\nNOTE\npython3 measure.py", d),
+            ('nohup sh -c "python3 measure.py > /tmp/k.log 2>&1" > /dev/null 2>&1 &', d),
+            ("TMPDIR=/x sh -c 'unset TMPDIR; python3 measure.py x' 2>&1 | tail -3", d),
+            ("python3 -c 'print(1)' && python3 measure.py \"it's x\"; echo" + ' $(true)' * 66, d),
         ]
         prose = 'mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
         allow = [
@@ -1951,6 +1959,23 @@ def script_cases():
             ('python3 stat.py>"a b"', d),
             ("python3 'x y'>measure.py", d),
             ('python3 stat.py "$(true x)" >/dev/null', d),
+            # card 946937b7 (replay of 59811cb0: 916 fleet commands blocked): the command as written lexes cleanly,
+            # only the gate's own view of it (a payload's quotes) has an odd quote; the old reading stands
+            ('python3 -c "import sys; print(\'a b\')" && python3 stat.py "a b"', d),
+            ("python3 -c 'print(1)' && python3 stat.py \"it's x\"", d),
+            # ... and where the call's own words do not lex alone either (mutation round 3: _CMD_READ always False
+            # survived): only the reading of the command as written lets them pass
+            ('nohup sh -c "python3 stat.py x > /tmp/k.log 2>&1" > /dev/null 2>&1 &', d),
+            ("TMPDIR=/x sh -c 'unset TMPDIR; python3 stat.py x' 2>&1 | tail -3", d),
+            ("python3 -c \"open('c.txt','w').write('python3 evil\\\\\\\\.py\\n./\\\"' + 'a'*50 + '\\\"\\n')\" && head -c 40 c.txt",
+             d),
+            # ... and past the lexer's bounds, a call whose own words lex alone keeps their reading (mutation round 3:
+            # _call_alone_groups always None survived)
+            ("python3 -c 'print(1)' && python3 stat.py \"it's x\"; echo" + ' $(true)' * 66, d),
+            ("python3 stat.py \"it's x\"; echo" + ' $(true)' * 66, d),
+            # ... the same for a substitution that opens in the gate's view of a call (mutation round 3b:
+            # the _CMD_READ guard of the substitution fail-closed survived)
+            ('C=\'export -- A=1; /usr/bin/printenv A\'; echo "bash $(/bin/bash -c "$C") zsh $(/bin/zsh -c "$C")"', d),
         ]
         for cmd, cwd in block:
             code, err = bash_in(cmd, cwd)

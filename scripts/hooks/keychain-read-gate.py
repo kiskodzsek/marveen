@@ -153,7 +153,9 @@ PIPE = r'(?<!>)\|'  # a | right after > is the noclobber redirection `>|f`, no c
 # shape): a quoted run is part of the value. Each alternative starts with its own char (WORD has no quote), and a
 # quoted run ends at the next quote or newline, so a token still reads one way only. An escaped char is part of it
 # too (Viktor 45626 R4a: `A=a\ b python3 m.py` ran m.py); the plain run has no backslash, so the alternatives do not
-# overlap, and the unrolled loop has no possessive quantifier (the fleet's /usr/bin/python3 is 3.9).
+# overlap, and the unrolled loop has no possessive quantifier (the fleet's /usr/bin/python3 is 3.9). Timed on 3.9
+# against the GIT_CONFIG_PARAMETERS x 20 000 row (full tree, lexer loaded): this form 5.26 s, one char or run per
+# step `(?:plain|esc|quoted)*` 5.7 s, a lookahead before the runs 5.26 s, main's WORD* 4.9-5.0 s.
 ASSIGN_VALUE = r'[^\s;&|(){}`\'"\\]*(?:(?:\\[\s\S]|"(?:[^"\\\n]|\\.)*"|\'[^\'\n]*\')[^\s;&|(){}`\'"\\]*)*'
 CHAIN = (r'(?:(?:' + WRAPPERS + r'\b|!|-(?!(?:exec|execdir|ok)(?=\s))' + WORD + r'*|' + REDIR + r'|[+.]?\d[\w.]*|\w+='
          + ASSIGN_VALUE + r')[ \t]+)*')
@@ -1208,6 +1210,25 @@ _BLANK_RUN_RX = re.compile(r'\s+')
 _ESC_SEP_RX = re.compile(r'\\[\s;&|)<>]')
 
 
+# card 946937b7: script_hits sets it: the lexer read the command AS WRITTEN (the only caller of script_paths, so it is
+# fresh for every interp_groups call of a decision); False (fail-closed) until then
+_CMD_READ = [False]
+
+
+def _call_alone_groups(name, seg, expanded):
+    """interp_groups of one call's own text (its name and its words up to the cut), or None when the lexer does not
+    read that text cleanly (card 946937b7, see interp_groups' fail-closed)."""
+    if shell_lex is None:
+        return None
+    try:
+        lx = shell_lex.lex(name + seg)
+    except Exception:  # LexTooBig, or a lexer bug: no reading
+        return None
+    if lx['problems']:
+        return None
+    return interp_groups(name + seg, expanded)
+
+
 def _code_words(seg, base, cls):
     """Card 946937b7: seg (text[base:base + len(seg)]) split at the blanks the lexer reads as code; a quoted or
     escaped blank stays in its word, quotes and backslashes kept (word_forms and strip_quotes read them). cls None:
@@ -1451,13 +1472,31 @@ def interp_groups(text, expanded=False):
         # reading here, and the payload pass reads the payload's own text as code
         ccls = cls if cls is not None and cls[m.end() - 1] == 'c' else None
         cut = _call_end(rest, m.end(), openers, ccls)
-        if openers is None and _OPENS_RX.search(rest, 0, cut):
+        unread = (openers is None and _OPENS_RX.search(rest, 0, cut)) or (cls is None and quoted and (
+            _odd_quote_word(rest[:cut]) or _ESC_SEP_RX.search(rest, 0, cut + 1)))
+        if unread:
+            # card 946937b7 (replay of 59811cb0: 916 everyday fleet commands blocked): the text the lexer did not
+            # read is this gate's own view (a payload's quotes marked as `;`, a python -c body, prose), so a
+            # quote there is often unbalanced although the shell read the command. The call's OWN words, lexed
+            # alone: when they read cleanly, their reading decides (the cut was the call's end); when not (a cut
+            # inside a substitution or a quote that opened in the words), the fail-closed below stands
+            # an odd run of backslashes right before the cut: the cut is on an escaped operator, not the call's end
+            esc = len(rest[:cut]) - len(rest[:cut].rstrip('\\'))
+            local = None if esc % 2 else _call_alone_groups(name, rest[:cut], expanded)
+            if local is not None:
+                groups += local
+                continue
+        # ... and when the command AS WRITTEN reads cleanly (886 of the 893 replay rows), the unread text is this gate's
+        # view only: the old reading stands, as before card 946937b7. Viktor's shapes are commands the lexer refuses
+        # as written (past LEX_MAX_SUBSTS or LEX_MAX_WORK): there the fail-closed stands
+        if not _CMD_READ[0] and openers is None and _OPENS_RX.search(rest, 0, cut):
             # card 946937b7 (Viktor 45543, fail-closed): without the lexer's reading (not loaded, past LEX_MAX_SUBSTS or
             # LEX_MAX_WORK, a lexer bug) a ")" may close a substitution that opened inside the call's words and cut it
             # short (`python3 $(true)m.py; echo` and 64 more substitutions ran m.py). No "(" and no backtick before
             # the cut: the cut is the call's own end, the old reading stands
             raise TooManyArgs('a lexer nem olvasta a szöveget, és a hívás szavaiban helyettesítés nyílik (fail-closed)')
-        if cls is None and quoted and (_odd_quote_word(rest[:cut]) or _ESC_SEP_RX.search(rest, 0, cut + 1)):
+        if not _CMD_READ[0] and cls is None and quoted and (
+                _odd_quote_word(rest[:cut]) or _ESC_SEP_RX.search(rest, 0, cut + 1)):
             # card 946937b7 (Viktor 45520, fail-closed): the lexer could not read the text, and a quote in the call's
             # words leaves the old blank split unsure which word is the script; so does an escaped blank or operator
             # (Viktor 45626 R4b: `python3 2>x\& m.py` with 66 substitutions in the text ran m.py)
@@ -2409,6 +2448,7 @@ def script_hits(cmd, cwd):
     # normalise() gives the same result on the blanked text
     span = data_heredoc_span(cmd, cwd)
     lx = lex_or_none(cmd)
+    _CMD_READ[0] = lx is not None
     if lx is None:  # the old path (card fae0712e: fail-closed, today's decision)
         text = normalise(blank_span(cmd, span))
     else:
