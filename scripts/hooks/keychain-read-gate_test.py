@@ -751,6 +751,11 @@ def script_cases():
         with open(os.path.join(d, 'sub2', 'twin.py'), 'w', encoding='utf-8') as f:
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         w('twin.py', 'print(1)\n')
+        os.makedirs(os.path.join(d, 'fdname'))  # bash 3.2 runs a file named {fd} in `python3 {fd}>f x.py`
+        with open(os.path.join(d, 'fdname', '{fd}'), 'w', encoding='utf-8') as f:
+            f.write("import subprocess\nsubprocess.run(['" + S + "', 'find-generic-password', '-s', 'x'])\n")
+        with open(os.path.join(d, 'fdname', 'ok.py'), 'w', encoding='utf-8') as f:
+            f.write("print(1)\n")
         w('tmpl.mjs', "import { execSync } from 'node:child_process';\nconst B = `/usr/bin/" + S + "`;\n"
                       "execSync(`${B} find-generic-password -s x`);\n")
         for i, form in enumerate(LIT_FORMS):
@@ -1384,6 +1389,104 @@ def script_cases():
             # over-read on purpose: a word that names a keychain-reading file in a pipeline into a shell
             ('echo hi measure.py | bash', d),
             ('cat measure.py | bash', d),
+            # card e05330a4 (Viktor 44085 G1, MEDIUM, main: allow, real bash ran the stub): bash ends a word at an
+            # unquoted < or > too, so a redirection glued to the script word leaves the script to run
+            ('python3 measure.py>/dev/null', d),
+            ('python3 measure.py>out.txt', d),
+            ('python3 measure.py>>tmp/log', d),
+            ('python3 measure.py>/dev/null 2>&1', d),
+            ('python3 measure.py</dev/null', d),
+            ('python3 measure.py&>/dev/null', d),
+            ('python3 measure.py>&2', d),
+            ('python3 measure.py>|tmp/o', d),
+            ('python3 ./measure.py>/dev/null', d),
+            ('python3 ' + os.path.join(d, 'measure.py') + '>/dev/null', d),
+            ('ruby measure.py>/dev/null', d),
+            ('perl measure.py>/dev/null', d),
+            ('python3 -B measure.py>/dev/null', d),
+            ('env python3 measure.py>/dev/null', d),
+            ('python3 -m measure>/dev/null', d),
+            ('python3 -mmeasure>/dev/null', d),
+            ('bash dump.sh>/dev/null', d),
+            ('bash ./dump.sh>/dev/null', d),
+            ('sh dump.sh>/dev/null', d),
+            ('source dump.sh>/dev/null', d),
+            ('. ./dump.sh>/dev/null', d),
+            # ... and a directly run word with a quote in it: the operator glued to it ends the word too
+            ('./"dump".sh;true', d),
+            ('./"dump".sh&&true', d),
+            ('./"dump".sh|cat', d),
+            ('./"dump".sh>/dev/null', d),
+            ('./dump$(true).sh;true', d),
+            # card e05330a4 (Viktor 44085 G2, MEDIUM, main: allow): a shell's -e is errexit, not code; the next word
+            # is the file it runs (node / perl / ruby -e stays code, below in allow)
+            ('bash -e dump.sh', d),
+            ('bash -e ./dump.sh', d),
+            ('sh -e dump.sh', d),
+            ('zsh -e dump.sh', d),
+            ('ksh -e dump.sh', d),
+            ('dash -e dump.sh', d),
+            ('bash -xe dump.sh', d),
+            ('bash -ue dump.sh', d),
+            ('bash -e -u dump.sh', d),
+            ('bash -e -- dump.sh', d),
+            ('bash -o pipefail -e dump.sh', d),
+            ('env bash -e dump.sh', d),
+            ('bash -e dump.sh arg', d),
+            ('cd sub2 && bash -e only.py', d),
+            # card e05330a4 (Viktor 45589 R1, MEDIUM, a G2 regression): a -c cluster whose c is not the last letter
+            # (-cx, -cu, -co, -cex) is code to the word reading, so its command string must be read; -ce / -lce were
+            # open on the fleet gate too (bash ran dump.sh / measure.py in every row)
+            ('bash -cx ./dump.sh', d),
+            ('sh -cu ./dump.sh', d),
+            ('bash -cl ./dump.sh', d),
+            ('bash -cv ./dump.sh', d),
+            ("bash -cex 'python3 measure.py'", d),
+            ('bash -co pipefail ./dump.sh', d),
+            ('bash -cx "./dump.sh; true"', d),
+            ('bash -ce ./dump.sh', d),
+            ("bash -ce 'python3 measure.py'", d),
+            ('bash -lce ./dump.sh', d),
+            ('zsh -ce ./dump.sh', d),
+            # ... with a capital letter on either side of the c (mutation round 6, cflag-lower-after / -before)
+            ('bash -cE ./dump.sh', d),
+            ('bash -Ec ./dump.sh', d),
+            # card e05330a4 (G1 with a blank, allow on fcba0fe6, measured; real bash and zsh ran the stub): a quote or
+            # substitution open over a blank goes on into the next piece, the glued redirection still ends the word
+            ('python3 measure.py>"a b"', d),
+            ("python3 measure.py>'a b'", d),
+            ('python3 $(true x)measure.py>/dev/null', d),
+            ('python3 `true x`measure.py>/dev/null', d),
+            ('python3 "$(true \\")"measure.py>/dev/null', d),
+            ('python3 $(true >&2)measure.py>/dev/null', d),
+            ('python3 `true >&2`measure.py>/dev/null', d),
+            ('bash $(true x)dump.sh>/dev/null', d),
+            # the first cut of the joined word wins, and a cut in its third piece sits past both blanks (round 3)
+            ('python3 measure.py>"a b">c', d),
+            ('python3 $(true x y)measure.py>/dev/null', d),
+            # ... and as a path word: a quote opened AFTER the glued redirection leaves the cut where it is (mutation
+            # round 3, ret-always-cut survived; on 0d285cbb and on the fleet gate these were allowed, bash and zsh ran)
+            ('./"dump".sh>"x y"', d),
+            ("./\"dump\".sh>'x y'", d),
+            ('./dump"".sh>"x y"', d),
+            ('./$(true)dump.sh>"x y"', d),
+            # a fd of two digits before > is a redirection, not a word (mutation round 4, fd-rx-one-digit: read `12` as
+            # the script; bash ran measure.py)
+            ('python3 12>err.log measure.py', d),
+            ('python3 12>/dev/null measure.py', d),
+            # ... and without a blank (mutation round 1: the quote, escape, $'..', $( ) and backtick tracking of the cut)
+            ('python3 `true>&2`measure.py>/dev/null', d),
+            ('python3 $(true>&2)measure.py>/dev/null', d),
+            ('python3 "$(true\\")"measure.py>/dev/null', d),
+            ('python3 $(true\\")measure.py>/dev/null', d),
+            ("python3 $(true$'\\'')measure.py>/dev/null", d),
+            ("python3 $'measure.py'>/dev/null", d),
+            # an fd number or a {fd} before the redirection is no script word (zsh runs measure.py; bash 3.2 has no {fd})
+            ('python3 {fd}>/dev/null measure.py', d),
+            ('python3 2>/dev/null measure.py', d),
+            # ... but macOS bash 3.2 runs a FILE named {fd} there (measured 11-16; mutation round 2, fd-rx-no-brace)
+            ('python3 {fd}>/dev/null ok.py', os.path.join(d, 'fdname')),
+            ("bash -c 'python3 {fd}>/dev/null ok.py'", os.path.join(d, 'fdname')),
         ]
         prose = 'mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
         allow = [
@@ -1659,6 +1762,57 @@ def script_cases():
             ("bash " + AM_ROOT + "/scripts/agent-msg.sh dave v - <<'M'\necho ./measure.py | sh\nM", d),
             ('echo ./measure.py | . /dev/stdinx', d),
             ('echo ./measure.py | dot /dev/stdin', d),
+            # card e05330a4: the split redirection's target is written, not run, and an operator inside quotes, an
+            # fd number before it, or a process substitution is no end of the script word
+            ('python3 stat.py>regiszter.jsonl', d),
+            ('python3 stat.py>out.jsonl', d),
+            ('python3 stat.py "a>b"', d),
+            ('python3 2>/dev/null stat.py', d),
+            ('python3 stat.py<(true)', d),
+            ('python3 notes.py>/dev/null', d),
+            # a shell's -c (also in a cluster with e) still takes a command string: the next word is $0, not run
+            ("bash -e -c 'echo hi' dump.sh", d),
+            ("bash -ec 'echo hi' dump.sh", d),
+            ("sh -ce 'echo hi' dump.sh", d),
+            # ... unquoted too: a quoted payload's quotes end the call before dump.sh, so only these read the cluster
+            # (mutation round 2: shell-rx-c-first and the class drops of its regex survived the quoted rows)
+            ('bash -ec x=1 dump.sh', d),
+            ('bash -Ec x=1 dump.sh', d),
+            ('sh -ce x=1 dump.sh', d),
+            ('bash -cE x=1 dump.sh', d),
+            # ... and a -c cluster with letters after the c: its string is the code, dump.sh is $0 (Viktor 45589 R1)
+            ('bash -cx "echo hi" dump.sh', d),
+            ('bash -ce "echo hi"', d),
+            # a -cv cluster after a non-shell word is no shell flag (grep counts, it runs nothing)
+            ("grep -cv 'python3 measure.py' data.jsonl", d),
+            # node's -e is code: the word after it is the code, not a file (G2 is shell-only)
+            ("node -e 'console.log(1)' measure.py", d),
+            # card e05330a4: none of these runs measure.py (real bash and zsh, measured): x<( is one word, \& is part of
+            # the file name, an operator inside a quote spanning a blank is no cut, a quoted target is written
+            ('python3 measure.py<(true)', d),
+            # ... also as a path word, where no call end takes the ")" (mutation round 2, cut-no-procsub)
+            ('./"dump".sh<(true)', d),
+            ('./"dump".sh>(true)', d),
+            # an operator in a later piece of the joined word is inside its quote (ret-always-cut), and a target after
+            # a word-final > is written (split-drop-target); node: every word is judged (measured: bash, zsh run none)
+            ('node ok.js>"a measure.py>b"', d),
+            ('node ok.js> measure.py', d),
+            ('./"dump".sh\\&;true', d),
+            # an escaped & before > is part of the file name: bash runs m.py&, no file (mutation round 3, amp-k-off:
+            # 0d285cbb stepped back over the \& and blocked; the fleet gate allows)
+            ('python3 measure.py\\&>x', d),
+            ('python3 measure.py\\&>>x', d),
+            # mutation round 4: a > in single quotes is file-name text (no-sq-track cut there and blocked; bash runs
+            # no measure.py), and a lone > in a joined word keeps its target (join-drop-target read measure.py, the
+            # target, as the script; bash writes measure.py and runs stat.py)
+            ("python3 'measure.py>x'", d),
+            ("python3 measure.py'>x'", d),
+            ('python3 $(true x)> measure.py stat.py', d),
+            ('python3 "x measure.py>y"', d),
+            ('python3 stat.py "a b>c"', d),
+            ('python3 stat.py>"a b"', d),
+            ("python3 'x y'>measure.py", d),
+            ('python3 stat.py "$(true x)" >/dev/null', d),
         ]
         for cmd, cwd in block:
             code, err = bash_in(cmd, cwd)
@@ -1746,6 +1900,14 @@ def script_cases():
                                env={'PATH': '/usr/bin:/bin', 'KEYCHAIN_GATE_SCRIPT_BUDGET_S': val})
             if p.stdout.strip() != want:
                 fails.append(f'script: budget seam {val!r} -> {p.stdout.strip()!r}, want {want}')
+        # card e05330a4 (mutation survivor split-maxargs-off): the redirection split stops past MAX_ARGS words and hands
+        # the rest back as written (the walk blocks past MAX_ARGS anyway); without the stop only time told it apart
+        split = ('import importlib.util as u,sys; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
+                 ' s.loader.exec_module(m); r=m.split_redirections(["a>b"]*100, {}); print(len(r), r[-1])')
+        p = subprocess.run([sys.executable, '-I', '-c', split, HOOK], capture_output=True, text=True, timeout=20,
+                           env={'PATH': '/usr/bin:/bin'})
+        if p.stdout.strip() != '133 a>b':
+            fails.append(f'script: split past MAX_ARGS -> {p.stdout.strip()!r}, want 133 a>b')
         # card d11364a4 (mutation survivor): past HALF the budget no payload is read again (one more read costs about
         # what the outer text did, and a timed-out hook does not block); 3 s of the default 4 s gone, in-process
         half = ('import importlib.util as u,sys; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
@@ -2026,7 +2188,11 @@ def main():
                   ('>&2 ' * 20000 + 'z', 0), ('2>&1 ' * 20000 + sec, 2), ('&>x ' * 20000 + 'z', 0),
                   ('sudo' + ' -u a' * 32 + ' ls', 0), ('sudo' + ' -u a' * 32 + ' -E ls', 2),
                   ('sudo -u a; ' * 20000, 0), ('(sudo -u a ' * 20000, 0), ('sudo -u a ' * 20000 + 'python3 x.py', 0),
-                  ('ssh h ' * 20000 + sec, 2), ('nice -n 5 sudo -u a ' * 10000 + sec, 2)]
+                  ('ssh h ' * 20000 + sec, 2), ('nice -n 5 sudo -u a ' * 10000 + sec, 2),
+                  # card e05330a4 r3: a call in the $( ) of another is a word of it, so the windows overlap, and each
+                  # open piece is scanned once (the joined word rescanned per piece ran these into the 6 s watchdog;
+                  # main 0.4-2.6 s, new 1.5-3.0 s, measured under load; main blocks the last one, past MAX_ARGS)
+                  ('python3 x.py $(' * 20000, 0), ('python3 x.py a $(' * 10000, 0), ('python3 x.py>x $(' * 10000, 0)]
     # card aeee72df: the word join and the stdin walk are linear (each quote and each word once), and a <<< at the
     # very end has no word (an IndexError there blocked every such command before it was caught). The two `<<<`
     # runs past 4096 characters block on the script rules ('script-too-many-args', main too): timed here, their

@@ -1235,12 +1235,112 @@ def word_forms(all_words, i):
         forms += [without_substs(strip_quotes(raw)), shell_unquote(without_substs(raw))]
     return list(dict.fromkeys(forms))
 
+# Only digits: a {fd} before the operator is cut off as a word of its own, so both readings are judged. zsh and bash
+# 4+ redirect it and run the next word; macOS bash 3.2 has no {fd} and runs a file named `{fd}` (measured 11-16,
+# mutation round 2: with `\{\w+\}` here such a file was never read).
+_FD_PREFIX_RX = re.compile(r'\d+')
+
+
+# One set for a path word and an interpreter call's words: in the call's words a ; & | is left only next to a < or >
+# (`2>&1`, `&>f`, `>|f`: _CALL_END_RX ends the call at any other), where OUT_REDIR_RX reads both splits alike
+# (mutation round 2, card e05330a4: a second set for the call words was never told apart).
+_REDIR_OPS = ';&|<>'
+_TOP = ('', 0, False)  # _redir_scan's state: the open quote, the $( ) depth, an open backtick
+
+
+def redir_at(w):
+    """G1 (Viktor, card 70c94516): the index where bash ends word w at an unquoted operator (`m.py>/dev/null`,
+    `m.py&>f`, `"x".sh;true`), 0 when there is none. Quotes, $'..', a backslash and a balanced $( ) / backtick are
+    stepped over. A quote or substitution the word leaves open AFTER the operator does not move it: the cut is at the
+    top level, so bash ends the word there (`./"x".sh>"a b"` runs x.sh; mutation round 3, card e05330a4: with
+    `0 if any(state)` the gate let it through). The caller adds w[:cut] to the word's forms, never drops one. The
+    digits of `2>f` are no word (a {fd} is: see _FD_PREFIX_RX), and `x<(true)` is one word in bash."""
+    return _redir_scan(w)[0]
+
+
+def _redir_scan(w, state=_TOP):
+    """redir_at's scan: (the cut in w, the state at the end of w). state goes on from the piece before, when a quote or
+    substitution left open joins w to it over a blank: each piece is scanned once (card e05330a4 r3: rescanning the
+    joined word ran nested `python3 m.py $(` calls into the 6 s watchdog). A cut in such a piece comes after the char
+    that closed the state, so its prefix in w is never all digits, as in the joined word."""
+    q, depth, tick = state
+    cut, i, n = 0, 0, len(w)
+    while i < n:
+        c = w[i]
+        if q:
+            if c == '\\' and q != "'":
+                i += 1
+            elif c == q[-1]:
+                q = ''
+        elif c == '\\':
+            i += 1
+        elif c in '\'"':
+            q = "$'" if c == "'" and i and w[i - 1] == '$' else c
+        elif c == '`':
+            tick = not tick
+        elif c == '(':
+            depth += 1
+        elif c == ')':
+            depth -= 1
+        elif c in _REDIR_OPS and not cut and not depth and not tick and w[i + 1:i + 2] != '(':
+            # an unescaped & of `&>` is an operator itself and cuts first; at i = 0 the cut is 0, no cut (mutation
+            # round 3: a step back over a `\&` cut `m.py\&>f` before the escaped & and blocked a call of `m.py&`)
+            if not _FD_PREFIX_RX.fullmatch(w[:i]):
+                cut = i
+        i += 1
+    return cut, (q, depth, tick)
+
+
+# G2 (Viktor, card 70c94516): a shell's -e is errexit, not code: `bash -e x.sh`, `sh -e x.sh`, `bash -o pipefail -e x.sh`
+# run x.sh. For a shell only a cluster with a c in it takes a command string (`-c`, `-ec`, `-ce`).
+SHELL_NAMES = ('bash', 'sh', 'zsh', 'dash', 'ksh')
+SHELL_CODE_FLAG_RX = re.compile(r'-[a-zA-Z]*c[a-zA-Z]*')
+
+def split_redirections(words, cache):
+    """`python3 m.py>/dev/null` runs m.py: the glued redirection becomes a word of its own (read as before). Only the
+    words the walk reads (MAX_ARGS); cache: one scan per distinct word and state of a text (the windows of calls
+    overlap, and a $( ) nests them)."""
+    def scan(w, state=_TOP):
+        r = cache.get((w, state))
+        if r is None:
+            r = cache[(w, state)] = _redir_scan(w, state)
+        return r
+    out = []
+    n = 0
+    while n < len(words):
+        if len(out) > MAX_ARGS:
+            return out + words[n:]
+        w = words[n]
+        k, state = scan(w)
+        if k and not any(state):
+            out += [w[:k], w[k:]]
+            n += 1
+            continue
+        # card e05330a4 (G1 with a blank): a quote or substitution left open goes on over the blank, so the shell
+        # word is the pieces joined (`python3 m.py>"a b"`, `python3 $(true x)m.py>/dev/null`): cut the joined word,
+        # in the piece the cut falls in. Not open, or no operator in the joined word: the pieces as they were.
+        j, at = n, len(w) + 1
+        while any(state) and j + 1 < len(words) and j - n < MAX_ARGS:
+            j += 1
+            c, state = scan(words[j], state)
+            k = k or (c and at + c)
+            at += len(words[j]) + 1
+        k = 0 if any(state) else k  # never closed: no cut (closed without a join: k is 0, a cut went on above)
+        start = 0
+        for p in range(n, j + 1):
+            piece, local = words[p], k - start
+            out += [piece[:local], piece[local:]] if 0 < local < len(piece) else [piece]
+            start += len(piece) + 1
+        n = j + 1
+    return out
+
 
 def interp_groups(text, expanded=False):
     """For each interpreter call: the words that may be its script, in order (every existing file is judged).
     Raises TooManyArgs when a call's words run past MAX_ARGS or ARGS_WINDOW and the walk did not stop before."""
     groups = []
     openers = backtick_openers(text)
+    redir_cache = {}
     for m in INTERP_RX.finditer(text):
         python = 'python' in m.group(0).lower()
         name = re.split(r'[\s;&|(){}`\'"/\\]', m.group(0).rstrip('\'"\\'))[-1]
@@ -1249,7 +1349,7 @@ def interp_groups(text, expanded=False):
         # (X=a python3 $X m.py, unset X, a comment) and the script the second word: such a text keeps the old walk)
         rest = text[m.end():m.end() + ARGS_WINDOW]  # a window, not the rest: 6 000 calls x the rest was quadratic
         cut = _call_end(rest, m.end(), openers)
-        all_words = rest[:cut].split()
+        all_words = split_redirections(rest[:cut].split(), redir_cache)
         # the window ended inside this command: what follows it is not read
         clipped = cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text)
         if name in ('.', 'source'):
@@ -1324,7 +1424,7 @@ def interp_groups(text, expanded=False):
                     groups += [[c] for c in module_files(shell_unquote(raw))]
                 stopped = True
                 break
-            if w == '-' or CODE_FLAG_RX.fullmatch(w):
+            if w == '-' or (SHELL_CODE_FLAG_RX if name in SHELL_NAMES else CODE_FLAG_RX).fullmatch(w):
                 stopped = True
                 break
             # an output redirection's target is written, not run (`python3 x.py > out.txt`; card 15896271): a file
@@ -1399,7 +1499,9 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
         if len(raw) > ARGS_WINDOW:  # without_substs is a loop per nesting level: an unbounded word is not read
             raise TooManyArgs(f'egy útvonal-szó hosszabb {ARGS_WINDOW} karakternél')
         # a ")" may close the substitution the path stands in (`$(./x"y".sh)`): read with and without it
-        groups.append([f for r in dict.fromkeys([raw, raw.rstrip(')')]) for f in word_forms([r], 0) if f])
+        k = redir_at(raw)  # G1: `./"x".sh;true`, `./"x".sh>log`: the word ends at the operator
+        groups.append([f for r in dict.fromkeys([raw, raw.rstrip(')')] + ([raw[:k]] if k else []))
+                       for f in word_forms([r], 0) if f])
     bases = cd_bases(text, cwd)
     if groups and len(bases) > MAX_BASES:
         return [''] * (MAX_SCRIPTS + 1)
@@ -1789,7 +1891,7 @@ REDEF_RX = re.compile(r'(?<![\w$-])(?:alias|unalias|function|eval|source|hash|en
                       r'|PROMPT_COMMAND|BASH_COMMAND|preexec|precmd|ps|pgrep|lsof|PPID|procargs2?)(?![\w-])|\(\s*\)'
                       r'|(?<![\w$])(?:PATH|path|FPATH|fpath)\+?=|\$\{?_(?!\w)')
 SHELL_WORD_RX = re.compile(r'(?:.*/)?(?:bash|sh|zsh|dash|ksh|fish|csh|tcsh|ash|rbash|pwsh)\d*|\$\{?(?:SHELL|BASH)\}?|\$0')
-C_FLAG_RX = re.compile(r'-[A-Za-z]*c')
+C_FLAG_RX = re.compile(r'-[A-Za-z]*c[A-Za-z]*')  # any cluster with a c, as SHELL_CODE_FLAG_RX: `bash -cx ./m.sh`
 CODE_FRAMES = ('`', '$(', '<(', '>(', '(')
 
 
