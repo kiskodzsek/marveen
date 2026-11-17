@@ -1453,6 +1453,10 @@ def script_cases():
             ("./\"dump\".sh>'x y'", d),
             ('./dump"".sh>"x y"', d),
             ('./$(true)dump.sh>"x y"', d),
+            # a fd of two digits before > is a redirection, not a word (mutation round 4, fd-rx-one-digit: read `12` as
+            # the script; bash ran measure.py)
+            ('python3 12>err.log measure.py', d),
+            ('python3 12>/dev/null measure.py', d),
             # ... and without a blank (mutation round 1: the quote, escape, $'..', $( ) and backtick tracking of the cut)
             ('python3 `true>&2`measure.py>/dev/null', d),
             ('python3 $(true>&2)measure.py>/dev/null', d),
@@ -1776,6 +1780,12 @@ def script_cases():
             # 0d285cbb stepped back over the \& and blocked; the fleet gate allows)
             ('python3 measure.py\\&>x', d),
             ('python3 measure.py\\&>>x', d),
+            # mutation round 4: a > in single quotes is file-name text (no-sq-track cut there and blocked; bash runs
+            # no measure.py), and a lone > in a joined word keeps its target (join-drop-target read measure.py, the
+            # target, as the script; bash writes measure.py and runs stat.py)
+            ("python3 'measure.py>x'", d),
+            ("python3 measure.py'>x'", d),
+            ('python3 $(true x)> measure.py stat.py', d),
             ('python3 "x measure.py>y"', d),
             ('python3 stat.py "a b>c"', d),
             ('python3 stat.py>"a b"', d),
