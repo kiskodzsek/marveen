@@ -1242,16 +1242,54 @@ def without_substs(w):
     return w
 
 
+def without_substs_lexed(w):
+    """Card 946937b7 (Viktor 45532): without_substs' regex ends a $( ) at its first ) and knows no quote or backslash
+    (`python3 $(true ')')m.py`, `$(true '(')m.py`, `$(true \\))m.py` run m.py); the shared lexer reads the spans as
+    bash does. The word without its outermost substitutions; None when the word is cut short (a piece of a
+    substitution with a blank in it: the lexer reports a problem; the regex reading stays beside it, never fewer
+    words). Fail-closed (Viktor 45533): when a quote or a backslash is in the word and the lexer is not loaded, or
+    does not read the word (LexTooBig: past its bounds, or a lexer bug), the regex reading may be the wrong one:
+    TooManyArgs, the call is blocked."""
+    quoted = '\\' in w or bool(QUOTE_RX.search(w))
+    if shell_lex is None:
+        if quoted:
+            raise TooManyArgs('a lexer nincs betöltve, egy idézetes helyettesítés nem olvasható')
+        return None
+    try:
+        lx = shell_lex.lex(w)
+    except Exception:  # LexTooBig, or a lexer bug
+        if quoted:
+            raise TooManyArgs('a lexer nem olvas egy idézetes helyettesítést (korlát vagy hiba)')
+        return None
+    if lx['problems']:
+        return None
+    out, at = [], 0
+    for a, b in sorted((s['start'], s['end']) for s in lx['substs'] if s['kind'] in ('`', '$(')):
+        if a >= at:  # one nested in a span already cut goes with it
+            out.append(w[at:a])
+            at = b
+    return ''.join(out) + w[at:]
+
+
 def has_subst(w):
     return '`' in w or '$(' in w
 
 
-def merged_span(all_words, i):
+def merged_span(all_words, i, quoted=False):
     """The call's words are split at blanks, so a substitution with a blank in it (`$(echo $(true))m.py`) is in
     pieces: join the pieces from i while a backtick or a "(" is still open (at most MAX_ARGS pieces).
-    -> (the joined word, the index of its last piece)."""
+    quoted (card 946937b7, Viktor 45532): a quote, a backslash and the parens in them as bash reads them, with
+    _redir_scan's state (`$(true ')' $(true '('))m.py` is one word; the count joins too few pieces). The caller
+    reads both joins: never fewer words. -> (the joined word, the index of its last piece)."""
     s = all_words[i]
     j = i
+    if quoted:
+        state = _redir_scan(s)[1]
+        while any(state) and j + 1 < len(all_words) and j - i < MAX_ARGS:
+            j += 1
+            s += ' ' + all_words[j]
+            state = _redir_scan(all_words[j], state)[1]
+        return s, j
     while (s.count('`') % 2 or s.count('(') > s.count(')')) and j + 1 < len(all_words) and j - i < MAX_ARGS:
         j += 1
         s += ' ' + all_words[j]
@@ -1276,6 +1314,10 @@ def word_forms(all_words, i):
     forms = [shell_unquote(raw)]
     if has_subst(raw):
         forms += [without_substs(strip_quotes(raw)), shell_unquote(without_substs(raw))]
+        for r in dict.fromkeys([raw, merged_span(all_words, i, quoted=True)[0]]):
+            lexed = without_substs_lexed(r)
+            if lexed is not None:
+                forms.append(shell_unquote(lexed))
     return list(dict.fromkeys(forms))
 
 # Only digits: a {fd} before the operator is cut off as a word of its own, so both readings are judged. zsh and bash
@@ -1427,9 +1469,9 @@ def interp_groups(text, expanded=False):
                 if needs_forms(all_words[idx]):
                     forms = word_forms(all_words, idx)
                     firsts += [f for f in forms if f and f not in firsts]
-                    end = merged_span(all_words, idx)[1]
-                    if '' in forms and end + 1 < len(all_words):
-                        firsts.append(strip_quotes(all_words[end + 1]))
+                    for end in dict.fromkeys([merged_span(all_words, idx)[1], merged_span(all_words, idx, quoted=True)[1]]):
+                        if '' in forms and end + 1 < len(all_words):
+                            firsts.append(strip_quotes(all_words[end + 1]))
                 tail = all_words[idx + 1:]
                 over = clipped or len(all_words) > MAX_ARGS
                 rest = []
@@ -1555,14 +1597,25 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
                 raise TooManyArgs(f'cat: {len(cat_words)} szó, MAX_ARGS {MAX_ARGS}')
             groups += [[strip_quotes(w)] for w in cat_words if not w.startswith('-')]
     groups += [[m.group(1)] for m in DIRECT_RX.finditer(text)]
-    for m in (m for t in word_texts for m in DIRECT_WORD_RX.finditer(t)):
+    for t, m in ((t, m) for t in word_texts for m in DIRECT_WORD_RX.finditer(t)):
         raw = m.group(1).rstrip(';&|<>')
         if len(raw) > ARGS_WINDOW:  # without_substs is a loop per nesting level: an unbounded word is not read
             raise TooManyArgs(f'egy útvonal-szó hosszabb {ARGS_WINDOW} karakternél')
-        # a ")" may close the substitution the path stands in (`$(./x"y".sh)`): read with and without it
-        k = redir_at(raw)  # G1: `./"x".sh;true`, `./"x".sh>log`: the word ends at the operator
-        groups.append([f for r in dict.fromkeys([raw, raw.rstrip(')')] + ([raw[:k]] if k else []))
-                       for f in word_forms([r], 0) if f])
+        raws = [raw]
+        if has_subst(raw):
+            # card 946937b7 (Viktor 45533): a substitution with a blank in it (`./$(true ')')x.sh`) goes on past the
+            # blank: the pieces joined as bash reads quotes and parens (merged_span quoted), within ARGS_WINDOW
+            at = m.start(1)
+            joined = merged_span(t[at:at + ARGS_WINDOW].split()[:MAX_ARGS + 1], 0, quoted=True)[0].rstrip(';&|<>')
+            if joined != raw:
+                raws.append(joined)
+        group = []
+        for raw in raws:
+            # a ")" may close the substitution the path stands in (`$(./x"y".sh)`): read with and without it
+            k = redir_at(raw)  # G1: `./"x".sh;true`, `./"x".sh>log`: the word ends at the operator
+            group += [f for r in dict.fromkeys([raw, raw.rstrip(')')] + ([raw[:k]] if k else []))
+                      for f in word_forms([r], 0) if f]
+        groups.append(list(dict.fromkeys(group)))
     bases = cd_bases(text, cwd)
     if groups and len(bases) > MAX_BASES:
         return [''] * (MAX_SCRIPTS + 1)

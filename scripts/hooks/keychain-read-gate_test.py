@@ -1503,6 +1503,31 @@ def script_cases():
             ('python3 "a b.py"', d),
             ("python3 'a b.py'", d),
             ('python3 a\\ b.py', d),
+            # card 946937b7 (Viktor 45532; all allow on ed110117, da7d6cb8 and 348e7dd4, bash and zsh ran the script): a
+            # quoted or escaped paren in a $( ) before the script; without_substs' regex ended it at the first )
+            ("python3 $(true ')')measure.py", d),
+            ('python3 $(true ")")measure.py', d),
+            ("python3 $(true '(')measure.py", d),
+            ('python3 $(true \\))measure.py', d),
+            ("bash $(true ')')dump.sh", d),
+            ("python3 $(true ')')measure.py>/dev/null", d),
+            ('python3 "$(true \')\')"measure.py', d),
+            ("python3 $(true ')' $(true '('))measure.py", d),
+            ("source $(true ')' ) dump.sh", d),
+            ('python3 $(true \')\' "x")measure.py', d),
+            # ... Viktor 45533 (wider): a direct path, source / ., other commands in the substitution
+            ("./$(true ')')dump.sh", d),
+            ("./$(true '(')dump.sh", d),
+            ("./$(true ')' )dump.sh", d),
+            ("source $(true ')')dump.sh", d),
+            (". $(true ')')dump.sh", d),
+            ("python3 $(: ')')measure.py", d),
+            ("python3 $(echo ')' >/dev/null)measure.py", d),
+            ("bash -e $(true ')')dump.sh", d),
+            # ... and a word past the lexer's bounds (65+ substitutions): its quotes leave the regex reading unsure,
+            # fail-closed
+            ("python3 $(true ')')" + '$(true)' * 70 + 'measure.py', d),
+            ("./$(true ')')" + '$(true)' * 70 + 'dump.sh', d),
             # ... and without a blank (mutation round 1: the quote, escape, $'..', $( ) and backtick tracking of the cut)
             ('python3 `true>&2`measure.py>/dev/null', d),
             ('python3 $(true>&2)measure.py>/dev/null', d),
@@ -1843,6 +1868,16 @@ def script_cases():
             ('A="a b" python3 stat.py', d),
             ('python3 "x y.py"', d),
             ('source >"dump.sh" stat.py', d),  # the redirection's target is written, the file is stat.py
+            # card 946937b7 (Viktor 45532): the same substitutions before a harmless script, or as data
+            ("echo $(true ')')measure.py", d),
+            ("python3 '$(true)'stat.py", d),
+            ("git log $(true ')')measure.py", d),
+            ("python3 $(true ')')stat.py", d),
+            ("python3 $(true ')' $(true '('))stat.py", d),
+            ("python3 -c 'print(1)' $(true ')')", d),
+            ("./$(true ')')stat.py", d),
+            ("echo ./$(true ')')dump.sh", d),
+            ("./stat.py $(true ')') dump.sh", d),
             ('python3 "x measure.py>y"', d),
             ('python3 stat.py "a b>c"', d),
             ('python3 stat.py>"a b"', d),
