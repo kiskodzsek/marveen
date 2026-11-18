@@ -24,6 +24,8 @@ whose text makes a CLAIM and carries no SOURCE.
   "X mérte" / "mértem", an HTTP status ("HTTP 503", "státusz 200"), or an attached file (a screenshot). A TG number,
   a PR, a file path, a link or "X szerint" is not a measurement of a site's state: "CLAUDE.md szerint" was the
   error itself.
+  MEASURED TIME AHEAD (card 5bb98efb, TG 6185 "mérve 10:02-kor" sent at 10:00): a "mérve" clock time 1-15 minutes
+  later than the current minute blocks on its own, source or not (see merve_ahead below).
 Quoted text is not a claim of ours: «...», "...", „...", `...` are dropped before matching (Patrik's own words).
 Every block is logged to store/claim-source-gate.log as one JSON line (time, chat kind, the claim labels, the text
 length): never the text itself, it may hold personal data.
@@ -236,6 +238,44 @@ def unsourced(text, files):
     return out
 
 
+# MEASURED-TIME AHEAD OF THE CLOCK (card 5bb98efb; hibanapló 2026-11-16, Klodel TG 6185): "mérve 10:02-kor" went to
+# the group at 10:00:53, a measured time typed without `date`. A "mérve" time 1-15 minutes later than the current
+# minute is a guess, not a measurement, so it blocks on its own (a source does not help: it IS the source).
+# The time stands after "mérve" in the same clause with no digit between (so "mérve: 29,3 s, 9:16" and
+# "mérve 11-12 08:27" are not read), or right before it ("15:39-kor mérve"); "tegnap" or a date right before passes.
+# Measured read-only on store/claudeclaw.db conversation_log, outgoing rows of the 14 days before 2026-11-18 16:45
+# (3283 rows, each at its own created_at minute): 133 "mérve" times; 12 later than their minute, 9 of them stamps
+# typed 1-2 minutes ahead (this window catches all 9), the other 3 (a 9:16 ratio, "tegnap 12:23", +61 minutes) pass.
+# 46 were more than 2 minutes EARLIER: quoted older measurements ("mérve 17:20 óta", "Pulzus 01:14"), so an earlier
+# time is not judged.
+MERVE_AHEAD_MAX = 15
+_HM = r'(?<![\d:.])([01]?\d|2[0-3]):([0-5]\d)(?![\d:])'
+MERVE_TIME_AFTER = re.compile(r'\bmerve\b([^.;!?\n\d]{0,25}?)' + _HM)
+MERVE_TIME_BEFORE = re.compile(_HM + r'(?:-?kor|-?es|-?as)?[^\S\n]{0,2}(?:\(?date\)?[^\S\n]{0,2})?merve\b')
+DATE_BEFORE = re.compile(r'(\btegnap\w*|\d{1,2}-\d{1,2}\.?|\d{4}-\d{2}-\d{2})[^\S\n]*$')
+
+
+def merve_ahead(text, now=None):
+    """The "mérve" clock times (HH:MM) that are 1-MERVE_AHEAD_MAX minutes later than the current minute."""
+    t = time.localtime() if now is None else now
+    now_min = t.tm_hour * 60 + t.tm_min
+    plain = DENIED_MEAS.sub(' ', QUOTED.sub(' ', norm(text)))
+    out = []
+    for rx, gap in ((MERVE_TIME_AFTER, True), (MERVE_TIME_BEFORE, False)):
+        for m in rx.finditer(plain):
+            hh, mm = (m.group(2), m.group(3)) if gap else (m.group(1), m.group(2))
+            if gap and 'tegnap' in m.group(1):
+                continue
+            start = m.start(2) if gap else m.start()
+            if DATE_BEFORE.search(plain[max(0, start - 14):start]):
+                continue
+            ahead = (int(hh) * 60 + int(mm) - now_min) % 1440
+            stamp = f'{int(hh):02d}:{mm}'
+            if 1 <= ahead <= MERVE_AHEAD_MAX and stamp not in out:
+                out.append(stamp)
+    return out
+
+
 def owner_chats():
     env = os.environ.get('MARVEEN_OWNER_CHATS')
     if env:
@@ -275,11 +315,20 @@ def main():
     if chats and chat not in chats:
         return 0
     text = str(ti.get('text') or '')
+    kind = chats.get(chat, '?') if isinstance(chats, dict) else '?'
+    log_mode = os.environ.get('CLAIM_SOURCE_GATE_MODE') == 'log'
+    ahead = merve_ahead(text)
+    if ahead:
+        log_block(kind + (' (log-only)' if log_mode else ''), ['mérve-idő'], len(text))
+        if not log_mode:
+            sys.stderr.write(
+                f'MÉRVE-IDŐ-KAPU (kártya 5bb98efb, hibanapló 2026-11-16, TG 6185): a "mérve" mellett álló idő '
+                f'({", ".join(ahead)}) később van, mint az óra most ({time.strftime("%H:%M")}). Ez nem mérés, hanem '
+                'becsült idő. Futtasd a date-et, és a mérés valódi idejét írd.\n')
+            return 2
     found = unsourced(text, ti.get('files') or [])
     if not found:
         return 0
-    kind = chats.get(chat, '?') if isinstance(chats, dict) else '?'
-    log_mode = os.environ.get('CLAIM_SOURCE_GATE_MODE') == 'log'
     log_block(kind + (' (log-only)' if log_mode else ''), found, len(text))
     if log_mode:  # a measuring day before enforcing: logged, let through
         return 0
