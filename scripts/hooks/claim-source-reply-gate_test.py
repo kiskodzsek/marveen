@@ -296,6 +296,66 @@ rc, _ = run('-222', 'Ki tudjuk emelni: Mira mérte, msg 41144.')
 ok('hook: capability with a source -> passes', rc == 0)
 rc, _ = run('-222', 'Szia, mikor jó a hívás?')
 ok('hook: no claim -> passes', rc == 0)
+# MEASURED TIME AHEAD (card 5bb98efb, hibanapló 2026-11-16, TG 6185). Unit level at a fixed minute.
+import time as _t
+AT = _t.strptime('2026-11-16 10:00', '%Y-%m-%d %H:%M')
+AHEAD = [
+    # the original sentence, word for word from the ledger (conversation_log, sent 10:00:53)
+    ('A modellek beállítása mostantól Fable 5.2 (mérve 10:02-kor a csapat beállításaiból).', ['10:02']),
+    ('Kernel szabad (mérve 10:01).', ['10:01']),
+    ('Állás (mérve, 10:02): Mágnes kész.', ['10:02']),
+    ('Keret most (mérve: 10:15, store/fleet-quota).', ['10:15']),
+    ('10:03-kor mérve a kampány aktív.', ['10:03']),
+    ('Mérve 10:05 és 10:06 között.', ['10:05']),
+]
+for text, want in AHEAD:
+    got = gate.merve_ahead(text, AT)
+    ok(f'ahead: {text[:55]!r} -> {want}', got == want, f'got {got}')
+NOT_AHEAD = [
+    'A modellek beállítása (mérve 10:00-kor).',                  # the current minute
+    'Mérve 09:52 óta nincs látogató.',                            # earlier: a quoted older measurement
+    'Ami mérve van: Mira 09:20, Szigma 08:55.',                   # earlier
+    'Mérve (GitHub): tegnap 10:05 óta 11 darab.',                # yesterday
+    'Mérve tegnap este 10:05-kor, azóta nem változott.',          # yesterday, a word between
+    'Mérve 11-16 10:05, Kernel.',                                 # a date right before
+    'Nincs mérve 10:05-kor, szólok, ha megvan.',                  # a denied measurement
+    'Patrik írta: „mérve 10:05”.',                                # quoted
+    'Mérve 10:30-kor indul a következő kör.',                     # beyond the window (16+ minutes: a plan)
+    'Indulás 10:05-kor, a mérés utána jön.',                      # no "mérve"
+]
+for text in NOT_AHEAD:
+    got = gate.merve_ahead(text, AT)
+    ok(f'not ahead: {text[:55]!r}', got == [], f'got {got}')
+AT_0910 = _t.strptime('2026-11-14 09:10', '%Y-%m-%d %H:%M')
+ok('not ahead: a 9:16 ratio after a number (09:10)',
+   gate.merve_ahead('Kész a záróklippel (Dave, mérve: 29,3 s, 9:16, hanggal).', AT_0910) == [])
+ok('ahead control: the same minute without the number before it (09:10)',
+   gate.merve_ahead('Kész a záróklippel (Dave, mérve 9:16).', AT_0910) == ['09:16'])
+ok('not ahead: a date right before "HH:MM-kor mérve"', gate.merve_ahead('11-16 10:05-kor mérve, Kernel.', AT) == [])
+ok('ahead control: "HH:MM-kor mérve" without the date', gate.merve_ahead('Kernel: 10:05-kor mérve.', AT) == ['10:05'])
+MIDNIGHT = _t.strptime('2026-11-16 23:59', '%Y-%m-%d %H:%M')
+ok('ahead across midnight: 23:59 -> "mérve 00:02"', gate.merve_ahead('Mérve 00:02.', MIDNIGHT) == ['00:02'])
+ok('not ahead across midnight: 23:59 -> "mérve 23:50"', gate.merve_ahead('Mérve 23:50.', MIDNIGHT) == [])
+
+# hook level, against the real clock (no time seam in the hook)
+def _hm(delta):
+    return _t.strftime('%H:%M', _t.localtime(_t.time() + delta * 60))
+rc, err = run('-222', f'Mira szabad (mérve {_hm(5)}), minden kártya frissítve.')
+ok('hook: a "mérve" time 5 minutes ahead -> exit 2, names the time rule', rc == 2 and 'MÉRVE-IDŐ' in err
+   and 'date' in err, f'rc={rc} {err}')
+line = json.loads(open(log).read().splitlines()[-1])
+ok('  ...logged as mérve-idő, never the text', line.get('claims') == ['mérve-idő'] and 'Mira' not in json.dumps(line),
+   line)
+rc, _ = run('-222', f'Mira szabad (mérve {_hm(-5)}), minden kártya frissítve.')
+ok('hook: a "mérve" time 5 minutes earlier -> passes', rc == 0)
+rc, _ = run('999', f'Mira szabad (mérve {_hm(5)}).')
+ok('hook: another chat is not judged by the time rule either', rc == 0)
+os.environ['CLAIM_SOURCE_GATE_MODE'] = 'log'
+rc, _ = run('-222', f'Mira szabad (mérve {_hm(5)}).')
+del os.environ['CLAIM_SOURCE_GATE_MODE']
+ok('hook: log mode -> the time rule passes, logged as log-only',
+   rc == 0 and json.loads(open(log).read().splitlines()[-1]).get('chat') == 'csoport (log-only)')
+
 r = subprocess.run([sys.executable, '-I', GATE], input='not json', capture_output=True, text=True,
                    env=dict(os.environ, CLAUDE_PROJECT_DIR=root), timeout=30)
 ok('hook: malformed payload -> allowed', r.returncode == 0)
