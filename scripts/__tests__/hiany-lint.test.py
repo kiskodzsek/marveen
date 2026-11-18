@@ -120,7 +120,7 @@ check("ITTHON-MERT to a sibling <root>x/ (prefix without separator): refused",
 # No digits on the site line: site_hibak reads any number there as a hit count ("410" -> "talált (emag.hu: 410)").
 EXEMPT = 'shared/ai-influenszer-1111/radar-markapenz.md'
 WAIVED = ("Itthon nincs ilyen.\nITTHON-MERT: ez a fájl\n"
-          "- ITTHON: mért (2026-11-16):\n"
+          "- ITTHON: független AI-influenszernek fizető magyar márka-megbízás a vizsgált körben: 0 (mért):\n"
           "  - Meska: NINCS ADAT, a kereső 404 (meska.hu, 11-16);\n"
           "  - Pepita: NINCS ADAT, a kereső 404 (pepita.hu, 11-16);\n"
           "  - eMAG: NINCS ADAT, a kereső 410 (emag.hu, 11-16);\n"
@@ -158,7 +158,23 @@ hit = findings_at(EXEMPT, WAIVED.replace('NINCS ADAT, mérve nem mérhető', 'do
 check("46972: a probe hit is never waived", (has(hit, 'site-próba talált (douglas.hu: 3)'), has(hit, SITE_MISSING)), (True, False))
 check("46972: the shop check still applies in the waived file",
       len(findings_at(EXEMPT, '\n'.join(l for l in WAIVED.split('\n') if 'Meska' not in l))) > 0, True)
-findings_at(EXEMPT, WAIVED)  # restore the waived block (the case above rewrote it without the Meska line)
+# Viktor 47302: the marker and the path are exact (his probe P12, P13b, P14, P15 killed mutants m14-m16, m18).
+check("46972: a lower-case marker keeps the site finding",
+      has(findings_at(EXEMPT, WAIVED.replace('KAPUDÖNTÉS: Klodel 46972', 'kapudöntés: klodel 46972')), SITE_MISSING), True)
+check("46972: an id with a digit before it (146972) keeps the site finding",
+      has(findings_at(EXEMPT, WAIVED.replace('Klodel 46972', 'Klodel 146972')), SITE_MISSING), True)
+check("46972: the waived name with a .bak suffix keeps the site finding",
+      has(findings_at(EXEMPT + '.bak', WAIVED), SITE_MISSING), True)
+check("46972: the waived path under another folder (x/shared/...) keeps the site finding",
+      has(findings_at('x/' + EXEMPT, WAIVED), SITE_MISSING), True)
+# Viktor 47302 L1: the waiver is bound to the decided block; a second block in the same file, with the decision line
+# and NINCS ADAT copied in, keeps its finding while the decided block passes.
+second = WAIVED.split('ITTHON-MERT: ez a fájl\n', 1)[1].replace(
+    'független AI-influenszernek fizető magyar márka-megbízás a vizsgált körben', 'AI-avatár bérlés magyar boltban')
+two = findings_at(EXEMPT, WAIVED + '\n' + second)
+check("L1: a second block with a copied decision line keeps its site finding, the decided one passes",
+      (len(two), has(two, 'AI-avatár bérlés') and has(two, SITE_MISSING)), (1, True))
+findings_at(EXEMPT, WAIVED)  # restore the waived block (the cases above rewrote it)
 check("46972: an ITTHON-MERT from another file to the waived block passes (the block carries the decision)",
       findings_at('shared/masik/hivatkozo.md', f"Itthon nincs ilyen.\nITTHON-MERT: {EXEMPT}\n"), [])
 

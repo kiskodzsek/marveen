@@ -101,15 +101,21 @@ def read_lines(path):
 # as not measurable (Bing: result-less page, DuckDuckGo: 403, the shops' own search: 410 / 403 / 403 / captcha). Only the
 # "site-próba eredménnyel hiányzik" finding is dropped, and only when the block itself names the decision and the site
 # line says NINCS ADAT. A probe that finds a hit (n > 0) is never waived. A new waiver = a new entry here, by decision.
-SITE_EXEMPT = {'shared/ai-influenszer-1111/radar-markapenz.md': '46972'}
+# The waiver is bound to the BLOCK, not only the file (Viktor 47302 L1): the block's ITTHON line must start with the
+# decided claim, so a second block pasted into the same file with the decision line copied keeps its finding.
+SITE_EXEMPT = {'shared/ai-influenszer-1111/radar-markapenz.md':
+               ('46972', 'ITTHON: független AI-influenszernek fizető magyar márka-megbízás')}
 SITE_MISSING = 'site-próba eredménnyel hiányzik'
 
 
 def site_exempt(tpath, blk, finding):
     if SITE_MISSING not in finding:
         return False
-    msg_id = SITE_EXEMPT.get(os.path.relpath(tpath, root()))
-    if not msg_id:
+    entry = SITE_EXEMPT.get(os.path.relpath(tpath, root()))
+    if not entry:
+        return False
+    msg_id, claim = entry
+    if not blk or not blk[0].strip().lstrip('-* ').startswith(claim):
         return False
     decided = any(re.search(r'KAPUDÖNTÉS:\s*Klodel\s+' + msg_id + r'(?!\d)', ln) for ln in blk)
     no_data = any(ITTHON_SITE.search(ln) and NINCS.search(ln) for ln in blk)
