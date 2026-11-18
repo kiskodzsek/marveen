@@ -36,6 +36,7 @@ def ok(name, cond, detail=''):
 # --- host_ok: the new host, exact match only (Klodel 27131: https://srv.e-szigno.hu/eszamlak&wac=...)
 ok('srv.e-szigno.hu over https is allowed', szl.host_ok('https://srv.e-szigno.hu/eszamlak&wac=00ff'))
 ok('srv.e-szigno.hu, upper case host is allowed (urlparse folds it)', szl.host_ok('https://SRV.E-Szigno.HU/eszamlak'))
+ok('portal.e-szigno.hu over https is allowed (the srv redirect target, Juró 47392)', szl.host_ok('https://portal.e-szigno.hu/x'))
 DENY = [
     ('plain http', 'http://srv.e-szigno.hu/eszamlak'),
     ('the bare domain', 'https://e-szigno.hu/eszamlak'),
@@ -45,6 +46,11 @@ DENY = [
     ('userinfo in front of another host', 'https://srv.e-szigno.hu@evil.example/eszamlak'),
     ('microsec.hu (not asked for)', 'https://microsec.hu/szamla.pdf'),
     ('no scheme', 'srv.e-szigno.hu/eszamlak'),
+    ('portal over plain http', 'http://portal.e-szigno.hu/x'),
+    ('a portal lookalike suffix', 'https://portal.e-szigno.hu.evil.example/x'),
+    ('a portal lookalike prefix', 'https://evil-portal.e-szigno.hu/x'),
+    ('a deeper portal subdomain', 'https://a.portal.e-szigno.hu/x'),
+    ('userinfo portal in front of another host', 'https://portal.e-szigno.hu@evil.example/x'),
 ]
 for name, url in DENY:
     ok(f'denied: {name}', not szl.host_ok(url), url)
@@ -52,7 +58,7 @@ for name, url in DENY:
 for h in ('app.billingo.hu', 'api.billingo.hu', 'www.innvoice.hu', 'innvoice.hu', 'www.szamlazz.hu', 'szamlazz.hu',
           'www.szamlazoprogram.hu', 'szamlazoprogram.hu'):
     ok(f'unchanged: {h}', szl.host_ok(f'https://{h}/x'))
-ok('the allowlist grew by exactly one host', len(szl.ALLOWED) == 9, sorted(szl.ALLOWED))
+ok('the allowlist grew by exactly two hosts (srv, portal)', len(szl.ALLOWED) == 10, sorted(szl.ALLOWED))
 
 
 # --- get(): a redirect away from the allowlist stops, before the body is used
@@ -131,6 +137,10 @@ try:
         https_open = _open
         http_open = _open
 
+    # R0 (Viktor 47372 I1): the module itself installs the checking opener; in production get() calls the global
+    # urlopen, so without that line R1/R2 would silently come back (mutant r01 was green before this row)
+    ok('R0 the module installs _Redir in the global opener',
+       any(isinstance(h, szl._Redir) for h in getattr(szl.urllib.request._opener, 'handlers', [])))
     szl.urllib.request.install_opener(szl.urllib.request.build_opener(Fake(), szl._Redir))
     S0 = 'https://srv.e-szigno.hu/eszamlak&wac=AA'
 
@@ -159,6 +169,19 @@ try:
     # control: an on-list redirect is followed
     res = main_res(t, {S0: (302, b'', 'https://srv.e-szigno.hu/final.pdf', 'text/html')})
     ok('on-list redirect is followed and saved', res == 'saved' and hits == ['https://srv.e-szigno.hu'] * 2, (res, hits))
+    # R11 (Juró 47392, KE26/83900): the srv link redirects to portal.e-szigno.hu -- followed and saved
+    t = os.path.join(K, 'r11.pdf')
+    res = main_res(t, {S0: (302, b'', 'https://portal.e-szigno.hu/szamla/AA', 'text/html')})
+    ok('R11 srv -> portal redirect is followed and saved',
+       (res, hits, os.path.exists(t)) == ('saved', ['https://srv.e-szigno.hu', 'https://portal.e-szigno.hu'], True),
+       (res, hits))
+    # R12: the portal redirecting on to an off-list e-szigno host still stops before that hop is requested
+    t = os.path.join(K, 'r12.pdf')
+    res = main_res(t, {S0: (302, b'', 'https://portal.e-szigno.hu/szamla/AA', 'text/html'),
+                       'https://portal.e-szigno.hu/szamla/AA': (302, b'', 'https://www.e-szigno.hu/x.pdf', 'text/html')})
+    ok('R12 portal -> off-list hop refused',
+       (res, hits, os.path.exists(t)) == ('refused', ['https://srv.e-szigno.hu', 'https://portal.e-szigno.hu'], False),
+       (res, hits))
     # R5: on an HTML page only the on-list download link is followed
     t = os.path.join(K, 'r5.pdf')
     res = main_res(t, {S0: (200, b'<a href="https://evil.example/download.pdf">x</a><a href="/letolt/1">y</a>', None,
