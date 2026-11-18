@@ -19,7 +19,7 @@ import { sendSystemDirective } from './system-directive.js'
 import { urgentEmitRefusal, setDeliveryHoldCheck, type DeliveryHold } from './message-router.js'
 import { notifyChannel } from '../notify.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
-import { backgroundAgentCount, detectPaneState, paneShowsContextSaturation, paneShowsContextSaturationHardError, type PaneState } from '../pane-state.js'
+import { backgroundAgentCount, backgroundShellCount, detectPaneState, paneShowsContextSaturation, paneShowsContextSaturationHardError, type PaneState } from '../pane-state.js'
 import { readContextTokensFromProjectDir, readActiveModelFromProjectDir, readTranscriptMtimeFromProjectDir } from './active-model.js'
 import { readContextGuardConfig } from './context-guard-store.js'
 import { localMidnightMs } from '../auto-restart.js'
@@ -184,6 +184,49 @@ const fastMainIdleStreak = new Map<string, number>()
 // Agents whose "background agents running, restarts defer" line is already
 // logged; cleared when the panel is gone, so each stretch is logged once.
 const bgAgentDeferLogged = new Set<string>()
+// Card 70dad0d7: agent name -> when the guard first saw a background shell in
+// the live footer of an otherwise idle pane (ms). Cleared when the shells are gone.
+const bgShellSince = new Map<string, number>()
+// Agents whose "background shell, restarts wait" / "wait cap passed" line is
+// already logged for the current stretch.
+const bgShellHoldLogged = new Set<string>()
+const bgShellCapLogged = new Set<string>()
+
+/**
+ * Card 70dad0d7: how long the guard keeps a restart back for a background shell.
+ * A shell dies with the session like a background agent does, but unlike an
+ * agent it may never end on its own (a watcher, a poll loop), so the wait is
+ * capped: past it the restart goes ahead and its notice to the main agent says
+ * which shells it cut. A choice, not a measurement: long enough for a Codex
+ * review round, short enough that a forgotten watcher does not pin a full
+ * context for hours.
+ */
+export const BG_SHELL_WAIT_MAX_MS = 45 * 60_000
+
+/**
+ * Pure: whether a background shell keeps the restart back now. `sinceMs` is when
+ * the current stretch of shells was first seen (undefined: none so far).
+ * Returns the new `sinceMs` (undefined when no shell runs) and whether the cap
+ * passed (the shells still run, the restart no longer waits).
+ */
+export function bgShellHold(
+  sinceMs: number | undefined,
+  bgShells: number,
+  nowMs: number,
+  maxMs: number = BG_SHELL_WAIT_MAX_MS,
+): { hold: boolean; sinceMs: number | undefined; capPassed: boolean } {
+  if (bgShells <= 0) return { hold: false, sinceMs: undefined, capPassed: false }
+  const since = sinceMs ?? nowMs
+  const capPassed = nowMs - since >= maxMs
+  return { hold: !capPassed, sinceMs: since, capPassed }
+}
+
+/** The pane state the guard acts on, with a held background shell read as busy.
+ *  Only an IDLE reading is turned: busy stays busy, and a pane that is neither
+ *  (error banner, modal) keeps the restart that is its only way out. */
+export function withShellHold(guardPaneState: PaneState, hold: boolean): PaneState {
+  return hold && guardPaneState === 'idle' ? 'busy' : guardPaneState
+}
 
 // agent name -> when the daily-handoff tier last fired (ms). Seeded on first
 // sight WITHOUT firing, so a slot that already passed before the dashboard
@@ -645,13 +688,39 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   // 'busy' (positively mid-turn -- restarts defer). A pane that is neither
   // (error banner, modal, unknown surface) is treated as NOT busy, so a
   // wedged pane still gets the restart that is its only way out.
-  const { paneState, guardPaneState, bgAgents } = guardPaneSignals(pane)
+  const { paneState, guardPaneState: agentGuardPaneState, bgAgents } = guardPaneSignals(pane)
   if (bgAgents > 0 && paneState !== 'busy' && !bgAgentDeferLogged.has(name)) {
     bgAgentDeferLogged.add(name)
     logger.info({ name, bgAgents, paneState }, 'context-guard: background agents running -- the pane counts as busy, restarts defer until they finish')
   } else if (bgAgents === 0) {
     bgAgentDeferLogged.delete(name)
   }
+  // Card 70dad0d7: a background shell dies with the session too. While one runs
+  // the idle pane counts as busy, so every restart path waits as for a live
+  // turn, up to BG_SHELL_WAIT_MAX_MS; the saturation net still fires. Only a
+  // sweep that looked at the pane moves the clock (null: not captured here).
+  const bgShells = pane !== null ? backgroundShellCount(pane) : 0
+  const shell = pane !== null
+    ? bgShellHold(bgShellSince.get(name), bgShells, nowMs)
+    : { hold: false, sinceMs: bgShellSince.get(name), capPassed: false }
+  if (pane !== null) {
+    if (shell.sinceMs === undefined) {
+      bgShellSince.delete(name)
+      bgShellHoldLogged.delete(name)
+      bgShellCapLogged.delete(name)
+    } else {
+      bgShellSince.set(name, shell.sinceMs)
+    }
+  }
+  if (shell.hold && agentGuardPaneState === 'idle' && !bgShellHoldLogged.has(name)) {
+    bgShellHoldLogged.add(name)
+    logger.info({ name, bgShells, capMinutes: BG_SHELL_WAIT_MAX_MS / 60_000 }, 'context-guard: background shell running -- the pane counts as busy, restarts wait until it ends or the cap passes')
+  }
+  if (shell.capPassed && !bgShellCapLogged.has(name)) {
+    bgShellCapLogged.add(name)
+    logger.warn({ name, bgShells, capMinutes: BG_SHELL_WAIT_MAX_MS / 60_000 }, 'context-guard: background shell still running past the wait cap -- restarts no longer wait for it')
+  }
+  const guardPaneState = withShellHold(agentGuardPaneState, shell.hold)
 
   // The pane banner and the calibrated measurement are TWO signals about one
   // fact, and this sweep is the only place that holds both. Reconciling them
@@ -991,6 +1060,14 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
                 // one reader who could compensate.
                 ? ` FIGYELEM: a HANDOFF.md letezik, de a FRISSESSEGET NEM TUDTAM MERNI (transcript-ora olvashatatlan) -- ha a session-ben friss dontes szuletett, kezi allapot-ellenorzes ajanlott (mtime vs. utolso munka).`
                 : '') +
+            // Card 70dad0d7: the shells this restart cut, said where the
+            // supervisor reads it. Only past the wait cap can a restart find one
+            // still running (the saturation net aside, which does not wait).
+            (bgShells > 0
+              ? ` FIGYELEM: ${bgShells} hatter-shell meg futott, a restart leallitotta` +
+                (shell.capPassed ? ` (${BG_SHELL_WAIT_MAX_MS / 60_000} perc varakozas utan)` : '') +
+                ' -- ha eredmenyre vart, inditsd ujra.'
+              : '') +
             (snapshotPath ? ` Pane-snapshot a restart elotti allapotrol: ${snapshotPath}` : ''),
             'context-guard restart notice',
           )
