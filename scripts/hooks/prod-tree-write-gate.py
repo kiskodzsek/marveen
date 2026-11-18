@@ -104,8 +104,10 @@ sub-agent and the raw text names a protected path or the tool is Write-type; els
 
 WHERE IT IS WIRED (Klodel 42872, Viktor 42810 "managed-settings ... most nem ... elfogadható"): every sub-agent's
 own .claude/settings.json, PreToolUse, by src/web/agent-scaffold.ts (injectProdTreeWriteGate at spawn,
-ensureProdTreeWriteGate on dashboard start: a removed or stale entry is written back). The main agent does not carry
-it. An agent can still take the entry out of its own settings until the next start/spawn (accident guard, see above);
+ensureProdTreeWriteGate on dashboard start: a removed or stale entry is written back). The main agent carries it in the
+checkout's .claude/settings.json (card aa9363b8, Klodel 47341): for it every rule above is log-only (would-deny),
+except ONE that denies: main_skill_bak below (an existing file under .claude/skills written with a Write-type tool
+and no fresh .bak next to it). An agent can still take the entry out of its own settings until the next start/spawn (accident guard, see above);
 the root-owned managed-settings form is parked under H1 until the owner asks for it.
 
 LOG (1b): <root>/store/prod-tree-write-gate/gate.jsonl, created on the first write (agent-writable, NOT append-only:
@@ -2041,6 +2043,76 @@ def on_alarm(_sig, _frame):
     raise Deadline()
 
 
+# MAIN AGENT, SKILL FILES (card aa9363b8; Klodel 47334, decision 47341; hibanapló 2026-11-18 16:40): during the #367
+# merge the main agent edited .claude/skills/agens-ag-push-pr/scripts/approve_merge.py and its SKILL.md in the
+# production tree with no backup, and the change looked ownerless to prod-tree-watch. The main agent is otherwise
+# never gated here; this one rule stops it: a Write-type tool on an EXISTING regular file under <prod>/.claude/skills
+# needs a sibling "<name>.bak-*" that either equals the current file (sha256) or was made in the last 2 hours
+# (creation, inode change or modification time, so `cp -p` counts as made now). A new file, a .bak file itself and
+# Bash are free (Bash keeps the would-deny log line only).
+MAIN_BAK_DIR = ('.claude', 'skills')
+MAIN_BAK_WINDOW_S = 2 * 3600
+MAIN_BAK_HASH_MAX = 8 * 1024 * 1024
+
+
+def file_sha(p):
+    try:
+        if os.path.getsize(p) > MAIN_BAK_HASH_MAX:
+            return None
+        h = hashlib.sha256()
+        with open(p, 'rb') as f:
+            for chunk in iter(lambda: f.read(65536), b''):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def main_skill_bak(payload, prod_root, now):
+    """The main agent's skill-file rule: a deny reason, or None (allowed). Raises on an unexpected error (the caller
+    allows and logs error-allow)."""
+    tool = payload.get('tool_name')
+    inp = payload.get('tool_input')
+    if tool not in WRITE_TOOLS or not isinstance(inp, dict):
+        return None
+    path = inp.get(WRITE_TOOLS[tool])
+    if not isinstance(path, str) or not path:
+        return None
+    if not os.path.isabs(path):
+        cwd = payload.get('cwd')
+        if not isinstance(cwd, str) or not os.path.isabs(cwd):
+            return None
+        path = os.path.join(cwd, path)
+    skills = fold(os.path.join(prod_root, *MAIN_BAK_DIR))
+    real = os.path.realpath(path)
+    if not any(f.startswith(skills + '/') for f in (fold(path), fold(real))):
+        return None
+    if not os.path.isfile(real):
+        return None                              # a new file: nothing to back up
+    base, d = os.path.basename(real), os.path.dirname(real)
+    if '.bak-' in base.casefold():
+        return None                              # writing a backup itself
+    prefix = base.casefold() + '.bak-'
+    cur = None
+    for n in sorted(os.listdir(d)):
+        if not n.casefold().startswith(prefix):
+            continue
+        p = os.path.join(d, n)
+        if os.path.islink(p) or not os.path.isfile(p):
+            continue
+        st = os.stat(p)
+        made = max(st.st_mtime, st.st_ctime, getattr(st, 'st_birthtime', 0) or 0)
+        if 0 <= now - made <= MAIN_BAK_WINDOW_S:
+            return None
+        if cur is None:
+            cur = file_sha(real) or ''
+        if cur and file_sha(p) == cur:
+            return None
+    return ('a főágens írása egy meglévő skill-fájlra friss mentés nélkül: %s. Kell mellé egy <fájl>.bak-* , amely '
+            'egyezik a mostani tartalommal, vagy 2 órán belül készült (Klodel 47334/47341, kártya aa9363b8). Előbb: '
+            'cp -p "%s" "%s.bak-<téma>-%s"' % (real, real, real, time.strftime('%m%d', time.localtime(now))))
+
+
 def run(raw, prod_root=PROD, log_dir=LOG_DIR, home=None, now=None):
     """raw stdin text -> stdout text ('' = allow). Never raises."""
     now = time.time() if now is None else now
@@ -2057,6 +2129,25 @@ def run(raw, prod_root=PROD, log_dir=LOG_DIR, home=None, now=None):
         agent = identify(payload.get('transcript_path'), prod)
         mark_seen(log_dir, payload.get('transcript_path'), agent, now)
         decision, reason, err = decide(payload, prod_root, home)
+        if agent == 'main':
+            try:
+                main_reason = main_skill_bak(payload, prod_root, now)
+            except Exception as e:   # never stop the main agent on a gate error; leave a trace for prod-tree-watch
+                main_reason = None
+                log_line(log_dir, {'ts': stamp(now), 'agent': agent, 'tool': tool if isinstance(tool, str) else None,
+                                   'reason': 'főágens skill-.bak szabály hibája (%s)' % type(e).__name__,
+                                   'input': redact(text), 'decision': 'error-allow'})
+            if main_reason:
+                row = {'ts': stamp(now), 'agent': agent, 'tool': tool, 'reason': main_reason,
+                       'input': redact(text), 'decision': 'deny'}
+                log_line(log_dir, row)
+                try:
+                    signal.alarm(0)
+                except Exception:
+                    pass
+                return json.dumps({'hookSpecificOutput': {
+                    'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+                    'permissionDecisionReason': 'prod-tree-write-gate: ' + main_reason}}, ensure_ascii=False) + '\n'
         try:
             signal.alarm(0)
         except Exception:

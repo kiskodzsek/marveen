@@ -880,6 +880,131 @@ class Fuzz(unittest.TestCase):
         self.assertEqual(r[0], 'allow')
 
 
+class MainSkillBak(unittest.TestCase):
+    """Card aa9363b8 (Klodel 47334, decision 47341): the main agent's Write-type tool on an existing file under
+    .claude/skills needs a sibling .bak-* equal to it or made in the last 2 hours; everything else stays log-only."""
+    SK = P + '/.claude/skills/agens-ag-push-pr'
+
+    def setUp(self):
+        shutil.rmtree(P + '/.claude/skills', ignore_errors=True)
+        os.makedirs(self.SK + '/scripts')
+        self.f = self.SK + '/SKILL.md'
+        open(self.f, 'w').write('# skill\nv1\n')
+        open(self.SK + '/scripts/approve_merge.py', 'w').write('print(1)\n')
+        open(os.path.join(LOG, 'gate.jsonl'), 'w').close()
+
+    def go(self, payload, now=None, tp=MAIN_TP):
+        payload = dict(payload, transcript_path=tp)
+        return gate.run(json.dumps(payload), P, LOG, HOME, now=time.time() if now is None else now)
+
+    def edit(self, path, tool='Edit', cwd=P):
+        return write(path, tool, cwd)
+
+    def decisions(self):
+        return [r['decision'] for r in log_rows() if r['decision'] != 'seen']
+
+    def test_the_47333_case_no_bak_is_denied(self):
+        for path in (self.f, self.SK + '/scripts/approve_merge.py'):
+            out = self.go(self.edit(path))
+            self.assertIn('"deny"', out, path)
+            self.assertIn('cp -p', out)
+            self.assertIn(os.path.realpath(path), out)
+        rows = [r for r in log_rows() if r['decision'] == 'deny']
+        self.assertEqual([r['agent'] for r in rows], ['main', 'main'])
+
+    def test_every_write_type_tool(self):
+        for tool in ('Write', 'Edit', 'MultiEdit', 'NotebookEdit'):
+            self.assertIn('"deny"', self.go(self.edit(self.f, tool)), tool)
+
+    def test_equal_bak_allows_even_when_old(self):
+        shutil.copyfile(self.f, self.f + '.bak-merge-1118')
+        self.assertEqual(self.go(self.edit(self.f)), '')
+        self.assertEqual(self.go(self.edit(self.f), now=time.time() + 5 * 3600), '')   # old, but equal: allowed
+        self.assertEqual(self.decisions(), ['would-deny', 'would-deny'])                  # the kapunapló line stays
+
+    def test_fresh_bak_allows_a_second_edit(self):
+        shutil.copyfile(self.f, self.f + '.bak-merge-1118')
+        open(self.f, 'w').write('# skill\nv2\n')                  # the first edit happened: no longer equal
+        self.assertEqual(self.go(self.edit(self.f)), '')
+        self.assertIn('"deny"', self.go(self.edit(self.f), now=time.time() + 2 * 3600 + 120))   # window over
+
+    def test_cp_p_counts_as_made_now(self):
+        bak = self.f + '.bak-x-1118'
+        shutil.copyfile(self.f, bak)
+        os.utime(bak, (1700000000, 1700000000))                   # what cp -p does to the mtime
+        open(self.f, 'w').write('# skill\nv2\n')
+        self.assertEqual(self.go(self.edit(self.f)), '')          # the inode change time is now
+
+    def test_bak_from_the_future_does_not_count(self):
+        open(self.f + '.bak-x', 'w').write('other\n')
+        self.assertIn('"deny"', self.go(self.edit(self.f), now=time.time() - 3 * 3600))
+
+    def test_other_name_or_symlink_bak_does_not_count(self):
+        open(self.SK + '/OTHER.md.bak-x', 'w').write('# skill\nv1\n')
+        open(self.SK + '/SKILL.md.orig', 'w').write('# skill\nv1\n')
+        os.symlink(self.f, self.f + '.bak-link')
+        self.assertIn('"deny"', self.go(self.edit(self.f)))
+
+    def test_new_file_and_bak_file_are_free(self):
+        self.assertEqual(self.go(self.edit(self.SK + '/references/new.md')), '')
+        open(self.f + '.bak-old', 'w').write('x\n')
+        self.assertEqual(self.go(self.edit(self.f + '.bak-old'), now=time.time() + 9 * 3600), '')
+        self.assertEqual(self.decisions(), ['would-deny', 'would-deny'])     # no error-allow, no deny
+
+    def test_path_forms(self):
+        self.assertIn('"deny"', self.go(self.edit('.claude/skills/agens-ag-push-pr/SKILL.md', cwd=P)))
+        self.assertIn('"deny"', self.go(self.edit(P + '/.Claude/Skills/agens-ag-push-pr/SKILL.md')))
+        self.assertIn('"deny"', self.go(self.edit(P + '/.claude/skills/x/../agens-ag-push-pr/SKILL.md')))
+        outside = os.path.join(HOME, 'global-skill')
+        os.makedirs(outside, exist_ok=True)
+        open(outside + '/SKILL.md', 'w').write('g\n')
+        os.symlink(outside, P + '/.claude/skills/global')
+        out = self.go(self.edit(P + '/.claude/skills/global/SKILL.md'))
+        self.assertIn('"deny"', out)
+        self.assertIn(os.path.realpath(outside + '/SKILL.md'), out)
+        self.assertEqual(self.go(self.edit('.claude/skills/agens-ag-push-pr/SKILL.md', cwd=None)), '')
+        lnk = HOME + '/sklnk'                                      # a link outside the prod tree into skills
+        os.symlink(P + '/.claude/skills', lnk)
+        try:
+            self.assertIn('"deny"', self.go(self.edit(lnk + '/agens-ag-push-pr/SKILL.md')))
+        finally:
+            os.unlink(lnk)
+
+    def test_outside_skills_and_bash_stay_log_only(self):
+        self.assertEqual(self.go(self.edit(P + '/scripts/x.py')), '')
+        self.assertEqual(self.go(self.edit(P + '/.claude/settings.json')), '')
+        self.assertEqual(self.go(bash('echo x > ' + self.f)), '')
+        self.assertEqual(self.decisions(), ['would-deny', 'would-deny', 'would-deny'])
+
+    def test_sub_agent_unchanged(self):
+        out = self.go(self.edit(self.f), tp=SUB_TP)
+        self.assertIn('"deny"', out)
+        self.assertNotIn('cp -p', out)                             # the sub-agent's own (worktree) reason
+        shutil.copyfile(self.f, self.f + '.bak-x')
+        self.assertIn('"deny"', self.go(self.edit(self.f), tp=SUB_TP))   # a .bak does not open it for a sub-agent
+
+    def test_unknown_session_not_gated(self):
+        self.assertEqual(self.go(self.edit(self.f), tp=None), '')
+
+    def test_rule_error_allows_and_leaves_a_trace(self):
+        real = gate.main_skill_bak
+        try:
+            def boom(*a):
+                raise OSError('x')
+            gate.main_skill_bak = boom
+            self.assertEqual(self.go(self.edit(self.f)), '')
+        finally:
+            gate.main_skill_bak = real
+        rows = [r for r in log_rows() if r['decision'] == 'error-allow']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['agent'], 'main')
+
+    def test_malformed_input_for_main(self):
+        for p in ({'tool_name': 'Edit', 'tool_input': None}, {'tool_name': 'Edit', 'tool_input': {'file_path': 5}},
+                  {'tool_name': 'Edit', 'tool_input': {'file_path': self.f + '\x00'}}):
+            self.assertEqual(self.go(dict(p, cwd=P)), '')
+
+
 if __name__ == '__main__':
     try:
         unittest.main(verbosity=1)

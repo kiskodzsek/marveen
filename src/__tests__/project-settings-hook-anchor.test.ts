@@ -80,6 +80,7 @@ const EXPECTED: Record<string, string[]> = {
     'service-memory-reply-gate.py', // Klodel 40111 (#241): a known service in a main-agent reply needs a memory search first
     'tmux-kill-gate.py', // card ad7edaec (Viktor 43117): no live tmux kill-server / agent session kill, every Bash call
     'zsh-trap-gate.py', // retro 2026-11-13 R6 (card cf287c2c): zsh traps + rm -r on a variable, every Bash call
+    'prod-tree-write-gate.py', // card aa9363b8 (Klodel 47341): main agent log-only, except a skill-file write with no fresh .bak
   ],
   Stop: ['marveen-commands.py', 'telegram-reply-guard.py', 'telegram_progress_clear.py', 'slack_progress_clear.py'],
   SessionStart: ['ledger-replay.py', 'taskstate-replay.py', 'clear-replay.py', 'marveen-commands.py'],
