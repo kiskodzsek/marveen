@@ -238,6 +238,62 @@ class Hook(unittest.TestCase):
         self.log(GROUP, 'out')
         self.assertEqual(self.run_gate(GROUP, 'És még ez.')[0], 2)
 
+    # Viktor 47309: his probe rows that killed mutants these cases missed (V01, V02, V06, V09, V14-V16), and the
+    # 6-hour window as a literal (a constant-derived age survived a 6 -> 60 hour mutant).
+    def queue_raw(self, msg_id, frm, to, created_at):
+        con = sqlite3.connect(self.db)
+        con.execute('INSERT INTO agent_messages (id, from_agent, to_agent, content, created_at) VALUES (?, ?, ?, ?, ?)',
+                    (msg_id, frm, to, 'kiadás', created_at))
+        con.commit()
+        con.close()
+
+    def release(self, value):
+        self.answered()
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value=value)
+        return self.run_gate(GROUP, 'Ma éjjel kiadás.')[0]
+
+    def test_v01_future_dated_message_blocks(self):
+        self.queue_raw(47230, 'pulzus', 'main', int(time.time()) + 3600)
+        self.assertEqual(self.release('47230'), 2)
+
+    def test_v02_real_created_at_blocks(self):
+        self.queue_raw(47231, 'pulzus', 'main', time.time() - 60.5)
+        self.assertEqual(self.release('47231'), 2)
+
+    def test_v06_three_digit_id_blocks(self):
+        self.queue_raw(472, 'pulzus', 'main', int(time.time()) - 60)
+        self.assertEqual(self.release('472'), 2)
+
+    def test_v09_sender_case_or_space_variant_blocks(self):
+        self.queue_raw(47232, 'Pulzus', 'main', int(time.time()) - 60)
+        self.queue_raw(47233, ' pulzus', 'main', int(time.time()) - 60)
+        self.queue_raw(47234, 'pulzus', 'Main', int(time.time()) - 60)
+        self.assertEqual(self.release('47232 47233 47234'), 2)
+
+    def test_v14_id_after_a_digit_blocks(self):
+        # 8 digits: without the lookbehind "1047235" would match from the second digit.
+        self.queue_msg(1047235)
+        self.assertEqual(self.release('91047235'), 2)
+
+    def test_v15_id_before_a_digit_blocks(self):
+        # 8 digits: without the lookahead "1047236" would match from the first digit.
+        self.queue_msg(1047236)
+        self.assertEqual(self.release('10472369'), 2)
+
+    def test_v16_second_of_two_ids_is_enough(self):
+        self.queue_msg(47237, frm='dave')
+        self.queue_msg(47238)
+        self.assertEqual(self.release('47237 47238'), 0)
+
+    def test_window_is_six_hours_literally(self):
+        self.queue_msg(47239, age=7 * 3600)
+        self.assertEqual(self.release('47239'), 2)
+        self.queue_msg(47240, age=5 * 3600 + 3000)
+        self.assertEqual(self.release('47240'), 0)
+
+    def test_spent_message_names_the_release_mark(self):
+        self.assertIn("f'VÁLASZ-KAPU: a {mark_kind} jel közben elfogyott", open(GATE, encoding='utf-8').read())
+
     def test_reply_mark_cli_accepts_the_accented_alias(self):
         env = dict(os.environ, REPLY_MARKS_PATH=self.marks_path(), MARVEEN_AGENT_ID='main', MAIN_AGENT_ID='main')
         env.pop('CLAUDE_CONFIG_DIR', None)

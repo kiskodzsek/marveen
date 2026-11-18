@@ -148,6 +148,7 @@ def main():
     except Exception:
         n = 0  # no readable ledger: the volume rule cannot decide, the size rule still holds
     escaped = False
+    mark_kind = 'KESZ-EREDMENY'
     if n >= 1:
         try:
             sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'lib'))
@@ -163,6 +164,7 @@ def main():
                               'újra.', file=sys.stderr)
                         return 2
                     escaped = True
+                    mark_kind = 'KIADAS-ELOTTE'
         except Exception:
             escaped = False
     msg = check(ti.get('text', ''), n, escaped)
@@ -170,7 +172,7 @@ def main():
         print(msg, file=sys.stderr)
         return 2
     if escaped and not reply_marks.spend_pending():
-        print('VÁLASZ-KAPU: a KESZ-EREDMENY jel közben elfogyott (egy jel = egy üzenet); jelölj újra.', file=sys.stderr)
+        print(f'VÁLASZ-KAPU: a {mark_kind} jel közben elfogyott (egy jel = egy üzenet); jelölj újra.', file=sys.stderr)
         return 2
     return 0
 
