@@ -209,6 +209,52 @@ export function backgroundAgentCount(pane: string): number {
   return Math.max(rows, waiting)
 }
 
+// The live mode footer (`⏵⏵ bypass permissions on · ...`), idle or busy shape.
+const LIVE_MODE_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on · /
+// One pill item: `2 shells`, `1 background task` (Claude Code's label for a MIX of
+// kinds, so it may hold a shell), optionally glyph-prefixed.
+const SHELL_PILL_ITEM_RX = /^(?:\S+ )?(\d+) (?:shells?|background tasks?)$/
+// How far above the footer the ❯ row of the live input box may sit (separator,
+// optional statusline, slack).
+const SHELL_FOOTER_MAX_BOX_DISTANCE = 6
+
+/**
+ * How many background SHELLS (run_in_background Bash) the live footer shows, 0
+ * when none.
+ *
+ * Card 70dad0d7, measured 2026-11-16: a Codex review (run_review, pid 44934) ran
+ * in a background shell of the kernel session while the context-guard prepared
+ * a restart; a restart kills the shell with the session, and it had to be held
+ * by hand. backgroundAgentCount does not see shells: they show only as a pill
+ * in the footer -- `⏵⏵ bypass permissions on · 1 shell` idle, `... · 1 shell ·
+ * esc to interrupt · ↓ to manage` busy (measured 2026-11-18 07:0x on the kernel
+ * pane), comma-joined with other kinds (`1 shell, 1 monitor`), or `N background
+ * tasks` for a mix, which is counted too (it may hold a shell; the guard's wait
+ * is capped). Monitors and agents are not shells and are not counted here.
+ *
+ * Read only from the LIVE footer: the last non-blank line once a background-agent
+ * panel is cut, with the ❯ row of the input box a few rows above it, so a pill
+ * quoted in scrollback is not a signal.
+ */
+export function backgroundShellCount(pane: string): number {
+  if (!pane) return 0
+  const kept = withoutAgentPanel(pane.split('\n'))
+  let footer = kept.length - 1
+  while (footer >= 0 && kept[footer].trim() === '') footer--
+  if (footer < 0 || !LIVE_MODE_FOOTER_RX.test(kept[footer])) return 0
+  let box = footer - 1
+  while (box >= 0 && footer - box <= SHELL_FOOTER_MAX_BOX_DISTANCE && !/^❯/.test(kept[box])) box--
+  if (box < 0 || footer - box > SHELL_FOOTER_MAX_BOX_DISTANCE) return 0
+  let shells = 0
+  for (const segment of kept[footer].split(' · ').slice(1)) {
+    for (const item of segment.split(', ')) {
+      const m = SHELL_PILL_ITEM_RX.exec(item.trim())
+      if (m) shells += Number(m[1])
+    }
+  }
+  return shells
+}
+
 // Index of the live idle footer line, or -1. Both footer shapes are accepted
 // only as the LIVE footer, the last non-blank line of the pane; the bare pill
 // additionally needs the whole live input box just above it (see above).
