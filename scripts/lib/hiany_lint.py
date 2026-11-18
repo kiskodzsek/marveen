@@ -46,6 +46,7 @@ ITTHON_CLAIM = _rules.ITTHON_CLAIM
 itthon_blocks = _rules.itthon_blocks
 itthon_shop_gaps = _rules.itthon_shop_gaps
 site_hibak = _rules.site_hibak
+ITTHON_SITE = _rules.ITTHON_SITE
 
 # The file form allows a list dash and a phrase ("ez a fájl"); the reply gate's ITTHON_MERT_RE takes one token.
 ITTHON_MERT_RE = re.compile(r'(?mi)^\s*[-*]?\s*ITTHON-M[EÉ]RT:[ \t]*(.+?)\s*$')
@@ -96,6 +97,25 @@ def read_lines(path):
     return out
 
 
+# Klodel 46972 (card bc03c9d4, Májsztró 45072): the 4-domain site probe is waived for ONE file, because it was measured
+# as not measurable (Bing: result-less page, DuckDuckGo: 403, the shops' own search: 410 / 403 / 403 / captcha). Only the
+# "site-próba eredménnyel hiányzik" finding is dropped, and only when the block itself names the decision and the site
+# line says NINCS ADAT. A probe that finds a hit (n > 0) is never waived. A new waiver = a new entry here, by decision.
+SITE_EXEMPT = {'shared/ai-influenszer-1111/radar-markapenz.md': '46972'}
+SITE_MISSING = 'site-próba eredménnyel hiányzik'
+
+
+def site_exempt(tpath, blk, finding):
+    if SITE_MISSING not in finding:
+        return False
+    msg_id = SITE_EXEMPT.get(os.path.relpath(tpath, root()))
+    if not msg_id:
+        return False
+    decided = any(re.search(r'KAPUDÖNTÉS:\s*Klodel\s+' + msg_id + r'(?!\d)', ln) for ln in blk)
+    no_data = any(ITTHON_SITE.search(ln) and NINCS.search(ln) for ln in blk)
+    return decided and no_data
+
+
 def check_itthon(path, lines):
     claims = [(i + 1, ln.strip()) for i, ln in enumerate(lines)
               if any(rx.search(ln) for rx in ITTHON_CLAIM) and not ITTHON_MERT_RE.match(ln)]
@@ -130,6 +150,8 @@ def check_itthon(path, lines):
                        f"(mért eredmény vagy „NINCS ADAT <indok>”)")
             continue
         for se in site_hibak('\n'.join(blk)):
+            if site_exempt(tpath, blk, se):
+                continue
             out.append(f"R10a NEM MEGY  ITTHON-blokk „{head}”: {se}")
     return out
 

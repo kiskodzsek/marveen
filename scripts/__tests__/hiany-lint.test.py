@@ -115,6 +115,53 @@ with open(os.path.join(sib, 'm.md'), 'w', encoding='utf-8') as f:
 check("ITTHON-MERT to a sibling <root>x/ (prefix without separator): refused",
       verdict(f"Itthon nincs ilyen.\nITTHON-MERT: {os.path.join(sib, 'm.md')}\n"), 1)
 
+# Klodel 46972 (card bc03c9d4, ea09b604; Radar 46983): the site probe of ONE file is waived, only with the decision
+# line in the block and NINCS ADAT on the site line; a probe hit is never waived. Synthetic copy of that block's shape.
+# No digits on the site line: site_hibak reads any number there as a hit count ("410" -> "talált (emag.hu: 410)").
+EXEMPT = 'shared/ai-influenszer-1111/radar-markapenz.md'
+WAIVED = ("Itthon nincs ilyen.\nITTHON-MERT: ez a fájl\n"
+          "- ITTHON: mért (2026-11-16):\n"
+          "  - Meska: NINCS ADAT, a kereső 404 (meska.hu, 11-16);\n"
+          "  - Pepita: NINCS ADAT, a kereső 404 (pepita.hu, 11-16);\n"
+          "  - eMAG: NINCS ADAT, a kereső 410 (emag.hu, 11-16);\n"
+          "  - site-próba (emag.hu, alza.hu, notino.hu, douglas.hu): NINCS ADAT, mérve nem mérhető; az ok a forrásokban.\n"
+          "    - KAPUDÖNTÉS: Klodel 46972 (2026-11-18): a domainpróba mellőzése elfogadva.\n")
+SITE_MISSING = 'site-próba eredménnyel hiányzik'
+
+
+def findings_at(rel, text):
+    path = os.path.join(ROOT, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(text)
+    return lint.lint(path)
+
+
+def has(fs, part):
+    return any(part in f for f in fs)
+
+
+check("46972: the waived file with decision + NINCS ADAT passes", findings_at(EXEMPT, WAIVED), [])
+check("46972: same text at another path keeps the site finding",
+      has(findings_at('shared/masik/radar-markapenz.md', WAIVED), SITE_MISSING), True)
+check("46972: another decision id keeps the site finding",
+      has(findings_at(EXEMPT, WAIVED.replace('Klodel 46972', 'Klodel 46973')), SITE_MISSING), True)
+check("46972: a longer id with the same prefix keeps the site finding",
+      has(findings_at(EXEMPT, WAIVED.replace('Klodel 46972', 'Klodel 469721')), SITE_MISSING), True)
+check("46972: the id without the KAPUDÖNTÉS marker keeps the site finding",
+      has(findings_at(EXEMPT, WAIVED.replace('KAPUDÖNTÉS: Klodel 46972', 'Klodel 46972')), SITE_MISSING), True)
+check("46972: the decision line removed keeps the site finding",
+      has(findings_at(EXEMPT, '\n'.join(l for l in WAIVED.split('\n') if 'KAPUDÖNTÉS' not in l)), SITE_MISSING), True)
+check("46972: a site line without NINCS ADAT keeps the site finding",
+      has(findings_at(EXEMPT, WAIVED.replace('NINCS ADAT, mérve nem mérhető', 'mérve nem mérhető')), SITE_MISSING), True)
+hit = findings_at(EXEMPT, WAIVED.replace('NINCS ADAT, mérve nem mérhető', 'douglas.hu: 3 találat; NINCS ADAT'))
+check("46972: a probe hit is never waived", (has(hit, 'site-próba talált (douglas.hu: 3)'), has(hit, SITE_MISSING)), (True, False))
+check("46972: the shop check still applies in the waived file",
+      len(findings_at(EXEMPT, '\n'.join(l for l in WAIVED.split('\n') if 'Meska' not in l))) > 0, True)
+findings_at(EXEMPT, WAIVED)  # restore the waived block (the case above rewrote it without the Meska line)
+check("46972: an ITTHON-MERT from another file to the waived block passes (the block carries the decision)",
+      findings_at('shared/masik/hivatkozo.md', f"Itthon nincs ilyen.\nITTHON-MERT: {EXEMPT}\n"), [])
+
 # Viktor 41461 LOW 2: a long hyphenated token on a NINCS ADAT line stays linear.
 import time
 t0 = time.time()
