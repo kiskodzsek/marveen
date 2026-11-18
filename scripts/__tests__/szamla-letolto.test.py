@@ -108,6 +108,81 @@ try:
     sys.argv = ['szamla-letolto.py', 'https://srv.e-szigno.hu/eszamlak&wac=1', inside]
     szl.main()
     ok('a PDF from the new host is saved under ~/Konyveles', open(inside, 'rb').read().startswith(b'%PDF'))
+    # --- the real opener path (Viktor 47352): a fake https handler answers, the script's own redirect handler runs
+    szl.urllib.request.urlopen = real
+    import email.message
+    import urllib.response
+    hits, ROUTES = [], {}
+
+    class Fake(szl.urllib.request.BaseHandler):
+        handler_order = 100
+
+        def _open(self, req):
+            u = req.full_url
+            hits.append(szl.urllib.parse.urlparse(u).scheme + '://' + req.host)
+            code, body, loc, ctype = ROUTES.get(u, (200, b'%PDF-1.7 ok', None, 'application/pdf'))
+            h = email.message.Message()
+            h['Content-Type'] = ctype
+            if loc:
+                h['Location'] = loc
+            r = urllib.response.addinfourl(io.BytesIO(body), h, u, code)
+            r.msg = 'x'
+            return r
+        https_open = _open
+        http_open = _open
+
+    szl.urllib.request.install_opener(szl.urllib.request.build_opener(Fake(), szl._Redir))
+    S0 = 'https://srv.e-szigno.hu/eszamlak&wac=AA'
+
+    def main_res(target, routes):
+        ROUTES.clear()
+        ROUTES.update(routes)
+        hits.clear()
+        sys.argv = ['szamla-letolto.py', S0, target]
+        try:
+            szl.main()
+            return 'saved'
+        except SystemExit:
+            return 'refused'
+
+    K = os.path.join(home, 'Konyveles')
+    # R1: an allowed host redirects off the list and back: stops at the first hop, the off-list host gets no request
+    t = os.path.join(K, 'r1.pdf')
+    res = main_res(t, {S0: (302, b'', 'https://evil.example/c', 'text/html'),
+                       'https://evil.example/c': (302, b'', 'https://srv.e-szigno.hu/final.pdf', 'text/html')})
+    ok('R1 off-list redirect hop: refused before it is requested',
+       (res, hits, os.path.exists(t)) == ('refused', ['https://srv.e-szigno.hu'], False), (res, hits))
+    # R2: a plain-http hop in the chain stops too
+    res = main_res(t, {S0: (302, b'', 'http://srv.e-szigno.hu/x', 'text/html'),
+                       'http://srv.e-szigno.hu/x': (302, b'', 'https://srv.e-szigno.hu/final.pdf', 'text/html')})
+    ok('R2 plain-http redirect hop: refused', (res, hits) == ('refused', ['https://srv.e-szigno.hu']), (res, hits))
+    # control: an on-list redirect is followed
+    res = main_res(t, {S0: (302, b'', 'https://srv.e-szigno.hu/final.pdf', 'text/html')})
+    ok('on-list redirect is followed and saved', res == 'saved' and hits == ['https://srv.e-szigno.hu'] * 2, (res, hits))
+    # R5: on an HTML page only the on-list download link is followed
+    t = os.path.join(K, 'r5.pdf')
+    res = main_res(t, {S0: (200, b'<a href="https://evil.example/download.pdf">x</a><a href="/letolt/1">y</a>', None,
+                            'text/html')})
+    ok('R5 html: only the on-list link is followed', (res, hits) == ('saved', ['https://srv.e-szigno.hu'] * 2),
+       (res, hits))
+    # R7: a symlink inside ~/Konyveles pointing out is refused (realpath)
+    lnk = os.path.join(K, 'l.pdf')
+    os.symlink(os.path.join(home, 'outside.pdf'), lnk)
+    res = main_res(lnk, {})
+    ok('R7 symlink out of ~/Konyveles refused', (res, os.path.exists(os.path.join(home, 'outside.pdf')))
+       == ('refused', False))
+    # R8: a non-.pdf target is refused
+    t = os.path.join(K, 'r8.txt')
+    ok('R8 non-pdf target refused', (main_res(t, {}), os.path.exists(t)) == ('refused', False))
+    # R9: the HTML path's download link answers non-PDF: nothing saved
+    t = os.path.join(K, 'r9.pdf')
+    res = main_res(t, {S0: (200, b'<a href="/letolt/9">y</a>', None, 'text/html'),
+                       'https://srv.e-szigno.hu/letolt/9': (200, b'<html>no</html>', None, 'text/html')})
+    ok('R9 html path, a non-PDF answer is not saved', (res, os.path.exists(t)) == ('refused', False))
+    # R10: a sibling directory sharing the prefix (~/KonyvelesX) is refused
+    os.makedirs(os.path.join(home, 'KonyvelesX'), exist_ok=True)
+    t = os.path.join(home, 'KonyvelesX', 'r10.pdf')
+    ok('R10 ~/KonyvelesX sibling refused', (main_res(t, {}), os.path.exists(t)) == ('refused', False))
 finally:
     szl.urllib.request.urlopen = real
     shutil.rmtree(home, ignore_errors=True)

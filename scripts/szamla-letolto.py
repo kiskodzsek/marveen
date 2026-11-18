@@ -24,6 +24,18 @@ def host_ok(u):
     return p.scheme == "https" and p.hostname in ALLOWED
 
 
+class _Redir(urllib.request.HTTPRedirectHandler):
+    """Every redirect hop is checked BEFORE it is requested, not only the final URL (Viktor 47352 L1: an allowed
+    host's open redirect to an off-list host and back, or a plain-http hop, used to be followed and accepted)."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not host_ok(newurl):
+            sys.exit(f"TILTOTT átirányítás: {urllib.parse.urlparse(newurl).hostname}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+urllib.request.install_opener(urllib.request.build_opener(_Redir))
+
+
 def get(u):
     if not host_ok(u):
         sys.exit(f"TILTOTT host: {urllib.parse.urlparse(u).hostname}")
