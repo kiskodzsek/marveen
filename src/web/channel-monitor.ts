@@ -45,7 +45,7 @@ import { probeTelegramConflict } from './channel-conflict-probe.js'
 import { schedulePluginUnlockAfterRespawn, wasPluginConfirmedAbsent, clearPluginAbsent } from './channel-plugin-unlock.js'
 import { getInjectedPrompt, matchesInjectedPrompt } from './injected-prompt-registry.js'
 import {
-  detectPaneState, decidePaneErrorAlert, detectsBlockingMenu, detectsPermissionDialog, detectsFirstRunGate, detectsModelConsentDialog, type PaneErrorAlertState, type PaneState,
+  detectPaneState, decidePaneErrorAlert, detectsBlockingMenu, detectsAutocompactOffer, detectsPermissionDialog, detectsFirstRunGate, detectsModelConsentDialog, type PaneErrorAlertState, type PaneState,
   stuckInputSignature, decideStuckInputRecovery, parkedChannelInput,
   parkedInputText, shouldClearTruncatedPreamble,
   parkedInputRowCount, submitLanded, decideStuckInputAction,
@@ -2409,13 +2409,24 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
             logger.warn({ session: t.session, agent: label }, 'Blocking "menu" is a tool-permission prompt -- a human decides, NO keystrokes sent')
             routeAgentAlert(alertWho, `🔐 A(z) ${label} session egy engedélykérésen vár, és NEM nyomtam meg semmit: ott az Escape NEM-et jelentene. Döntsd el te: tmux attach -t ${t.session}`)
           } else {
-            logger.warn({ session: t.session, agent: label }, 'Session parked in a blocking interactive menu -- sending Escape to recover')
+            // Card e9989124: the autocompact offer gets the same single Escape -- there it is "not now" (outcome
+            // not_now, nothing saved, model unchanged); Enter would SAVE a smaller window and is never sent. If stray
+            // keys reached the dialog first it eats one Escape; the next pass re-sends after the dedup window while
+            // the dialog is still up. Only the log line and the alert text differ.
+            const offer = paneNow != null && detectsAutocompactOffer(paneNow, 'last-line')
+            logger.warn({ session: t.session, agent: label, autocompactOffer: offer }, offer
+              ? 'Session parked on the Claude Code autocompact offer -- sending Escape ("not now", settings unchanged)'
+              : 'Session parked in a blocking interactive menu -- sending Escape to recover')
             try {
               execFileSync(tmuxBin(), ['send-keys', '-t', exactTmuxTarget(t.session), 'Escape'], { timeout: 5000 })
             } catch (err) {
               logger.warn({ err, session: t.session }, 'Menu-recovery Escape failed')
             }
-            sendRoutineAlert(`menu-escape:${label}`, `⌨️ A(z) ${label} session beragadt egy interaktív menübe (pl. /mcp) és nem dolgozott fel üzeneteket. Kiküldtem egy Escape-et, visszatérítettem a prompthoz. Ha ismétlődik: tmux attach -t ${t.session}`)
+            if (offer) {
+              sendRoutineAlert(`autocompact-offer:${label}`, `🗜️ A(z) ${label} session a Claude Code autocompact-ajánlatán ("Want to autocompact at ... tokens instead?") parkolt, és nem dolgozott fel üzeneteket. Escape-et küldtem ("not now"): a beállítás és a modell NEM változott. Ha ismétlődik: tmux attach -t ${t.session}`)
+            } else {
+              sendRoutineAlert(`menu-escape:${label}`, `⌨️ A(z) ${label} session beragadt egy interaktív menübe (pl. /mcp) és nem dolgozott fel üzeneteket. Kiküldtem egy Escape-et, visszatérítettem a prompthoz. Ha ismétlődik: tmux attach -t ${t.session}`)
+            }
           }
         }
       }

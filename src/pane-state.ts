@@ -837,7 +837,54 @@ export function detectsBlockingMenu(pane: string, anchor: DialogAnchor = 'tail')
   if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
   if (hasIdleFooter(pane)) return false
   const hintArea = anchor === 'last-line' ? lastLiveLine(lines) : footerRegion
-  return MENU_NAV_RX.test(hintArea) || MENU_ESC_RX.test(hintArea)
+  return MENU_NAV_RX.test(hintArea) || MENU_ESC_RX.test(hintArea) || detectsAutocompactOffer(pane, anchor)
+}
+
+// Card e9989124 (Radar 2026-11-16, session-stuck 44979: 10+ min parked, 2 messages queued): Claude Code's
+// AUTOCOMPACT OFFER. A modal titled "We recommend compacting earlier" that asks "Want to autocompact at <N> tokens
+// instead? ...". Read from the shipped CLI (bin/claude.exe, 2026-11-18): its hint row is
+// "↑/↓ choose · ←/→ change size · enter confirm · esc not now", which neither MENU_NAV_RX ("↑/↓ to choose") nor
+// MENU_ESC_RX ("esc to cancel") matches, so the pane read 'unknown' and nothing recovered it. Worse, every key that
+// is not an arrow, Enter or Escape is swallowed as a stray key, so each message the router typed into it was lost.
+// Escape is the NEUTRAL answer here: the CLI resolves choice "esc" to outcome "not_now" ("Autocompact unchanged"),
+// nothing is saved and the model does not change. (Enter would save the preselected window; never send it.) After
+// stray keys the dialog eats one Escape to clear its stray-key state, so a second Escape may be needed: the
+// menu-recovery pass in channel-monitor re-sends after its dedup window while the dialog is still up.
+// When the body does not fit, the dialog draws "More text above: ..." UNDER its hint row; the 'last-line' anchor
+// skips that warning and pure box-border rows, and nothing else.
+const AUTOCOMPACT_OFFER_BODY_RX = /We recommend compacting earlier|Want to autocompact at \S+ tokens instead\?/
+const AUTOCOMPACT_OFFER_HINT_RX = /\besc not now\b/i
+const AUTOCOMPACT_OFFER_OVERFLOW_RX = /^More text above: scroll up, or enlarge the terminal$/
+const BOX_EDGE_RX = /^[\s│┃╭╮╰╯─━┌┐└┘]+|[\s│┃╭╮╰╯─━┌┐└┘]+$/g
+
+function autocompactOfferHintLine(lines: string[]): string {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const t = lines[i].replace(BOX_EDGE_RX, '')
+    if (t === '' || AUTOCOMPACT_OFFER_OVERFLOW_RX.test(t)) continue
+    return t
+  }
+  return ''
+}
+
+/**
+ * True when the pane is parked on Claude Code's autocompact offer (see above). Same discipline as
+ * detectsBlockingMenu: never on a busy pane or under a live idle footer; the dialog's own body text must be on
+ * screen (whitespace-normalised, so a wrapped line still matches); and its "esc not now" hint must be in the live
+ * footer region ('tail') or be the last live row ('last-line', for the caller that sends Escape).
+ */
+export function detectsAutocompactOffer(pane: string, anchor: DialogAnchor = 'tail'): boolean {
+  if (!pane || !pane.trim()) return false
+  for (const rx of BUSY_INDICATORS) {
+    if (rx.test(pane)) return false
+  }
+  const lines = pane.split('\n')
+  const footerRegion = liveTailRegion(lines, MENU_FOOTER_REGION_LINES)
+  if (BUSY_ESC_TO_INTERRUPT_RX.test(footerRegion)) return false
+  if (hasIdleFooter(pane)) return false
+  const flat = lines.map((l) => l.replace(BOX_EDGE_RX, '')).join(' ').replace(/\s+/g, ' ')
+  if (!AUTOCOMPACT_OFFER_BODY_RX.test(flat)) return false
+  const hintArea = anchor === 'last-line' ? autocompactOfferHintLine(lines) : footerRegion
+  return AUTOCOMPACT_OFFER_HINT_RX.test(hintArea)
 }
 
 // What the prompt is ASKING, in one line, for an alert that has to be
