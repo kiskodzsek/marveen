@@ -2990,3 +2990,27 @@ describe('detectPaneState: the footer cut by the pane width (0db274d2)', () => {
     expect(detectPaneState(modeFooter('  and so it goes on and on…'))).toBe('unknown')
   })
 })
+
+describe('detectPaneState: a cut footer that ends inside "esc to interrupt" (a183d0f4)', () => {
+  // Viktor 45950 INFO-1: the ellipsis can fall inside the busy footer's own `esc to interrupt`. Without a spinner row
+  // in the capture, that line must not read idle; the router holds ('unknown') instead of typing into a working turn.
+  it('is not idle when the last segment before the ellipsis starts "esc to interrupt"', () => {
+    for (const cut of ['esc to inte', 'esc to', 'esc', 'es', 'e', 'Esc to interr', '']) {
+      const footer = modeFooter(`  ⏵⏵ bypass permissions on · 1 monitor · ${cut}…`)
+      expect(detectPaneState(footer), cut).toBe('unknown')
+      expect(isReadyForPrompt(footer), cut).toBe(false)
+    }
+    // The cut right after the dot, no space: an empty segment is a prefix of anything, so it holds too.
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · 1 monitor ·…'))).toBe('unknown')
+    // The esc segment right after the mode, as the measured busy footers have it.
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · esc to int…'))).toBe('unknown')
+  })
+
+  it('other cut segments still read idle (the #360 behaviour is kept)', () => {
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · install gh for PR status · 1 monitor · ↓ to mana…'))).toBe('idle')
+    expect(detectPaneState(modeFooter('  ⏵⏵ accept edits on · 2 shells · ↓ to…'))).toBe('idle')
+    // Starts like esc but is another word: not a prefix of "esc to interrupt".
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · 1 monitor · escalat…'))).toBe('idle')
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · 1 monitor · esc to manage…'))).toBe('idle')
+  })
+})

@@ -116,6 +116,21 @@ const IDLE_TASK_PILL_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on · (?:[^·\n]{1,60}
 // and where it does, it does not sit under a live box.
 const IDLE_TRUNCATED_FOOTER_RX = /(?:[A-Za-z][\w-]* ){1,3}on · [^\n]*\u2026[ \t]*$/
 
+// Card a183d0f4 (Viktor 45950 INFO-1, PR #360 follow-up): the cut can fall INSIDE the busy footer's own
+// `esc to interrupt` (`⏵⏵ bypass permissions on · 1 monitor · esc to inte…`). That line is a working turn, not an
+// idle prompt, so the last `·` segment before the ellipsis must not be a start of `esc to interrupt`. The measured
+// busy footers put `esc` right after the mode, so this is hardening, not a seen case; a too-short cut such as `e…`,
+// or one right after the dot (`· …`, an empty segment, a prefix of anything), counts too and reads 'unknown' (the
+// router holds), the safe side.
+const BUSY_ESC_FOOTER_TEXT = 'esc to interrupt'
+
+function truncatedFooterCutsBusyEsc(line: string): boolean {
+  const cut = line.lastIndexOf('\u2026')
+  if (cut < 0) return false
+  const segment = line.slice(line.lastIndexOf('·', cut) + 1, cut).trim().toLowerCase()
+  return BUSY_ESC_FOOTER_TEXT.startsWith(segment)
+}
+
 // How far above the bare pill footer the input box's bottom separator may sit.
 // The box is followed by an optional statusline row (`Opus 5.5 | ctx 22% ...`)
 // and then the footer, so 3 rows leaves one row of slack.
@@ -283,7 +298,8 @@ function idleFooterIndex(lines: string[]): number {
   while (last >= 0 && lines[last].trim() === '') last--
   if (last < 0) return -1
   if (IDLE_FOOTER_RX.test(lines[last])) return last
-  if (!IDLE_TASK_PILL_FOOTER_RX.test(lines[last]) && !IDLE_TRUNCATED_FOOTER_RX.test(lines[last])) return -1
+  const truncatedIdle = IDLE_TRUNCATED_FOOTER_RX.test(lines[last]) && !truncatedFooterCutsBusyEsc(lines[last])
+  if (!IDLE_TASK_PILL_FOOTER_RX.test(lines[last]) && !truncatedIdle) return -1
   // The whole live input box must sit above the pill, not just one rule: a
   // `cat`-ed report with a ─ line over a quoted pill must not read idle
   // (Viktor review R1, 2026-10-17).
