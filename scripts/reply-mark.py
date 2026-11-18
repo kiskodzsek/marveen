@@ -5,7 +5,8 @@
 
 KIND: PRIVAT-OK (why private) | KESZ-EREDMENY (what finished result) | BALAZS-KERES (TG <message id>) |
 BELSO-UT-MERVE (msg_id of the internal route measured) |
-PATRIK-LEPES (who measured that there is no internal route, and that msg_id: patrik-step-reply-gate.py). One mark = one message, 3 minutes, this agent and chat only
+PATRIK-LEPES (who measured that there is no internal route, and that msg_id: patrik-step-reply-gate.py) |
+KIADAS-ELOTTE (Pulzus's release message msg_id: the "before" line of a release, patrik-reply-volume-gate.py). One mark = one message, 3 minutes, this agent and chat only
 (scripts/lib/reply_marks.py). Klodel 40845: the owner never sees these markers; Viktor 40894.
 """
 import os
@@ -18,7 +19,7 @@ import reply_marks  # noqa: E402
 import owner_chat  # noqa: E402
 
 ALIASES = {'PRIVÁT-OK': 'PRIVAT-OK', 'KÉSZ-EREDMÉNY': 'KESZ-EREDMENY', 'BALÁZS-KÉRÉS': 'BALAZS-KERES',
-           'BELSŐ-ÚT-MÉRVE': 'BELSO-UT-MERVE', 'PATRIK-LÉPÉS': 'PATRIK-LEPES'}
+           'BELSŐ-ÚT-MÉRVE': 'BELSO-UT-MERVE', 'PATRIK-LÉPÉS': 'PATRIK-LEPES', 'KIADÁS-ELŐTTE': 'KIADAS-ELOTTE'}
 
 
 def agent_id():
