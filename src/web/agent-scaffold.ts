@@ -820,6 +820,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsRevocationNote(name)) injectRevocationNote(existing)
   if (agentGetsProdTreeWriteGate(name)) injectProdTreeWriteGate(existing)
   if (agentGetsTmuxKillGate(name)) injectTmuxKillGate(existing)
+  if (agentGetsBigReadGate(name)) injectBigReadGate(existing)
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
   // Card d4180ec8: no hook kill switch survives a spawn, in this file or the agent's other two (ensureNoHookKillSwitch).
   if (name !== MAIN_AGENT_ID) ensureNoHookKillSwitch(name)
@@ -1794,6 +1795,51 @@ export function ensureTmuxKillGate(name: string): boolean {
   if (hookEntriesSettled(settings, 'PreToolUse', 'tmux-kill-gate.py', injectTmuxKillGate)) return false
   if (isUnsafeHookCommand(command)) return false
   injectTmuxKillGate(settings)
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  return true
+}
+
+// Card b073a7e3 (Klodel 46838, 46967): the big-read gate. A Read without `limit` of a text file over 20 KiB is
+// stopped once with a hint (grep -n, then offset/limit, or a subagent); an explicit limit always goes through.
+// Measured over 14 days (2026-11-18): 306 such reads, 9878 KiB, and file viewing is the largest tool-output share
+// of the context growth that restarts agents. An EFFICIENCY gate that fails open, not a boundary. Sub-agents only:
+// the main agent's project settings are the owner's call.
+export function agentGetsBigReadGate(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+export function injectBigReadGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'big-read-gate.py'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  // timeout 10 s above the gate's internal 3 s watchdog
+  const entry = {
+    matcher: 'Read',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  // One canonical entry: a prior one under another matcher or with a stale command is a gate that never fires.
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('big-read-gate.py')),
+    entry,
+  ]
+}
+
+// Idempotent migration for the running fleet (same shape as ensureKeychainReadGate). Returns true if written; a
+// settings file that is not there is not created (a never-spawned agent gets the hook on its first spawn).
+export function ensureBigReadGate(name: string): boolean {
+  if (!agentGetsBigReadGate(name)) return false
+  const settingsPath = agentSettingsPath(name)
+  if (!existsSync(settingsPath)) return false
+  let settings: Record<string, unknown> = {}
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'big-read-gate.py'))
+  if (hookEntriesSettled(settings, 'PreToolUse', 'big-read-gate.py', injectBigReadGate)) return false
+  if (isUnsafeHookCommand(command)) return false
+  injectBigReadGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }

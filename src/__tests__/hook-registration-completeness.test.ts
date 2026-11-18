@@ -68,6 +68,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of prod-tree-write-gate.py (run: python3 -I scripts/hooks/prod-tree-write-gate_test.py); not itself a hook (11c4a5fe)',
   'tmux-kill-gate_test.py':
     'the unit test of tmux-kill-gate.py (run: python3 -I scripts/hooks/tmux-kill-gate_test.py); not itself a hook (ad7edaec)',
+  'big-read-gate_test.py':
+    'the unit test of big-read-gate.py (run: python3 -I scripts/hooks/big-read-gate_test.py); not itself a hook (b073a7e3)',
   'command_prompt.py':
     'shared library: the one "is this prompt an owner slash command" check, imported by marveen-commands.py, inbox-drain.py and channel-inbox-drain.py; not itself a hook',
   'hook_errlog.py':
