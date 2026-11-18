@@ -2113,6 +2113,95 @@ def main_skill_bak(payload, prod_root, now):
             'cp -p "%s" "%s.bak-<téma>-%s"' % (real, real, real, time.strftime('%m%d', time.localtime(now))))
 
 
+# The main agent's schedule-store rule (card a74793b8, Klodel 47389; system 47365, first case Klodel 11-14 42457):
+# the per-task store ~/.claude/scheduled-tasks/<name>/ is written by the dashboard API only. A file write leaves the
+# task with a hash that no longer matches its trust row, so the runner frames it as an agent task and alarms. The
+# sub-agents get the same store closed in scripts/self-pace-gate.mjs (SCHEDDIR1118).
+MAIN_SCHED_DIR = ('.claude', 'scheduled-tasks')
+MAIN_SCHED_MENTION = re.compile(r'\.claude(?:-config)?/+scheduled-tasks(?![\w.-])', re.I)
+MAIN_SCHED_HINT = ('az ütemezés-tár (~/.claude/scheduled-tasks/) fájljait a főágens sem írja: a fájlírás '
+                   'schedule-trust eltérést ad (system 47365). Ütemezést a dashboard API-n módosíts: '
+                   'PUT /api/schedules/<név> (új: POST /api/schedules), idézett heredoc payloaddal '
+                   '(Klodel 47389, kártya a74793b8). Olvasni szabad.')
+
+
+class SchedProd(Prod):
+    """A Prod whose only protected place is the schedule store: the same Bash analysis (cp, mv, tee, redirects,
+    sed -i, find -delete, cd tracking, loops, nested shells) then names its write targets."""
+    def __init__(self, store):
+        self.root = store
+        self.cf = fold(store)
+        self.dirs = (self.cf,)
+        self.files = ()
+        self.agents = '\x00'        # matches no path: no agent-config rules here
+        self.caller = None
+        self.names = []
+
+    def kind_of(self, f):
+        if f == self.cf or f.startswith(self.cf + '/'):
+            return 'protected'
+        if f == '/' or (self.cf + '/').startswith(f.rstrip('/') + '/'):
+            return 'ancestor'
+        return None
+
+    def agent_reach(self, path, pat, destructive):
+        return False
+
+    def cfg_below(self, path, dirs):
+        return []
+
+
+def main_schedule_dir(payload, home):
+    """The main agent's schedule-store rule: a deny reason, or None (allowed). Raises on an unexpected error (the
+    caller allows and logs error-allow)."""
+    store = os.path.join(home, *MAIN_SCHED_DIR)
+    sp = SchedProd(store)
+    tool = payload.get('tool_name')
+    inp = payload.get('tool_input')
+    cwd = payload.get('cwd')
+    if not (isinstance(cwd, str) and os.path.isabs(cwd)):
+        cwd = None
+    if tool in WRITE_TOOLS:
+        path = inp.get(WRITE_TOOLS[tool]) if isinstance(inp, dict) else None
+        if not isinstance(path, str) or not path:
+            return None
+        if path.startswith('~/'):
+            path = os.path.join(home, path[2:])
+        if not os.path.isabs(path):
+            if cwd is None:
+                return None
+            path = os.path.join(cwd, path)
+        if MAIN_SCHED_MENTION.search(path) or sp.classify(path) == 'protected':
+            return '%s az ütemezés-tárba: %s -- %s' % (tool, path[:160], MAIN_SCHED_HINT)
+        return None
+    if tool != 'Bash':
+        return None
+    cmd = inp.get('command') if isinstance(inp, dict) else None
+    if not isinstance(cmd, str):
+        return None
+    # Viktor prop: what bash resolves before the path is used (a backslash, quotes, // and /./), and a bare
+    # scheduled-tasks word too (cd ~/.claude && cp a scheduled-tasks/x; cwd ~/.claude with a relative scheduled-tasks/x)
+    norm = re.sub(r'/(?:\.?/)+', '/', re.sub(r'["\']', '', re.sub(r'\\(.)', r'\1', cmd)))
+    named = bool(MAIN_SCHED_MENTION.search(norm))
+    if not named and 'scheduled-tasks' not in norm.casefold() and not (cwd and sp.classify(cwd) == 'protected'):
+        return None     # neither named nor the cwd: nothing to analyse (keeps the main agent's hot path cheap)
+    if len(cmd) > MAX_CMD:
+        return 'Bash: túl hosszú parancs az ütemezés-tár említésével -- %s' % MAIN_SCHED_HINT if named else None
+    st = State(sp, cwd, home)
+    analyze_text(cmd, st, 0)
+    if st.deny:
+        return 'Bash: %s -- %s' % (st.deny[0][:200], MAIN_SCHED_HINT)
+    # Viktor prop: the same as decide() for the prod tree: an unresolved target (xargs from a pipe, a while-read
+    # loop) or a parse error, with the store named in the text, is a deny
+    if named and (st.unknown or st.errors):
+        return 'Bash: nem feloldható írási cél (%s) az ütemezés-tár említésével -- %s' % (
+            (st.unknown or st.errors)[0][:80], MAIN_SCHED_HINT)
+    # Viktor 47421 option (b), an interpreter on a line naming the store, is left out: on the main agent's 7-day
+    # transcripts it denied 36 harmless reads (python json.load of a task-config.json) for 0 real writes; the
+    # interpreter class stays a documented limit, like curl -O / wget (B49, B50) and cat heredoc | bash (B18).
+    return None
+
+
 def run(raw, prod_root=PROD, log_dir=LOG_DIR, home=None, now=None):
     """raw stdin text -> stdout text ('' = allow). Never raises."""
     now = time.time() if now is None else now
@@ -2137,6 +2226,15 @@ def run(raw, prod_root=PROD, log_dir=LOG_DIR, home=None, now=None):
                 log_line(log_dir, {'ts': stamp(now), 'agent': agent, 'tool': tool if isinstance(tool, str) else None,
                                    'reason': 'főágens skill-.bak szabály hibája (%s)' % type(e).__name__,
                                    'input': redact(text), 'decision': 'error-allow'})
+            if not main_reason:
+                try:
+                    main_reason = main_schedule_dir(payload, home_dir() if home is None else home)
+                except Exception as e:   # the same: allow, and a trace
+                    main_reason = None
+                    log_line(log_dir, {'ts': stamp(now), 'agent': agent,
+                                       'tool': tool if isinstance(tool, str) else None,
+                                       'reason': 'főágens ütemezés-tár szabály hibája (%s)' % type(e).__name__,
+                                       'input': redact(text), 'decision': 'error-allow'})
             if main_reason:
                 row = {'ts': stamp(now), 'agent': agent, 'tool': tool, 'reason': main_reason,
                        'input': redact(text), 'decision': 'deny'}
