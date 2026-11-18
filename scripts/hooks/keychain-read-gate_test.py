@@ -700,6 +700,15 @@ def bash_in(cmd, cwd):
 LIT_FORMS = ["SEC = '/usr/bin/BIN'", 'SEC=BIN', 'SEC = "BIN"', 'X = ~/bin/BIN\nSEC = X', 'X=/usr/local/bin/BIN\nSEC = X']
 
 
+
+def _eval_nest(cmd, k):
+    """Card af12091a: cmd as the innermost of k eval payloads, each level quoted for the next (shlex)."""
+    import shlex
+    for _ in range(k):
+        cmd = 'eval ' + shlex.quote(cmd)
+    return cmd
+
+
 def script_cases():
     """Card bc009036 (Kernel 41497, Viktor 41502): the file a command runs is judged too. Every script is written to
     a temp dir at run time from fragments; nothing is executed, the gate only reads the files."""
@@ -1562,6 +1571,94 @@ def script_cases():
             ('bash <<EOF\npython3 -W "a b" measure.py\nEOF', d),
             ("bash <<'EOF'\npython3 -W \"a b\" measure.py\nEOF", d),
             ('cat <<EOF\n$(python3 >"x y" measure.py)\nEOF', d),
+            # card af12091a (Viktor 45748 K1; bash ran the script in every row of his probe): a quoted operator in a
+            # call the lexer reads as quoted text (a payload, a heredoc body) cut its words short of the script. The
+            # call's own command ends at the first operator up to which its text lexes cleanly
+            ("bash -c \"python3 -W 'a;b' measure.py\"", d),
+            ('bash -c "python3 -W \\"a;b\\" measure.py"', d),
+            ("eval 'python3 -W \"a;b\" measure.py'", d),
+            ("eval 'python3 >\"x;y\" measure.py'", d),
+            ("eval 'python3 -W \"a|b\" measure.py'", d),
+            ("eval 'python3 -W \"a&b\" measure.py'", d),
+            ("eval 'python3 -W \"a)b\" measure.py'", d),
+            ("eval 'python3 2>x\\& measure.py'", d),
+            ("eval 'python3 -W a\\;b measure.py'", d),
+            ("sh -c 'eval \"$0\"' 'python3 -W \"a;b\" measure.py'", d),
+            ('bash <<EOF\npython3 -W "a;b" measure.py\nEOF', d),
+            ("eval 'source >\"a;b\" dump.sh'", d),
+            ("eval 'bash >\"x;y\" dump.sh'", d),
+            ("eval 'python3 -W \"a;b\" notes.py; python3 -W \"a;b\" measure.py'", d),
+            # an escaped operator is no end (-W takes "x;"), a payload closed by a double quote, an opening backtick in
+            # the words, an expanded text ($X is empty in bash: echo's X= is no assignment); bash ran measure.py in each
+            ("eval 'python3 -W \"a;b\" -W x\\; measure.py'", d),
+            ("eval \"python3 -W 'a;b' measure.py\"", d),
+            ("x=$(eval \"python3 -W 'a;b' measure.py\")", d),
+            ("eval 'python3 -W \"a;b\" `true` measure.py'", d),
+            ("echo X=notes.py; eval 'python3 -W \"a;b\" $X measure.py'", d),
+            # the same two in a heredoc body into a shell: no payload quote, only the own-command search reads them
+            # (mutation round 2: with the decoded payloads the eval rows above no longer told these apart)
+            ("bash <<'EOF'\npython3 -W \"a;b\" -W x\\; measure.py\nEOF", d),
+            ("echo X=notes.py; bash <<'EOF'\npython3 -W \"a;b\" $X measure.py\nEOF", d),
+            # a backtick in a heredoc body: one that opens a substitution in the words, one that closes the call's
+            ("bash <<'EOF'\npython3 -W \"a;b\" `true` measure.py\nEOF", d),
+            ("bash <<'EOF'\nx=`python3 -W \"a;b\" measure.py`\nEOF", d),
+            # Viktor 47244 (1): the payload's outer quoting hid the operator; read as the shell reads it (bash ran it)
+            ("eval 'python3 -W '\\''c;d'\\'' measure.py'", d),
+            ("eval 'eval \"python3 -W \\\"c;d\\\" measure.py\"'", d),
+            ("eval 'eval \"python3 -W '\\''c;d'\\'' measure.py\"'", d),
+            ("eval 'python3 -W \"a;b\" $(eval \"python3 -W '\\''c;d'\\'' measure.py\")'", d),
+            ("eval 'python3 notes.py; eval \"python3 -W '\\''c;d'\\'' measure.py\"'", d),
+            # a payload past PAYLOAD_DEPTH levels is not read: blocks, whatever it runs
+            (_eval_nest("python3 -W 'a' notes.py", 4), d),
+            # no limit per call: 40 quoted operators before the script (a limit would leave the old reading)
+            ("eval 'python3 -W \"a" + ';b' * 40 + "\" measure.py'", d),
+            # card 2917e6b6 (2026-11-18, bash and zsh ran measure.py in each; main allowed every eval row): a
+            # substitution in the payload's words, no quote before it, cut the call at its ")" or opening backtick
+            ("eval 'python3 $(:) measure.py'", d),
+            ("eval 'python3 $(echo) measure.py'", d),
+            ("eval 'python3" + ' $(:)' * 70 + " measure.py'", d),
+            ("eval 'python3 `:` measure.py'", d),
+            ("eval 'python3 `:``:` measure.py'", d),
+            ("eval 'python3" + ' `:`' * 70 + " measure.py'", d),
+            ("eval 'python3 `:`$(:) measure.py'", d),
+            ("sh -c 'eval \"$0\"' 'python3 `:` measure.py'", d),
+            # the body of a heredoc into a shell (main allowed each; bash and zsh ran measure.py)
+            ("bash <<'EOF'\npython3 `:` measure.py\nEOF", d),
+            ("bash <<EOF\npython3 `:` measure.py\nEOF", d),
+            ("sh <<'X'\necho hi\npython3 `:``:` measure.py\nX", d),
+            ("bash <<'EOF'\npython3 $(:) measure.py\nEOF", d),
+            # Viktor 2917e6b6 (11-18 18:55) asked negative rows (11-19, gate-bash-truth: bash ran measure.py in each;
+            # main allowed 10 of them): eval in double quotes, builtin/command eval, nested eval, backtick and $( )
+            # together. (source/. of a process substitution: open on main and here, another class, card c7234bed)
+            ('eval "python3 $(:) measure.py"', d),
+            ('eval "python3 \\$(:) measure.py"', d),
+            ('eval "python3 \\`:\\` measure.py"', d),
+            ('eval "python3 `:` measure.py"', d),
+            ("builtin eval 'python3 $(:) measure.py'", d),
+            ("command eval 'python3 $(:) measure.py'", d),
+            ("builtin eval 'python3 `:` measure.py'", d),
+            ("command eval 'python3 `:` measure.py'", d),
+            ('eval \'eval \'"\'"\'python3 $(:) measure.py\'"\'"\'\'', d),
+            ('eval "eval \'python3 \\$(:) measure.py\'"', d),
+            ('eval \'eval "python3 \\`:\\` measure.py"\'', d),
+            ("eval 'python3 `:`$(:)`:` measure.py'", d),
+            ("eval 'python3 $(`:`) measure.py'", d),
+            ("eval 'python3 `echo $(:)` measure.py'", d),
+            # ... and the fail-closed side (measured): a harmless call with 70 of them past the lexer's bounds
+            ("eval 'python3 notes.py" + ' $(:)' * 70 + "'", d),
+            # mutation round m5 (bin/mut-diff.py, generated candidates; bash and zsh ran measure.py in each): an
+            # operator after the payload's closing quote (the strip end's quote index), and a heredoc in the call's
+            # text whose cut line is not its delimiter (unterminated: bash warns and runs the call), with <<- tabs
+            ("eval 'python3 $(:) measure.py' && true", d),
+            ("eval 'python3 -W \"a;b\" measure.py <<-X\n\tfoo;bar\n\tX; echo done'", d),
+            ("eval 'python3 -W \"a;b\" measure.py <<X\nfoo;bar\nX\"'`:`", d),
+            # ... an end more than four times past the filter's text (the filter is asked only within it), the whole
+            # text unterminated (a heredoc with no body: bash warns and runs the call), so no later end reads
+            ("eval 'python3 -W \"a;b;c\" -W " + 'x' * 200 + " measure.py; cat <<E'", d),
+            # ... a backtick in a '"' glued to the script word, at the call text's own quote (the strip end wants the
+            # 'c' class there, and a substitution's start is not inside it), and a substitution's end right at an end
+            ("eval 'python3 -W \"a;b\" measure.py\"`:`\" <<E'", d),
+            ("eval 'python3 -W \"a;b\" measure.py$(:); cat <<E'", d),
             # R3 LOW: an input redirection, a here-doc or a here-string before source's file
             ('source </dev/null dump.sh', d),
             ('. </dev/null dump.sh', d),
@@ -1608,6 +1705,40 @@ def script_cases():
         prose = 'mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
         allow = [
             ('python3 list.py', d),
+            # card af12091a: the K1 shapes before a harmless script, and as prose or data
+            ("eval 'python3 -W \"a;b\" notes.py'", d),
+            ('bash -c "python3 -W \\"a;b\\" notes.py"', d),
+            ("bash -c \"python3 >'x;y' notes.py\"", d),
+            ('git commit -m "fix: python3 -W \\"a;b\\" measure.py is prose"', d),
+            ("echo 'python3 -W \"a;b\" measure.py'", d),
+            ("eval 'python3 -W \"a;b\" notes.py `date`'", d),  # a backtick end: notes.py is the script either way
+            ("eval 'python3 -W '\\''c;d'\\'' notes.py'", d),  # decoded payloads: a harmless script stays allowed
+            ("eval 'eval \"python3 -W \\\"c;d\\\" notes.py\"'", d),
+            (_eval_nest("python3 -W 'a' notes.py", 3), d),  # PAYLOAD_DEPTH levels are read
+            # card 2917e6b6: a substitution in a harmless call's payload words, and a backtick that closes the call's
+            ("eval 'python3 $(:) notes.py'", d),
+            ("eval 'python3 notes.py $(:)'", d),
+            ("eval 'python3 `:` notes.py'", d),
+            ("eval 'python3 notes.py `date` measure.py'", d),
+            ("eval 'x=`python3 notes.py`; echo measure.py'", d),
+            # ... and a harmless script behind the same shapes stays allowed
+            ("builtin eval 'python3 `:` notes.py'", d),
+            ("eval 'echo `python3 notes.py` measure.py'", d),
+            ("eval 'x=`python3 notes.py` measure.py'", d),
+            # mutation round m5 (own-cut-end-off): a call with no cut inside its payload words does not search for its
+            # own command, so 70 backticks after its script are no fail-closed block (bash runs notes.py)
+            ("eval 'python3 notes.py" + ' `:`' * 70 + "'", d),
+            # ... (heredoc-any-command, shrunk from a fleet command 11-16): a heredoc body with a backtick is read as
+            # shell only when a shell reads it; cat writes this Python data file
+            ("cat > t.py <<'PY'\n\"`''`\"\n\"python $() -m$('')\"]\nPY", d),
+            # ... (own-depth-off, shrunk from a fleet data file 11-16): shell heredocs into shells, line after line; a
+            # call's own text, read again, does not search for its own end again (without that: past OWN_LEX_BUDGET)
+            ("<<'J'necho\nsh <<'J'necho\nsh <<'J'necho\nsh <<'J'necho\nsh <<'J'necho\nsource <<'J'necho\n"
+             ". <<'J'necho J\nsh <<'J'necho b\nsudo sh <<'J'necho\nenv bash <<'J'necho o /|sh", d),
+            ("bash <<'EOF'\necho `date`\npython3 notes.py\nEOF", d),
+            ("cat <<'EOF' > /dev/null\nrun `python3 notes.py` then measure.py\nEOF", d),  # no shell reads it
+            ("python3 - <<'PY'\ns = '`python3 x` measure.py'\nprint(s)\nPY", d),
+            ("x=`eval 'python3 -W \"a;b\" notes.py'`; echo measure.py", d),
             # card 31045f4d (A, Klodel 43233): a data file after the script is its sys.argv, not run
             ('python3 stat.py regiszter.jsonl', d),
             ('python3 -I -B -u stat.py regiszter.jsonl', d),
@@ -2089,6 +2220,155 @@ def script_cases():
                            timeout=20, env={'PATH': '/usr/bin:/bin'})
         if 'secret-read' not in p.stdout.strip().split(','):
             fails.append(f'script: hits() after an escaped quote {cmd!r} -> {p.stdout.strip()!r}, want secret-read')
+        # card af12091a: OWN_LEX_BUDGET is per decision (an in-process caller, the replay, judges many commands): after
+        # a command that used it up, the next one gets the whole budget again
+        own = ('import importlib.util as u,sys,time; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
+               ' s.loader.exec_module(m)\nfor c in sys.argv[2:]:\n    m.T0 = time.monotonic()\n'
+               '    try:\n        print(",".join(m.script_hits(c, ' + repr(d) + ')) or "-")\n'
+               '    except m.TooManyArgs:\n        print("too-many")')
+        p = subprocess.run([sys.executable, '-I', '-c', own, HOOK, "bash -c '" + 'python3 $(a;b notes.py; ' * 1500 + "'",
+                            "eval '" + 'python3 -W "a;b" notes.py; ' * 1000 + "'"], capture_output=True, text=True,
+                           timeout=60, env={'PATH': '/usr/bin:/bin'})
+        lines = p.stdout.splitlines()
+        if len(lines) != 2 or not lines[0].startswith('script-too-many-args') or '2000000' not in lines[0] or lines[1] != '-':
+            fails.append(f'script: OWN_LEX_BUDGET per decision -> {lines!r} {p.stderr[-200:]!r}, want too-many then -')
+        # card af12091a (m3 own-budget-off survived): every pass of the lexer counts against OWN_LEX_BUDGET. 70 openers
+        # that each need a retry, in a call quoted open: the end filter gives up (past MAX_SPLIT_RETRIES) and every end
+        # is lexed up to 65 times. Counted once per lexing, 2 million characters took 6.4 s (only the watchdog stopped
+        # it), and the 500-end line passed after 4.5 s. In process (no watchdog) the budget stops both, under 2 s.
+        # _lex_no_segments runs lex()'s retry loop itself to charge each pass: its reading must be lex()'s.
+        per_pass = ('import importlib.util as u,sys,time; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
+                    ' s.loader.exec_module(m); L=m.shell_lex\nfor c in sys.argv[2:4]:\n    m.T0 = t = time.monotonic()\n'
+                    '    try:\n        r = ",".join(m.script_hits(c, ' + repr(d) + ')) or "-"\n'
+                    '    except m.TooManyArgs as e:\n        r = "too-many " + str(e)\n'
+                    '    print(r[:60], "%.2f" % (time.monotonic() - t))\nm.OWN_LEX_BUDGET = 10**12; bad = []\n'
+                    'for k in (0, 1, 63, 64, 65, 70):\n'
+                    '    for t in ("python3 -W \\"a;" + "$((y) );" * k + "\\" x.py", "python3 $((1 #x)) " + "((y) ) " * k + "m.py"):\n'
+                    '        so = L.segments_of; L.segments_of = m._no_segments\n'
+                    '        try:\n            ref = L.lex(t)\n        finally:\n            L.segments_of = so\n'
+                    '        mine = m._lex_no_segments(t)\n'
+                    '        if {a: b for a, b in mine.items() if a != "segments"} != {a: b for a, b in ref.items() if a != "segments"}:\n'
+                    '            bad.append(k)\nprint("lex-same", bad)')
+        retry_open = "eval 'python3 -W \"a;" + '$((y) );' * 70
+        p = subprocess.run([sys.executable, '-I', '-c', per_pass, HOOK, retry_open + ';' * 500 + "'",
+                            retry_open + ';' * 3000 + "\" notes.py'"], capture_output=True, text=True, timeout=60,
+                           env={'PATH': '/usr/bin:/bin'})
+        lines = p.stdout.splitlines()
+        if (len(lines) != 3 or lines[2] != 'lex-same []'
+                or any(not ln.startswith('script-too-many-args (a hívások') or float(ln.split()[-1]) >= 2
+                       for ln in lines[:2])):
+            fails.append(f'script: OWN_LEX_BUDGET per lexer pass -> {lines!r} {p.stderr[-200:]!r}, want 2x too-many under 2 s, lex-same []')
+        # card af12091a (Viktor 47244 (1)): the decoded payloads only add. Every block row, judged with them and with
+        # decoded_payloads() giving nothing: a row whose script rules block without them blocks with them too
+        only_adds = ('import importlib.util as u,json,sys,time; s=u.spec_from_file_location("g",sys.argv[1]);'
+                     ' m=u.module_from_spec(s); s.loader.exec_module(m); real=m.decoded_payloads; out=[]\n'
+                     'for c, w in json.load(sys.stdin):\n    r=[]\n    for f in (real, lambda t: []):\n'
+                     '        m.decoded_payloads=f; m.T0=time.monotonic(); r.append(bool(m.script_hits(c, w)))\n'
+                     '    out.append(r)\nprint(json.dumps(out))')
+        p = subprocess.run([sys.executable, '-I', '-c', only_adds, HOOK], input=json.dumps(block), capture_output=True,
+                           text=True, timeout=600, env={'PATH': '/usr/bin:/bin'})
+        try:
+            pairs = json.loads(p.stdout)
+        except ValueError:
+            pairs = None
+        if not pairs or len(pairs) != len(block):
+            fails.append(f'script: decoded payloads only add -> no result {p.stderr[-200:]!r}')
+        else:
+            lost = [cmd[:60] for (cmd, _), (w, wo) in zip(block, pairs) if wo and not w]
+            if lost:
+                fails.append(f'script: decoded payloads took a block away: {lost!r}')
+        # ... and the own-command search on its own: the decoded payloads read these rows too, so the rows above do not
+        # tell a broken own-command search apart (mutation m3: the closing-quote variant removed, single or double
+        # quote only, the escape guard, the expanded walk, all survived). With no decoded text, each still blocks
+        own_only = [(c, d) for c in (
+            "eval 'python3 -W \"a;b\" measure.py'", "eval \"python3 -W 'a;b' measure.py\"",
+            "bash -c \"python3 -W 'a;b' measure.py\"", 'bash -c "python3 -W \\"a;b\\" measure.py"',
+            "eval 'python3 >\"x;y\" measure.py'", "eval 'python3 -W \"a;b\" -W x\\; measure.py'",
+            "eval 'python3 -W \"a;b\" `true` measure.py'", "echo X=notes.py; eval 'python3 -W \"a;b\" $X measure.py'",
+            "eval 'python3 $(:) measure.py'", "eval 'python3 -W \"a;b\" notes.py; python3 -W \"a;b\" measure.py'")]
+        own_alone = ('import importlib.util as u,json,sys,time; s=u.spec_from_file_location("g",sys.argv[1]);'
+                     ' m=u.module_from_spec(s); s.loader.exec_module(m); m.decoded_payloads=lambda t: [];'
+                     ' m.shell_heredoc_bodies=lambda c, lx: []; out=[]\n'
+                     'for c, w in json.load(sys.stdin):\n    m.T0=time.monotonic(); out.append(bool(m.script_hits(c, w)))\n'
+                     'print(json.dumps(out))')
+        p = subprocess.run([sys.executable, '-I', '-c', own_alone, HOOK], input=json.dumps(own_only),
+                           capture_output=True, text=True, timeout=120, env={'PATH': '/usr/bin:/bin'})
+        try:
+            alone = json.loads(p.stdout)
+        except ValueError:
+            alone = None
+        if not alone or len(alone) != len(own_only):
+            fails.append(f'script: own-command search alone -> no result {p.stderr[-200:]!r}')
+        elif not all(alone):
+            fails.append(f'script: own-command search alone let through: {[c[:60] for (c, _), b in zip(own_only, alone) if not b]!r}')
+        # card af12091a (the replay: 39 benign fleet commands past OWN_LEX_BUDGET): the end filter of the own-command
+        # search only skips ends that cannot read. Every block and allow row is judged the same with it and without it
+        # (budget lifted: the unfiltered search is the slow one). A third pass builds the filter at the first failed
+        # end (_OWN_FILTER_AFTER 0): on a short row the failed ends never cost enough to build it, so without this
+        # pass every row compared the unfiltered reading with itself (mutation m3 on 9c1810bd: 12 filter mutants that
+        # skip more ends survived, e.g. every substitution's end read as broken)
+        same = ('import importlib.util as u,json,sys,time; s=u.spec_from_file_location("g",sys.argv[1]);'
+                ' m=u.module_from_spec(s); s.loader.exec_module(m); m.OWN_LEX_BUDGET=10**13; out=[]; built=[0]\n'
+                'real_f=m._own_end_filter\n'
+                'def counted(*a):\n    f=real_f(*a)\n    built[0]+=bool(f)\n    return f\n'
+                'm._own_end_filter=counted\n'
+                'for c, w in json.load(sys.stdin):\n    r=[]\n    for on, after in ((True, 2), (True, 0), (False, 2)):\n'
+                '        m._OWN_FILTER[0]=on; m._OWN_FILTER_AFTER[0]=after; m.T0=time.monotonic(); r.append(m.script_hits(c, w))\n'
+                '    out.append(r[0]==r[1]==r[2])\nout.append(built[0])\nprint(json.dumps(out))')
+        rows = block + allow
+        p = subprocess.run([sys.executable, '-I', '-c', same, HOOK], input=json.dumps(rows), capture_output=True,
+                           text=True, timeout=900, env={'PATH': '/usr/bin:/bin'})
+        try:
+            eq = json.loads(p.stdout)
+            built = eq.pop()
+        except (ValueError, AttributeError, IndexError):
+            eq, built = None, 0
+        # the comparison is empty unless the filter was built: on the rows it must be, 74 times on the final head (2026-11-18)
+        if eq is not None and built < 40:
+            fails.append(f'script: end filter built on only {built} row passes, the comparison proves nothing')
+        if not eq or len(eq) != len(rows):
+            fails.append(f'script: end filter only skips -> no result {p.stderr[-200:]!r}')
+        elif not all(eq):
+            fails.append(f'script: end filter changed a verdict: {[c[:60] for (c, _), e in zip(rows, eq) if not e]!r}')
+        # ... and one shape per rule of the filter, in-process: the call's own-command reading is the same with and
+        # without the filter, and the filter keeps the lexing small (each rule switched off, its shape lexes 97 000
+        # to 700 000 characters: every end of the 300 is lexed from the call's start)
+        shapes = {
+            'whole-quote': ' -W "a;b" \'' + 'x;' * 300 + '\' m.py',
+            'whole-subst': ' -W "a;b" $(' + 'x;' * 300 + ') m.py',
+            'body-whole': ' -W "a;b" <<E m.py\n' + 'x;\n' * 300 + 'E\n',
+            'body-strip': ' -W "a;b" <<E m.py\n' + "x' ;\n" * 300 + 'E\n',
+            'pending': ' -W "a;b" <<E m.py' + ' |' * 300 + '\nE\n',
+            'broken': ' -W "a;b" `(` m.py' + ' x;' * 300,
+            'strip-quote': ' -W "a;b" \'' + 'x";' * 300 + '\' m.py',
+            # the filter's lexing past MAX_SPLIT_RETRIES (70 '((y) )' after the end) splits every opener: the
+            # arithmetic '$((1 #x))' turns into a comment there, and without the guard the clean end after it was
+            # skipped (measured: work/af12091a/retrycap.py, readings differed at 150 and 1000). Reading only
+            'retry-cap-150': ' -W "a' + ';' * 150 + '" $((1 #x)) notes.py; m.py' + ' ((y) )' * 70,
+            'retry-cap-1000': ' -W "a' + ';' * 1000 + '" $((1 #x)) notes.py; m.py' + '\n((y) )' * 70,
+        }
+        cost = ('import importlib.util as u,json,sys; s=u.spec_from_file_location("g",sys.argv[1]);'
+                ' m=u.module_from_spec(s); s.loader.exec_module(m); m.OWN_LEX_BUDGET=10**13; out={}\n'
+                'def norm(x):\n    if isinstance(x, (list, tuple)):\n        return [norm(y) for y in x]\n'
+                '    if hasattr(x, "__dict__"):\n        return sorted((k, repr(norm(v))) for k, v in vars(x).items())\n'
+                '    return x\n'
+                'for k, rest in json.load(sys.stdin).items():\n    r=[]\n    for on in (True, False):\n'
+                '        m._OWN_FILTER[0]=on; m._OWN_LEXED[0]=0\n'
+                '        g=norm(m._own_command_groups("python3", rest, rest.index(";"), False)); r.append((g, m._OWN_LEXED[0]))\n'
+                '    out[k]=[r[0][0]==r[1][0], len(r[0][0]), r[0][1], r[1][1]]\nprint(json.dumps(out))')
+        p = subprocess.run([sys.executable, '-I', '-c', cost, HOOK], input=json.dumps(shapes), capture_output=True,
+                           text=True, timeout=120, env={'PATH': '/usr/bin:/bin'})
+        try:
+            got = json.loads(p.stdout)
+        except ValueError:
+            got = {}
+        for k in shapes:
+            same_r, n, on, off = got.get(k, [False, 0, -1, -1])
+            if k.startswith('retry-cap'):
+                on, off = 1, 10001  # the reading is what this shape pins
+            if not same_r or n == 0 and k != 'broken' or not 0 < on <= 10000 or off <= 10000:
+                fails.append(f'script: end filter shape {k}: same {same_r}, {n} groups, lexed {on} with the filter '
+                             f'(want <= 10000), {off} without (want > 10000) {p.stderr[-120:]!r}')
         # card fae0712e: the gate loads the shared lexer from its own scripts/lib (by path, under python3 -I); a text
         # with a lexer problem gives None (the old path)
         probe_l = probe.replace('print(m.script_budget())', 'print(m.shell_lex is not None, m.lex_or_none("echo a")'
@@ -2141,6 +2421,23 @@ def script_cases():
             ('node x ' + '=/' * 50000, 2),  # python3: x is the script, the rest data (31045f4d)
             ('python3 x ' + '=/' * 60000 + ' ; ' + S + ' dump-keychain', 2),
             ('python3 eq.py', 0), ('python3 eqs.py', 0), ('node min.js', 0), ('python3 big.py', 2),
+            # card af12091a: every call of a long line looks for its own command end; Viktor's Q1 read up to the line
+            # end per call (5-6 s, and a fail-closed block of the first two). The third has the script call at the
+            # end; the fourth never lexes cleanly and blocks on OWN_LEX_BUDGET (6 s watchdog without it)
+            ("eval '" + 'python3 -W "a;b" notes.py; ' * 1500 + "'", 0),
+            ('bash -c "' + 'python3 -W \\"a;b\\" notes.py; ' * 800 + '"', 0),
+            ("eval '" + 'python3 -W "a;b" notes.py; ' * 1500 + 'python3 -W "a;b" measure.py' + "'", 2),
+            ("bash -c '" + 'python3 $(a;b notes.py; ' * 1500 + "'", 2),
+            # past 64 substitutions: the call's own command reads cleanly (the lexer's problems, not its segments, which
+            # LexTooBig bounds) but is past the lexer's bounds, which interp_groups would read the old way: blocks
+            # (before the end filter it blocked on OWN_LEX_BUDGET, every end raising LexTooBig); bash ran measure.py
+            ("eval 'python3 -W \"a;b\" " + '$(:)' * 900 + " measure.py'", 2),
+            # the replay (39 benign fleet commands): calls quoted in Python code in a heredoc never read cleanly, and
+            # every end of each was lexed from its start (a block on OWN_LEX_BUDGET at 60 lines); the end filter
+            ("python3 - <<'PY'\nadd = \"\"\"\n" + "    ('python3 -W \"a;b\" notes.py', d),\n" * 120 + "\"\"\"\nPY", 0),
+            # Viktor 47244 (1): MAX_PAYLOADS decoded payloads are read, one more blocks unread
+            ('; '.join("eval 'python3 -W '\\''a;b'\\'' n%d.py'" % i for i in range(64)), 0),
+            ('; '.join("eval 'python3 -W '\\''a;b'\\'' n%d.py'" % i for i in range(65)), 2),
         ]
         for cmd, want in timed:
             t = _t.monotonic()
@@ -2176,6 +2473,7 @@ def script_cases():
             ('cat ' + 'x ' * 70 + 'measure.py | python3', d),
             ('cat ' + 'x ' * 64 + 'list.py | python3', d),  # 65 words
             ('python3 ' + 'A' * 4096, d),  # one char past the window
+            ("bash -c '" + 'python3 $(a;b notes.py; ' * 1500 + "'", d),  # card af12091a: past OWN_LEX_BUDGET
         ]
         for cmd, cwd in too_many:
             code, err = bash_in(cmd, cwd)
@@ -2257,7 +2555,7 @@ def script_cases():
             fails.append(f'script: 30 000 interpreter calls took {took:.1f} s (want under 2 s)')
         corpus_fails, corpus_n = corpus_cases(d)
         fails += corpus_fails
-        return fails, len(block) + len(allow) + 8 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos) + 6 + corpus_n + 1 + 1
+        return fails, len(block) + len(allow) + 9 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos) + 6 + corpus_n + 1 + 1
 
 
 def corpus_cases(d):
