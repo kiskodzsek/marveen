@@ -12,7 +12,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { detectsAutocompactOffer, detectsBlockingMenu, detectPaneState } from '../pane-state.js'
+import { detectsAutocompactOffer, detectsBlockingMenu, detectsPermissionDialog, detectPaneState } from '../pane-state.js'
 import { formatStuckSessionAlert, urgentEmitRefusal } from '../web/message-router.js'
 
 const SEP = '─'.repeat(80)
@@ -104,6 +104,24 @@ const BUSY_WITH_OFFER_TEXT = [
   '❯ ',
   SEP,
   '  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt',
+].join('\n')
+
+// A tool-permission prompt whose last rows are the offer's question and hint (Viktor 47068 V9, 47118): a real overlap,
+// every detector says yes, the 'last-line' offer check included. Only the branch order keeps the monitor from sending
+// Escape (= NO) into the permission prompt.
+const PERMISSION_ENDING_IN_OFFER = [
+  '⏺ Bash(cat shared/offer.txt)',
+  '',
+  ' Bash command',
+  '',
+  '   cat shared/offer.txt',
+  '',
+  ' Do you want to proceed?',
+  ' ❯ 1. Yes',
+  '   2. No',
+  '',
+  '   Want to autocompact at 400k tokens instead?',
+  `   ${HINT}`,
 ].join('\n')
 
 const CAT_IN_SHELL = [
@@ -208,6 +226,26 @@ describe('wiring (e9989124)', () => {
     // the permission prompt and the model-consent dialog are decided first: neither gets this Escape
     expect(at).toBeGreaterThan(monitor.indexOf('detectsPermissionDialog(paneNow)'))
     expect(at).toBeGreaterThan(monitor.indexOf('detectsModelConsentDialog(paneNow)'))
+  })
+
+  it('in the menu branch the permission check comes first: no offer check and no key before it (V9)', () => {
+    const start = monitor.indexOf('const paneNow = capturePane(t.session)')
+    expect(start).toBeGreaterThan(0)
+    const menu = monitor.slice(start, monitor.indexOf('// MODALOROSHATOKOR922', start))
+    const perm = menu.indexOf('} else if (paneNow != null && detectsPermissionDialog(paneNow)) {')
+    expect(perm).toBeGreaterThan(0)
+    expect(menu.match(/detectsAutocompactOffer\(/g) ?? []).toHaveLength(1)
+    expect(menu.indexOf('detectsAutocompactOffer(')).toBeGreaterThan(perm)
+    // Any quote: a key sent with "send-keys" or `send-keys` counts too (Viktor 47118, V9d).
+    expect(menu.match(/(['"`])send-keys\1/g) ?? []).toHaveLength(1)
+    expect(menu.search(/(['"`])send-keys\1/)).toBeGreaterThan(perm)
+  })
+
+  it('a permission prompt that ends in the offer is a permission prompt, and the offer check says yes too (V9)', () => {
+    expect(detectsPermissionDialog(PERMISSION_ENDING_IN_OFFER)).toBe(true)
+    expect(detectsBlockingMenu(PERMISSION_ENDING_IN_OFFER)).toBe(true)
+    // The overlap is the point: if the offer check said no here, this pane would not test the branch order.
+    expect(detectsAutocompactOffer(PERMISSION_ENDING_IN_OFFER, 'last-line')).toBe(true)
   })
 
   it('the router passes the pane reading into the stuck alert', () => {

@@ -3004,6 +3004,8 @@ describe('detectPaneState: a cut footer that ends inside "esc to interrupt" (a18
     expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · 1 monitor ·…'))).toBe('unknown')
     // The esc segment right after the mode, as the measured busy footers have it.
     expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · esc to int…'))).toBe('unknown')
+    // An earlier notice segment is cut too (Viktor 47094, V2): the LAST ellipsis decides, not the first one.
+    expect(detectPaneState(modeFooter('  ⏵⏵ bypass permissions on · install g… · 1 monitor · esc to inte…'))).toBe('unknown')
   })
 
   it('other cut segments still read idle (the #360 behaviour is kept)', () => {
