@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +50,10 @@ class Check(unittest.TestCase):
     def test_text_marker_is_no_escape(self):
         self.assertIsNotNone(gate.check('KÉSZ-EREDMÉNY: a két kért kép\nItt vannak.', 1))
 
+    def test_release_problem_core(self):
+        self.assertIn('nincs benne', gate.release_problem('köteg', 'main', '/nonexistent.db'))
+        self.assertIn('nem olvasható', gate.release_problem('47210', 'main', '/nonexistent.db'))
+
     def test_escape_does_not_lift_size(self):
         self.assertIsNotNone(gate.check('\n'.join(['sor'] * 7), 0, escaped=True))
 
@@ -60,6 +65,8 @@ class Hook(unittest.TestCase):
         con = sqlite3.connect(self.db)
         con.execute('CREATE TABLE conversation_log (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT, '
                     'chat_id TEXT, direction TEXT, text TEXT, created_at INTEGER)')
+        con.execute('CREATE TABLE agent_messages (id INTEGER PRIMARY KEY, from_agent TEXT, to_agent TEXT, '
+                    'content TEXT, created_at INTEGER)')
         con.commit()
         con.close()
 
@@ -73,9 +80,20 @@ class Hook(unittest.TestCase):
     def marks_path(self):
         return os.path.join(os.path.dirname(self.db), 'reply-marks.jsonl')
 
-    def mark(self, chat, agent='main'):
+    def mark(self, chat, agent='main', kind='KESZ-EREDMENY', value='a kért képek'):
         os.environ['REPLY_MARKS_PATH'] = self.marks_path()
-        reply_marks.add('KESZ-EREDMENY', chat, agent, 'a kért képek')
+        reply_marks.add(kind, chat, agent, value)
+
+    def queue_msg(self, msg_id, frm='pulzus', to='main', age=60):
+        con = sqlite3.connect(self.db)
+        con.execute('INSERT INTO agent_messages (id, from_agent, to_agent, content, created_at) VALUES (?, ?, ?, ?, ?)',
+                    (msg_id, frm, to, 'kiadás', int(time.time()) - age))
+        con.commit()
+        con.close()
+
+    def answered(self, chat=GROUP):
+        self.log(chat, 'in')
+        self.log(chat, 'out')
 
     def run_gate(self, chat, text, agent='main', tool=TOOL, db=None):
         env = dict(os.environ, LEDGER_DB_PATH=db or self.db, MAIN_AGENT_ID='main', MARVEEN_AGENT_ID=agent,
@@ -132,6 +150,103 @@ class Hook(unittest.TestCase):
     def test_seven_lines_block(self):
         self.log(PRIV, 'in')
         self.assertEqual(self.run_gate(PRIV, '\n'.join(['sor'] * 7))[0], 2)
+
+    # --- card 36731203: the release "before" line (KIADAS-ELOTTE, Pulzus's release message msg_id) ---
+    def test_release_mark_with_pulzus_message_passes(self):
+        self.answered()
+        self.queue_msg(47210)
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value='pulzus 47210: éjjeli köteg')
+        self.assertEqual(self.run_gate(GROUP, 'Ma éjjel kiadás: 3 PR, Pulzus viszi.')[0], 0)
+
+    def test_without_any_mark_the_hint_names_the_release_mark(self):
+        self.answered()
+        rc, err = self.run_gate(GROUP, 'Ma éjjel kiadás.')
+        self.assertEqual(rc, 2)
+        self.assertIn('KIADAS-ELOTTE', err)
+
+    def test_release_mark_without_msg_id_blocks(self):
+        self.answered()
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value='éjjeli köteg')
+        rc, err = self.run_gate(GROUP, 'Ma éjjel kiadás.')
+        self.assertEqual(rc, 2)
+        self.assertIn('nincs benne', err)
+
+    def test_release_mark_naming_another_sender_blocks(self):
+        self.answered()
+        self.queue_msg(47211, frm='dave')
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value='47211')
+        self.assertEqual(self.run_gate(GROUP, 'Ma éjjel kiadás.')[0], 2)
+
+    def test_release_mark_naming_pulzus_to_another_agent_blocks(self):
+        self.answered()
+        self.queue_msg(47212, to='dave')
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value='47212')
+        self.assertEqual(self.run_gate(GROUP, 'Ma éjjel kiadás.')[0], 2)
+
+    def test_release_mark_naming_an_old_message_blocks(self):
+        self.answered()
+        self.queue_msg(47213, age=gate.RELEASE_MSG_MAX_AGE_S + 60)
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value='47213')
+        self.assertEqual(self.run_gate(GROUP, 'Ma éjjel kiadás.')[0], 2)
+
+    def test_release_mark_naming_a_missing_message_blocks_and_is_not_spent(self):
+        self.answered()
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value='47214')
+        self.assertEqual(self.run_gate(GROUP, 'Ma éjjel kiadás.')[0], 2)
+        self.queue_msg(47214)  # the same mark passes once the message is there: the block did not spend it
+        self.assertEqual(self.run_gate(GROUP, 'Ma éjjel kiadás.')[0], 0)
+
+    def test_release_mark_lets_one_message_through(self):
+        self.answered()
+        self.queue_msg(47215)
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value='47215')
+        self.assertEqual(self.run_gate(GROUP, 'Ma éjjel kiadás.')[0], 0)
+        self.log(GROUP, 'out')
+        self.assertEqual(self.run_gate(GROUP, 'És még ez.')[0], 2)
+
+    def test_release_mark_does_not_lift_size(self):
+        self.answered()
+        self.queue_msg(47216)
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value='47216')
+        self.assertEqual(self.run_gate(GROUP, '\n'.join(['sor'] * 7))[0], 2)
+
+    def test_release_mark_of_another_chat_is_no_escape(self):
+        self.answered()
+        self.queue_msg(47217)
+        self.mark(PRIV, kind='KIADAS-ELOTTE', value='47217')
+        self.assertEqual(self.run_gate(GROUP, 'Ma éjjel kiadás.')[0], 2)
+
+    def test_release_mark_without_a_queue_table_blocks(self):
+        con = sqlite3.connect(self.db)
+        con.execute('DROP TABLE agent_messages')
+        con.commit()
+        con.close()
+        self.answered()
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value='47218')
+        rc, err = self.run_gate(GROUP, 'Ma éjjel kiadás.')
+        self.assertEqual(rc, 2)
+        self.assertIn('nem olvasható', err)
+
+    def test_finished_result_mark_is_taken_first_the_release_mark_stays(self):
+        self.answered()
+        self.queue_msg(47219)
+        self.mark(GROUP)
+        self.mark(GROUP, kind='KIADAS-ELOTTE', value='47219')
+        self.assertEqual(self.run_gate(GROUP, 'Itt vannak.')[0], 0)
+        self.log(GROUP, 'out')
+        self.assertEqual(self.run_gate(GROUP, 'Ma éjjel kiadás.')[0], 0)
+        self.log(GROUP, 'out')
+        self.assertEqual(self.run_gate(GROUP, 'És még ez.')[0], 2)
+
+    def test_reply_mark_cli_accepts_the_accented_alias(self):
+        env = dict(os.environ, REPLY_MARKS_PATH=self.marks_path(), MARVEEN_AGENT_ID='main', MAIN_AGENT_ID='main')
+        env.pop('CLAUDE_CONFIG_DIR', None)
+        cli = os.path.join(os.path.dirname(HERE), 'reply-mark.py')
+        p = subprocess.run([sys.executable, '-I', cli, 'KIADÁS-ELŐTTE', '--chat', GROUP, 'pulzus 47220'], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        rows = [json.loads(l) for l in open(self.marks_path(), encoding='utf-8') if l.strip()]
+        self.assertEqual(rows[-1]['kind'], 'KIADAS-ELOTTE')
 
     def test_601_chars_block(self):
         self.log(PRIV, 'in')

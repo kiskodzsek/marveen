@@ -11,6 +11,11 @@ elo_uzenet "privat" / "csoport", or MARVEEN_OWNER_CHATS):
   2. volume: the agent already replied in this chat since the latest inbound message there (store/claudeclaw.db
      conversation_log, by row id), unless the text has a line "KÉSZ-EREDMÉNY: <what>" -- a finished
      deliverable (e.g. the images Patrik asked for) may follow the answer it was promised in.
+  The release line (card 36731203, 2026-11-16 23:16): CLAUDE.md asks for one line to Patrik BEFORE and one AFTER a
+  release; the "before" line came after an answer to Patrik's last message and was blocked. A KIADAS-ELOTTE mark lets
+  ONE such line through; its value must hold the msg_id of Pulzus's release message to the main agent in the
+  inter-agent queue (store/claudeclaw.db agent_messages), at most RELEASE_MSG_MAX_AGE_S old. The "after" line is a
+  finished result (KESZ-EREDMENY).
 Edits (edit_message) are not gated: the live status message is edited in place and is long by design.
 The inbound side counts every inbound row of the chat (the ledger has no sender column); in the owner's
 chats those are the owner's (and the team's) human messages.
@@ -24,6 +29,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -31,6 +37,9 @@ STORE = os.path.join(os.path.dirname(os.path.dirname(HERE)), 'store')
 
 MAX_LINES = 6
 MAX_CHARS = 600
+RELEASER = 'pulzus'  # CLAUDE.md "Kiadás és éles üzem": Pulzus collects, merges and deploys the batch
+RELEASE_MSG_MAX_AGE_S = 6 * 3600
+MSG_ID = re.compile(r'(?<!\d)\d{4,7}(?!\d)')
 
 
 def owner_chats():
@@ -66,8 +75,34 @@ def check(text, replies_since_inbound, escaped=False):
     if replies_since_inbound >= 1 and not escaped:
         return ('VÁLASZ-KAPU (Patrik TG 18129): Patrik utolsó üzenete óta már válaszoltál ebben a chatben. '
                 'Egy Patrik-üzenetre egy válasz. Kész anyag (pl. a kért képek) mehet, ha előtte jelölöd (a szövegbe '
-                'nem kerül): python3 -I scripts/reply-mark.py KESZ-EREDMENY --chat <chat_id> "<mi>"; minden más a kártyára.')
+                'nem kerül): python3 -I scripts/reply-mark.py KESZ-EREDMENY --chat <chat_id> "<mi>"; kiadás ELŐTTI sor: '
+                'python3 -I scripts/reply-mark.py KIADAS-ELOTTE --chat <chat_id> "<Pulzus kiadás-üzenetének msg_id-je>"; '
+                'minden más a kártyára.')
     return None
+
+
+def release_problem(value, main_agent, db, now=None):
+    """Why a KIADAS-ELOTTE value does not name Pulzus's release message, or None: one of its msg_ids must be a row of
+    the inter-agent queue from RELEASER to the main agent, at most RELEASE_MSG_MAX_AGE_S old."""
+    ids = [int(x) for x in MSG_ID.findall(str(value or ''))]
+    if not ids:
+        return 'nincs benne Pulzus kiadás-üzenetének msg_id-je (4-7 jegyű szám)'
+    now = time.time() if now is None else now
+    try:
+        con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=5)
+        try:
+            rows = con.execute('SELECT from_agent, to_agent, created_at FROM agent_messages WHERE id IN (%s)'
+                               % ','.join('?' * len(ids)), ids).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return 'az üzenetsor nem olvasható, a msg_id nem ellenőrizhető'
+    for frm, to, at in rows:
+        if (str(frm) == RELEASER and str(to) == str(main_agent) and isinstance(at, int)
+                and 0 <= now - at <= RELEASE_MSG_MAX_AGE_S):
+            return None
+    return (f'a msg_id ({", ".join(map(str, ids))}) nem {RELEASER} -> {main_agent} üzenet az utolsó '
+            f'{RELEASE_MSG_MAX_AGE_S // 3600} órából')
 
 
 def replies_since_inbound(agent_id, chat_id):
@@ -119,6 +154,15 @@ def main():
             import reply_marks
             reply_marks.bind_call(payload)  # held for this call, spent by reply-marks-spend.py once sent (41147)
             escaped = reply_marks.take('KESZ-EREDMENY', chat, agent_id) is not None
+            if not escaped:
+                rel = reply_marks.take('KIADAS-ELOTTE', chat, agent_id)
+                if rel is not None:
+                    problem = release_problem(rel, agent_id, ledger_lib.db_path())
+                    if problem:
+                        print(f'VÁLASZ-KAPU: a KIADAS-ELOTTE jel {problem}; a jel nem fogyott el, javítsd és jelölj '
+                              'újra.', file=sys.stderr)
+                        return 2
+                    escaped = True
         except Exception:
             escaped = False
     msg = check(ti.get('text', ''), n, escaped)
