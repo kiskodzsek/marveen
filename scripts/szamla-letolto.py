@@ -10,7 +10,11 @@ Használat: python3 -I scripts/szamla-letolto.py <url> <cél-fájl.pdf>
 import os, re, sys, urllib.parse, urllib.request
 
 ALLOWED = {"app.billingo.hu", "api.billingo.hu", "www.innvoice.hu", "innvoice.hu",
-           "www.szamlazz.hu", "szamlazz.hu", "www.szamlazoprogram.hu", "szamlazoprogram.hu"}
+           "www.szamlazz.hu", "szamlazz.hu", "www.szamlazoprogram.hu", "szamlazoprogram.hu",
+           # Microsec e-invoice (KE26/83900, Juró 45840, card b5f36cf6): the invoice e-mail carries no PDF, only an
+           # e-Szignó link on this exact host (Klodel 27131, from the Microsec e-mail of 2026-11-04 16:43).
+           # Exact match only: not e-szigno.hu, www.e-szigno.hu or any other subdomain.
+           "srv.e-szigno.hu"}
 ROOT = os.path.realpath(os.path.expanduser("~/Konyveles"))
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh) szamla-letolto/1.0"}
 
