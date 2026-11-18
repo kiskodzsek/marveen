@@ -567,10 +567,21 @@ GIT_RULES += [('git-credential-helper', FnRule(lambda t: env_value_hit(t, _PARAM
               ('git-config-override', FnRule(config_write))]
 
 
+# card 39d885ef (Viktor 43793 MEDIUM 1): True while pipes_union() reads the text a second time, with every
+# backslash-letter kept as written, so the escapes printf / echo -e print (\n: a new command line) are seen
+_KEEP_ESC = [False]
+# backslash-letters normalise() took off so far (never reset: a nested call only adds); pipes_union reads the text
+# a second time only when a first reading took one off, else the kept reading is the same text
+_ESC_TAKEN = [0]
+_ESC_SKIP = [True]  # the tests turn it off to compare the skipped reading with the full one
+
+
 def normalise(cmd, joined=False):
     if not joined:
         cmd = cmd.replace('\\\n', '')                # line continuation
-    cmd = re.sub(r'\\([A-Za-z])', r'\1', cmd)       # sec\urity -> security
+    if not _KEEP_ESC[0]:
+        cmd, n = re.subn(r'\\([A-Za-z])', r'\1', cmd)   # sec\urity -> security
+        _ESC_TAKEN[0] += n
     cmd = re.sub(r'(?<=\w)(?:\'\'|"")(?=\w)', '', cmd)  # sec''urity -> security
     cmd = re.sub(r'\$\{IFS\}|\$IFS\b', ' ', cmd)        # security${IFS}dump-keychain -> a space
     return cmd
@@ -706,12 +717,16 @@ _BRACE_AFTER_RX = re.compile(r'[ \t]*\}')  # no newline: a newline is a stop of 
 _SEG_STOP = ';&|\n(){}<>'
 
 
-def _group_openers(text):
-    """For each ")" / "}" position, the position of the opener that matches it (one stack pass; quotes are not
-    tracked, so a bracket in a quote may pair wrongly: that only moves the start, and an unmatched closer maps to
-    -1, the text's start: never a shorter read than without the group)."""
+def _group_openers(text, code=None):
+    """For each ")" / "}" position, the position of the opener that matches it (one stack pass); an unmatched closer
+    maps to -1, the text's start. code (card 39d885ef, Viktor 43793 LOW 1): the lexer's code positions; a bracket in
+    a quote is skipped. It was not: `(echo ./x.sh; echo "(") | bash` paired the quoted "(" and read the pipeline from
+    after it, a SHORTER read (the old docstring said it never was). Without the lexer (code None) brackets in quotes
+    still pair."""
     stack, match = [], {}
     for i, ch in enumerate(text):
+        if code is not None and not code[i]:
+            continue
         if ch in '({':
             stack.append((ch, i))
         elif ch in _GROUP_CLOSE:
@@ -721,13 +736,141 @@ def _group_openers(text):
     return match
 
 
-def stdin_pipelines(text):
-    """(lines, words) of every pipeline that feeds a shell on stdin (see the block above)."""
+_UNESC_RX = re.compile(r'\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|([nrfvtae]))')
+
+
+def _printf_unescape(v):
+    """Card 39d885ef (Viktor 43793): what printf / echo -e print for the backslash escapes of a word (\\n, \\r, \\f,
+    \\v a newline: a command position; \\t, \\a, \\e a blank; \\xHH and octal their char)."""
+    def one(m):
+        x, o, c = m.groups()
+        if x or o:
+            return chr(int(x, 16) if x else int(o, 8) & 0xff)
+        return '\n' if c in 'nrfv' else ' '
+    return _UNESC_RX.sub(one, v)
+
+
+_PRINTF_CONV_RX = re.compile(r'%(%|[-+ #0]*\d*(?:\.\d*)?[sbqdiouxXeEfgGc])')
+_PRINTF_MAX_OUT = 65536
+
+
+def _printf_output(fmt, args):
+    """Card 39d885ef: what printf prints: each conversion takes the next argument (%b unescapes it), the format is
+    used again while arguments are left, and the format's own escapes are applied. `printf 'x\\ns3curity %s\\n'
+    dump-keychain` prints the call on a line of its own; its words alone never stand next to each other. Bounded: at
+    most one pass per argument plus one, and _PRINTF_MAX_OUT chars."""
+    args, out = list(args), []
+    for _ in range(len(args) + 1):
+        def conv(m):
+            if m.group(1) == '%':
+                return '%'
+            a = args.pop(0) if args else ''
+            return _printf_unescape(a) if m.group(1).endswith('b') else a
+        out.append(_printf_unescape(_PRINTF_CONV_RX.sub(conv, fmt)))
+        if not args or not _PRINTF_CONV_RX.search(fmt) or sum(map(len, out)) > _PRINTF_MAX_OUT:
+            break
+    return ''.join(out)[:_PRINTF_MAX_OUT]
+
+
+_REDIR_OP_RX = re.compile(r'&?[<>]+[&|]?')
+_REDIR_FD_RX = re.compile(r'\d+|\{\w+\}')
+_DUP_TARGET_RX = re.compile(r'\d+-?|-')
+_BRACE_FD_RX = re.compile(r'\{\w+\}(?=&?[<>])')
+
+
+def _seg_cmds(seg, strip=False):
+    """The commands of one pipeline segment, each a list of its words (stdin_pipelines). strip (card 39d885ef): a
+    redirection is no word: its operator, the fd number glued before it (`2>`, `{fd}>`), and its target (`>x`,
+    `2>&1`, `<<<w`); a process substitution `<(..)` / `>(..)` keeps the old reading."""
+    cmds, cur, i, last_end = [], [], 0, -1
+    while i < len(seg):
+        ch = seg[i]
+        if strip and ch == '{':
+            fd = _BRACE_FD_RX.match(seg, i)  # `{fd}>f`: zsh and bash 4+ redirect (a { would end the command here)
+            if fd:
+                i = fd.end()
+                continue
+        if strip and (ch in '<>' or seg.startswith('&>', i)) and seg[i + 1:i + 2] != '(':
+            if cur and last_end == i and _REDIR_FD_RX.fullmatch(cur[-1]):
+                cur.pop()
+            op = _REDIR_OP_RX.match(seg, i)
+            i = op.end()
+            if op.group().endswith('&'):
+                d = _DUP_TARGET_RX.match(seg, i)
+                if d:
+                    i = d.end()
+                    continue
+            while i < len(seg) and seg[i] in ' \t':
+                i += 1
+            if i < len(seg) and seg[i] not in _SEG_STOP:
+                i = max(shell_word(seg, i)[1], i + 1)
+            continue
+        if ch in ' \t' or ch in _SEG_STOP:
+            if ch in ';&|\n(){}' and cur:
+                cmds.append(cur)
+                cur = []
+            i += 1
+            continue
+        v, e = shell_word(seg, i)
+        if e <= i:
+            i += 1
+            continue
+        cur.append(v)
+        i = last_end = e
+    if cur:
+        cmds.append(cur)
+    return cmds
+
+
+def pipes_union(make_src, lexed=True, since=None):
+    """Card 39d885ef (Viktor 43793): stdin_pipelines() of make_src() as read so far, united with the reading that keeps
+    a backslash-letter (normalise() turns the quoted \\n of printf '...\\n...' | bash into n before any rule sees it).
+    The union, not the second read alone: `\\bash`, `ba\\sh` need the first. lexed: see stdin_pipelines.
+    since: _ESC_TAKEN when the caller began the text make_src() may hand back unchanged (default: now). When no
+    normalise() since then took a backslash-letter off, the second text is the first one: not read again (the
+    second lexer_view cost 1.25 s on a 100 000-word wrapper, past the 5 s timing cap)."""
+    if since is None:
+        since = _ESC_TAKEN[0]
+    l1, w1 = stdin_pipelines(make_src(), lexed)
+    if _ESC_SKIP[0] and _ESC_TAKEN[0] == since:
+        return list(dict.fromkeys(l1)), list(dict.fromkeys(w1))
+    _KEEP_ESC[0] = True
+    try:
+        l2, w2 = stdin_pipelines(make_src(), lexed)
+    finally:
+        _KEEP_ESC[0] = False
+    return list(dict.fromkeys(l1 + l2)), list(dict.fromkeys(w1 + w2))
+
+
+def stdin_pipelines(text, lexed=True):
+    """(lines, words) of every pipeline that feeds a shell on stdin (see the block above).
+    lexed=False (a script file's text, _hits(script=True)): every stop counts, as on main; the gate does not lex a
+    script file's text (see _hits). Lexed, the fleet replay's node files (82 KB, 30 lexer retries for their `((`) cost
+    about 1 s per reading, four readings per file: 133 -> 1 345 ms, 894 -> 3 945 ms on one command, and benign
+    commands blocked on the script budget. The lexer only takes stops away, so a reading without it is main's."""
     import bisect
     pipes = [m.start() for m in PIPE_SHELL_RX.finditer(text)] if '|' in text else []
     if not pipes:
         return [], []
-    stops = [i for i, ch in enumerate(text) if ch in PIPELINE_START]
+    lx = lex_or_none(text) if lexed else None
+    code = [c == 'c' for c in lx['cls']] if lx is not None else None
+    # a heredoc body is the text of whatever reads it, not the outer command's: by the outer lexing every stop in it
+    # was gone, and a pipeline in a Python string of a `python3 - <<'PY'` body started at the body's top, its words
+    # taking in the lines above (the fleet replay: the gate file named two lines up blocked as script-file). The
+    # body's stops are those of the body lexed on its own (every stop, as on main, when it does not lex): a lexing
+    # only takes stops away, so this reads no shorter than main.
+    if code is not None:
+        for h in lx['heredocs']:
+            bs, be = h.get('bodyStart'), h.get('bodyEnd')
+            if bs is None or be is None or be <= bs:
+                continue
+            sub = lex_or_none(text[bs:be])
+            for k in range(bs, be):
+                code[k] = sub is None or sub['cls'][k - bs] == 'c'
+    # card 39d885ef (Viktor 43793 LOW 1): a stop is a CODE position (not in a quote: `echo './x.sh;' | bash` printed
+    # the ;), and not the & of a redirection (2>&1, &>, <&: `echo ./x.sh 2>&1 | bash` started the pipeline after it)
+    stops = [i for i, ch in enumerate(text) if ch in PIPELINE_START and (code is None or code[i])
+             and not (ch == '&' and ((i > 0 and text[i - 1] in '<>') or text[i + 1:i + 2] == '>'))]
     openers = None
     memo = {}  # a position -> the start it leads to: each position is walked once (a chain of groups stays linear)
     brace = {}  # a stop -> the "}" right after it (blanks between), or None
@@ -754,7 +897,7 @@ def stdin_pipelines(text):
                 b = s + 1
                 break
             if openers is None:
-                openers = _group_openers(text)
+                openers = _group_openers(text, code)
             o = openers.get(closer, -1)
             if not 0 <= o < b:
                 b = 0
@@ -772,29 +915,28 @@ def stdin_pipelines(text):
     lines, words = [], []
     for b, p in merged:
         seg = text[b:p]
-        cmds, cur, i = [], [], 0
-        while i < len(seg):
-            ch = seg[i]
-            if ch in ' \t' or ch in _SEG_STOP:
-                if ch in ';&|\n(){}' and cur:
-                    cmds.append(cur)
-                    cur = []
-                i += 1
-                continue
-            v, e = shell_word(seg, i)
-            if e <= i:
-                i += 1
-                continue
-            cur.append(v)
-            i = e
-        if cur:
-            cmds.append(cur)
+        cmds = _seg_cmds(seg)
+        # card 39d885ef: the same words without the redirections: `echo s3curity 2>/dev/null dump-keychain` prints the
+        # call whole (bash and zsh ran it, measured); zsh's MULTIOS sends a `>x` to the pipe too. Never fewer reads
+        cmds += [cw for cw in _seg_cmds(seg, strip=True) if cw not in cmds]
         for cw in cmds:
             lines.extend(cw)
             if len(cw) > 1:
                 lines.append(' '.join(cw[1:]))
             for v in cw:
                 words.extend(v.split())
+            if cw[0].rsplit('/', 1)[-1] in ('printf', 'echo') and any('\\' in v for v in cw[1:]):  # 39d885ef
+                for v in cw[1:]:
+                    u = _printf_unescape(v)
+                    if u != v:
+                        for ln in u.split('\n'):
+                            lines.append(ln)
+                            words.extend(ln.split())
+            if cw[0].rsplit('/', 1)[-1] == 'printf' and len(cw) > 1 + (cw[1] == '--'):
+                f = 1 + (cw[1] == '--')  # card 39d885ef: the arguments put into the format (printf 'x\n%s y\n' z)
+                for ln in _printf_output(cw[f], cw[f + 1:]).split('\n'):
+                    lines.append(ln)
+                    words.extend(ln.split())
     # each once: a word repeated in many pipelines is one lookup, not one per pipeline (MAX_TRIES)
     return list(dict.fromkeys(lines)), list(dict.fromkeys(words))
 
@@ -892,7 +1034,7 @@ def _hits(cmd, script=False):
     src = cmd
     if not script and '|' in cmd and '<<' in cmd:
         src = data_body_pipes_masked(cmd, lex_or_none(cmd), None)
-    lines = stdin_pipelines(normalise(src))[0]
+    lines = pipes_union(lambda: normalise(src), lexed=not script)[0]  # since: normalise(src) is made inside
     if lines:
         found += [h for h in hits_in('\n'.join(lines), script) if h not in found]
     # card fae0712e: normalise() joins every backslash-newline, also one whose backslash ends a comment or is half of
@@ -2335,21 +2477,28 @@ def _load_shell_lex():
 shell_lex = _load_shell_lex()
 
 
-_LEX_LAST = [None, None]  # hits() and script_hits() lex the same command: once
+# hits() and script_hits() lex the same command: once. Card 39d885ef: not only the last text. stdin_pipelines lexes
+# its text for the code positions, pipes_union reads two texts in turn and the payloads are judged again, so a
+# one-entry cache lexed the same texts over and over (the fleet replay: 133 -> 1 345 ms, 894 -> 3 945 ms on one
+# command, 126 lexer passes). The lexings are only read, never changed (no caller writes into one).
+_LEX_CACHE = {}
+_LEX_CACHE_MAX = 32
 
 
 def lex_or_none(cmd):
     """The lexer's view of cmd, or None: not loaded, raised, past the bounds, or a problem (see above)."""
     if shell_lex is None:
         return None
-    if _LEX_LAST[0] == cmd:
-        return _LEX_LAST[1]
+    if cmd in _LEX_CACHE:
+        return _LEX_CACHE[cmd]
     try:
         lx = shell_lex.lex(cmd)
     except Exception:  # LexTooBig, or a lexer bug: the old path
         lx = None
     lx = None if lx is None or lx['problems'] else lx
-    _LEX_LAST[:] = [cmd, lx]
+    if len(_LEX_CACHE) >= _LEX_CACHE_MAX:
+        _LEX_CACHE.clear()
+    _LEX_CACHE[cmd] = lx
     return lx
 
 
@@ -2508,7 +2657,23 @@ def _agent_msg_is_ours(path, cwd, moved):
     return os.path.realpath(path) == AGENT_MSG
 
 
+_MASK_CACHE = {}
+
+
 def data_body_pipes_masked(cmd, lx, cwd):
+    """_data_body_pipes_masked, once per (cmd, cwd). Card 39d885ef (Viktor 43793 INFO 1): payload_texts, _hits and
+    script_hits each masked the same text (with many data heredocs about 3x the time), and the escape-keeping second
+    read (pipes_union) would have doubled it again. Every caller passes lex_or_none(cmd) as lx, so (cmd, cwd) is the
+    key; at most 32 entries (a hook call judges a handful of texts)."""
+    key = (cmd, cwd, lx is None)
+    if key not in _MASK_CACHE:
+        if len(_MASK_CACHE) >= 32:
+            _MASK_CACHE.clear()
+        _MASK_CACHE[key] = _data_body_pipes_masked(cmd, lx, cwd)
+    return _MASK_CACHE[key]
+
+
+def _data_body_pipes_masked(cmd, lx, cwd):
     """Card 74586987 (replay r2, a card comment blocked as secret-read): cmd (same length) with every "|" made a blank
     inside the body of a quoted-delimiter heredoc whose recipient only stores or sends it (DATA_RECIPIENT_RX: git
     commit -F -, curl -d @-, this repo's agent-msg.sh), for stdin_pipelines() only. Such a body is data, never code of
@@ -2715,6 +2880,7 @@ def shell_heredoc_bodies(cmd, lx):
 def script_hits(cmd, cwd):
     """Rule names for inline interpreter code and for the files the command runs."""
     found = []
+    esc0 = _ESC_TAKEN[0]  # pipes_union: the texts below are made from here on
     if INTERP_RX.search(normalise(cmd)) and literal_hit(cmd):
         found.append('script-inline')
     # the payload a quote opens past PAYLOAD_OPEN's reach: that quote becomes a command boundary (`;`), so the
@@ -2742,20 +2908,34 @@ def script_hits(cmd, cwd):
     # card 74586987: a pipeline into a shell runs what it prints: its words as command lines, and every piece of them
     # as a file the script rules look up (stdin_pipelines); the pipes of a data heredoc's body are prose
     # (data_body_pipes_masked: only the pipeline reading changes, the script rules read `text` as before)
-    pipe_src = text
-    masked = data_body_pipes_masked(cmd, lx, cwd) if lx is not None else cmd
-    if masked != cmd:  # the same steps as above, on the masked text (same length as cmd)
-        pb = blank_span(masked, span)
-        for s in lexer_data_spans(cmd, cwd, lx):
-            pb = blank_span(pb, s)
-        pview, pextras = lexer_view(nonshell_prose_masked(pb, cmd, lx), cmd, lx, cwd)
-        pipe_src = pview + ''.join('\n' + e for e in pextras)
-    pipe_lines, pipe_words = stdin_pipelines(pipe_src)
+    def _pipe_src():
+        masked = data_body_pipes_masked(cmd, lx, cwd) if lx is not None else cmd
+        if masked != cmd:  # the same steps as above, on the masked text (same length as cmd)
+            pb = blank_span(masked, span)
+            for s in lexer_data_spans(cmd, cwd, lx):
+                pb = blank_span(pb, s)
+            pview, pextras = lexer_view(nonshell_prose_masked(pb, cmd, lx), cmd, lx, cwd)
+            return pview + ''.join('\n' + e for e in pextras)
+        if lx is not None and _KEEP_ESC[0]:  # card 39d885ef: the view again, with the backslash-letters kept
+            kview, kextras = lexer_view(blanked, cmd, lx, cwd)
+            return kview + ''.join('\n' + e for e in kextras)
+        if lx is None and _KEEP_ESC[0]:  # card 39d885ef: the old path again, with the backslash-letters kept
+            return normalise(blank_span(cmd, span))
+        return text
+    pipe_srcs = []  # the texts the pipelines were read from, before `text` grows below (main's pipe_src)
+
+    def _pipe_src_seen():
+        s = _pipe_src()
+        pipe_srcs.append(s)
+        return s
+    pipe_lines, pipe_words = pipes_union(_pipe_src_seen, since=esc0)
     text += ''.join('\n' + ln for ln in pipe_lines)
     # card 946937b7 (Viktor 45626 R1): a here-string a shell reads (`bash <<<'python3 m.py'`, `<<<'./m.sh' sh`) runs
-    # its word as a command line: read like a pipeline's lines (stdin_payloads knows which <<< feeds a shell)
-    if '<<<' in pipe_src:
-        text += ''.join('\n' + w for w, _ in stdin_payloads(pipe_src, pipes=False))
+    # its word as a command line: read like a pipeline's lines (stdin_payloads knows which <<< feeds a shell); of
+    # both pipe readings (card 39d885ef: a union, it only adds)
+    for src in dict.fromkeys(pipe_srcs):
+        if '<<<' in src:
+            text += ''.join('\n' + w for w, _ in stdin_payloads(src, pipes=False))
     # card af12091a (Viktor 45748 K1, 47244 (1)): a payload as the shell reads it (payload_texts: '\'' -> ', \" -> ")
     # is a command text too, and so are the payloads in it: a call whose outer quoting hid its operator
     # (`eval 'python3 -W '\''a;b'\'' m.py'`, `eval 'eval "python3 -W \"a;b\" m.py"'`) reads as code there. They are
