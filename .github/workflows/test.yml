@@ -135,6 +135,9 @@ jobs:
       # The waiting clock + free-machine guard (Klodel 35735, Patrik TG 4453/4454) and the reply_to/files columns
       # ledger-outbound records for it. Hermetic: temp DB and store, synthetic chat ids, --dry.
       - run: python3 -I scripts/__tests__/patrik-varakozas.test.py
+      # Card 5e664183 (TG 6187): the live status round's silence reminder; temp projects file and ledger
+      # (LEDGER_DB_PATH), MAIN_AGENT_ID=main, synthetic chat ids, fixed --now.
+      - run: python3 -I scripts/__tests__/elo-allapot-csend.test.py
       # PRIVTOPIC1106 (card 6dbeadad, #123): the private-topic group gate blocks a
       # private project's words in the team group; its fail-closed cases (bad regex,
       # broken store, unknown private chat) are the gate. Hermetic: throwaway
