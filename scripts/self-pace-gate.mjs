@@ -412,6 +412,197 @@ export function allowlistBashSegmentAllowed(seg) {
   return true
 }
 
+// SCHEDDIR1118 (card a74793b8, Klodel 47370; system 47365, first case 42457): the task
+// store moved from the one scheduled_tasks.json to a directory per task,
+// ~/.claude/scheduled-tasks/<name>/{SKILL.md,task-config.json}, and SCHEDULE_STORE_RX
+// never followed: a Write of a SKILL.md, an Edit of a task-config.json, a cp or a python
+// open() into it all passed (measured 2026-11-18 on the production gate). The runner
+// fires a file-written task with the agent framing (src/web/schedule-trust.ts), but it
+// fires it -- so a sub-agent could pace its own future turns by file. Every agent's
+// .claude-config/scheduled-tasks is a symlink to the same directory.
+//
+// The same shape as the egress allowlist above. Native file tools: denied on the path
+// text AND on the real path of the nearest existing ancestor (a symlink, a relative path,
+// a new task directory). Bash: FAIL-CLOSED. A segment that names the store may only be a
+// plain READ, and its output redirect may not point into the store; a `cd` into the
+// store makes every later segment of the command count as inside it.
+// Not seen, written down: a path built at run time, or a relative path after a cd to
+// ~/.claude. The schedule-trust alarm catches those after the fact.
+// The repository's own scheduled-tasks/ templates (no .claude in the path) stay free.
+const SCHEDULE_DIR_RX = /(?:\.claude(?:-config)?\}?|CLAUDE_CONFIG_DIR(?::?[-=+?][^\s/}]*(?:\/[^\s/}]*)*)?\}?)\/scheduled-tasks(?![\w.-])/i
+// What bash resolves before the path is used: quotes, a backslash escape, // and /./ (Viktor 47414 L1); the
+// ${CLAUDE_CONFIG_DIR:-x} default form counts too.
+export function namesScheduleDir(text) {
+  const t = String(text ?? '').replace(/\\(.)/g, '$1').replace(/["']/g, '').replace(/\/(?:\.?\/)+/g, '/')
+  return SCHEDULE_DIR_RX.test(t)
+}
+const SCHEDULE_DIR_READERS = new Set([...ALLOWLIST_READERS, 'ls', 'du', 'find', 'readlink'])
+// find can write or run: -delete, -exec*, -ok*, -fprint*, -fls.
+const FIND_ACTION_RX = /\s-(?:delete|exec\w*|ok\w*|fprint\w*|fls)\b/i
+
+// Shell grammar words that run nothing themselves; the command after them is judged
+// (`do cat x`), or the segment is only a list / a test (`for d in <store>/*`, `[ -d x ]`).
+const SHELL_LEAD_RX = /^(?:(?:do|then|else|elif|if|while|until|!|\{|\()\s+)+/
+// The fleet's text senders (a message, a card comment, a shared-file line): their
+// arguments are text, so naming the store there writes nothing into it.
+const TEXT_TOOL_RX = /(?:^|\/)(?:agent-msg|kernel-msg|msg-close|card-comment|shared-append)\.sh$/
+// Inside the store (after a cd / for / variable): these write or run code.
+const IN_DIR_WRITER_RX = /^(?:cp|mv|tee|sed|dd|ln|touch|mkdir|rm|rmdir|install|rsync|truncate|chmod|chown|patch|ed|ex|vi|vim|nano|perl|ruby|python[\d.]*|node|deno|bun|bash|sh|zsh|osascript|awk|gawk|xargs|env|find|tar|unzip|git)$/
+const SHELL_NEUTRAL = new Set(['for', 'done', 'fi', '[', '[[', 'test', 'true', ':', 'select', 'case', 'esac'])
+
+export function scheduleDirBashSegmentAllowed(seg, inDir = false, tainted = false) {
+  // `f=$(ls -d <store>/x*)`: the substitution's command is the command
+  const s = String(seg ?? '').trim().replace(SHELL_LEAD_RX, '').replace(/^[A-Za-z_][A-Za-z0-9_]*=\$\(\s*/, '')
+  if (!s) return true
+  const named = namesScheduleDir(s)
+  if (!inDir && !tainted && !named) return true
+  // A substitution's command is a command too, also inside double quotes (masked for the split) (Viktor 47414 M1)
+  for (const m of s.matchAll(/\$\(([^()]*)\)|`([^`]*)`/g)) {
+    const inner = (m[1] ?? m[2] ?? '').trim()
+    if (inner && !scheduleDirBashSegmentAllowed(inner, inDir, true)) return false
+  }
+  const words = s.split(/\s+/)
+  let i = 0
+  while (i < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i])) i++ // leading VAR=x
+  if (i >= words.length && !/\$\(|`/.test(s)) return true // a bare assignment runs nothing (it may carry the store, see below)
+  let cmd = (words[i] ?? '').replace(/^.*\//, '')
+  if (cmd === 'cd' || cmd === 'pushd' || cmd === 'popd') return true
+  if (SHELL_NEUTRAL.has(cmd)) cmd = 'echo' // judged on its redirects below
+  // Carried in (cd / for / variable) but not naming the store: an unrelated command
+  // (curl to the dashboard, git elsewhere) is not denied blind; a writer, an
+  // interpreter or a redirect is.
+  if ((inDir || tainted) && !named && !TEXT_TOOL_RX.test(cmd) && !(/^(?:ba)?sh$/.test(cmd) && TEXT_TOOL_RX.test(words[i + 1] ?? ''))) {
+    // An ALLOWLIST, not a writer list: command cp, \cp, "cp", nohup, ditto, wget all write (Viktor 47414 M2)
+    let ok = SCHEDULE_DIR_READERS.has(cmd) || cmd === 'echo'
+    // pure text filters (they print to stdout; sort -o and a second uniq operand write a file)
+    if (/^(?:cut|tr|nl|basename|dirname|realpath|column|true|test|\[)$/.test(cmd)) ok = true
+    if (cmd === 'sort') ok = !words.some((w) => /^['"]?(?:-[A-Za-z]*o|--output)/.test(w))
+    // a lone '-' is stdin, an operand: uniq - out writes out
+    if (cmd === 'uniq') ok = words.slice(i + 1).filter((w) => w === '-' || !w.startsWith('-')).length <= 1
+    if (cmd === 'git') {
+      let sub = ''
+      for (let k = i + 1; k < words.length; k++) {
+        if (/^(?:-C|-c|--git-dir|--work-tree|--namespace)$/.test(words[k])) { k++; continue }
+        if (!words[k].startsWith('-')) { sub = words[k]; break }
+      }
+      ok = GIT_READONLY_SUBCOMMANDS.has(sub) && !words.some((w) => /^['"]?--out/i.test(w))
+    }
+    if (cmd === 'curl') ok = !/\s(?:-[A-Za-z]*[oOcD]\b|--(?:output|output-dir|remote-name|remote-name-all|dump-header|cookie-jar|trace|trace-ascii|stderr|etag-save|hsts|alt-svc)\b)/.test(s)
+    if (cmd === 'find' && FIND_ACTION_RX.test(s)) ok = false
+    if (!ok) return false
+    for (const m of s.matchAll(OUTPUT_REDIRECT_RX)) {
+      const t = m[1]
+      if (/^&?\d+$/.test(t) || t === '/dev/null') continue
+      if (inDir || /[$`]/.test(t) || namesScheduleDir(t)) return false
+    }
+    return true
+  }
+  // The path as TEXT: a message (`bash .../agent-msg.sh ... "<text>"`) or a read-only
+  // git subcommand over source that names it (the same exemptions as the screening rule).
+  if (/^(?:ba)?sh$/.test(cmd) && TEXT_TOOL_RX.test(words[i + 1] ?? '')) cmd = 'agent-msg.sh'
+  if (TEXT_TOOL_RX.test(cmd)) cmd = 'agent-msg.sh'
+  if (cmd === 'git' && !inDir) {
+    const sub = words.slice(i + 1).find((w) => !w.startsWith('-'))
+    if (!GIT_READONLY_SUBCOMMANDS.has(sub ?? '')) return false
+    if (words.some((w) => /^['"]?--out/i.test(w))) return false // `git diff --output=<file>` writes
+    cmd = 'cat' // judged on its redirects below like any reader
+  }
+  if (cmd === 'agent-msg.sh' && !inDir) cmd = 'echo'
+  if (!SCHEDULE_DIR_READERS.has(cmd)) return false
+  if (cmd === 'find' && FIND_ACTION_RX.test(s)) return false
+  for (const m of s.matchAll(OUTPUT_REDIRECT_RX)) {
+    const target = m[1]
+    if (/^&?\d+$/.test(target) || target === '/dev/null') continue // 2>&1, >/dev/null
+    // inside the store a relative target lands in it too
+    if (inDir || namesScheduleDir(target) || /[$`]/.test(target)) return false
+  }
+  return true
+}
+
+// Split on the real separators only: their positions come from maskInertLiterals (which
+// keeps the length), the TEXT from the command, so a quoted path stays visible while a
+// `;` or `|` inside a quoted grep pattern or message no longer cuts a fake segment.
+// Unparseable quoting falls back to the naive split (more segments, more scanning).
+// A text sender's heredoc body (`bash .../kernel-msg.sh klodel - <<'MSG'`) is the message:
+// blanked to the same length, so naming the store in a message is no write. Only a QUOTED
+// tag (the shell expands nothing in it) on a line whose command is a text sender.
+export function blankTextToolHeredocs(command) {
+  return String(command ?? '').replace(
+    /(<<-?\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\2)([\s\S]*?)(^\s*\3\s*$)/gm,
+    (full, open, _q, _tag, body, close, offset, string) => {
+      // the command that owns the redirect: after the last separator on the opener line
+      const line = string.slice(string.lastIndexOf('\n', offset - 1) + 1, offset).split(/[;&|(]/).pop()
+      const lead = line.trim().replace(SHELL_LEAD_RX, '').split(/\s+/)
+      const first = (lead[0] ?? '').replace(/^.*\//, '')
+      const owner = /^(?:ba)?sh$/.test(first) ? (lead[1] ?? '') : first
+      if (!TEXT_TOOL_RX.test(owner)) return full
+      const nl = body.indexOf('\n')
+      // the rest of the opener line is shell and stays; line breaks stay, so the tag line still closes it
+      return open + body.slice(0, nl + 1) + body.slice(nl + 1).replace(/[^\n]/g, ' ') + close
+    },
+  )
+}
+
+export function splitSegmentsKeepQuotes(command) {
+  const src = blankTextToolHeredocs(String(command ?? '')).replace(/\\\r?\n/g, ' ')
+  const m = maskInertLiterals(src)
+  if (m == null || m.length !== src.length) return splitSegments(src)
+  const out = []
+  let start = 0
+  for (let i = 0; i < m.length; i++) {
+    const two = m.slice(i, i + 2)
+    if (two === '&&' || two === '||') { out.push(src.slice(start, i)); start = i + 2; i++; continue }
+    if (m[i] === ';' || m[i] === '&' || m[i] === '|' || m[i] === '\n' || m[i] === '`' || m[i] === ')') { out.push(src.slice(start, i)); start = i + 1; continue }
+    if (two === '$(' || two === '<(' || two === '>(') { out.push(src.slice(start, i)); start = i + 2; i++ }
+  }
+  out.push(src.slice(start))
+  return out.map((x) => x.trim())
+}
+
+// A segment that names the store other than as a text sender's text.
+function segmentNamesStoreAsPath(x) {
+  return namesScheduleDir(x) && !TEXT_TOOL_RX.test(x.split(/\s+/).find((w) => !/^(?:ba)?sh$/.test(w)) ?? '')
+}
+
+// Does a segment carry the store into the rest of the command? A `cd` / `pushd` into it,
+// a `for` over it, or a variable set from it (`f=$(ls -d <store>/x*)`): a later
+// `cp a $d/SKILL.md` no longer spells the path.
+export function segmentEntersScheduleDir(seg) {
+  const s = String(seg ?? '').trim().replace(SHELL_LEAD_RX, '')
+  return /^(?:cd\s|pushd\s|for\s|[A-Za-z_][A-Za-z0-9_]*=)/.test(s) && namesScheduleDir(s)
+}
+
+// The real path of `p`, resolving the nearest existing ancestor (a new file or a new task
+// directory does not exist yet, but its parent's symlink still counts).
+function realViaAncestor(p) {
+  let head = p
+  const rest = []
+  for (let n = 0; n < 64; n++) {
+    try { return join(realpathSync(head), ...rest.reverse()) } catch { /* climb */ }
+    const up = dirname(head)
+    if (up === head) break
+    rest.push(basename(head))
+    head = up
+  }
+  return p
+}
+
+// The task store this install's runner reads: opts.scheduleDir (tests), else <home>/.claude/scheduled-tasks.
+export function scheduleDirOf(opts = {}) {
+  return opts.scheduleDir ?? join(opts.home ?? homedir(), '.claude', 'scheduled-tasks')
+}
+
+// Does a native file-tool call write into the task store? `scheduleDir` is the real
+// store; tests pass a tmp one. Compared case-insensitively (APFS).
+export function fileToolTargetsScheduleDir(toolInput, scheduleDir, cwd = process.cwd()) {
+  const raw = String(toolInput?.file_path ?? toolInput?.notebook_path ?? '')
+  if (!raw) return false
+  if (SCHEDULE_DIR_RX.test(raw)) return true
+  const real = realViaAncestor(resolve(cwd, expandHome(raw))).toLowerCase()
+  const root = realViaAncestor(resolve(scheduleDir)).toLowerCase()
+  return real === root || real.startsWith(root + '/')
+}
+
 // IMAGESAFETY1020 (card 1a4fe725, Viktor 9018 F3): generated images wait in an
 // `_unscreened/` directory until scripts/image-safety/check.py screens them, and a
 // flagged one goes to `_quarantine/` with mode 000. Mode 000 is no boundary -- every
@@ -1125,6 +1316,7 @@ export function gateDecision(toolName, toolInput, opts = {}) {
   if (name === 'Write' || name === 'Edit' || name === 'MultiEdit' || name === 'NotebookEdit') {
     const fp = String(toolInput?.file_path ?? toolInput?.notebook_path ?? '')
     if (SCHEDULE_STORE_RX.test(fp)) return { deny: true }
+    if (fileToolTargetsScheduleDir(toolInput, scheduleDirOf(opts), opts.cwd)) return { deny: true, reason: 'schedule-dir' }
     if (fileToolTargetsAllowlist(toolInput, opts.allowlistPath, opts.cwd)) return { deny: true, reason: 'egress-allowlist' }
   }
   if (name === 'Bash') {
@@ -1141,6 +1333,23 @@ export function gateDecision(toolName, toolInput, opts = {}) {
     const naiveSegs = splitSegments(safeCommand)
     // ONCE: decided once, on the whole RAW command, top level only (see onceCommandAllowed).
     const onceOk = (opts.depth ?? 0) === 0 && onceCommandAllowed(toolInput?.command)
+    // SCHEDDIR1118: the per-task store, on separator-true segments; a cd / for /
+    // variable that carries the store makes the later segments count as inside it.
+    let inScheduleDir = false
+    const schedSegs = splitSegmentsKeepQuotes(safeCommand)
+    // a store named anywhere in the command (not only as a text sender's text): every other segment then runs on
+    // the allowlist (a pipe, a while loop, a process substitution carry it; Viktor 47414 M1)
+    let tainted = schedSegs.some(segmentNamesStoreAsPath)
+    for (const [k, seg] of schedSegs.entries()) {
+      if (!scheduleDirBashSegmentAllowed(seg, inScheduleDir, tainted)) return { deny: true, reason: 'schedule-dir' }
+      if (segmentEntersScheduleDir(seg)) inScheduleDir = true
+      else if (/^(?:cd|pushd)(?:\s+[~/$]|\s*$)/.test(seg.replace(SHELL_LEAD_RX, ''))) {
+        // an absolute cd leaves it, a relative one does not; the taint then only holds if a LATER segment names
+        // the store (cd /x && cp a b after reading the store is free; ... done < <(ls store) is not)
+        inScheduleDir = false
+        tainted = schedSegs.slice(k + 1).some(segmentNamesStoreAsPath)
+      }
+    }
     for (const seg of naiveSegs) {
       // Match the self-pace bash patterns against the shell-normalised segment so a
       // `\/loop` / `$IFS/loop` evasion (which bash resolves to `/loop` at exec) is
@@ -1185,7 +1394,7 @@ export function gateDecision(toolName, toolInput, opts = {}) {
     for (const payload of wrappedPayloads(wrapBase)) {
       const depth = (opts.depth ?? 0) + 1
       if (depth > MAX_WRAP_DEPTH) return { deny: true }
-      const inner = gateDecision('Bash', { command: payload }, { cwd: opts.cwd, allowlistPath: opts.allowlistPath, depth })
+      const inner = gateDecision('Bash', { command: payload }, { cwd: opts.cwd, allowlistPath: opts.allowlistPath, home: opts.home, scheduleDir: opts.scheduleDir, depth })
       if (inner.deny) return inner
     }
     if (launchdOps.length) return { deny: false, launchdOps }
@@ -1244,6 +1453,13 @@ const ALLOWLIST_GATE_MSG =
   'agenst (inter-agent uzenet: domain + miert); o a gazda jovahagyasaval veszi fel. ' +
   'Olvasni szabad: cat / grep / jq a fajlra (ertelmezo -- python, node -- nem).'
 
+const SCHEDULE_DIR_GATE_MSG =
+  'Utemezes-tar TILTOTT (governance hard-gate). Sub-agentkent a ~/.claude/scheduled-tasks/ ' +
+  'ala (SKILL.md, task-config.json, mentes) NEM irhatsz: se Write/Edit, se Bash (cp, mv, tee, >, ' +
+  'python, ...). Utemezes letrehozasat vagy modositasat kerd a fo agenstol (inter-agent uzenet: nev, ' +
+  'cron Europe/Budapest, prompt, task/heartbeat). Olvasni szabad: cat / grep / head / ls / find. Ha a ' +
+  'parancs a tarolot olvassa ES mast is futtat (python, sed, ...), bontsd kulon Bash-hivasokra.'
+
 function allow() { process.exit(0) }
 
 function deny(reason) {
@@ -1285,7 +1501,7 @@ if (isInvokedDirectly()) {
   if (reason === 'launchd-agent-mismatch' || (launchdOps && launchdOps.length)) {
     writeLaunchdOpsLog(opts, reason === 'launchd-agent-mismatch' ? [{ sub: 'MISMATCH', label: '-' }] : launchdOps)
   }
-  if (shouldDeny) deny(reason === 'egress-allowlist' ? ALLOWLIST_GATE_MSG : reason === 'image-quarantine' ? QUARANTINE_GATE_MSG : GATE_MSG)
+  if (shouldDeny) deny(reason === 'egress-allowlist' ? ALLOWLIST_GATE_MSG : reason === 'image-quarantine' ? QUARANTINE_GATE_MSG : reason === 'schedule-dir' ? SCHEDULE_DIR_GATE_MSG : GATE_MSG)
   allow()
 }
 
