@@ -799,7 +799,7 @@ def stdin_pipelines(text):
     return list(dict.fromkeys(lines)), list(dict.fromkeys(words))
 
 
-def payload_texts(text, script=False):
+def payload_texts(text, script=False, subst=False):
     """The text of each payload a quote opens (payload_quotes(), PAYLOAD_OPEN): '...' as written, "..." with \\ \" \\$
     \\` and backslash-newline unescaped, as bash reads it. An escaped opening quote (`do shell script \\"...\\"`) is
     left to the payload around it. A quote inside an earlier payload belongs to it, so the walk is linear. Only a
@@ -808,13 +808,18 @@ def payload_texts(text, script=False):
     `-c 'a'` paddings stay fast). Each distinct text once; None past MAX_PAYLOADS.
     Card aeee72df: the whole shell word the quote opens is a payload too (shell_word(), LOW 2), when it is more than
     its first piece, and so is what a shell reads on stdin (stdin_payloads(), LOW 4). Both only add texts: the walk
-    and the first-piece payloads are the ones before (a mark only ever adds a block)."""
+    and the first-piece payloads are the ones before (a mark only ever adds a block).
+    Card 2917e6b6 (subst=True, decoded_payloads): a verbatim payload with a backtick is returned too. Its text stands
+    in the outer text as quoted text, where the call's words are cut at the backtick, which may open a substitution
+    in them: `eval 'python3 \x60:\x60 evil.py'` read no script, and bash and zsh ran evil.py (main 01a9dded too).
+    Read as a text of its own, the lexer reads it as code. Not in the outer passes: a backtick that closes a call there (prose
+    in a heredoc: `python3 x`) cut it right, and searching on from it blocked 16 benign fleet commands (the replay)."""
     starts = set(payload_quotes(text))
     starts.update(m.end() - 1 for m in re.finditer(PAYLOAD_OPEN, text))
     out, seen, last, word_end = [], set(), -1, 0
 
     def add(p, verbatim):
-        if p in seen or (verbatim and not PAYLOAD_QUOTED.search(p)):
+        if p in seen or (verbatim and not PAYLOAD_QUOTED.search(p) and not (subst and '`' in p)):
             return True
         if len(out) == MAX_PAYLOADS:
             return False
@@ -1229,6 +1234,216 @@ def _call_alone_groups(name, seg, expanded):
     return interp_groups(name + seg, expanded)
 
 
+# card af12091a: the characters _own_command_groups may lex in one decision (each candidate end lexes the call's
+# text up to it). Past the budget the gate blocks (fail-closed): a text padded to use it up would otherwise hide the
+# call that comes after (`bash -c '<1500 x python3 $(a;b ok.py;>'` lexed about 15 million characters, 6 s, the
+# watchdog). A benign line of 1500 calls reads about 75 000. There is no limit per call: a call that ran out of tries
+# would keep the old reading, and 33 quoted operators would reopen the gap (`eval 'python3 -W "a;...;b" evil.py'`).
+# A call quoted in Python code (a heredoc that edits a test file) never reads cleanly: its search runs to the window's
+# end and, with the end filter, lexes about 1.5 windows (5 000 characters); the fleet's commands lexed at most 207 000
+# (the replay), 400 000 blocked a heredoc of 120 such lines (0.08 s). 2 million: about 400 of them, 0.4 s.
+# Every pass of the lexer counts (_own_charge): a '$((' or '((' that is not arithmetic re-lexes the whole text, up to
+# MAX_SPLIT_RETRIES + 1 passes per lexing. Counted once per lexing, 70 such openers in a call quoted open made the
+# filter give up (past the retries) and its ends cost 2 million characters in 6.4 s, the watchdog (m3 own-budget-off).
+OWN_LEX_BUDGET = 2_000_000
+
+
+def _own_charge(n):
+    """Adds n characters about to be lexed to this decision's count; past OWN_LEX_BUDGET the gate blocks."""
+    _OWN_LEXED[0] += n
+    if _OWN_LEXED[0] > OWN_LEX_BUDGET:
+        raise TooManyArgs(f'a hívások saját parancsának keresése túllépte a {OWN_LEX_BUDGET} karakteres keretet (fail-closed)')
+
+
+def _own_command_groups(name, rest, cut, expanded):
+    """Card af12091a (Viktor 45748 K1, his Q1 direction 0f6e9cc5): a call whose cut fell inside a quoted word of its
+    payload (`bash -c "python3 -W 'a;b' evil.py"`, `eval 'python3 >"x;y" evil.py'`): the cut is not the end of its
+    command, and the old blank split up to it never reaches the script. The call's own command ends at the first
+    operator or line end past the cut up to which its text (with the payload's closing quote, or without it) reads
+    cleanly: every quote and substitution that opened in the words is closed there, so that operator is code in the
+    payload. interp_groups of that text; [] when no end up to the window's reads cleanly (the old reading stands).
+    A backtick end adds its reading and the search goes on (it may open a substitution in the words).
+    An end after an odd run of backslashes is an escaped operator, not tried. Each call lexes its own command (and
+    the shorter prefixes that failed), never the rest of the line: Q1 lexed up to the line end (the whole
+    ARGS_WINDOW on a long line) for every call, and judged every later call of the line again, which made one line
+    of 1500 calls take 5-6 s and run past MAX_TRIES (a fail-closed block of benign text).
+    Once the ends that did not read cleanly have cost twice as much lexing as the search's distance, the call's text
+    is lexed once more, four times as far (four times further again when the search passes its end), and an end
+    that cannot read cleanly by that lexing is not lexed again (_own_end_filter): a call whose second end reads pays
+    nothing for it, a longer search pays in proportion to its distance. Trying every end of a call
+    whose text never reads cleanly (a call quoted in a Python heredoc) cost ends x window, about 6 million characters
+    on a 4 KB command of the fleet (the replay: 39 benign commands past OWN_LEX_BUDGET). The filter only skips ends;
+    every end it lets through is lexed as before, so the reading is the same (a test compares both on every row)."""
+    if shell_lex is None or _OWN_DEPTH[0] or cut >= len(rest):
+        return []
+    groups = []
+    pos = cut + 1
+    flt = None  # the lexing of name + rest[:flt_len], made once the failed ends cost enough; False: no filter
+    flt_len = spent = 0
+    while True:
+        e = _CALL_END_RX.search(rest, pos)
+        seg = rest if e is None else rest[:e.start()]
+        if (len(seg) - len(seg.rstrip('\\'))) % 2 == 0:
+            for s2 in (seg, seg.rstrip()[:-1] if seg.rstrip()[-1:] in ('"', "'") else None):
+                if not s2:
+                    continue
+                if flt and e is not None and _OWN_FILTER[0]:
+                    if e.start() >= flt_len:  # the search passed the lexed part: four times as far
+                        flt_len = min(len(rest), 4 * flt_len)
+                        flt = _own_end_filter(name, rest[:flt_len])
+                    if flt and e.start() < flt_len and not _own_end_may_read(flt, name, rest, e.start(), s2 is seg):
+                        continue
+                # whether the text reads cleanly is the lexer's problems, not its segments (the part LexTooBig bounds:
+                # past LEX_MAX_SUBSTS every end raised it, and the search went on past the call's real end);
+                # interp_groups below reads a text past the bounds by its own rule
+                lx2 = _lex_no_segments(name + s2)
+                if lx2 is None or lx2['problems']:
+                    spent += len(name) + len(s2)
+                    if flt is None and e is not None and spent >= _OWN_FILTER_AFTER[0] * (len(name) + e.end()):
+                        flt_len = min(len(rest), 4 * e.end())
+                        flt = _own_end_filter(name, rest[:flt_len])
+                    continue
+                # the call's own command reads cleanly but is past the lexer's bounds: interp_groups would read it
+                # the old way, which the quoted operator fools (`eval 'python3 -W "a;b" $(:)x900 evil.py'`, bash ran
+                # evil.py; card 2917e6b6 is the same class for the whole payload)
+                if past_lex_bounds(name + s2, lx2['substs']):
+                    raise TooManyArgs('egy hívás saját parancsa túl nagy a lexernek (fail-closed)')
+                _OWN_DEPTH[0] += 1  # one level: the call's text, read again, does not look for its own end again
+                try:
+                    found = interp_groups(name + s2, expanded)
+                finally:
+                    _OWN_DEPTH[0] -= 1
+                if e is None or rest[e.start()] != '`':
+                    return groups + found
+                # a backtick the text before reads cleanly up to is the end of a `...` around the call, or the
+                # opening of one in its words (`eval 'python3 -W "a;b" \`true\` evil.py'` runs evil.py): both
+                # readings, the later ends are tried too
+                groups += found
+                break
+        if e is None:
+            return groups
+        pos = e.end()
+
+
+_OWN_DEPTH = [0]
+_OWN_LEXED = [0]  # characters lexed by _own_command_groups in this decision; script_hits sets it to 0
+_OWN_FILTER = [True]  # the tests turn it off to compare the filtered reading with the unfiltered one
+_OWN_FILTER_AFTER = [2]  # the filter is built once the failed ends cost this many times the search's distance; the
+# tests set 0 (built at the first failed end) so that every row's ends go through it
+
+
+def _no_segments(s, cls, substs):
+    return []
+
+
+def _lex_no_segments(text, retries_only=False):
+    """shell_lex.lex(text) without its segments (segments_of is the part LexTooBig bounds; the classes,
+    substitutions, heredocs and problems come from the lexing itself). None on a lexer bug.
+    retries_only (the end filter): None also when the lexing needs more than MAX_SPLIT_RETRIES retries. lex() then
+    splits EVERY '$((' and '((' opener ('$((a #b))' turns into a comment that never closes), so a prefix that
+    needed fewer reads differently: such a lexing proves nothing about it.
+    lex()'s own loop, so that every pass is charged to OWN_LEX_BUDGET before it runs (a test compares it with lex())."""
+    seg = shell_lex.segments_of
+    shell_lex.segments_of = _no_segments
+    try:
+        split = set()
+        for _ in range(shell_lex.MAX_SPLIT_RETRIES):
+            _own_charge(len(text))
+            r = shell_lex._lex_once(text, split)
+            if 'retry' not in r:
+                return r
+            split.add(r['retry'])
+        if retries_only:
+            return None
+        _own_charge(len(text))
+        return shell_lex._lex_once(text, shell_lex._ALL)
+    except TooManyArgs:
+        raise
+    except Exception:
+        return None
+    finally:
+        shell_lex.segments_of = seg
+
+
+def _own_end_filter(name, rest):
+    """One lexing of the call's text (name + rest, rest cut where the caller's search will look) for
+    _own_end_may_read, which reads ends before rest's end only: (classes, inside, heredocs, text, broken), inside[p]
+    is true when p lies strictly inside a substitution (start < p < end; an open one ends at the text's end). Any
+    text that reaches past an end proves the same for it (the proof does not use what comes after). False when the
+    text does not lex (no filter: every end is lexed). Counts against OWN_LEX_BUDGET."""
+    full = name + rest
+    # without its segments: the filter needs the classes, substitutions and heredocs, and segments_of is the part
+    # LexTooBig bounds (past LEX_MAX_SUBSTS: Python code quoted in a heredoc opens a '(' frame for every call it makes)
+    lx = _lex_no_segments(full, retries_only=True)
+    if lx is None:  # a lexer bug, or past the retries: no filter
+        return False
+    run = [0] * (len(full) + 1)
+    for sub in lx['substs']:
+        if sub['end'] - sub['start'] > 1:
+            run[sub['start'] + 1] += 1
+            run[sub['end']] -= 1
+    inside, depth = [], 0
+    for k in range(len(full)):
+        depth += run[k]
+        inside.append(depth > 0)
+    # a substitution the closing backtick of a body around it ended (inner end == end, short of the text's end; a
+    # closed one ends past its closer, an open one at the text's end) is a problem the lexer records there: every
+    # prefix that reaches past it holds it (the body's end is found the same way in the prefix)
+    broken = min([sub['end'] for sub in lx['substs'] if sub['end'] == sub['inner'][1] < len(full)] + [len(full)])
+    return lx['cls'], inside, lx['heredocs'], full, broken
+
+
+def _own_body_end_may_read(flt, p):
+    """A prefix of the call's text that ends at p inside a heredoc body ('h', 'u') reads cleanly only if its last,
+    cut line is that heredoc's delimiter (the lexer then finds the body's end there); any other cut line leaves the
+    heredoc unterminated."""
+    heredocs, full = flt[2], flt[3]
+    for h in heredocs:
+        if h['bodyStart'] <= p < h['bodyEnd']:
+            line = full[full.rfind('\n', 0, p) + 1:p]
+            return (line.lstrip('\t') if h['stripTabs'] else line) == h['delim']
+    return True
+
+
+def _own_end_may_read(flt, name, rest, end, whole):
+    """False only when the call's text up to rest[end] (whole), or up to the payload's closing quote before it (not
+    whole), cannot lex cleanly, by the one lexing of name + rest. The lexer reads left to right: a prefix that lexes
+    cleanly leaves the stack at the top at its end, and the whole text's lexing has the same stack there (it looks
+    ahead only past a backtick body, at a '$((' whose ')' follows, and one character at the end, none of which can
+    turn a closed prefix open). A prefix that holds a heredoc's operator and delimiter but ends before its body
+    leaves it unterminated; one that ends in a body reads only if its cut line is the delimiter
+    (_own_body_end_may_read). One that reaches past a substitution a backtick body's end broke holds that problem
+    (broken). So:
+    - whole: the operator at p is read at the top: its class is not a quote's ('q' "'", 'd' '"', 'a' "$'") and no
+      substitution is open around it. A comment ('m') or terminator ('t') class is no proof: lexed.
+    - not whole: the prefix ends before the quote at q (the last non-blank before the operator), and the operator is
+      past blanks only. Read at the top, q opens a quote there: the operator is inside it ('q' for "'", 'd' for '"',
+      'c' for a backtick in '"', which opens a substitution there) and in no substitution. When the lexing did not
+      read q as a quote character of its own (its class is no quote's, or it follows '\\' or '$', which take it into
+      an escape or a "$'"/'$"' word), no proof: lexed. (Rules for those cases saved nothing on the fleet's commands,
+      measured: work/af12091a/ablate.py.)"""
+    cls, inside, _, full, broken = flt
+    p = len(name) + end
+    if p > broken or _own_heredoc_pending(flt, p):
+        return False
+    if whole:
+        if cls[p] in 'hu':
+            return _own_body_end_may_read(flt, p)
+        return not (cls[p] in 'qda' or inside[p])
+    q = len(name) + len(rest[:end].rstrip()) - 1
+    if cls[q] in 'hu':
+        return _own_body_end_may_read(flt, q)
+    if cls[q] not in 'qd' or full[q - 1] in '\\$':
+        return True
+    want = 'q' if full[q] == "'" else ('c' if full[p] == '`' else 'd')
+    return cls[p] == want and not inside[p]
+
+
+def _own_heredoc_pending(flt, k):
+    """A prefix that ends at k holds a heredoc's operator and whole delimiter but none of its body: unterminated."""
+    return any(h['opEnd'] <= k < h['bodyStart'] for h in flt[2])
+
+
 def _code_words(seg, base, cls):
     """Card 946937b7: seg (text[base:base + len(seg)]) split at the blanks the lexer reads as code; a quoted or
     escaped blank stays in its word, quotes and backslashes kept (word_forms and strip_quotes read them). cls None:
@@ -1486,6 +1701,7 @@ def interp_groups(text, expanded=False):
             if local is not None:
                 groups += local
                 continue
+            groups += _own_command_groups(name, rest, cut, expanded)
         # ... and when the command AS WRITTEN reads cleanly (886 of the 893 replay rows), the unread text is this gate's
         # view only: the old reading stands, as before card 946937b7. Viktor's shapes are commands the lexer refuses
         # as written (past LEX_MAX_SUBSTS or LEX_MAX_WORK): there the fail-closed stands
@@ -1505,9 +1721,17 @@ def interp_groups(text, expanded=False):
         # keeps the old blank split above, which a quoted blank fools (`eval 'python3 -W "a b" m.py'`). Its own
         # text, lexed alone (without the payload's closing quote if it does not read otherwise), is read as code
         # too: its groups are ADDED, the old reading stays
-        if ccls is None and cls is not None and not expanded and _QUOTED_RX.search(rest, 0, cut):
+        # (card af12091a: an expanded text skips that lexed reading, as before, but not the call's own command below:
+        # `echo X=notes.py; eval 'python3 -W "a;b" $X evil.py'` ran evil.py, X is empty in bash; expanded keeps the
+        # old walk there)
+        # card 2917e6b6 (2026-11-18, measured with bash and zsh): a substitution in the payload cuts the call too, at
+        # its ")" or backtick, with no quote before it: `eval 'python3 $(:) evil.py'` read the script as `$(:` and ran
+        # evil.py on main and on this branch (one substitution is enough; past LEX_MAX_SUBSTS too). A "(" or a
+        # backtick before the cut takes the same path as a quote (a cut ON an opening backtick: decoded_payloads)
+        if ccls is None and cls is not None and (_QUOTED_RX.search(rest, 0, cut) or _OPENS_RX.search(rest, 0, cut)):
             seg = rest[:cut]
-            for s2 in (seg, seg.rstrip()[:-1] if seg.rstrip()[-1:] in ('"', "'") else None):
+            esc2 = len(seg) - len(seg.rstrip('\\'))
+            for s2 in ((None, None) if expanded or esc2 % 2 else (seg, seg.rstrip()[:-1] if seg.rstrip()[-1:] in ('"', "'") else None)):
                 if s2 is None or shell_lex is None:
                     continue
                 try:
@@ -1517,6 +1741,8 @@ def interp_groups(text, expanded=False):
                 if not lx2['problems']:
                     groups += interp_groups(name + s2)
                     break
+            else:
+                groups += _own_command_groups(name, rest, cut, expanded)
         all_words = split_redirections(_code_words(rest[:cut], m.end(), ccls), redir_cache)
         # the window ended inside this command: what follows it is not read
         clipped = cut == len(rest) == ARGS_WINDOW and m.end() + ARGS_WINDOW < len(text)
@@ -2086,6 +2312,12 @@ class LexTooBig(Exception):
     """The text is past the lexer's bounds: the caller takes the old path."""
 
 
+def past_lex_bounds(s, substs):
+    """The lexer's bounds (LEX_MAX_SUBSTS, LEX_MAX_WORK units of segments_of) for text s and its substitutions."""
+    work = (len(s) + sum(max(0, x['inner'][1] - x['inner'][0]) for x in substs)) * (len(substs) + 1)
+    return len(substs) > LEX_MAX_SUBSTS or work > LEX_MAX_WORK
+
+
 def _load_shell_lex():
     """The lexer as a private module object, loaded by path from this file's own scripts/lib: the hook runs with
     python3 -I (no script dir, no cwd on sys.path), and nothing is added to sys.path or sys.modules, so no other
@@ -2101,8 +2333,7 @@ def _load_shell_lex():
         return None
 
     def bounded(s, cls, substs):
-        work = (len(s) + sum(max(0, x['inner'][1] - x['inner'][0]) for x in substs)) * (len(substs) + 1)
-        if len(substs) > LEX_MAX_SUBSTS or work > LEX_MAX_WORK:
+        if past_lex_bounds(s, substs):
             raise LexTooBig()
         return full(s, cls, substs)
     mod.segments_of = bounded
@@ -2436,6 +2667,59 @@ def nonshell_prose_masked(text, cmd, lx):
     return ''.join(chars) if chars else text
 
 
+def _payload_marked(text):
+    """text with every quote that opens a payload past PAYLOAD_OPEN's reach (payload_quotes) as a `;`: the script
+    rules read that payload as a command; nothing else changes."""
+    marks = payload_quotes(text)
+    if not marks:
+        return text
+    chars = list(text)
+    for i in marks:
+        chars[i] = ';'
+    return ''.join(chars)
+
+
+def decoded_payloads(text):
+    """Card af12091a (Viktor 47244 (1)): every payload of text as the shell reads it (payload_texts), and the payloads
+    in those, to PAYLOAD_DEPTH levels; each distinct text once. None (the caller blocks) when a level-PAYLOAD_DEPTH
+    text still holds a payload, or past MAX_PAYLOADS texts in all (one count for every level), or when payload_texts
+    gives up. Breadth first: a text is read once, whatever level it is found at."""
+    out, seen, level = [], set(), [text]
+    for depth in range(PAYLOAD_DEPTH + 1):
+        nxt = []
+        for t in level:
+            ps = payload_texts(t, subst=True)
+            if ps is None:
+                return None
+            for p in ps:
+                if p in seen:
+                    continue
+                if depth == PAYLOAD_DEPTH or len(seen) == MAX_PAYLOADS:
+                    return None
+                seen.add(p)
+                out.append(p)
+                nxt.append(p)
+        level = nxt
+        if not level:
+            break
+    return out
+
+
+def shell_heredoc_bodies(cmd, lx):
+    """Card 2917e6b6: the body of each heredoc (the lexer's) whose command line has a shell word in it (STDIN_SHELL_RX,
+    as for a here-string: `bash <<'EOF'`, `sudo -u a sh <<EOF`; over-read, a shell elsewhere on the line counts too).
+    [] without the lexer's reading (the old path reads the text as before)."""
+    if lx is None:
+        return []
+    out = []
+    for hd in lx['heredocs']:
+        ls = cmd.rfind('\n', 0, hd['op']) + 1
+        le = cmd.find('\n', hd['opEnd'])
+        if STDIN_SHELL_RX.search(cmd[ls:len(cmd) if le < 0 else le]):
+            out.append(cmd[hd['bodyStart']:hd['bodyEnd']])
+    return out
+
+
 def script_hits(cmd, cwd):
     """Rule names for inline interpreter code and for the files the command runs."""
     found = []
@@ -2449,6 +2733,7 @@ def script_hits(cmd, cwd):
     span = data_heredoc_span(cmd, cwd)
     lx = lex_or_none(cmd)
     _CMD_READ[0] = lx is not None
+    _OWN_LEXED[0] = 0
     if lx is None:  # the old path (card fae0712e: fail-closed, today's decision)
         text = normalise(blank_span(cmd, span))
     else:
@@ -2479,21 +2764,31 @@ def script_hits(cmd, cwd):
     # its word as a command line: read like a pipeline's lines (stdin_payloads knows which <<< feeds a shell)
     if '<<<' in pipe_src:
         text += ''.join('\n' + w for w, _ in stdin_payloads(pipe_src, pipes=False))
-    marks = payload_quotes(text)
-    if marks:
-        chars = list(text)
-        for i in marks:
-            chars[i] = ';'
-        text = ''.join(chars)
+    # card af12091a (Viktor 45748 K1, 47244 (1)): a payload as the shell reads it (payload_texts: '\'' -> ', \" -> ")
+    # is a command text too, and so are the payloads in it: a call whose outer quoting hid its operator
+    # (`eval 'python3 -W '\''a;b'\'' m.py'`, `eval 'eval "python3 -W \"a;b\" m.py"'`) reads as code there. They are
+    # judged as a text of their own (the files only add: the command's own reading is not changed); past
+    # PAYLOAD_DEPTH levels or MAX_PAYLOADS texts in all the gate blocks unread
+    decoded = decoded_payloads(text)
+    if decoded is None:
+        return found + ['payload-unread']
+    # card 2917e6b6: the body of a heredoc a shell reads, with a backtick in it, is a text of its own too
+    # (decoded_payloads: in the outer text it is quoted text, and its call's words were cut at the backtick:
+    # `bash <<'EOF'` + `python3 \x60:\x60 evil.py` ran evil.py, main 01a9dded too)
+    decoded += [b for b in shell_heredoc_bodies(cmd, lx) if '`' in b and b not in decoded]
+    texts = [_payload_marked(text)] + ([_payload_marked('\n'.join(normalise(p) for p in decoded))] if decoded else [])
+    text = texts[0]
     # `sudo -u root python3 m.py` (card 3085a683): the files of the text with the wrapped commands' boundaries are
     # judged TOO, as in hits(): a mark only ever adds a file
-    bounded = wrapper_bounds(text, SCRIPT_WRAP_RX)
-    if bounded is None:
+    bounds = [wrapper_bounds(t, SCRIPT_WRAP_RX) for t in texts]
+    if None in bounds:
         return found + ['wrapper-unread']
     try:
         paths = script_paths(cmd, cwd, text, pipe_words)
-        if bounded != text:
-            paths += [p for p in script_paths(cmd, cwd, bounded) if p not in paths]
+        for t in dict.fromkeys(bounds[:1] + texts[1:] + bounds[1:]):
+            if t == text:
+                continue
+            paths +=[p for p in script_paths(cmd, cwd, t) if p not in paths]
     except TooManyArgs as e:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
         return found + [f'script-too-many-args ({e})']
     if len(paths) > MAX_SCRIPTS:  # not "check the first ten": an eleventh file would slip past (fail-closed)
