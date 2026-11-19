@@ -30,6 +30,10 @@ Viktor 48105 (round 2): a sentence ends only at [.!?;] before a space or the end
 Known limits: a no-failure wording with a bare failure noun ("az error log üres") still reads as a failure, and a probe
 reported over two sentences ("Lefuttattam ... a meglévő belépéssel. 401-et adott.") does not count: the price of the
 one-sentence rule, which keeps "A Vercel deploy elbukott. Külön téma: a belépés rendben van." from passing.
+Card c4f0b5bb (Viktor 7c4bd122 HOLE-OLD): a step also when up to three words stand between the verb and "be" ("lépj
+már végre be", "jelentkezz már be"), in the conditional ("Lépnél be újra?"), in English ("Please log in again") and
+for "engedélyezd". Known limit (Viktor 48114 I2): a quoted or negated FAIL_OWN phrase ("nincs not logged in", 29552)
+still reads as a failure in the mark and the queue-row check; kept on purpose (a quality gate, not a security border).
 The owner's chats unknown (no MARVEEN_OWNER_CHATS, store/projektek.json unreadable or of another shape): the gate
 passes and says so on stderr, once per call (Viktor 41257 MEDIUM).
 Passes: a negated sentence ("nem kell nyomnod", "ne töltsd fel"), past tense ("megnyomtad", "feltöltöttük": no
@@ -67,6 +71,10 @@ STEP = re.compile(r'(?<!\w)(?:' + '|'.join([
     r'nyomd\s+(?:meg|rá|le|be)', r'nyomj\s+(?:rá|egy)', r'(?:meg)?nyomod', r'(?:meg)?nyomnod\s+kell',
     r'kattints(?:d|\s+rá)?', r'(?:rá)?kattintasz', r'kattintanod\s+kell',
     r'lépj\s+be', r'jelentkezz\s+be', r'(?:be)?lépsz(?:\s+be)?', r'be\s+kell\s+(?:lépned|jelentkezned)',
+    # card c4f0b5bb (Viktor 7c4bd122 HOLE-OLD): up to three words between the verb and "be", the conditional form
+    r'(?:lépj|lépnél|jelentkezz|jelentkeznél)(?:\s+\w+){1,3}?\s+be', r'(?:lépnél|jelentkeznél)\s+be',
+    r'please\s+(?:log|sign)[\s-]?in', r'^\s*(?:log|sign)[\s-]?in\s+again',  # imperative only at sentence start
+    r'engedélyezd', r'engedélyezned\s+kell',
     r'töltsd\s+(?:fel|le)', r'tölts\s+fel', r'(?:fel|le)töltöd', r'töltöd\s+(?:fel|le)',
     r'(?:fel|le)\s+kell\s+töltened',
     r'indítsd(?:\s+el)?', r'(?:el)?indítod', r'el\s+kell\s+indítanod',
@@ -170,7 +178,7 @@ def step_phrase(text):
             before = sentence[:m.start()].split()[-NEG_WINDOW_WORDS:]
             if any(NEGATION.fullmatch(w.strip(',:()')) for w in before):
                 continue
-            return m.group(0)
+            return m.group(0).strip()
     return None
 
 
