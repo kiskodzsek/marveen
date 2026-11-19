@@ -2310,6 +2310,61 @@ def NEG_owner_mentions_group_without_asking_blocked(root):
     return all(out)
 
 
+# Card 147ac81f (mérve 2026-11-16 14:26, conversation_log 15538): the owner's private "/model opus keep" is answered
+# by the dashboard, the agent never gets that turn; it must not make the private chat "where he wrote last".
+@case
+def owner_dashboard_command_in_private_is_no_conversation(root):
+    out = []
+    for cmd in ('/model opus keep', '/status', '/USAGE', '/help@marveen_bot', '/status\n'):   # a trailing newline
+        sub = tempfile.mkdtemp(dir=root)
+        db = ledger(sub, GROUP, PRIV, texts={0: 'Kész a jelentés?', 1: cmd})
+        rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Kész, itt a jelentés.'})
+        out.append(rc == 0 and 'PRIVÁT-VÁLASZ-KAPU' not in err and 'Traceback' not in err)
+    return _why(all(out), out)
+
+
+@case
+def NEG_real_private_message_still_holds_the_private_chat(root):
+    # a real private message (also before a dashboard command), a custom /command (it goes to the model) and a
+    # multi-line text starting with a command name are conversation: the group reply still stops
+    out = []
+    for chats, texts in (((GROUP, PRIV), {1: 'Rendben, mehet.'}),
+                         ((GROUP, PRIV, PRIV), {1: 'Rendben, mehet.', 2: '/model opus keep'}),
+                         ((GROUP, PRIV), {1: '/napindito'}),
+                         ((GROUP, PRIV), {1: '/model opus\nés nézd meg a csoportot is'}),
+                         ((GROUP, PRIV), {1: '/modellezes kell'}),
+                         ((GROUP, PRIV), {1: '/status-t nézd meg a csoportban'})):   # a suffix is no command
+        sub = tempfile.mkdtemp(dir=root)
+        db = ledger(sub, *chats, texts=texts)
+        rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Kész, itt a jelentés.'})
+        out.append(rc == 2 and 'PRIVÁT-VÁLASZ-KAPU' in err)
+    return _why(all(out), out)
+
+
+@case
+def owner_asked_group_reads_past_a_dashboard_command(root):
+    os.makedirs(os.path.join(root, 'store'), exist_ok=True)
+    db = ledger(root, GROUP, PRIV, PRIV, texts={1: 'írd a csoportba, ott beszéljük meg', 2: '/model opus keep'})
+    rc, err = run_ledger(root, db, {'chat_id': GROUP, 'text': 'Itt a terv, beszéljük meg.'})
+    return _why(rc == 0 and 'Traceback' not in err, (rc, err[-160:]))
+
+
+@case
+def dashboard_commands_pinned_to_marveen_commands(root):
+    # the skip list is marveen-commands.py BUILTIN_NAMES (the commands the dashboard answers without a turn)
+    import ast
+    import importlib.util
+    src = open(os.path.join(os.path.dirname(HOOK), 'marveen-commands.py'), encoding='utf-8').read()
+    names = None
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Assign) and any(getattr(t, 'id', '') == 'BUILTIN_NAMES' for t in node.targets):
+            names = set(ast.literal_eval(node.value.args[0]))
+    spec = importlib.util.spec_from_file_location('pig_pin', HOOK)
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    return _why(names is not None and names == set(g.DASHBOARD_COMMANDS), (names, sorted(g.DASHBOARD_COMMANDS)))
+
+
 @case
 def NEG_latest_private_plain_message_group_reply_still_blocked(root):
     # A plain private message, an older private "másik chat" followed by a plain one, and a "másik chat" said in
