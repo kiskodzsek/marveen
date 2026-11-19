@@ -5,11 +5,20 @@ Why: Viktor 29950 (2026-11-06, card c1921b55). Every agent runs as the same macO
 read any keychain item of that user (another agent's OAuth token, the Vault master key): the accepted structural
 risk H1 of 2026-10-12. This gate is the cheap defense-in-depth Viktor asked for, NOT the fix: the fix is per-agent
 isolation (H1). It does not see a keychain read made through Python/Node/Swift APIs, osascript's own keychain
-calls, or a command name hidden in a variable (`s=security; $s dump-keychain`). Do not rely on it.
+calls, or a command name hidden in a variable or made by a substitution (`s=security; $s -i`) beyond the
+hidden-name rule below. Do not rely on it.
 
 What blocks (exit 2): a `security` call in command position whose subcommand reads or exports secrets:
   find-generic-password, find-internet-password, dump-keychain, export,
 or that reads its subcommands from stdin (`security -i`, `security -p <prompt>`), which would hide the subcommand.
+Hidden name (card 03a336e5, Viktor 47750/47751 LOW): a simple command whose first word is not literal (a $ or a
+backtick in it: `$(echo security)`, `` `echo security` ``, `$s`, `${S:-security}`, `sec$(echo urity)`) and that has
+find-generic-password, find-internet-password or dump-keychain as a word of its own blocks, whatever the name
+turns out to be (the gate cannot know what a substitution prints). A literal first word (`echo $(...) dump-keychain`),
+`export` / -i / -p after a made name, and a subcommand that is made too (`$s dump-$(echo keychain)`) are not seen.
+It reads the command text, and a file the command names only where a shell may run that file (no data or non-shell
+extension, a shell shebang, or a shell / source / . before its name): a made name inside a Python or Node file
+(`os.system('$S dump-keychain')`) is not seen, a JSON or Markdown text quoting the forms passes.
 Command position: the start of the command, or after ; & | ( ) { } a newline, a backtick, $( , an opening quote
 (`bash -c "security ..."`, `ssh host 'security ...'`), after find's -exec / -execdir / -ok, and after the
 wrapper and keyword words env, sudo, doas, sandbox-exec, exec, command, nohup, time, nice, xargs, caffeinate, arch,
@@ -94,7 +103,8 @@ file a command runs is read and judged too:
     (`python3 -c "..."`, `python3 - <<'PY' ... PY`).
   Not seen: a module the script imports, a file the script builds or downloads, a name assembled at run time
   ('sec' + 'urity'), keychain APIs (Security.framework, keyring), a variable set outside the command, a quoted path
-  with spaces, an interpreter whose own name a substitution makes (`$(echo python3) m.py`; Viktor 43662 INFO 1), a Ruby %w list, a payload a quote opens after other commands (`command '...'`, `time '...'` run a
+  with spaces, an interpreter whose own name a substitution makes (`$(echo python3) m.py`, `p=python3; $p m.py`;
+  Viktor 43662 INFO 1, 47750: left INFO), a Ruby %w list, a payload a quote opens after other commands (`command '...'`, `time '...'` run a
   command literally named so, which fails). A wrapped script (`sudo -u root python3 m.py`, `ssh localhost python3
   m.py`, `sg staff 'python3 m.py'`) is read like any other (card 3085a683; for ssh the file is looked up here, which
   is right for localhost and a fail-closed guess for a remote host). The gate's own test assembles its fixtures at
@@ -566,6 +576,139 @@ GIT_RULES += [('git-credential-helper', FnRule(lambda t: env_value_hit(t, _PARAM
               ('git-config-override', FnRule(lambda t: env_value_hit(t, _ONLY_PARAMS_RX, _INCLUDE_NAMED_RX))),
               ('git-config-override', FnRule(config_override, plain=True)),
               ('git-config-override', FnRule(config_write))]
+
+# Card 03a336e5 (Viktor 47750/47751 LOW, defense-in-depth; the class the docstring names): a command NAME the shell
+# makes at run time (`$(echo security) dump-keychain`, `` `echo security` ``, `s=security; $s ...`, `${S:-security}`,
+# `sec$(echo urity)`, `$(printf '\163...')`) passed, 16 forms measured on the live gate. secret-read needs the literal
+# name, and what the substitution prints is unknown here, so the rule is Viktor's: a simple command whose FIRST word is
+# not literal (a $ or a backtick in it) and that has a secret subcommand standing as a word of its own blocks.
+# Only find-generic-password, find-internet-password and dump-keychain: `export` is an everyday word after a
+# variable command (`$PY x.py export`), and a name made at run time with -i / -p stays unseen (docstring).
+# The name: plain chars, quoted runs, and $( ) (one level of parens inside), backticks, ${ }, $ pieces, at least one
+# of the last; each piece starts with its own char, so it reads one way only. A blank must follow it (a quote right
+# after it is the end of a quoted string, not a command: `echo "$(date)" dump-keychain` passes). The rest of the
+# command up to ; & | or a newline is searched for the word; texts without one of the three words skip the regex.
+# Linear (measured 2026-11-19): the first form, one regex POSITION + name + a lazy scan to the word, took 2.3 s on a
+# 20 KB line of `$($a ` heads and as long on glued backtick or quoted pieces, every start reading the same long name
+# again; at 80 KB it blocked on the 6 s watchdog. Now only the lines that hold the word are read (a name, its blank and
+# the scan never cross a newline); _hn_names() reads each name once, right to left; a name hits when the first word
+# after its blank comes before the next ; & |; and the regex only asks whether a command position reaches such a name,
+# at a NUL mark put in front of it (every way of reading the wrapper words, as the first form's backtracking did).
+_HN_SECRET = r'(?<![^\s\'"])(?:find-generic-password|find-internet-password|dump-keychain)(?=[\s;&|)\'"`]|$)'
+_HN_SECRET_RX = re.compile(_HN_SECRET, re.I)
+_HN_MARK_RX = re.compile(POSITION + '\x00', re.I)
+_HN_NOT_PLAIN = frozenset(';&|(){}<>')
+
+
+def _hn_names(line):
+    """{start: index after its blank} for every name in line (no newline in it) with a $ or backtick piece that a blank
+    follows. Pieces as the first form's regex read them: a plain char (not blank, ; & | ( ) { } < > or a quote, $,
+    backtick), "..." with backslash pairs, '...', $( ) with one level of parens inside, `...`, ${ }, else a bare $.
+    Each piece starts with its own char and ends one way, so the name from an index is its pieces up to the first char
+    that starts none; filled right to left, every index once."""
+    n = len(line)
+    nbt, nsq, nbr, npa = [n] * (n + 2), [n] * (n + 2), [n] * (n + 2), [n] * (n + 2)
+    dq, pe = [-1] * (n + 3), [-1] * (n + 3)  # inside "..." / $( ): the index after the closing quote / paren, or -1
+    cend, cdyn = list(range(n + 2)), [False] * (n + 2)
+    out = {}
+    for i in range(n - 1, -1, -1):
+        c = line[i]
+        nbt[i] = i if c == '`' else nbt[i + 1]
+        nsq[i] = i if c == "'" else nsq[i + 1]
+        nbr[i] = i if c == '}' else nbr[i + 1]
+        npa[i] = i if c in '()' else npa[i + 1]
+        dq[i] = i + 1 if c == '"' else (dq[i + 2] if i + 1 < n else -1) if c == '\\' else dq[i + 1]
+        if c == ')':
+            pe[i] = i + 1
+        elif c == '(':
+            k = npa[i + 1]
+            pe[i] = pe[k + 1] if k < n and line[k] == ')' else -1
+        else:
+            pe[i] = pe[i + 1]
+        j, dyn = None, False
+        if c == '$':
+            dyn = True
+            if line[i + 1:i + 2] == '(' and pe[i + 2] != -1:
+                j = pe[i + 2]
+            elif line[i + 1:i + 2] == '{' and nbr[i + 2] < n:
+                j = nbr[i + 2] + 1
+            else:
+                j = i + 1
+        elif c == '`':
+            dyn = True
+            j = nbt[i + 1] + 1 if nbt[i + 1] < n else None
+        elif c == '"':
+            j = dq[i + 1] if dq[i + 1] != -1 else None
+        elif c == "'":
+            j = nsq[i + 1] + 1 if nsq[i + 1] < n else None
+        elif not (c.isspace() or c in _HN_NOT_PLAIN):
+            j = i + 1
+        if j is not None:
+            cend[i], cdyn[i] = cend[j], dyn or cdyn[j]
+            if cdyn[i] and cend[i] < n and line[cend[i]] in ' \t':
+                out[i] = cend[i] + 1
+    return out
+
+
+def hidden_name(text):
+    if '$' not in text and '`' not in text:
+        return False
+    import bisect
+    words = [m.start() for m in _HN_SECRET_RX.finditer(text)]
+    done = -1
+    for w in words:
+        if w < done:
+            continue  # this line was read already
+        ls = text.rfind('\n', 0, w) + 1
+        done = text.find('\n', w)
+        done = len(text) if done < 0 else done
+        line = text[ls:done]
+        names = _hn_names(line)
+        if not names:
+            continue
+        lw = [x - ls for x in words[bisect.bisect_left(words, ls):bisect.bisect_left(words, done)]]
+        seps = [i for i, c in enumerate(line) if c in ';&|']
+        hits = []
+        for q, e in names.items():
+            k = bisect.bisect_left(lw, e)
+            j = bisect.bisect_left(seps, e)
+            if k < len(lw) and (j == len(seps) or lw[k] < seps[j]):
+                hits.append(q)
+        if hits:
+            # a later line gets its newline back in front (a command position, and the \s of `\s-exec`); the first
+            # line starts at ^ (no newline: `-exec $S dump-keychain` as the whole text is no find -exec)
+            # (a NUL of the command itself is read as another plain char, not as a mark)
+            plain = line.replace('\x00', '\x01')
+            parts, prev = ['\n' if ls else ''], 0
+            for q in sorted(hits):
+                parts += [plain[prev:q], '\x00']
+                prev = q
+            if _HN_MARK_RX.search(''.join(parts) + plain[prev:]):
+                return True
+    return False
+
+
+# The command text only, as GIT_RULES (_hits with script=False). A file the command names is judged by it only when a
+# shell may run it (_hn_shell_file, in script_hits): the fleet replay (2026-11-19) blocked a kanban dump read by a
+# python heredoc (kb.json, this card's own description quotes `$(printf %s S) find-generic-password`), a PR.md and a
+# .diff that quote the forms; the made name is a shell form, a JSON, Markdown or Python file runs no shell word.
+CMD_RULES = [('hidden-name', FnRule(hidden_name))]
+# a file with one of these extensions is not shell code unless a shell shebang opens it or the command runs it with a
+# shell word (bash x.md); any other extension, or none, may be shell code (fail-closed)
+_HN_NOT_SHELL_EXT = frozenset(
+    '.json .jsonl .md .markdown .txt .diff .patch .csv .tsv .log .py .pyi .js .mjs .cjs .ts .tsx .jsx .html .htm '
+    '.css .xml .yml .yaml .toml .ini .sql .rb .pl .php'.split())
+_HN_SHEBANG_RX = re.compile(r'#![ \t]*\S*?(?:/env[ \t]+(?:-\S+[ \t]+)*)?(?:ba|z|k|da)?sh\b')
+
+
+def _hn_shell_file(path, body, cmd):
+    """True when a shell may run this file's text as code: not a data or non-shell extension, a shell shebang, or a
+    shell word / source / . right before its name in the command."""
+    if os.path.splitext(path)[1].lower() not in _HN_NOT_SHELL_EXT or _HN_SHEBANG_RX.match(body):
+        return True
+    base = re.escape(os.path.basename(path))
+    return re.search(r'(?:^|[\s;&|(`/])(?:(?:ba|z|k|da)?sh|source|\.)[ \t]+(?:-\S+[ \t]+)*[\'"]?[^\s;&|]*?' + base
+                     + r'(?![^\s;&|\'")])', cmd) is not None
 
 
 # card 39d885ef (Viktor 43793 MEDIUM 1): True while pipes_union() reads the text a second time, with every
@@ -1295,7 +1438,7 @@ def payload_texts(text, script=False, subst=False):
 
 
 def hits(cmd, script=False, _depth=0):
-    """Rule names the text matches; a script file's text (script=True) is not judged by GIT_RULES."""
+    """Rule names the text matches; a script file's text (script=True) is not judged by GIT_RULES or CMD_RULES."""
     found = _hits(cmd, script)
     if _depth >= PAYLOAD_DEPTH:
         # card aeee72df (Viktor 42941 LOW 1): a payload this deep is not read again, so one still in it blocks, as
@@ -1364,7 +1507,7 @@ def hits_in(text, script=False):
     texts += [re.sub(r'[\'"\\]', '', t) for t in texts]
     found = []
     plain = [text, re.sub(r'[\'"\\]', '', text)]
-    for name, rx in RULES + ([] if script else GIT_RULES):
+    for name, rx in RULES + ([] if script else GIT_RULES + CMD_RULES):
         if name not in found and any(rx.search(t) for t in (plain if getattr(rx, 'plain', False) else texts)):
             found.append(name)
     return found
@@ -3279,7 +3422,7 @@ def script_hits(cmd, cwd):
             return found + ['script-too-slow']
         with open(path, 'rb') as f:
             body = f.read(MAX_SCRIPT_BYTES).decode('utf-8', errors='replace')
-        if hits(body, script=True) or literal_hit(body):
+        if hits(body, script=True) or literal_hit(body) or (_hn_shell_file(path, body, cmd) and hidden_name(body)):
             found.append('script-file')
             break
     return found
