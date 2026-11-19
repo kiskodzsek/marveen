@@ -19,6 +19,11 @@ hibanapló 2026-11-16 09:31, Patrik TG 6174, second occurrence after TG 17727): 
 with the EXISTING sign-in failed (an "existing" word and a failure word, not negated), and the referenced queue row has
 to report that failed sign-in probe itself (a sign-in word and a failure word in its content). A team claim ("the fleet
 token is not allowed") is not a probe. Word matching: an accident guard against a skipped measurement, not a proof.
+Viktor 7c4bd122 (card 540745fa): the topic includes the separable-prefix forms ("Be kell lépned", "lépj már be") and
+log in / authenticate, not "signing" / "belépő" / "belépett" / "hitelesített"; the failure and its sign-in (or
+"existing") word have to stand in one sentence, and a negation after the failure word ("hiba nélkül", "a 401 megszűnt")
+or a few words before it ("nem volt hiba", "0 hiba") cancels it. A password or 2FA step is deliberately not a sign-in
+topic: for a NEW service there is no existing sign-in to probe, so the rule would block it with no way through.
 The owner's chats unknown (no MARVEEN_OWNER_CHATS, store/projektek.json unreadable or of another shape): the gate
 passes and says so on stderr, once per call (Viktor 41257 MEDIUM).
 Passes: a negated sentence ("nem kell nyomnod", "ne töltsd fel"), past tense ("megnyomtad", "feltöltöttük": no
@@ -72,14 +77,24 @@ MSG_ID = re.compile(r'(?<!\d)\d{4,7}(?!\d)')
 
 # A step about signing in (hibanapló 2026-11-16 09:31, Patrik TG 6174: "be van lépve már mindegiyk claude és codex is
 # most is azookon futtok nem értem a kérést"; second occurrence after TG 17727). On folded text (no accents, lower).
-LOGIN_TOPIC = re.compile(r'(?<![a-z])(?:belep|bejelentkez|jelentkezz\s+be|lepj\s+be|login|hitelesit|autentik|o?auth'
-                         r'(?![a-z])|sign[\s-]?in|setup-token)')
+# Viktor 7c4bd122 (card 540745fa): L1 the separable-prefix forms ("Be kell lépned", "lépj már végre be", "Lépnél be
+# újra?"), log in / authenticate; L3 not "signing", "belépő" (a ticket), "belépett", "hitelesített" (a certified copy).
+LOGIN_TOPIC = re.compile(
+    r'(?<![a-z])(?:belep(?!o|ett)|bejelentkez|hitelesit(?!ett)|autentik|o?auth(?![a-z])|authenticat[a-z]*'
+    r'|login|log[\s-]?in(?![a-z])|sign[\s-]?in(?![a-z])|setup-token'
+    r'|be\s+(?:kell(?:ene)?\s+|tudsz\s+|tudnal\s+)?(?:lep|jelentkez)[a-z]*'
+    r'|(?:lepj|lepnel|lepsz|lepjel|jelentkezz|jelentkeznel|jelentkezzel)[a-z]*\s+(?:[a-z]+\s+){0,3}be(?![a-z]))')
 # The probe with the existing sign-in failed. Folded text. A failure word right after a negation ("nem bukott el",
-# "not failed") does not count; "nem működik" / "nem megy" are failure phrases of their own.
-FAIL_OWN = re.compile(r'(?<![a-z])(?:nem\s+mukodik|nem\s+megy|not\s+logged\s+in|nincs\s+belepve)(?![a-z])')
+# "not failed", "nem volt hiba", "nem adott 401-et", "0 hiba") or right before one ("hiba nélkül", "a 401 megszűnt")
+# does not count; "nem működik" / "nem megy" / "nem sikerült" are failure phrases of their own (Viktor 7c4bd122 L2, L3).
+FAIL_OWN = re.compile(r'(?<![a-z])(?:nem\s+mukodik|nem\s+megy|nem\s+sikerult|nem\s+ment\s+at|not\s+logged\s+in|nincs\s+belepve)'
+                      r'(?![a-z])')
 FAIL_WORD = re.compile(r'(?<![a-z0-9])(?:elbuk\w*|bukott\w*|hibas?|hibat|hibaval|401|403|failed|failure|'
-                       r'authentication_failed|unauthorized|lejart\w*|expired|invalid)(?![a-z0-9])')
-FAIL_NEGATED = re.compile(r'(?<![a-z])(?:nem|not|no|sem|nincs)\s+(?:el\s+)?$')
+                       r'authentication_failed|unauthorized|lejart\w*|expired|invalid|sikertelen\w*|(?:vissza|el)utasit\w*|'
+                       r'rejected|denied|error\w*)(?![a-z0-9])')
+FAIL_NEGATED = re.compile(r'(?:(?<![a-z])(?:nem|not|no|sem|nincs|never|without)\s+(?:el\s+|volt\s+|adott\s+|kaptam\s+|kaptunk\s+'
+                          r'|kapott\s+|jott\s+|lett\s+)?|(?<![\d])0\s+)$')
+FAIL_POSTNEG = re.compile(r'^(?:-?[a-z]{0,4})?\s+(?:nelkul|megszunt\w*|elmult|nem\s+jott)(?![a-z])')
 EXISTING = re.compile(r'(?<![a-z])(?:meglev\w*|mostani\w*|jelenlegi\w*|existing|current|flotta\w*|fleet)(?![a-z])')
 
 
@@ -88,9 +103,18 @@ def has_failure(text_folded):
     if FAIL_OWN.search(text_folded):
         return True
     for m in FAIL_WORD.finditer(text_folded):
-        if not FAIL_NEGATED.search(text_folded[max(0, m.start() - 12):m.start()]):
-            return True
+        if FAIL_NEGATED.search(text_folded[max(0, m.start() - 16):m.start()]):
+            continue
+        if FAIL_POSTNEG.search(text_folded[m.end():m.end() + 24]):
+            continue
+        return True
     return False
+
+
+def sentence_with(text_folded, *checks):
+    """Whether ONE sentence of the folded text passes every check (Viktor 7c4bd122 L2: "A Vercel deploy elbukott.
+    Külön téma: a belépés rendben van." is no failed sign-in)."""
+    return any(all(c(s) for c in checks) for s in SENTENCE.split(text_folded))
 
 
 def login_topic(text):
@@ -167,7 +191,7 @@ def value_problem(value, names, writer='', now=None, login=False):
     ids = [int(x) for x in MSG_ID.findall(v)]
     if not ids:
         return 'nincs benne a mérés msg_id-je (4-7 jegyű szám)'
-    if login and not (EXISTING.search(v) and has_failure(v)):
+    if login and not sentence_with(v, EXISTING.search, has_failure):
         return ('belépésről szól, de nem mondja ki, hogy a MEGLÉVŐ belépéssel mért próba elbukott (pl. "pulzus 43901: '
                 'a meglévő belépéssel claude -p: 401")')
     words = set(re.findall(r'[a-z0-9_-]+', v))
@@ -194,7 +218,7 @@ def value_problem(value, names, writer='', now=None, login=False):
             if not login:
                 return None
             c = fold(str(content or ''))
-            if LOGIN_TOPIC.search(c) and has_failure(c):
+            if sentence_with(c, LOGIN_TOPIC.search, has_failure):
                 return None
     if party:
         return ('a hivatkozott üzenet (' + ', '.join(map(str, ids)) + ') nem elbukott belépés-próbáról szól (nincs '

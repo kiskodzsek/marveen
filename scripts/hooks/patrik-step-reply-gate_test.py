@@ -166,6 +166,58 @@ class Hook(unittest.TestCase):
                      'A link: https://example.com/login', 'Kattints az author mezőre.'):
             self.assertFalse(gate.login_topic(text), text)
 
+    def test_login_topic_viktor_7c4bd122(self):
+        # L1: separable-prefix forms, log in / authenticate; L3: no over-match; L4: normalised before matching
+        for text in ('Be kell lépned a Claude-ba a gépen.', 'Be kell jelentkezned a Codex fiókba.',
+                     'Lépnél be újra a Claude-ba?', 'Jelentkezz már be.', 'Kérlek lépj már végre be a gépen.',
+                     'Be tudsz lépni a gépen?', 'Please log in again.', 'Log-in kell.', 'Authenticate again.',
+                     'Re-authentication kell.', 'A Codexhez új bel​épés kell.', 'Futtasd: ｌｏｇｉｎ'):
+            self.assertTrue(gate.login_topic(text), text)
+        for text in ('Nyomd meg a gombot a signing oldalon.', 'Írd alá a hitelesített másolatot.',
+                     'A belépő ára 5000 Ft, fizesd ki.', 'A csomag belépett a rendszerbe, nyomd meg az OK-t.',
+                     'Be van töltve a lap, nyomd meg.', 'A blogin oldalon kattints.'):
+            self.assertFalse(gate.login_topic(text), text)
+
+    def test_failure_words_viktor_7c4bd122(self):
+        # L3: the words of a genuine failed-probe report; L2: a negation after the word, or a few words before it
+        for text in ('sikertelen volt', 'nem sikerült', 'a próba nem ment át', 'visszautasította', 'elutasítva',
+                     'rejected', 'denied', 'error 400', 'a Codex elutasította'):
+            self.assertTrue(gate.has_failure(gate.fold(text)), text)
+        for text in ('hiba nélkül lefutott', 'nem volt hiba', 'nem adott 401-et', 'a 401 megszűnt', 'without failure',
+                     'never failed', '0 hiba', 'a hiba nem jött elő', 'Klodel utasítása szerint megy',
+                     'nem kaptunk 403-at', 'nem kaptunk  401-et'):   # two spaces (a wrapped paste): 13 chars back
+            self.assertFalse(gate.has_failure(gate.fold(text)), text)
+        self.assertTrue(gate.has_failure(gate.fold('10 hiba')))   # "0 hiba" only as its own number
+
+    def test_neg_failure_and_sign_in_in_one_sentence(self):
+        # L2: the failure word and the sign-in word (the queue row) / the existing word (the mark) in ONE sentence
+        names = {'mira', 'kernel', 'dave', 'pulzus', 'main'}
+        con = sqlite3.connect(self.db)
+        now = int(time.time())
+        for row in ((41315, 'pulzus', 'main', 'A Vercel deploy elbukott. Külön téma: a belépés rendben van.', now - 60),
+                    (41316, 'pulzus', 'main', 'A meglévő belépéssel a próba sikertelen volt, a Codex elutasította.',
+                     now - 60)):
+            con.execute("INSERT INTO agent_messages VALUES (?, ?, ?, ?, 'done', ?)", row)
+        con.commit()
+        con.close()
+        self.assertIn('elbukott belépés-próbáról',
+                      gate.value_problem('pulzus 41315: a meglévő belépéssel elbukott', names, 'main', login=True))
+        self.assertIsNone(gate.value_problem('pulzus 41316: a meglévő belépéssel elbukott', names, 'main', login=True))
+        self.assertIn('MEGLÉVŐ', gate.value_problem('pulzus 41316: a meglévő belépés rendben. A deploy elbukott.',
+                                                    names, 'main', login=True))
+
+    def test_neg_separable_sign_in_step_end_to_end(self):
+        # L1 end to end: TG 6174's claim mark no longer lets "Be kell lépned ..." through; a probe mark does
+        self.mark(value='dave 41301: a flotta-token tilos, külön belépés kell')
+        rc, err = self.run_gate(GROUP, 'Be kell lépned a Claude-ba a gépen.')
+        self.assertEqual(rc, 2)
+        self.assertIn('MEGLÉVŐ', err)
+        self.mark(value='pulzus 41300: a meglévő belépéssel claude -p: 401')
+        self.assertEqual(self.run_gate(GROUP, 'Be kell lépned a Claude-ba a gépen.')[0], 0)
+        # L3: "signing" is no sign-in, so a plain reference mark passes it
+        self.mark(value='dave 41301: a flotta-token tilos, külön belépés kell')
+        self.assertEqual(self.run_gate(GROUP, 'Nyomd meg a gombot a signing oldalon.')[0], 0)
+
     def test_failure_words(self):
         for text in ('401', 'a próba elbukott', 'authentication_failed', 'nem működik', 'not logged in', 'lejárt'):
             self.assertTrue(gate.has_failure(gate.fold(text)), text)
