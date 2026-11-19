@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>hu.myshp.dave-seat-guard</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>-I</string>
+		<string>/Users/klodel/marveen/ops/dave-seat-guard/guard.py</string>
+		<string>--notify</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>600</integer>
+	<key>StandardErrorPath</key>
+	<string>/Users/klodel/Library/Logs/marveen-dave-seat-guard.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/klodel/Library/Logs/marveen-dave-seat-guard.log</string>
+</dict>
+</plist>
