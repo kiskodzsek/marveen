@@ -164,6 +164,42 @@ SHELL_CALL_RX = re.compile(r'(?:\b(?:system|popen|getoutput|getstatusoutput|run|
 KILL_WORD_RX = re.compile(r'\b(kill-(se(r(v(er?)?)?)?|session|window|pane)|killp|killw)\b')
 
 
+# card 09283e90: the $( ) and backtick substitutions of an unquoted-delimiter heredoc body run when the body is read
+# (cat <<J + $(tmux kill-server) killed the server and passed on main; a heredoc in $( ) has its body now too). Past
+# MAX_BODY_SUBSTS openers in one body, the whole body is read as a command line (more, not less).
+MAX_BODY_SUBSTS = 64
+
+
+def body_substs(L, body):
+    """[inner text] of the live substitutions of an unquoted heredoc body, or None past MAX_BODY_SUBSTS. Each opener
+    is lexed over a growing window (its line, then doubled): where it closes depends only on the text before the
+    closer, so the first window it closes in gives the same answer as the whole body (bash-egress-parser bodyFrames)."""
+    out = []
+    k = 0
+    n = len(body)
+    while k < n:
+        ch = body[k]
+        if ch == '\\':
+            k += 2
+            continue
+        if ch == '`' or (ch == '$' and body[k + 1:k + 2] == '('):
+            if len(out) >= MAX_BODY_SUBSTS:
+                return None
+            e = body.find('\n', k)
+            size = max((n if e < 0 else e) - k + 1, 64)
+            while True:
+                t = L.lex(body[k:k + size])
+                sub = t['substs'][0]
+                if sub['inner'][1] < sub['end'] or k + size >= n:
+                    break
+                size *= 2
+            out.append(body[k + sub['inner'][0]:k + sub['inner'][1]])
+            k += max(1, sub['end'])
+            continue
+        k += 1
+    return out
+
+
 def _load_lex():
     spec = importlib.util.spec_from_file_location('tmux_kill_gate_shell_lex', LEX_PATH)
     mod = importlib.util.module_from_spec(spec)
@@ -747,13 +783,24 @@ def decide_text(text, depth=0):
                     reasons += decide_text(unescape(lit.replace('\\"', '"').replace("\\'", "'")), depth + 1)
     # a heredoc body fed to a shell runs as commands
     for h in lx['heredocs']:
-        owner = next((sg for sg in lx['segments'] if sg['start'] <= h['op'] < sg['end']), None)
+        # the innermost segment holding the operator (card 09283e90: the shared lexer gives a heredoc in $( ) its
+        # body, and the outer segment R=$(sh <<'X' ... ) holds the operator too; the first match was the outer one)
+        owner = max((sg for sg in lx['segments'] if sg['start'] <= h['op'] < sg['end']),
+                    key=lambda sg: sg['depth'], default=None)
         if owner is None:
             continue
         ws = strip_wrappers(L.words(text, lx, owner))
         if ws and os.path.basename(ws[0]['text']) in SHELLS and not any(
                 re.fullmatch(r'-[A-Za-z]*c[A-Za-z]*', w['text']) for w in ws[1:]):
             reasons += decide_text(text[h['bodyStart']:h['bodyEnd']], depth + 1)
+    # the live substitutions of an unquoted body run as commands (see body_substs)
+    for h in lx['heredocs']:
+        if h['quoted']:
+            continue
+        body = text[h['bodyStart']:h['bodyEnd']]
+        subs = body_substs(L, body)
+        for inner in ([body] if subs is None else subs):
+            reasons += decide_text(inner, depth + 1)
     return reasons
 
 

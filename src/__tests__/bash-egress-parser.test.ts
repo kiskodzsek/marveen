@@ -1396,6 +1396,17 @@ describe('structure from the shared shell lexer (card fae0712e)', () => {
     expect(classify(`git commit -m "$(cat <<'EOF'\nfix: don't break\nEOF\n)" && ls`)).toMatchObject({ deny: false, reason: 'unparseable' })
     expect(classify(`git commit -m "$(cat <<'EOF'\nfix: x\nEOF\n)" && curl -s ${U}`)).toMatchObject({ deny: true, hosts: ['example.org'] })
   })
+  it('card 09283e90: the lexer reads a heredoc in $( ) now; this parser keeps it a problem, and one whose body crosses a frame is one too', () => {
+    // the shared lexer gives such a heredoc its body (no lexer problem any more): the parser adds 'heredoc-in-subst'
+    // itself, so the reserve above judges it as before
+    expect(classify(`python3 -c "$(cat <<'PY'\nimport urllib.request; urllib.request.urlopen('https://example.org')\nPY\n)"`)).toMatchObject({ deny: true, reason: 'unparseable-external' })
+    expect(classify(`R=$(cat <<'J'\n{"a": 1}\nJ\n)\necho "$R"`)).toMatchObject({ deny: false, reason: 'unparseable' })
+    // a top heredoc read inside a ( ) subshell: the blanked text read the curl after it as body text (an allow, on
+    // main too; found by the lexer oracle's hsub cases)
+    expect(classify(`cat <<T ; ( echo\nm1\nT\n)\ncurl ${U}\nT\nm2`)).toMatchObject({ deny: true, reason: 'unparseable-external' })
+    // a newline in $( ) does not read the top heredoc: the curl in it runs, and is read as a command
+    expect(classify(`cat <<T $(echo\ncurl -s ${U}\nT\n)\nbody\nT`)).toMatchObject({ deny: true, reason: 'curl-external' })
+  })
   it('STILL OPEN, pinned: a program file named by an unknown variable is a program file (open point (a))', () => {
     // card fae0712e: the old reader could not see a quoted word and read the heredoc as the program
     expect(classify(`python3 "$S" - <<'PY'\nimport urllib.request\nurllib.request.urlopen("${U}")\nPY`)).toMatchObject({ deny: false })
