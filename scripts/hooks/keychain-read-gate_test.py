@@ -489,7 +489,32 @@ BLOCK += ['echo s3curity dump-keychain | bash', 'echo s3curity find-generic-pass
           'echo s3c\\urity dump-keychain | bash', 'echo /usr/bin/s3curity dump-keychain | bash',
           "echo '\"s3c\"urity dump-keychain' | source /dev/stdin", "echo '\"s3c\"urity dump-keychain' | . /dev/fd/0",
           # mutation r2 w2: an escaped blank keeps one word, which only its own line shows at a command position
-          "printf '%s\\n' s3curity\\ dump-keychain x | bash"]
+          "printf '%s\\n' s3curity\\ dump-keychain x | bash",
+          # card 39d885ef (Viktor 43793 MEDIUM 1): printf / echo -e escapes as the shell on stdin gets them: \n a newline,
+          # \t a blank, \x and octal a char (a plain n, t was all normalise() left: allowed on main a8b4a4bf)
+          "printf 'true\\ns3curity dump-keychain\\n' | bash", "echo -e 'true\\ns3curity dump-keychain' | sh",
+          "printf 's3curity\\tdump-keychain' | bash", "printf 's3curity\\x20dump-keychain' | bash",
+          "printf 's3curity\\040dump-keychain' | bash", "printf 'true\\n%b\\n' 's3curity\\tdump-keychain' | bash",
+          # printf puts its arguments into the format: the call is on a line of its own only after that (allowed on
+          # main a8b4a4bf and on the proposal of 43793; bash and zsh ran the stub)
+          "printf 'x\\ns3curity %s\\n' dump-keychain | bash", "printf 's3curity %s' dump-keychain | bash",
+          "printf '%s dump-keychain\\n' s3curity | bash",
+          # a redirection between the printed words is no printed word (bash and zsh ran these; allowed on main and on
+          # the proposal); `>x` and `>&2 .. 2>&1`: zsh's MULTIOS sends the output to the pipe too (zsh ran them)
+          'echo s3curity 2>/dev/null dump-keychain | bash', 'echo s3curity 2>x dump-keychain | bash',
+          'echo s3curity <x dump-keychain | bash', "printf '%s %s\\n' s3curity 2>/dev/null dump-keychain | bash",
+          'echo s3curity >x dump-keychain | bash', 'echo s3curity >&2 dump-keychain 2>&1 | bash',
+          'echo s3curity {fd}>/dev/null dump-keychain | bash', 'echo s3curity &>/dev/null dump-keychain | zsh',
+          # mutation m39 (its survivors, by the differential, 11-19; bash 3.2 and zsh printed each, measured): printf
+          # uses its format again while arguments are left (printf-one-pass), `--` ends its options
+          # (printf-no-dashdash), %% prints a % and takes no argument (printf-pct-arg), %c and %.1s convert as %s do
+          # (printf-s-only)
+          "printf '%s' s3c urity ' dump-keychain' | bash", "printf -- 's3c%sity dump-keychain\\n' ur | bash",
+          "printf 'true%%;%s dump-keychain\\n' s3curity | bash", "printf 's3c%crity dump-keychain\\n' u | bash",
+          # ... \r \f \v read as a newline (Viktor 43793 (b)): bash and zsh keep a CR in the word (measured: `echo A\rB`
+          # is one word), so this read is the safe side, kept on purpose (unesc-nl-only-n)
+          "printf 'true\\rs3curity dump-keychain' | bash", "printf 'true\\fs3curity dump-keychain' | bash",
+          "printf 'true\\vs3curity dump-keychain' | bash"]
 # $'...' escapes as bash 3.2 reads them (each measured with the proxy rule): one hex digit before a non-hex, two octal
 # digits, hex letters in both cases
 BLOCK += ["bash -c $'s3curity\\x9\\x20dump-keychain'", "bash -c $'s3curity\\11dump-keychain'",
@@ -529,6 +554,11 @@ ALLOW = [
     'echo hi | bash; echo s3curity dump-keychain', '(echo s3curity dump-keychain); echo hi | bash',
     'echo s3curity dump-keychain | source ./notes', 'echo s3curity dump-keychain | . /dev/stdin2',
     'echo s3curity dump-keychain | bash.x', 'echo s3curity dump-keychain >| bash', 'echo the s3curity team | bash',
+    # card 39d885ef: printf's output, the name printed as text
+    "printf 'echo %s\\n' s3curity | bash", "printf 'echo the\\ns3curity team\\n' | cat",
+    # mutation m39 (strip-fd-any-word): a 2 not glued to its > is a printed word, so by security(1)'s syntax 2 is the
+    # command it runs (not run here); in bash nothing reaches the pipe at all, only zsh's MULTIOS sends it
+    'echo s3curity 2 >/dev/null dump-keychain | bash',
     # card d11364a4: a payload taken out and judged on its own stays allowed when it reads no secret
     'bash -c "echo \\"s3curity\\" find-generic-password"',
     "bash -c 'grep -c dump-keychain notes.txt'",
@@ -1701,8 +1731,44 @@ def script_cases():
             ('nohup sh -c "python3 measure.py > /tmp/k.log 2>&1" > /dev/null 2>&1 &', d),
             ("TMPDIR=/x sh -c 'unset TMPDIR; python3 measure.py x' 2>&1 | tail -3", d),
             ("python3 -c 'print(1)' && python3 measure.py \"it's x\"; echo" + ' $(true)' * 66, d),
+            # card 39d885ef (Viktor 43793 MEDIUM 1): printf and echo -e print a newline for \n (a command position);
+            # normalise() made it a plain n, so the command ended glued to the last word and passed (main a8b4a4bf)
+            ("printf './measure.py\\n' | bash", d),
+            ("printf 'python3 measure.py\\n' | bash", d),
+            ("printf 'true\\n./measure.py\\n' | bash", d),
+            ("echo -e './measure.py\\n' | bash", d),
+            ('echo -e "./measure.py\\n" | bash', d),
+            ("printf './measure.py\\012' | bash", d),
+            ("printf './measure.py\\x0a' | bash", d),
+            # (Viktor 43793 LOW 1): a ; & ( { in a quote is printed text, and the & of a redirection ends no pipeline:
+            # the start of the pipeline was read after it, and the words before it were never read
+            ("echo './measure.py;' | bash", d),
+            ('echo "./measure.py;" | bash', d),
+            ("echo './measure.py;echo hi' | bash", d),
+            ("echo './measure.py &' | bash", d),
+            ('echo ./measure.py 2>&1 | bash', d),
+            # the same in a heredoc body fed to a shell: the body's stops are its own lexing's (the fleet replay)
+            ("bash <<'EOF'\necho './measure.py;' | bash\nEOF", d),
+            ('(echo ./measure.py) 2>&1 | bash', d),
+            ('{ echo ./measure.py; } 2>&1 | bash', d),
+            ('(echo ./measure.py; echo "(") | bash', d),
+            ("(echo ./measure.py; echo '(') | bash", d),
+            ('{ echo ./measure.py; echo "{"; } | bash', d),
+            ("{ echo ./measure.py; echo '{'; } | bash", d),
+            # mutation m39 (survivors, by the differential, 11-19): the escape-kept reading alone does not see an escaped
+            # shell name (union-second-only); a here-string's escapes kept too (herestring-first-only: bash and zsh run
+            # $'..\n..' as two lines); a text the lexer does not read (a heredoc in a backtick) takes the old path with
+            # the escapes kept (pipesrc-keep-old-off); %.1s converts (printf-s-only)
+            ('echo ./measure.py | ba\\sh', d),
+            ('echo ./measure.py | \\bash', d),
+            ("bash <<<$'true\\n./measure.py'", d),
+            ("echo x | true; bash <<<$'true\\n./measure.py'", d),
+            ("x=`cat <<'E'\nE\n`\nprintf 'true\\n./measure.py' | bash", d),
+            ("printf './meas%.1sre.py\\n' u | bash", d),
+            ("printf '%s' ./meas ure.py | bash", d),
+            ("printf -- './meas%s.py\\n' ure | bash", d),
         ]
-        prose = 'mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
+        prose ='mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
         allow = [
             ('python3 list.py', d),
             # card af12091a: the K1 shapes before a harmless script, and as prose or data
@@ -1996,6 +2062,23 @@ def script_cases():
             ('echo ./measure.py | bashful', d),
             ('echo ./measure.py | source ./notes.py', d),  # source a file: no stdin reader
             ('echo ./measure.py | source /dev/stdin.bak', d),
+            # card 39d885ef: the printed text stays allowed when it runs nothing that reads a secret
+            ("printf 'echo hi\\n' | bash", d),
+            # the fleet replay (dave 11-16): a pipeline in a Python string of a python3 heredoc. By the outer lexing
+            # every stop of the body was gone, the pipeline started at the body's top and took measure.py in
+            ("python3 - <<'PY'\np = 'measure.py'\nprint(f(\"echo x | tee /dev/stdout | bash\"))\nPY", d),
+            # mutation m39 (body-none-nostop; the fleet differential, 6 commands of pulzus, kernel, viktor shrunk): a
+            # body the lexer does not read (an odd quote) keeps every stop, as on main, so its pipeline starts on its
+            # own line, not at the body's top
+            ("python3 - <<'PY'\ns = 'it's ./measure.py'\nx = \"a | bash\"\nPY", d),
+            ("cat > out.ts <<'TS'\n// it's ./measure.py\nconst lang = /(python|bash/\nTS", d),
+            ("printf './measure.py\\n' | cat", d),
+            ("echo 'x;' ./measure.py | cat", d),
+            ("echo -e 'a\\tb' | bash", d),
+            ("printf 'true\\nls\\n' | bash", d),
+            ('echo hi 2>&1 | bash', d),
+            ("printf 'x %s\\n' ./measure.py | cat", d),
+            ("printf '%%s\\n' ./list.py | bash", d),
             # replay r2 (a card comment of this card blocked as secret-read): prose in the body of a quoted heredoc
             # into a data recipient is no pipeline, with steps before it the data-heredoc walk does not take (ID=)
             ('T="Authorization: Bearer x"; ID=$(curl -s -H "$T" http://h/k | python3 -I -c \'print(1)\')\n'
@@ -2202,6 +2285,21 @@ def script_cases():
                            env={'PATH': '/usr/bin:/bin'})
         if p.stdout.strip() != '133 a>b':
             fails.append(f'script: split past MAX_ARGS -> {p.stdout.strip()!r}, want 133 a>b')
+        # card 39d885ef (the fleet replay): a script file's text is not lexed by the pipeline reading (the gate lexes
+        # no script file's text). A node file of 82 KB with 30 `((` retries cost about 1 s per reading, four readings
+        # per file: 133 -> 1 345 ms and 894 -> 3 945 ms on fleet commands, benign ones blocked on the budget. The
+        # command's own text is lexed (its quoted stops: Viktor 43793 LOW 1)
+        nolex = ('import importlib.util as u,sys; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
+                 ' s.loader.exec_module(m); n=[]; real=m.shell_lex.lex\n'
+                 'def lex(t):\n    n.append(len(t)); return real(t)\n'
+                 'm.shell_lex.lex = lex; t = "x = 1\\necho \'./a.sh;\' | bash\\n"\n'
+                 'm.hits(t, True); a = len(n); getattr(m, "_LEX_CACHE", {}).clear(); n.clear()\n'
+                 'm.hits(t + " ", False); print(a, len(n) > 0)')
+        p = subprocess.run([sys.executable, '-I', '-c', nolex, HOOK], capture_output=True, text=True, timeout=20,
+                           env={'PATH': '/usr/bin:/bin'})
+        if p.stdout.strip() != '0 True':
+            fails.append(f'script: pipeline reading lexes a script file / not the command -> {p.stdout.strip()!r} '
+                         f'{p.stderr[-200:]!r}, want 0 True')
         # card d11364a4 (mutation survivor): past HALF the budget no payload is read again (one more read costs about
         # what the outer text did, and a timed-out hook does not block); 3 s of the default 4 s gone, in-process
         half = ('import importlib.util as u,sys; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
@@ -2330,6 +2428,33 @@ def script_cases():
             fails.append(f'script: end filter only skips -> no result {p.stderr[-200:]!r}')
         elif not all(eq):
             fails.append(f'script: end filter changed a verdict: {[c[:60] for (c, _), e in zip(rows, eq) if not e]!r}')
+        # card 39d885ef: pipes_union skips the escape-kept second reading when no backslash-letter was taken off (the
+        # same text). Every row: hits() and script_hits() the same with the skip and without it; both branches must
+        # run on the rows (a comparison where one side never ran proves nothing: af12091a m3)
+        esc_same = ('import importlib.util as u,json,sys,time; s=u.spec_from_file_location("g",sys.argv[1]);'
+                    ' m=u.module_from_spec(s); s.loader.exec_module(m); out=[]; n=[0, 0]\n'
+                    'real_p=m.stdin_pipelines\n'
+                    'def counted(*a, **k):\n    n[1 if m._KEEP_ESC[0] else 0]+=1\n    return real_p(*a, **k)\n'
+                    'm.stdin_pipelines=counted\n'
+                    'for c, w in json.load(sys.stdin):\n    r=[]\n    for skip in (True, False):\n'
+                    '        m._ESC_SKIP[0]=skip; m.T0=time.monotonic(); r.append((m.hits(c), m.script_hits(c, w)))\n'
+                    '    out.append(r[0]==r[1])\nout.append(n)\nprint(json.dumps(out))')
+        p = subprocess.run([sys.executable, '-I', '-c', esc_same, HOOK], input=json.dumps(rows), capture_output=True,
+                           text=True, timeout=900, env={'PATH': '/usr/bin:/bin'})
+        try:
+            eq = json.loads(p.stdout)
+            first, second = eq.pop()
+        except (ValueError, AttributeError, IndexError, TypeError):
+            eq, first, second = None, 0, 0
+        if not eq or len(eq) != len(rows):
+            fails.append(f'script: escape-kept skip -> no result {p.stderr[-200:]!r}')
+        elif not all(eq):
+            fails.append(f'script: escape-kept skip changed a verdict: {[c[:60] for (c, _), e in zip(rows, eq) if not e]!r}')
+        # each mode makes the same first readings (first / 2 each); the forced mode adds a second one to every first, so
+        # second - first / 2 is the skip mode's second readings: some (the rows with a backslash-letter), not all
+        elif not 0 < second - first // 2 < first // 2:
+            fails.append(f'script: escape-kept skip: {first // 2} first readings per mode, {second - first // 2} '
+                         f'second ones with the skip (want some, not all)')
         # ... and one shape per rule of the filter, in-process: the call's own-command reading is the same with and
         # without the filter, and the filter keeps the lexing small (each rule switched off, its shape lexes 97 000
         # to 700 000 characters: every end of the 300 is lexed from the call's start)
