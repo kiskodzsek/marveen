@@ -514,15 +514,133 @@ BLOCK += ['echo s3curity dump-keychain | bash', 'echo s3curity find-generic-pass
           # ... \r \f \v read as a newline (Viktor 43793 (b)): bash and zsh keep a CR in the word (measured: `echo A\rB`
           # is one word), so this read is the safe side, kept on purpose (unesc-nl-only-n)
           "printf 'true\\rs3curity dump-keychain' | bash", "printf 'true\\fs3curity dump-keychain' | bash",
-          "printf 'true\\vs3curity dump-keychain' | bash"]
+          "printf 'true\\vs3curity dump-keychain' | bash",
+          # card c7234bed (Viktor 47570): shell code an echo / printf substitution prints, where eval, source, . or a
+          # shell runs it (passed on main 171f2e6a and on 39d885ef; bash and zsh ran the stub, work/c7234bed/truth1)
+          'eval "$(echo s3curity dump-keychain)"', 'eval `echo s3curity dump-keychain`',
+          "eval \"$(printf 'true\\ns3c%sity dump-keychain\\n' ur)\"", 'bash -c "$(echo s3curity dump-keychain)"',
+          "sh <<<\"$(echo s3curity dump-keychain)\"", ". <(printf 's3c%sity dump-keychain\\n' ur)",
+          "bash <(echo 's3curity dump-keychain')", ". /dev/stdin <<<'s3curity dump-keychain'",
+          'x=$(echo s3curity dump-keychain); eval "$x"',
+          # mutation round c7234bed (feeder-no-path): echo / printf by its path (work/c7234bed/truth8)
+          'eval "$(/bin/echo s3curity dump-keychain)"',
+          # mutation round c7234bed (var-no-brace, source-here-nosplit): eval "${x}"; a here-string of two lines to a
+          # /dev/stdin source (work/c7234bed/truth9)
+          'x=$(echo s3curity dump-keychain); eval "${x}"', ". /dev/stdin <<<'true\ns3curity dump-keychain'",
+          # mutation round 2 c7234bed (bt-noesc, sq-off, dq-off, depth-off; bin/mut-diff.py witnesses, bash and zsh ran
+          # the stub form, work/c7234bed/truth10, truth11): an escaped backtick, a quoted ")", a nested $( ) inside
+          'eval "`echo \\`true\\`; echo s3curity dump-keychain`"',
+          'bash -c "`echo \\`echo hi\\`; echo s3curity dump-keychain`"',
+          'eval "$(echo \'#)\'; echo s3curity dump-keychain)"', 'eval "$(echo "#)"; echo s3curity dump-keychain)"',
+          'eval "$(echo $(echo s3curity) dump-keychain)"',
+          # more than MAX_GEN_SUBSTS sites: not read, blocked unread
+          '; '.join('. <(echo echo a%d)' % i for i in range(65)),
+          # mutation round 2 c7234bed (hits-none-pass; bin/mut-diff.py witness): a bash -c payload past the cap. Since
+          # the 48033 M1 rework a site counts at a code position only, and a verbatim payload with a substitution and a
+          # feeder word is read as a text of its own (payload_texts), so this is the payload's own 65 sites
+          "bash -c '" + '; '.join('. <(echo echo a%d)' % i for i in range(65)) + "'",
+          # 48033 M1 rework: a substitution in a verbatim single-quoted payload (no quote in it, so payload_texts did
+          # not read it again, and generated_lines() reads code positions only): passed on main and on 79e1a907
+          "bash -c 'eval $(echo s3curity dump-keychain)'", "sh -c '. <(echo s3curity dump-keychain)'",
+          "bash -c 'eval `echo s3curity dump-keychain`'", "bash -c 'eval -- $(true; echo s3curity dump-keychain)'"]
+# card c7234bed (Viktor 48033 M1, agents/viktor/work/kcgen-1119/probe3.out: passed on main f48a5d0f and on 79e1a907,
+# bash or zsh ran the stub with the secret subcommand): the reader anywhere in its command (a shell option with its
+# value, the substitution after other words of the argument or after other arguments, a redirection from a process
+# substitution), the form in a heredoc body a shell reads, a feeder that is not the substitution's first command, a
+# comment with a quote in the substitution; 48033 INFO V1 (a $var other readers take) and V2 (a long blank run)
+BLOCK += ['bash -o pipefail -c "$(echo s3curity dump-keychain)"', 'bash -c "true; $(echo s3curity dump-keychain)"',
+          'eval "true; $(echo s3curity dump-keychain)"', 'eval " $(echo s3curity dump-keychain)"',
+          'eval "x=1 $(echo s3curity dump-keychain)"', 'eval -- "$(echo s3curity dump-keychain)"',
+          'eval "" "$(echo s3curity dump-keychain)"', 'eval true\\; $(echo s3curity dump-keychain)',
+          'sh < <(echo s3curity dump-keychain)', "bash <<'E'\neval \"$(echo s3curity dump-keychain)\"\nE",
+          'eval "$(true; echo s3curity dump-keychain)"', 'eval "$({ echo s3curity dump-keychain; })"',
+          'eval "$( (echo s3curity dump-keychain) )"', 'eval "$(2>/dev/null echo s3curity dump-keychain)"',
+          'eval "$(if true; then echo s3curity dump-keychain; fi)"',
+          "eval \"$(printf '%s\\n' \"$(echo s3curity dump-keychain)\")\"",
+          "eval \"$(echo x # it's\necho s3curity dump-keychain)\"",
+          'x=$(echo s3curity dump-keychain); bash -c "$x"', 'x=$(echo s3curity dump-keychain); bash <<< "$x"',
+          'x=$(echo s3curity dump-keychain); echo "$x" | bash', 'x=$(echo s3curity dump-keychain); . <(echo "$x")',
+          "bash <<E\n$(echo s3curity dump-keychain)\nE", 'eval' + ' ' * 170 + '"$(echo s3curity dump-keychain)"',
+          # M1 mutation round (recurse-off): the site only exists in what the site prints (printf's \x24 is $); passed
+          # on main f48a5d0f and on 79e1a907, bash and zsh ran the stub (work/c7234bed/m1/truth-surv.txt)
+          "eval \"$(printf 'eval \\x24(echo s3curity dump-keychain)')\"",
+          # M1 mutation round (seg-frame-any): a ${ } default value is part of the reader's command; ${1 is no $var
+          # name (the var rule does not cover it). The bash -c forms passed on main and on 79e1a907, the eval forms on
+          # main; bash and zsh ran the stub (work/c7234bed/m1/truth-skip.txt, truth-skip2.txt)
+          'eval "${1:-$(echo s3curity dump-keychain)}"', 'bash -c "${1:-$(echo s3curity dump-keychain)}"',
+          'eval "${x:-$(echo s3curity dump-keychain)}"', 'bash -c "${x:-$(echo s3curity dump-keychain)}"']
+
+# card c7234bed (Viktor 48205, 2nd round; agents/viktor/reports/2026-11-19-kc-c7234bed-kor2-itelet.md): M1 a
+# positional parameter a reader takes ($1, ${1}, $@, $*; a regression against 79e1a907), M2 a substitution or a heredoc
+# piped into a shell, L1 a heredoc in an unquoted heredoc body. main f48a5d0f and bbc4f1cb allowed each, bash and zsh ran
+# the stub (|& bash: zsh only, bash 3.2 has no |&) (work/c7234bed/r2/truth-r2.txt)
+BLOCK += [
+    'f() { eval "$1"; }; f "$(echo s3curity dump-keychain)"',
+    'set -- "$(echo s3curity dump-keychain)"; eval "$1"',
+    'set -- "$(echo s3curity dump-keychain)"; eval "${1}"',
+    'set -- "$(echo s3curity dump-keychain)"; eval "$@"',
+    'set -- "$(echo s3curity dump-keychain)"; eval "$*"',
+    'f() { bash -c "$1"; }; f "$(echo s3curity dump-keychain)"',
+    'echo "$(echo s3curity dump-keychain)" | bash',
+    'echo "$(echo s3curity dump-keychain)" | sh -s',
+    'printf \'%s\\n\' "$(echo s3curity dump-keychain)" | bash',
+    'echo "`echo s3curity dump-keychain`" | bash',
+    'echo "$(echo s3curity dump-keychain)" |& bash',
+    'echo "$(echo s3curity dump-keychain)" | /bin/bash',
+    'cat <<E | bash\n$(echo s3curity dump-keychain)\nE',
+    'cat <<\'E\' | bash\neval "$(echo s3curity dump-keychain)"\nE',
+    'cat <<E | sh\n$(echo s3curity dump-keychain)\nE',
+    'cat <<-E | bash\n\t$(echo s3curity dump-keychain)\n\tE',
+    "bash <<E1\nbash <<'E2'\n$(echo s3curity dump-keychain)\nE2\nE1",
+    'bash <<E1\nbash <<E2\nbash <<E3\n$(echo s3curity dump-keychain)\nE3\nE2\nE1',
+]
 # $'...' escapes as bash 3.2 reads them (each measured with the proxy rule): one hex digit before a non-hex, two octal
 # digits, hex letters in both cases
 BLOCK += ["bash -c $'s3curity\\x9\\x20dump-keychain'", "bash -c $'s3curity\\11dump-keychain'",
           "bash -c $'s3curity dump-\\x6beychain'", "bash -c $'s3curity dump-\\x6Beychain'",
           # a $"..." piece after the first one, and a $'...' piece that ends before the next $'...' (mutation round)
           "bash -c 's3c'$\"urity dump-keychain\"", "bash -c $'s3c'u$'\\x72ity dump-keychain'"]
+# card c7234bed L1 mutation round: %b's \0NNN put into the format, the format's own \u (zsh's printf; bash 3.2
+# prints it as is: fail-closed there), a wrapper's flag with its word in a substitution a reader runs
+BLOCK += ["printf 's%b dump-keychain' '\\0145curity' | bash", "printf '\\u0073%s dump-keychain' ecurity | bash",
+          "eval \"$(env -u HOME printf 'x\\ns3curity dump-keychain')\""]
+# card c7234bed (Viktor 47808 LOW L1, agents/viktor/work/kcpipe-1119/probe.py: 12 forms passed on main and on
+# 9ddb6a43, bash or zsh ran the stub): \0NNN of echo -e / %b / zsh's echo, \u / \U, a feeder after builtin /
+# command / env, zsh's print
+BLOCK += ["echo -e '\\0163\\0145curity dump-keychain' | bash", "printf '%b' '\\0163ecurity dump-keychain' | bash",
+          "echo '\\0163ecurity dump-keychain' | zsh", "printf '\\u0073ecurity dump-keychain' | zsh",
+          "printf '\\u0073ecurity dump-keychain' | bash", "echo -e '\\u0073ecurity dump-keychain' | zsh",
+          "builtin printf 'x\\ns3curity dump-keychain\\n' | bash", "command printf 'x\\ns3curity dump-keychain\\n' | bash",
+          "env printf 'x\\ns3curity dump-keychain\\n' | bash", "command echo -e 'x\\ns3curity dump-keychain' | bash",
+          "print 'x\\ns3curity dump-keychain' | zsh", "echo -e 'x\\0012s3curity dump-keychain' | bash",
+          # the wrapper words with their own words, and the same in a substitution a reader runs
+          "env -u HOME A=1 printf 'x\\ns3curity dump-keychain' | bash", "nice -n 5 printf 'x\\ns3curity dump-keychain' | bash",
+          "command -p echo -e 'x\\ns3curity dump-keychain' | bash", "printf '\\U00000073ecurity dump-keychain' | zsh",
+          'eval "$(command echo s3curity dump-keychain)"', 'eval "$(print s3curity dump-keychain)"',
+          "eval \"$(env A=1 printf 'x\\ns3curity dump-keychain')\"", "bash -c \"$(builtin echo -e 'x\\ns3curity dump-keychain')\""]
 
 ALLOW = [
+    # card c7234bed (L1): the decoded feeders into no shell, a harmless decoded call, another program's substitution
+    # card c7234bed (48033 M1 rework): the two rows that blocked unread before (the old count of a quoted text's raw
+    # sites, and of a bash -c payload read twice; nothing secret runs in either): an echo prints its quoted text, and
+    # 33 harmless sites are in the cap; a quoted substitution no reader takes, a non-secret line in a payload
+    "echo '" + '; '.join('. <(echo echo a%d)' % i for i in range(65)) + "'",
+    "bash -c '" + '; '.join('. <(echo echo a%d)' % i for i in range(33)) + "'",
+    "echo 'x $(echo s3curity dump-keychain)'", "bash -c 'eval $(echo s3curity list-keychains)'",
+    # a bare printf into a shell raised IndexError in stdin_pipelines (main too: an 'error' block); it prints nothing
+    'printf | bash',
+    # card c7234bed (48033 M1): the substitution in another command than the reader's, a $var no reader takes, a
+    # heredoc body no shell reads, a substitution in a comment, a harmless or non-secret line at the new sites
+    'bash -n x.sh && cat <(echo s3curity dump-keychain)', 'x=$(echo s3curity dump-keychain); bash -n x.sh; echo "$x"',
+    "cat <<'E'\neval \"$(echo s3curity dump-keychain)\"\nE", "eval \"$(echo x # $(echo s3curity dump-keychain)\necho true)\"",
+    'bash -o pipefail -c "$(echo echo hi)"', 'eval -- "$(echo s3curity list-keychains)"',
+    "print 'x\\ns3curity dump-keychain' | cat", "command echo -e 'x\\ns3curity dump-keychain' | cat",
+    # (mutation round) \U past U+10FFFF prints no letter (bash: as is, zsh: other bytes); a flag word before the
+    # feeder with no wrapper is the command itself (`-v` runs nothing)
+    "printf '\\U00110073ecurity dump-keychain' | bash", "-v printf 'x\\ns3curity dump-keychain' | bash",
+    "printf '\\u0073ecurity list-keychains' | bash", "echo -e '\\0163ecurity list-keychains' | bash",
+    'eval "$(command -v brew)"', "builtin printf 'hello\\n' | bash", 'eval "$(env | grep PATH)"',
+    "printf '\\uD800 x\\n' | bash", "printf '\\U0011FFFF x\\n' | bash",
     # card aeee72df: the new payloads stay allowed when they read no secret; a pipe or a here-string into a program
     # that is not a shell is not read as a script; a 4-deep payload with nothing quoted left in it passes
     "echo '\"hello\" world' | bash", "bash <<< 'echo \"hi\"'", "bash -c ''\\''echo'\\'' hi'",
@@ -559,6 +677,55 @@ ALLOW = [
     # mutation m39 (strip-fd-any-word): a 2 not glued to its > is a printed word, so by security(1)'s syntax 2 is the
     # command it runs (not run here); in bash nothing reaches the pipe at all, only zsh's MULTIOS sends it
     'echo s3curity 2 >/dev/null dump-keychain | bash',
+    # card c7234bed: a substitution's output that no shell runs, and a substitution of another program (H1: what
+    # ssh-agent or brew prints is not read)
+    'echo "$(echo s3curity dump-keychain)"', 'cat <(echo s3curity dump-keychain)',
+    'grep x <<<"$(echo s3curity dump-keychain)"', 'eval "$(ssh-agent -s)"', 'eval $(ssh-agent)',
+    'eval "$(/opt/homebrew/bin/brew shellenv)"', 'eval "$(echo echo hi)"',
+    # mutation round c7234bed (ev-/so-any-opener, hs-lo-zero, hs-hi-end): an opener its reader does not take as code
+    # (eval runs the path /dev/fd/N, . reads the file the printed words name: bash and zsh ran nothing,
+    # work/c7234bed/truth7), and a here-string to a program that is no shell next to a shell of another command
+    'eval <(echo s3curity dump-keychain)', '. "$(echo s3curity dump-keychain)"',
+    'bash -n x.sh; grep x <<<"$(echo s3curity dump-keychain)"',
+    'grep x <<<"$(echo s3curity dump-keychain)"; bash -n x.sh',
+    'bash -n x.sh && grep x <<<"$(echo s3curity dump-keychain)"',
+    'grep x <<<"$(echo s3curity dump-keychain)"\nbash -n x.sh',
+    # mutation round c7234bed (var-cls-off, max-gen-1): eval "$x" as quoted data reads no feeder; 64 harmless sites
+    # are all read, none blocks (work/c7234bed/truth9)
+    'x=$(echo s3curity dump-keychain); echo \'eval "$x"\'',
+    '; '.join('eval "$(echo echo a%d)"' % i for i in range(64)),
+    # M1 mutation round (rd-cls-off, feeder-cls-off, var-cls-off): a reader word in quotes is data (echo prints it),
+    # a feeder word in quotes in the body is data (grep's pattern), a $x in single quotes is not expanded by the outer
+    # shell (and x is not exported): bash and zsh ran nothing (work/c7234bed/m1/truth-surv.txt)
+    "echo 'eval' \"$(echo s3curity dump-keychain)\"", "eval \"$(grep -c 'echo s3curity dump-keychain' notes.txt)\"",
+    "x=$(echo s3curity dump-keychain); bash -c 'echo $x'",
+    # M1 mutation round (doc-quoted-all): in a quoted heredoc body only a site with its own reader counts; here echo
+    # prints the line (bash and zsh ran nothing, work/c7234bed/m1/truth-skip.txt)
+    "bash <<'E'\necho \"$(echo s3curity dump-keychain)\"\nE",
+    # card c7234bed (Viktor 48205, 2nd round): his controls, nothing secret runs (work/c7234bed/r2/truth-r2.txt)
+    'echo "$(echo hi)" | bash',
+    'echo "$(date)" | bash',
+    'echo "$(echo s3curity dump-keychain)" | tee x.txt',
+    'echo "$(echo s3curity dump-keychain)" | grep bash',
+    'echo "$(echo s3curity dump-keychain)" | wc -l',
+    'cat <<E | bash\necho $(date)\nE',
+    'cat <<\'E\' | python3\neval "$(echo s3curity dump-keychain)"\nE',
+    'echo "$1" | bash',
+    'f() { echo "$1"; }; f "$(echo s3curity dump-keychain)"',
+    'f() { eval "$1"; }; f hi',
+    # (2nd round mutation: site-pipe-search, doc-pipe-search, doc-lexed-never) the pipe into a shell of a later command,
+    # a reader in a string of a quoted heredoc body a shell reads: nothing runs (work/c7234bed/r2/truth-r2b.txt)
+    'echo "$(echo s3curity dump-keychain)"; echo hi | bash',
+    'x="$(echo s3curity dump-keychain)"; echo hi | bash',
+    'cat <<E\n$(echo s3curity dump-keychain)\nE\necho hi | bash',
+    'cat <<\'E\' > x.txt\neval "$(echo s3curity dump-keychain)"\nE\necho hi | bash',
+    'bash <<\'E\'\nx=\'eval "$(echo s3curity dump-keychain)"\'\nE',
+    'cat <<\'E\' | bash\nx=\'eval "$(echo s3curity dump-keychain)"\'\nE',
+    # mutation round 2 c7234bed (hs-any-opener, unclosed-read-all): a here-string of a process substitution gives the
+    # shell a path as its line; a substitution that never closes is a syntax error: bash and zsh ran nothing
+    # (work/c7234bed/truth10, truth11)
+    'bash <<< <(echo s3curity dump-keychain)',
+    'eval "$(echo s3curity dump-keychain', 'eval "$(echo s3curity dump-keychain"', '. <(echo s3curity dump-keychain',
     # card d11364a4: a payload taken out and judged on its own stays allowed when it reads no secret
     'bash -c "echo \\"s3curity\\" find-generic-password"',
     "bash -c 'grep -c dump-keychain notes.txt'",
@@ -1767,6 +1934,72 @@ def script_cases():
             ("printf './meas%.1sre.py\\n' u | bash", d),
             ("printf '%s' ./meas ure.py | bash", d),
             ("printf -- './meas%s.py\\n' ure | bash", d),
+            # card c7234bed (Viktor 47570): the stub ran in bash and zsh (zsh only: the `. <(..)` forms), the gate
+            # allowed each on main 171f2e6a and on 39d885ef (work/c7234bed/truth1)
+            (". <(printf '%s\\n' 'python3 measure.py')", d),
+            ("source <(echo 'python3 measure.py')", d),
+            ("bash <(printf '%s\\n' 'python3 measure.py')", d),
+            ("sh <(echo 'python3 measure.py')", d),
+            ('eval "$(printf \'%s\\n\' \'python3 measure.py\')"', d),
+            ('eval $(echo python3 measure.py)', d),
+            ('eval "`echo python3 measure.py`"', d),
+            ('builtin eval "$(echo python3 measure.py)"', d),
+            ('bash -c "`echo python3 measure.py`"', d),
+            ('bash <<< $(echo python3 measure.py)', d),
+            (". /dev/stdin <<<'python3 measure.py'", d),
+            ('source /dev/stdin <<<"$(echo python3 measure.py)"', d),
+            ('x=$(echo python3 measure.py); eval "$x"', d),
+            ("eval \"$(printf 'true\\npython3 meas%s.py\\n' ure)\"", d),
+            ("eval \"$(echo -e 'true\\npython3 measure.py')\"", d),
+            # mutation round c7234bed (feeder-no-path): echo by its path; bash and zsh ran the stub, 39d885ef allowed
+            # both (work/c7234bed/truth8; the `. <(..)` form in zsh only)
+            ('eval "$(/bin/echo python3 measure.py)"', d),
+            ('. <(/bin/echo python3 measure.py)', d),
+            # mutation round c7234bed (var-no-brace, source-here-nosplit; work/c7234bed/truth9): 39d885ef allowed both
+            ('x=$(echo python3 measure.py); eval "${x}"', d),
+            ('source /dev/stdin <<<"$(printf \'true\\npython3 measure.py\\n\')"', d),
+            # mutation round 2 c7234bed (bt-noesc, sq-off, dq-off): bash and zsh ran the stub, 9ddb6a43 allowed each
+            # (work/c7234bed/truth10, truth11; the `. <(..)` form in zsh only)
+            ('eval "`echo \\`true\\`; echo python3 measure.py`"', d),
+            ('bash -c "`echo \\`echo hi\\`; echo python3 measure.py`"', d),
+            ('eval "$(echo \'#)\'; echo python3 measure.py)"', d),
+            ('eval "$(echo "#)"; echo python3 measure.py)"', d),
+            (". <(echo '#)'; echo python3 measure.py)", d),
+            # card c7234bed (Viktor 48033 M1): bash and zsh ran the stub, main f48a5d0f and 79e1a907 allowed each
+            # (work/c7234bed/m1/truth-m1.txt)
+            ('bash -o pipefail -c "$(echo python3 measure.py)"', d),
+            ('eval -- "$(echo python3 measure.py)"', d),
+            ('eval "$(true; echo python3 measure.py)"', d),
+            ('sh < <(echo python3 measure.py)', d),
+            ("bash <<'E'\neval \"$(echo python3 measure.py)\"\nE", d),
+            ('x=$(echo python3 measure.py); bash -c "$x"', d),
+            # M1 mutation round (recurse-off): bash and zsh ran the stub, f48a5d0f and 79e1a907 allowed it
+            # (work/c7234bed/m1/truth-surv.txt)
+            ("eval \"$(printf 'eval \\x24(echo python3 measure.py)')\"", d),
+            # M1 mutation round (seg-frame-any; work/c7234bed/m1/truth-skip.txt, truth-skip2.txt)
+            ('eval "${1:-$(echo python3 measure.py)}"', d),
+            ('bash -c "${1:-$(echo python3 measure.py)}"', d),
+            ('eval "${x:-$(echo python3 measure.py)}"', d),
+            ('bash -c "${x:-$(echo python3 measure.py)}"', d),
+            # card c7234bed (Viktor 48205, 2nd round: M1, M2, L1; work/c7234bed/r2/truth-r2.txt)
+            ('f() { eval "$1"; }; f "$(echo python3 measure.py)"', d),
+            ('set -- "$(echo python3 measure.py)"; eval "$1"', d),
+            ('set -- "$(echo python3 measure.py)"; eval "${1}"', d),
+            ('set -- "$(echo python3 measure.py)"; eval "$@"', d),
+            ('set -- "$(echo python3 measure.py)"; eval "$*"', d),
+            ('f() { bash -c "$1"; }; f "$(echo python3 measure.py)"', d),
+            ('echo "$(echo python3 measure.py)" | bash', d),
+            ('echo "$(echo python3 measure.py)" | sh -s', d),
+            ('printf \'%s\\n\' "$(echo python3 measure.py)" | bash', d),
+            ('echo "`echo python3 measure.py`" | bash', d),
+            ('echo "$(echo python3 measure.py)" |& bash', d),
+            ('echo "$(echo python3 measure.py)" | /bin/bash', d),
+            ('cat <<E | bash\n$(echo python3 measure.py)\nE', d),
+            ('cat <<\'E\' | bash\neval "$(echo python3 measure.py)"\nE', d),
+            ('cat <<E | sh\n$(echo python3 measure.py)\nE', d),
+            ('cat <<-E | bash\n\t$(echo python3 measure.py)\n\tE', d),
+            ("bash <<E1\nbash <<'E2'\n$(echo python3 measure.py)\nE2\nE1", d),
+            ('bash <<E1\nbash <<E2\nbash <<E3\n$(echo python3 measure.py)\nE3\nE2\nE1', d),
         ]
         prose ='mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
         allow = [
@@ -2072,6 +2305,48 @@ def script_cases():
             # own line, not at the body's top
             ("python3 - <<'PY'\ns = 'it's ./measure.py'\nx = \"a | bash\"\nPY", d),
             ("cat > out.ts <<'TS'\n// it's ./measure.py\nconst lang = /(python|bash/\nTS", d),
+            # card c7234bed: a harmless script printed for eval / a shell, and a printed name no shell runs
+            ('eval "$(echo python3 notes.py)"', d),
+            ('bash -c "$(echo python3 notes.py)"', d),
+            ('echo "$(echo python3 measure.py)"', d),
+            ('x=$(echo python3 measure.py); echo "$x"', d),
+            ('diff <(echo python3 measure.py) <(echo b)', d),
+            # card c7234bed (48033 M1): the substitution in another command than the reader's, a heredoc to cat
+            ('bash -n x.sh && cat <(echo python3 measure.py)', d),
+            ("cat <<'E'\neval \"$(echo python3 measure.py)\"\nE", d),
+            ('bash -o pipefail -c "$(echo python3 notes.py)"', d),
+            # M1 mutation round (rd-cls-off, feeder-cls-off, var-cls-off): bash and zsh ran nothing
+            # (work/c7234bed/m1/truth-surv.txt)
+            ("echo 'eval' \"$(echo python3 measure.py)\"", d),
+            ("eval \"$(grep -c 'echo python3 measure.py' notes.txt)\"", d),
+            ("x=$(echo python3 measure.py); bash -c 'echo $x'", d),
+            # M1 mutation round (doc-quoted-all): echo prints it (work/c7234bed/m1/truth-skip.txt)
+            ("bash <<'E'\necho \"$(echo python3 measure.py)\"\nE", d),
+            # card c7234bed (Viktor 48205, 2nd round): the controls (work/c7234bed/r2/truth-r2.txt)
+            ('echo "$(echo hi)" | bash', d),
+            ('echo "$(date)" | bash', d),
+            ('echo "$(echo python3 measure.py)" | tee x.txt', d),
+            ('echo "$(echo python3 measure.py)" | grep bash', d),
+            ('echo "$(echo python3 measure.py)" | wc -l', d),
+            ('cat <<E | bash\necho $(date)\nE', d),
+            ('cat <<\'E\' | python3\neval "$(echo python3 measure.py)"\nE', d),
+            ('echo "$1" | bash', d),
+            ('f() { echo "$1"; }; f "$(echo python3 measure.py)"', d),
+            ('f() { eval "$1"; }; f hi', d),
+            # (2nd round mutation round; work/c7234bed/r2/truth-r2b.txt)
+            ('echo "$(echo python3 measure.py)"; echo hi | bash', d),
+            ('x="$(echo python3 measure.py)"; echo hi | bash', d),
+            ('cat <<E\n$(echo python3 measure.py)\nE\necho hi | bash', d),
+            ('cat <<\'E\' > x.txt\neval "$(echo python3 measure.py)"\nE\necho hi | bash', d),
+            ('bash <<\'E\'\nx=\'eval "$(echo python3 measure.py)"\'\nE', d),
+            ('cat <<\'E\' | bash\nx=\'eval "$(echo python3 measure.py)"\'\nE', d),
+            # ... (the fleet replay, 5 commands of viktor 11-16): a reader and a substitution in a heredoc body's
+            # strings are no code (the lexer's class), and an eval at a code position does not read a substitution
+            # that stands in data
+            ("python3 - <<'PY'\ns = 'eval \"$(echo python3 measure.py)\"'\nPY", d),
+            ("eval x; python3 - <<'PY'\ns = \"$(echo python3 measure.py)\"\nPY", d),
+            ("eval x; echo '$(echo python3 measure.py)'", d),
+            ("cat <<'EOF'\n. /dev/stdin <<<'python3 measure.py'\nEOF", d),
             ("printf './measure.py\\n' | cat", d),
             ("echo 'x;' ./measure.py | cat", d),
             ("echo -e 'a\\tb' | bash", d),
@@ -2300,6 +2575,47 @@ def script_cases():
         if p.stdout.strip() != '0 True':
             fails.append(f'script: pipeline reading lexes a script file / not the command -> {p.stdout.strip()!r} '
                          f'{p.stderr[-200:]!r}, want 0 True')
+        # card c7234bed (48033 M1 rework, the replay): generated_lines() lexes no script file's text and no text past
+        # GEN_LEX_MAX (a 1 MB text cost 1-4 s a reading, 6 fleet commands past the script budget), and the lexer-less
+        # path keeps the nested form of a shell file (the whole body read first: the cut part first put a `$` line
+        # between the name and its subcommand, and 79e1a907's block of `bash x.sh` was lost)
+        genlex = ('import importlib.util as u,sys; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
+                  ' s.loader.exec_module(m); n=[]; real=m.shell_lex.lex\n'
+                  'def lex(t):\n    n.append(len(t)); return real(t)\n'
+                  'm.shell_lex.lex = lex\n'
+                  'big = "eval \\"$(echo echo hi)\\"\\n" + "x\\n" * (m.GEN_LEX_MAX // 2)\n'
+                  'm.generated_lines(big); a = len([k for k in n if k > m.GEN_LEX_MAX])\n'
+                  'nest = "#!/bin/bash\\neval \\"$(echo $(echo s" + "ec" + "u\'\'rity) dump-key\'\'chain)\\"\\n"\n'
+                  'print(a, m.hits(nest, True))')
+        p = subprocess.run([sys.executable, '-I', '-c', genlex, HOOK], capture_output=True, text=True, timeout=60,
+                           env={'PATH': '/usr/bin:/bin'})
+        if p.stdout.strip() != "0 ['secret-read']":
+            fails.append(f'script: generated_lines lexes a big text / loses the nested form -> {p.stdout.strip()!r} '
+                         f'{p.stderr[-200:]!r}, want 0 [\'secret-read\']')
+        # card c7234bed M1 mutation round (prefilter-reader-off, raw-part-off, raw-window-off, raw-comment-off; the
+        # in-process probe work/c7234bed/m1/raw-probe.py): a text with no reader word is not lexed at all; a feeder
+        # part of the lexer-less path is GEN_RAW_PART chars at most; in a script file's text a reader farther than
+        # GEN_RAW_BEFORE before the opener is not its reader (bash and zsh ran nothing: an assignment), and a comment
+        # with a quote in the substitution does not end the reading (zsh ran the stub; bash 3.2 reads the quote,
+        # fail-closed there; the command form is truth-m1.txt row 17)
+        rawpin = ('import importlib.util as u,sys; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
+                  ' s.loader.exec_module(m); n=[]; real=m.shell_lex.lex\n'
+                  'def lex(t):\n    n.append(len(t)); return real(t)\n'
+                  'm.shell_lex.lex = lex\n'
+                  'm.generated_lines("x=$(echo hi)\\ny=`printf a`\\n"); a = len(n); m.shell_lex.lex = real\n'
+                  'lens = []; sp = m.stdin_pipelines\n'
+                  'def rec(t, *x, **k):\n    lens.append(len(t)); return sp(t, *x, **k)\n'
+                  'm.stdin_pipelines = rec; m.generated_lines("eval \\"$(echo " + "a" * 5000 + ")\\"\\n", lexed=False)\n'
+                  'm.stdin_pipelines = sp; b = bool(lens) and max(lens) <= m.GEN_RAW_PART + len(" | bash")\n'
+                  'sec = "s" + "ec" + "urity dump-keychain"\n'
+                  'far = m.hits("eval true\\n#" + "x" * 200 + "\\nx=$(echo " + sec + ")\\n", True)\n'
+                  'cm = m.hits("eval \\"$(echo x # it\'s\\necho " + sec + ")\\"\\n", True)\n'
+                  'print(a, b, far, cm)')
+        p = subprocess.run([sys.executable, '-I', '-c', rawpin, HOOK], capture_output=True, text=True, timeout=60,
+                           env={'PATH': '/usr/bin:/bin'})
+        if p.stdout.strip() != "0 True [] ['secret-read']":
+            fails.append(f'script: generated_lines raw path (no-reader lexing, part cap, reader window, comment) -> '
+                         f'{p.stdout.strip()!r} {p.stderr[-200:]!r}, want 0 True [] [\'secret-read\']')
         # card d11364a4 (mutation survivor): past HALF the budget no payload is read again (one more read costs about
         # what the outer text did, and a timed-out hook does not block); 3 s of the default 4 s gone, in-process
         half = ('import importlib.util as u,sys; s=u.spec_from_file_location("g",sys.argv[1]); m=u.module_from_spec(s);'
