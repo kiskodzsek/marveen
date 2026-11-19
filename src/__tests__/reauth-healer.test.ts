@@ -187,3 +187,36 @@ describe('decideReauthAction: restartMain (main agent dead-token restart)', () =
     expect(d.escalate).toBe(true)
   })
 })
+
+// 2026-11-11 (dave): the healer restarted a sub-agent while the owner was
+// authorizing a dashboard-started /login, voiding the link. A live,
+// operator-started login (login-in-flight.ts) holds every action.
+describe('decideReauthAction: operator login in flight', () => {
+  const atThreshold: ReauthHealerState = { consecutiveDead: 2, lastActionAtMs: null }
+
+  it('sign-in screen at threshold, login in flight: no restart, no keys, no alert, spell reset', () => {
+    const d = decideReauthAction(base({ isFirstRunGate: true, loginInFlight: true, prev: atThreshold }), T)
+    expect(d.restartAgent).toBe(false)
+    expect(d.sendKeys).toBe(false)
+    expect(d.escalate).toBe(false)
+    expect(d.restartMain).toBe(false)
+    expect(d.next).toEqual(NO_REAUTH_STATE)
+  })
+
+  it('same pane without a login in flight still restarts (the first-run-gate heal is unchanged)', () => {
+    const d = decideReauthAction(base({ isFirstRunGate: true, loginInFlight: false, prev: atThreshold }), T)
+    expect(d.restartAgent).toBe(true)
+    expect(d.escalate).toBe(true)
+  })
+
+  it('a dead token with a login in flight is held too (no /login keys into a human login)', () => {
+    const d = decideReauthAction(base({ loginInFlight: true, prev: atThreshold }), T)
+    expect(d.sendKeys).toBe(false)
+    expect(d.escalate).toBe(false)
+  })
+
+  it('the main agent ignores the flag (it is never marked; its own rules apply)', () => {
+    const d = decideReauthAction(base({ isMain: true, loginInFlight: true, prev: atThreshold }), T)
+    expect(d.escalate).toBe(true)
+  })
+})
