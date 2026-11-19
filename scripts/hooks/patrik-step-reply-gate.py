@@ -14,6 +14,22 @@ name who measured that there is no internal route and the msg_id of that measure
 (<install>/agents/<name>/, or the main agent id; not the writer's own, Viktor 41257 LOW 2) and a 4-7 digit id that is a
 row of the inter-agent queue (store/claudeclaw.db agent_messages) from the last 7 days with that agent as its sender or
 recipient: the mark is a reference, not a claim. One mark = one message (scripts/lib/reply_marks.py).
+A step about signing in (the unquoted text names belépés / bejelentkezés / login / hitelesítés / auth / sign in;
+hibanapló 2026-11-16 09:31, Patrik TG 6174, second occurrence after TG 17727): the mark also has to say that a probe
+with the EXISTING sign-in failed (an "existing" word and a failure word, not negated), and the referenced queue row has
+to report that failed sign-in probe itself (a sign-in word and a failure word in its content). A team claim ("the fleet
+token is not allowed") is not a probe. Word matching: an accident guard against a skipped measurement, not a proof.
+Viktor 7c4bd122 (card 540745fa): the topic includes the separable-prefix forms ("Be kell lépned", "lépj már be") and
+log in / authenticate, not "signing" / "belépő" / "belépett" / "hitelesített"; the failure and its sign-in (or
+"existing") word have to stand in one sentence, and a negation after the failure word ("hiba nélkül", "a 401 megszűnt")
+or a few words before it ("nem volt hiba", "0 hiba") cancels it. A password or 2FA step is deliberately not a sign-in
+topic: for a NEW service there is no existing sign-in to probe, so the rule would block it with no way through.
+Viktor 48105 (round 2): a sentence ends only at [.!?;] before a space or the end, or at a line break ("(v2.1.3): 401",
+"claude.ai" stay one sentence); "lépésenként", "lépcsőzetesen", "jelentkezését" are no sign-in; a post-verb negation
+("hibát nem kaptunk", "401-et nem adott", "egy 401-et sem kaptunk") and "semmi(lyen)" cancel the failure word.
+Known limits: a no-failure wording with a bare failure noun ("az error log üres") still reads as a failure, and a probe
+reported over two sentences ("Lefuttattam ... a meglévő belépéssel. 401-et adott.") does not count: the price of the
+one-sentence rule, which keeps "A Vercel deploy elbukott. Külön téma: a belépés rendben van." from passing.
 The owner's chats unknown (no MARVEEN_OWNER_CHATS, store/projektek.json unreadable or of another shape): the gate
 passes and says so on stderr, once per call (Viktor 41257 MEDIUM).
 Passes: a negated sentence ("nem kell nyomnod", "ne töltsd fel"), past tense ("megnyomtad", "feltöltöttük": no
@@ -64,6 +80,58 @@ STEP = re.compile(r'(?<!\w)(?:' + '|'.join([
 NEGATION = re.compile(r'(?<!\w)(?:nem|ne|se|sem|nincs|nélküled)(?!\w)', re.IGNORECASE)
 NEG_WINDOW_WORDS = 4
 MSG_ID = re.compile(r'(?<!\d)\d{4,7}(?!\d)')
+
+# A step about signing in (hibanapló 2026-11-16 09:31, Patrik TG 6174: "be van lépve már mindegiyk claude és codex is
+# most is azookon futtok nem értem a kérést"; second occurrence after TG 17727). On folded text (no accents, lower).
+# Viktor 7c4bd122 (card 540745fa): L1 the separable-prefix forms ("Be kell lépned", "lépj már végre be", "Lépnél be
+# újra?"), log in / authenticate; L3 not "signing", "belépő" (a ticket), "belépett", "hitelesített" (a certified copy).
+LOGIN_TOPIC = re.compile(
+    r'(?<![a-z])(?:belep(?!o|ett)|bejelentkez|hitelesit(?!ett)|autentik|o?auth(?![a-z])|authenticat[a-z]*'
+    r'|login|log[\s-]?in(?![a-z])|sign[\s-]?in(?![a-z])|setup-token'
+    r'|be\s+(?:kell(?:ene)?\s+|tudsz\s+|tudnal\s+)?(?:lep(?!es|cso)|jelentkez(?!es|o))[a-z]*'
+    r'|(?:lepj|lepnel|lepsz|lepjel|jelentkezz|jelentkeznel|jelentkezzel)[a-z]*\s+(?:[a-z]+\s+){0,3}be(?![a-z]))')
+# The probe with the existing sign-in failed. Folded text. A failure word right after a negation ("nem bukott el",
+# "not failed", "nem volt hiba", "nem adott 401-et", "0 hiba") or right before one ("hiba nélkül", "a 401 megszűnt")
+# does not count; "nem működik" / "nem megy" / "nem sikerült" are failure phrases of their own (Viktor 7c4bd122 L2, L3).
+FAIL_OWN = re.compile(r'(?<![a-z])(?:nem\s+mukodik|nem\s+megy|nem\s+sikerult|nem\s+ment\s+at|not\s+logged\s+in|nincs\s+belepve)'
+                      r'(?![a-z])')
+FAIL_WORD = re.compile(r'(?<![a-z0-9])(?:elbuk\w*|bukott\w*|hibas?|hibat|hibaval|401|403|failed|failure|'
+                       r'authentication_failed|unauthorized|lejart\w*|expired|invalid|sikertelen\w*|(?:vissza|el)utasit\w*|'
+                       r'rejected|denied|error\w*)(?![a-z0-9])')
+FAIL_NEGATED = re.compile(r'(?:(?<![a-z])(?:nem|not|no|sem|nincs|never|without)\s+(?:el\s+|volt\s+(?:[a-z]+\s+)?|adott\s+|kaptam\s+'
+                          r'|kaptunk\s+|kapott\s+|jott\s+|lett\s+)?(?:semmi(?:lyen)?\s+|egy\s+)?|(?<![a-z])semmi(?:lyen)?\s+'
+                          r'|(?<![\d.])0\s+)$')
+FAIL_POSTNEG = re.compile(r'^(?:-?[a-z]{0,4})?\s+(?:nelkul|megszunt\w*|elmult|sem|nem\s+(?:jott|kaptunk|kaptam|kapott|adott|volt'
+                          r'|dobott|jelzett))(?![a-z])')
+EXISTING = re.compile(r'(?<![a-z])(?:meglev\w*|mostani\w*|jelenlegi\w*|existing|current|flotta\w*|fleet)(?![a-z])')
+
+
+def has_failure(text_folded):
+    """A failed-probe statement in folded text, not negated."""
+    if FAIL_OWN.search(text_folded):
+        return True
+    for m in FAIL_WORD.finditer(text_folded):
+        if FAIL_NEGATED.search(text_folded[max(0, m.start() - 28):m.start()]):
+            continue
+        if FAIL_POSTNEG.search(text_folded[m.end():m.end() + 24]):
+            continue
+        return True
+    return False
+
+
+SENTENCE_END = re.compile(r'[.!?;]+(?=\s|$)|\n+')
+
+
+def sentence_with(text_folded, *checks):
+    """Whether ONE sentence of the folded text passes every check (Viktor 7c4bd122 L2: "A Vercel deploy elbukott.
+    Külön téma: a belépés rendben van." is no failed sign-in)."""
+    return any(all(c(s) for c in checks) for s in SENTENCE_END.split(text_folded))
+
+
+def login_topic(text):
+    """Whether the unquoted text is about signing in (belépés, login, hitelesítés ...)."""
+    t = INVISIBLE.sub('', unicodedata.normalize('NFKC', str(text or '')))
+    return bool(LOGIN_TOPIC.search(fold(URL.sub(' ', QUOTED.sub(' ', t)))))
 
 
 def fold(s):
@@ -125,13 +193,18 @@ def agent_names():
     return names
 
 
-def value_problem(value, names, writer='', now=None):
+def value_problem(value, names, writer='', now=None, login=False):
     """Why a PATRIK-LEPES value does not name the measurement, or None. The value must name ANOTHER fleet agent and a
-    msg_id that is a queue row of the last 7 days with that agent as sender or recipient."""
+    msg_id that is a queue row of the last 7 days with that agent as sender or recipient.
+    login=True (the step is about signing in): the value must also say that a probe with the EXISTING sign-in failed,
+    and the referenced queue row must itself report a failed sign-in probe (a sign-in word and a failure word)."""
     v = fold(value or '')
     ids = [int(x) for x in MSG_ID.findall(v)]
     if not ids:
         return 'nincs benne a mérés msg_id-je (4-7 jegyű szám)'
+    if login and not sentence_with(v, EXISTING.search, has_failure):
+        return ('belépésről szól, de nem mondja ki, hogy a MEGLÉVŐ belépéssel mért próba elbukott (pl. "pulzus 43901: '
+                'a meglévő belépéssel claude -p: 401")')
     words = set(re.findall(r'[a-z0-9_-]+', v))
     named = (words & names) - {fold(writer or '')}
     if not named:
@@ -143,15 +216,24 @@ def value_problem(value, names, writer='', now=None):
         con = sqlite3.connect(f'file:{ledger_lib.db_path()}?mode=ro', uri=True, timeout=5)
         try:
             rows = con.execute(
-                'SELECT from_agent, to_agent, created_at FROM agent_messages WHERE id IN (%s)' % ','.join('?' * len(ids)),
-                ids).fetchall()
+                'SELECT from_agent, to_agent, created_at, content FROM agent_messages WHERE id IN (%s)'
+                % ','.join('?' * len(ids)), ids).fetchall()
         finally:
             con.close()
     except Exception:
         return 'az üzenetsor nem olvasható, a msg_id nem ellenőrizhető'
-    for frm, to, at in rows:
+    party = False
+    for frm, to, at, content in rows:
         if (fold(str(frm)) in named or fold(str(to)) in named) and isinstance(at, int) and 0 <= now - at <= MSG_MAX_AGE_S:
-            return None
+            party = True
+            if not login:
+                return None
+            c = fold(str(content or ''))
+            if sentence_with(c, LOGIN_TOPIC.search, has_failure):
+                return None
+    if party:
+        return ('a hivatkozott üzenet (' + ', '.join(map(str, ids)) + ') nem elbukott belépés-próbáról szól (nincs '
+                'benne belépés-szó és hiba-szó); előbb mérd meg a meglévő belépéssel')
     return ('a msg_id (' + ', '.join(map(str, ids)) + ') nem olyan 7 napon belüli üzenet az üzenetsorban, amelynek '
             + ' vagy '.join(sorted(named)) + ' a feladója vagy címzettje')
 
@@ -192,11 +274,12 @@ def main():
             f'(„{phrase}”). ')
     how = ('Előbb mérd meg, van-e belső út (csapattag, skill, API); ha nincs, jelöld előtte (a szövegbe nem kerül): '
            'python3 -I scripts/reply-mark.py PATRIK-LEPES --chat <privat|csoport> "<ki mérte> <msg_id>: <miért nincs '
-           'belső út>" (a msg_id a csapattag 7 napon belüli üzenete az üzenetsorban). Ha nem neki szól, írd át („mi feltöltjük”); vevőnek szóló szöveg (poszt, hirdetés) „...” közé.')
+           'belső út>" (a msg_id a csapattag 7 napon belüli üzenete az üzenetsorban). Belépésről szóló lépésnél a jel és a '
+           'hivatkozott üzenet is mondja ki, hogy a MEGLÉVŐ belépéssel mért próba elbukott (TG 6174). Ha nem neki szól, írd át („mi feltöltjük”); vevőnek szóló szöveg (poszt, hirdetés) „...” közé.')
     if value is None:
         print(head + how, file=sys.stderr)
         return 2
-    problem = value_problem(value, agent_names(), agent)
+    problem = value_problem(value, agent_names(), agent, login=login_topic(ti.get('text', '')))
     if problem:
         print(head + f'A PATRIK-LEPES jel {problem}. ' + how, file=sys.stderr)
         return 2

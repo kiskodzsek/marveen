@@ -58,7 +58,7 @@ class Hook(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.marks = os.path.join(self.tmp, 'reply-marks.jsonl')
         self.agents = os.path.join(self.tmp, 'agents')
-        for n in ('mira', 'kernel', 'dave'):
+        for n in ('mira', 'kernel', 'dave', 'pulzus'):
             os.makedirs(os.path.join(self.agents, n))
         os.environ['REPLY_MARKS_PATH'] = self.marks
         # The inter-agent queue (store/claudeclaw.db agent_messages), synthetic rows: the writer is "main".
@@ -70,6 +70,12 @@ class Hook(unittest.TestCase):
         for row in ((41144, 'mira', 'main', now - 3600), (41154, 'main', 'kernel', now - 60),
                     (40001, 'kernel', 'main', now - 8 * 86400), (41200, 'main', 'main', now - 60)):
             con.execute("INSERT INTO agent_messages VALUES (?, ?, ?, 'x', 'done', ?)", row)
+        # Sign-in steps (hibanapló 2026-11-16 09:31, TG 6174): a measured failed probe, and a team claim without one.
+        for row in ((41300, 'pulzus', 'main', 'A meglévő belépéssel claude -p: 401 authentication_failed.', now - 60),
+                    (41301, 'dave', 'main', 'A flotta-token tilos, a BubekAI-hoz külön belépés kell.', now - 60),
+                    (41302, 'pulzus', 'main', 'A meglévő belépéssel a claude -p nem bukott el, megy.', now - 60),
+                    (41303, 'mira', 'main', 'A Meta hirdetési API hívás 403-at adott.', now - 60)):
+            con.execute("INSERT INTO agent_messages VALUES (?, ?, ?, ?, 'done', ?)", row)
         con.commit()
         con.close()
         os.environ['LEDGER_DB_PATH'] = self.db
@@ -151,6 +157,139 @@ class Hook(unittest.TestCase):
         self.mark(value='kernel 41154: nincs belső út')
         self.assertEqual(self.run_gate(GROUP, 'Nyomd meg a gombot.')[0], 0)
 
+    def test_login_topic(self):
+        for text in ('Lépj be a Codexbe.', 'A BubekAI-hoz külön belépés kell, kérlek nyomd meg.',
+                     'Jelentkezz be a GitHubra.', 'Futtasd a /login parancsot.', 'Kell egy OAuth hitelesítés.',
+                     'Sign in, majd kattints.', 'Futtasd: claude setup-token'):
+            self.assertTrue(gate.login_topic(text), text)
+        for text in ('Nyomd meg a Kiemelés gombot.', 'Töltsd fel a videót.', 'Poszt: „Lépj be a családi körbe”.',
+                     'A link: https://example.com/login', 'Kattints az author mezőre.'):
+            self.assertFalse(gate.login_topic(text), text)
+
+    def test_login_topic_viktor_7c4bd122(self):
+        # L1: separable-prefix forms, log in / authenticate; L3: no over-match; L4: normalised before matching
+        for text in ('Be kell lépned a Claude-ba a gépen.', 'Be kell jelentkezned a Codex fiókba.',
+                     'Lépnél be újra a Claude-ba?', 'Jelentkezz már be.', 'Kérlek lépj már végre be a gépen.',
+                     'Be tudsz lépni a gépen?', 'Please log in again.', 'Log-in kell.', 'Authenticate again.',
+                     'Re-authentication kell.', 'A Codexhez új bel​épés kell.', 'Futtasd: ｌｏｇｉｎ'):
+            self.assertTrue(gate.login_topic(text), text)
+        for text in ('Nyomd meg a gombot a signing oldalon.', 'Írd alá a hitelesített másolatot.',
+                     'A belépő ára 5000 Ft, fizesd ki.', 'A csomag belépett a rendszerbe, nyomd meg az OK-t.',
+                     'Be van töltve a lap, nyomd meg.', 'A blogin oldalon kattints.'):
+            self.assertFalse(gate.login_topic(text), text)
+
+    def test_failure_words_viktor_7c4bd122(self):
+        # L3: the words of a genuine failed-probe report; L2: a negation after the word, or a few words before it
+        for text in ('sikertelen volt', 'nem sikerült', 'a próba nem ment át', 'visszautasította', 'elutasítva',
+                     'rejected', 'denied', 'error 400', 'a Codex elutasította'):
+            self.assertTrue(gate.has_failure(gate.fold(text)), text)
+        for text in ('hiba nélkül lefutott', 'nem volt hiba', 'nem adott 401-et', 'a 401 megszűnt', 'without failure',
+                     'never failed', '0 hiba', 'a hiba nem jött elő', 'Klodel utasítása szerint megy',
+                     'nem kaptunk 403-at', 'nem kaptunk  401-et'):   # two spaces (a wrapped paste): 13 chars back
+            self.assertFalse(gate.has_failure(gate.fold(text)), text)
+        self.assertTrue(gate.has_failure(gate.fold('10 hiba')))   # "0 hiba" only as its own number
+
+    def test_round2_viktor_48105(self):
+        # R2: "be" + a lép-/jelentkez- word that is no sign-in
+        for text in ('Írd be lépésenként a parancsokat.', 'Állítsd be lépcsőzetesen a fényerőt.',
+                     'Add be jelentkezését a tanfolyamra.', 'Tedd be lépés közben a kártyát.'):
+            self.assertFalse(gate.login_topic(text), text)
+        self.assertTrue(gate.login_topic('Be kell lépned a Claude-ba a gépen.'))
+        # R3: a post-verb negation, "semmi(lyen)", "egy ... sem", a word after "nem volt"; m24: "nem jött"
+        for text in ('hibát nem kaptunk', '401-et nem adott', 'semmi hiba', 'nem kaptunk semmilyen hibát',
+                     'egy 401-et sem kaptunk', 'nem volt semmi hiba', 'nem volt permission denied', 'nem jött 401',
+                     'nem adott egy 401-et', '401-et nem dobott', 'hibát nem jelzett'):
+            self.assertFalse(gate.has_failure(gate.fold(text)), text)
+        # R1: a dot inside a word or a version is no sentence end, and "2.0 401" is no "0 401"
+        names = {'mira', 'kernel', 'dave', 'pulzus', 'main'}
+        con = sqlite3.connect(self.db)
+        now = int(time.time())
+        rows = ((41320, 'A meglévő belépéssel futtattam (v2.1.3): 401.'),
+                (41321, 'A meglévő belépés a ~/.claude/.credentials.json mellett: 401.'),
+                (41322, 'claude 2.0 401 a meglévő belépéssel'),
+                (41323, 'A meglévő belépéssel: authentication_failed\n(claude -p)'),
+                (41324, 'A Vercel deploy elbukott\nKülön téma: a belépés rendben van'))
+        for mid, content in rows:
+            con.execute("INSERT INTO agent_messages VALUES (?, 'pulzus', 'main', ?, 'done', ?)", (mid, content, now - 60))
+        con.commit()
+        con.close()
+        for mid, _ in rows[:-1]:
+            self.assertIsNone(gate.value_problem('pulzus %d: a meglévő belépéssel elbukott, 401' % mid, names, 'main',
+                                                 login=True), mid)
+        self.assertIsNone(gate.value_problem('pulzus 41320: a meglévő belépéssel (claude.ai) 401', names, 'main',
+                                             login=True))
+        # a line break alone also ends a sentence: the failure and the sign-in word are apart
+        p = gate.value_problem('pulzus 41324: a meglévő belépéssel elbukott, 401', names, 'main', login=True)
+        self.assertIsNotNone(p)
+        self.assertIn('elbukott belépés-próbáról', p)
+
+    def test_neg_failure_and_sign_in_in_one_sentence(self):
+        # L2: the failure word and the sign-in word (the queue row) / the existing word (the mark) in ONE sentence
+        names = {'mira', 'kernel', 'dave', 'pulzus', 'main'}
+        con = sqlite3.connect(self.db)
+        now = int(time.time())
+        for row in ((41315, 'pulzus', 'main', 'A Vercel deploy elbukott. Külön téma: a belépés rendben van.', now - 60),
+                    (41316, 'pulzus', 'main', 'A meglévő belépéssel a próba sikertelen volt, a Codex elutasította.',
+                     now - 60)):
+            con.execute("INSERT INTO agent_messages VALUES (?, ?, ?, ?, 'done', ?)", row)
+        con.commit()
+        con.close()
+        p = gate.value_problem('pulzus 41315: a meglévő belépéssel elbukott', names, 'main', login=True)
+        self.assertIsNotNone(p)   # a FAIL, not a TypeError ERROR, when the gate lets it through (Viktor 48105 INFO)
+        self.assertIn('elbukott belépés-próbáról', p)
+        self.assertIsNone(gate.value_problem('pulzus 41316: a meglévő belépéssel elbukott', names, 'main', login=True))
+        p = gate.value_problem('pulzus 41316: a meglévő belépés rendben. A deploy elbukott.', names, 'main', login=True)
+        self.assertIsNotNone(p)
+        self.assertIn('MEGLÉVŐ', p)
+
+    def test_neg_separable_sign_in_step_end_to_end(self):
+        # L1 end to end: TG 6174's claim mark no longer lets "Be kell lépned ..." through; a probe mark does
+        self.mark(value='dave 41301: a flotta-token tilos, külön belépés kell')
+        rc, err = self.run_gate(GROUP, 'Be kell lépned a Claude-ba a gépen.')
+        self.assertEqual(rc, 2)
+        self.assertIn('MEGLÉVŐ', err)
+        self.mark(value='pulzus 41300: a meglévő belépéssel claude -p: 401')
+        self.assertEqual(self.run_gate(GROUP, 'Be kell lépned a Claude-ba a gépen.')[0], 0)
+        # L3: "signing" is no sign-in, so a plain reference mark passes it
+        self.mark(value='dave 41301: a flotta-token tilos, külön belépés kell')
+        self.assertEqual(self.run_gate(GROUP, 'Nyomd meg a gombot a signing oldalon.')[0], 0)
+
+    def test_failure_words(self):
+        for text in ('401', 'a próba elbukott', 'authentication_failed', 'nem működik', 'not logged in', 'lejárt'):
+            self.assertTrue(gate.has_failure(gate.fold(text)), text)
+        for text in ('nem bukott el', 'nem hibás', 'not failed', 'minden rendben, megy', ''):
+            self.assertFalse(gate.has_failure(gate.fold(text)), text)
+
+    def test_neg_login_step_needs_a_failed_existing_sign_in_probe(self):
+        # TG 6174: the mark named a team claim ("flotta-token tilos", Dave 43852), not a probe; that must not pass.
+        names = {'mira', 'kernel', 'dave', 'pulzus', 'main'}
+        ok = 'pulzus 41300: a meglévő belépéssel claude -p: 401'
+        self.assertIsNone(gate.value_problem(ok, names, 'main', login=True))
+        self.assertIsNone(gate.value_problem(ok, names, 'main', login=False))
+        self.assertIn('MEGLÉVŐ', gate.value_problem('dave 41301: a flotta-token tilos', names, 'main', login=True))
+        self.assertIn('MEGLÉVŐ', gate.value_problem('pulzus 41300: 401', names, 'main', login=True))  # no "existing"
+        self.assertIn('MEGLÉVŐ', gate.value_problem('pulzus 41300: a meglévő belépés nem bukott el', names, 'main',
+                                                    login=True))
+        # the value says it, but the referenced row is a claim, a non-failure, or an unrelated message
+        for ref in ('dave 41301', 'pulzus 41302', 'mira 41144', 'mira 41303'):  # 41303: a failure, not a sign-in
+            p = gate.value_problem(ref + ': a meglévő belépéssel elbukott', names, 'main', login=True)
+            self.assertIn('elbukott belépés-próbáról', p, ref)
+        self.assertIn('üzenetsor', gate.value_problem('kernel 40001: a meglévő belépés elbukott', names, 'main',
+                                                      login=True))
+        # without login the old rule is unchanged: a reference is enough
+        self.assertIsNone(gate.value_problem('dave 41301: nincs belső út', names, 'main', login=False))
+
+    def test_neg_login_step_end_to_end(self):
+        self.mark(value='dave 41301: a flotta-token tilos, külön belépés kell')
+        rc, err = self.run_gate(GROUP, 'A BubekAI-hoz lépj be a Claude-ba és a Codexbe.')
+        self.assertEqual(rc, 2)
+        self.assertIn('MEGLÉVŐ', err)
+        self.mark(value='pulzus 41300: a meglévő belépéssel claude -p: 401')
+        self.assertEqual(self.run_gate(GROUP, 'A BubekAI-hoz lépj be a Claude-ba és a Codexbe.')[0], 0)
+        # the same claim mark still passes a step that is not about signing in
+        self.mark(value='dave 41301: a flotta-token tilos, külön belépés kell')
+        self.assertEqual(self.run_gate(GROUP, 'Nyomd meg a Kiemelés gombot.')[0], 0)
+
     def projektek(self, data):
         root = os.path.join(self.tmp, 'root')
         os.makedirs(os.path.join(root, 'store'), exist_ok=True)
@@ -176,8 +315,8 @@ class Hook(unittest.TestCase):
             self.assertIn('the gate is off', err, data)
 
     def test_main_agent_id_counts_as_a_name_for_another_writer(self):
-        reply_marks.add('PATRIK-LEPES', GROUP, 'kernel', 'main 41154: Patrik telefonján a 2FA')
-        self.assertEqual(self.run_gate(GROUP, 'Lépj be a Metába.', agent='kernel')[0], 0)
+        reply_marks.add('PATRIK-LEPES', GROUP, 'kernel', 'main 41154: a Kiemelés csak a Meta felületén')
+        self.assertEqual(self.run_gate(GROUP, 'Kattints a Kiemelés gombra.', agent='kernel')[0], 0)
 
     def test_neg_mark_of_another_chat_kind_or_agent_blocks(self):
         self.mark(chat=PRIV)
