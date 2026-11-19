@@ -558,6 +558,29 @@ function bodyFrames(cp, h, out) {
     k++
   }
 }
+// Card 09283e90: the shared lexer now gives a heredoc inside $( ) or a ( ) its body. This parser classifies each frame
+// on its own and re-lexes the text with the frames blanked, so a heredoc whose operator is in a frame keeps the
+// problem it had before ('heredoc-in-subst': the unparseable-external reserve judges it, e.g. python3 -c "$(cat
+// <<'PY' ... )" runs the body as code), and a heredoc whose body crosses a frame boundary is not understood either
+// ('heredoc-across-frame': cat <<T ; ( echo + newline reads T's body inside the subshell, the blanked text did not,
+// and a curl after the subshell read as body text; on main too, found by the oracle's hsub cases).
+function heredocFrameProblems(lx, n) {
+  if (!lx.heredocs.length || !lx.substs.length) return []
+  // the innermost substitution covering each position (-1 = none), one sweep: substs are in start order and nest
+  const at = new Int32Array(n).fill(-1)
+  const st = []
+  for (let p = 0, k = 0; p < n; p++) {
+    while (st.length && p >= lx.substs[st[st.length - 1]].end) st.pop()
+    while (k < lx.substs.length && lx.substs[k].start === p) st.push(k++)
+    if (st.length) at[p] = st[st.length - 1]
+  }
+  const out = []
+  for (const h of lx.heredocs) {
+    if (at[h.op] !== -1) { out.push('heredoc-in-subst'); continue }
+    for (let p = h.bodyStart; p < h.end && p < n; p++) if (at[p] !== -1) { out.push('heredoc-across-frame'); break }
+  }
+  return out
+}
 // Everything classify() reads about one command text. Code-point arrays throughout, as the lexer counts.
 //   norm:  the text with every backslash-newline the shell removes taken out (not one inside '...' or a
 //          comment, unlike the earlier regex), so `cu\<nl>rl` is `curl`;
@@ -603,7 +626,7 @@ function readCommand(command) {
   return {
     norm, cp, lx, frames, blank, blankCp, lxB, segs,
     segWords: segs.map((s) => lexWords(blank, lxB, s)),
-    problems: [...new Set([...lx.problems, ...lxB.problems])],
+    problems: [...new Set([...lx.problems, ...lxB.problems, ...heredocFrameProblems(lx, cp.length)])],
     codeText: cp.filter((_, k) => lx.cls[k] !== 'm').join(''),
   }
 }

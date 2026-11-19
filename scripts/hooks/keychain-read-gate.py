@@ -1342,21 +1342,13 @@ def _lex_no_segments(text, retries_only=False):
     retries_only (the end filter): None also when the lexing needs more than MAX_SPLIT_RETRIES retries. lex() then
     splits EVERY '$((' and '((' opener ('$((a #b))' turns into a comment that never closes), so a prefix that
     needed fewer reads differently: such a lexing proves nothing about it.
-    lex()'s own loop, so that every pass is charged to OWN_LEX_BUDGET before it runs (a test compares it with lex())."""
+    Every pass of the lexer is charged to OWN_LEX_BUDGET before it runs (lex(charge=...); card 09283e90: lex() also
+    lexes a $( ) with a heredoc once more the bash 3.2 way, and may read the whole text again; a copy of its loop here
+    missed both). A test compares it with lex()."""
     seg = shell_lex.segments_of
     shell_lex.segments_of = _no_segments
     try:
-        split = set()
-        for _ in range(shell_lex.MAX_SPLIT_RETRIES):
-            _own_charge(len(text))
-            r = shell_lex._lex_once(text, split)
-            if 'retry' not in r:
-                return r
-            split.add(r['retry'])
-        if retries_only:
-            return None
-        _own_charge(len(text))
-        return shell_lex._lex_once(text, shell_lex._ALL)
+        return shell_lex.lex(text, charge=_own_charge, retries_only=retries_only)
     except TooManyArgs:
         raise
     except Exception:

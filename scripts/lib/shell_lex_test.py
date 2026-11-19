@@ -148,8 +148,25 @@ def main():
     # level (bash-egress-parser.test.ts) and the unparseable-external reserve judge them
     check('matrix: the valid cells the lexer does not understand', sorted(c['cell'] for c in matrix if not c.get('syntax') and ran_by_lexer(c['cmd']) is None),
           sorted(MATRIX_PROBLEM_CELLS))
-    print('shell_lex_test: OK (%d golden cases, %d bash-oracle cases (%d with lexer problems; %d matrix cases, %d cells), semantic asserts)'
-          % (len(cases), len(oracle), skipped, len(matrix), len(cells)))
+    # card 09283e90: a heredoc in a frame, run with bash 3.2 AND zsh (the oracle's hsub cases). Where the two shells
+    # run different markers the lexer must not understand the text (a gate fails closed); where they agree it must
+    # understand it, except in the frames whose heredoc it reads the old way (<( ) >( ) and a backtick)
+    hs = [c for c in oracle if 'hsub' in c]
+
+    def agree(c):
+        return c['ran'] == c['zsh'] and bool(c.get('syntax')) == bool(c.get('zsh_syntax'))
+
+    check('hsub cases', len(hs), 128)
+    check('hsub: bash 3.2 and zsh differ -> not understood', [c['hsub'] for c in hs if not agree(c) and ran_by_lexer(c['cmd']) is not None], [])
+    check('hsub: they agree -> understood, except the old-reading frames',
+          sorted(c['hsub'] for c in hs if agree(c) and not c.get('syntax') and ran_by_lexer(c['cmd']) is None),
+          sorted(c['hsub'] for c in hs if agree(c) and not c.get('syntax') and c['hsub'].split('|')[0] in ('<(', '`')))
+    if FAILS:
+        print('shell_lex_test: %d FAIL' % len(FAILS))
+        return 1
+    print('shell_lex_test: OK (%d golden cases, %d bash-oracle cases (%d with lexer problems; %d matrix cases, %d cells; '
+          '%d heredoc-in-frame cases, bash 3.2 + zsh), semantic asserts)'
+          % (len(cases), len(oracle), skipped, len(matrix), len(cells), len(hs)))
     return 0
 
 

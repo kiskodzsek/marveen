@@ -18,7 +18,9 @@
 //             LOOSEN on what it read must not loosen when problems is non-empty.
 //   heredocs: [{op, opEnd, delim, quoted, stripTabs, bodyStart, bodyEnd, end}], code-point indices: op = the
 //             first `<` of `<<`, opEnd = just past the delimiter word, body = [bodyStart, bodyEnd), the terminator line
-//             is [bodyEnd, end). Only top-level heredocs: one inside a substitution is a problem, its lines stay code.
+//             is [bodyEnd, end). A heredoc inside $( ), <( ), >( ) or ( ) has its body too (card 09283e90); where
+//             bash 3.2 would close such a frame elsewhere, and in a backtick, ${ } or $(( )), it is not understood:
+//             no body, its lines stay code, and the problem 'heredoc-in-subst'.
 //   substs:   [{kind, start, end, inner}] kind '$(', '`', '<(', '>(', '(', '$((', '((', '${'; start = first char of
 //             the opener, end = just past the closer (text length if unterminated); inner = [innerStart, innerEnd).
 //   segments: [{start, end, depth}] simple commands: maximal code runs between separators (; & && || | |& newline) in
@@ -55,25 +57,47 @@ const WORD_SUBST_KINDS = new Set(['$(', '<(', '>(', '$((', '`'])
 // Past MAX_SPLIT_RETRIES every $(( and (( is read as two parentheses at once: its body is read as commands, which
 // shows a gate more, not less.
 const MAX_SPLIT_RETRIES = 64
+// card 09283e90: the $( ) frames that may own a heredoc, per text; past it the text is read the old way (each one costs one more lexing of the text from the frame's start: the bash 3.2 reading, see lex)
+const MAX_HEREDOC_FRAMES = 8
+const HEREDOC_FRAME_KINDS = new Set(['$('])
+
+// Card 09283e90: a heredoc inside $( ), <( ), >( ) gets its body (bash 5 and zsh read it before the frame's closer).
+// bash 3.2 finds the closer FIRST, reading the body's lines as code (measured: a body line 'a)' ends the frame there).
+// So each such frame is lexed once more the bash 3.2 way (bash32: a heredoc in a frame takes no body); when the two
+// put the closer at different places, or a frame is not understood, the whole text is read the bash 3.2 way and gets
+// the problem 'heredoc-in-subst' (the reading before this card).
 export function lex(text) {
+  const r = lexSplit(text, false)
+  return r.hsub ? lexSplit(text, true) : r
+}
+
+function lexSplit(text, bash32, stop = false) {
   const split = new Set()
+  const cache = new Map()
   for (let k = 0; k < MAX_SPLIT_RETRIES; k++) {
-    const r = lexOnce(text, split)
+    const r = lexOnce(text, split, bash32, cache, stop)
     if (r.retry === undefined) return r
     split.add(r.retry)
   }
-  return lexOnce(text, { has: () => true })
+  return lexOnce(text, { has: () => true }, bash32, cache, stop)
 }
 
-function lexOnce(text, split) {
+// stop (card 09283e90, the bash 3.2 check): the text starts with a frame; return { substs } as soon as it closes
+// (a check that read to the end of the text made 8 frames 9x slower on a 20 000-char text)
+function lexOnce(text, split, bash32, cache, stop = false) {
   const s = Array.from(text)
   const n = s.length
   const cls = new Array(n).fill('c')
   const problems = []
   const heredocs = []
   const substs = []
-  const pending = []           // heredocs whose body starts at the next code newline
-  const stack = [{ kind: 'top' }]
+  // card 09283e90: a frame's lvl is the frame whose newline reads its heredocs: itself, or for a ( ) subshell its
+  // parent's (bash and zsh, measured: cat <<T ; ( echo + newline reads T's body inside the subshell, cat <<T $(echo +
+  // newline does not). The pending heredocs of a level are in its pend list; hdFrames counts the frames with one.
+  const topFrame = { kind: 'top' }
+  topFrame.lvl = topFrame
+  const stack = [topFrame]
+  let hdFrames = 0
   const top = () => stack[stack.length - 1]
   const inCode = () => top().kind !== '"'
   // the backtick frames on the stack as [index, frame], innermost last. Frames leave the stack in many places, so the
@@ -95,6 +119,7 @@ function lexOnce(text, split) {
     const sub = { kind, start, end: n, inner: [innerStart, n] }
     substs.push(sub)
     const fr = { kind, sub, depth: 0, nested }
+    fr.lvl = kind === '(' ? top().lvl : fr
     // an escaped-backtick frame (nested) has no body end of its own: the next escaped backtick closes it, and the
     // outer body's end (its first unescaped backtick) ends it too, as an unterminated frame (bash: echo `a \` b` ; ls
     // runs ls at the top)
@@ -114,11 +139,31 @@ function lexOnce(text, split) {
     f.sub.inner[1] = innerEnd
     f.sub.end = end
     if (WORD_SUBST_KINDS.has(f.kind)) wordCloser.add(end - 1)
+    // card 09283e90: a heredoc of this frame still pending gets no body (the frame closed on its operator's line: bash
+    // and zsh read nothing, the lines after it are code, measured)
+    for (const h of f.pend ?? []) h.bodyStart = h.bodyEnd = h.end = innerEnd
+    delete f.pend
+  }
+  // the end of frame f (just closed) when the heredocs in frames take no body (the bash 3.2 reading); -1 if it does
+  // not close there. ONE such lexing per outermost $( ) (the anchor), from its start to its closer, answers for every
+  // frame in it (a lexing per frame made 8 nested frames 9x slower); cached per lex() call, the retries of the split
+  // loop ask again.
+  const bash32Closer = (f) => {
+    let anchor = f
+    for (let k = 1; k < stack.length; k++) if (stack[k].kind === '$(') { anchor = stack[k]; break }
+    const a = anchor.sub.start
+    if (!cache.has(a)) {
+      const r = lexSplit(s.slice(a).join(''), true, true)
+      cache.set(a, new Map(r.substs.filter((x) => x.inner[1] < x.end).map((x) => [x.start, x.end])))  // closed frames only
+    }
+    const rel = cache.get(a).get(f.sub.start - a)
+    return rel === undefined ? -1 : a + rel
   }
 
-  const readHeredocBodies = (from) => {  // from = index just past a code newline; returns the next index to lex
+  // from = index just past a code newline; returns the next index to lex
+  const readHeredocBodies = (from, todo) => {
     let p = from
-    for (const h of pending.splice(0)) {
+    for (const h of todo) {
       h.bodyStart = p
       let found = false
       while (p < n) {
@@ -237,7 +282,14 @@ function lexOnce(text, split) {
       }
     }
     if (f.kind === '${' && ch === '}') { closeSubst(i, i + 1); i++; continue }
-    if (ch === ')' && ['$(', '(', '<(', '>('].includes(f.kind)) { closeSubst(i, i + 1); i++; continue }
+    if (ch === ')' && ['$(', '(', '<(', '>('].includes(f.kind)) {
+      closeSubst(i, i + 1)
+      if (stop && stack.length === 1) return { substs }
+      // card 09283e90: a frame with a heredoc: bash 3.2 must close it here too, else read the old way (see lex)
+      if (f.hd && bash32Closer(f) !== i + 1) return { hsub: true }
+      i++
+      continue
+    }
 
     // card f7d4ead8 (oracle matrix): inside a backtick an escaped backtick opens a nested command substitution, and
     // the next escaped backtick closes it; bash runs the command in it (echo `a \`b\`` runs b). A third level
@@ -284,28 +336,47 @@ function lexOnce(text, split) {
       while (p < n && (s[p] === ' ' || s[p] === '\t')) p++
       const d = readDelimiter(p)
       if (d.delim === '') { i = p; continue }  // `<<` with no word: a syntax error, left as code
-      if (f.kind !== 'top') {
-        // inside a substitution bash 3.2 finds the closer first, bash 5 and zsh read the body first (measured with
-        // bash, card fae0712e): no body is taken, its lines stay code, and the text is marked not understood
-        problems.push('heredoc-in-subst')
-        i = d.end
-        continue
+      const lvl = f.lvl
+      if (lvl !== topFrame) {
+        if (bash32) {
+          // the reading before card 09283e90 (bash 3.2 finds the closer first, card fae0712e): no body is taken, its
+          // lines stay code, and the text is marked not understood
+          problems.push('heredoc-in-subst')
+          i = d.end
+          continue
+        }
+        // card 09283e90: a body only in $( ), <( ), >( ) (and a ( ) in them), not in a backtick body (cut out
+        // first), at most MAX_HEREDOC_FRAMES frames; else the old reading
+        if (liveBts().length || !HEREDOC_FRAME_KINDS.has(lvl.kind)) return { hsub: true }
+        if (!lvl.hd) {
+          if (hdFrames >= MAX_HEREDOC_FRAMES) return { hsub: true }
+          lvl.hd = true
+          hdFrames++
+        }
       }
       const h = { op: i, opEnd: d.end, delim: d.delim, quoted: d.quoted, stripTabs, bodyStart: n, bodyEnd: n, end: n }
       heredocs.push(h)
-      pending.push(h)
+      ;(lvl.pend ??= []).push(h)
       i = d.end
       continue
     }
     if (ch === '<' && nx === '<' && s[i + 2] === '<') { i += 3; continue }  // here-string: an operator, no body
-    if (ch === '\n' && pending.length) { i = readHeredocBodies(i + 1); continue }
+    // card 09283e90: a newline reads the heredocs of its own level only (a newline inside $( ), a backtick, <( ), >( ),
+    // $(( )), (( )) or ${ } does not read a heredoc pending outside it; bash and zsh, measured)
+    if (ch === '\n' && f.lvl.pend?.length) {
+      const todo = f.lvl.pend
+      delete f.lvl.pend
+      i = readHeredocBodies(i + 1, todo)
+      continue
+    }
     i++
   }
   for (let k = stack.length - 1; k > 0; k--) {
     const f = stack[k]
+    if (f.hd) return { hsub: true }  // an unterminated frame with a heredoc: not understood, the old reading
     problems.push(f.sub ? `unterminated-${f.kind}` : `unterminated-quote-${f.kind}`)
   }
-  if (pending.length) { readHeredocBodies(n); }
+  if (topFrame.pend?.length) readHeredocBodies(n, topFrame.pend)
   const out = { cls: cls.join(''), problems, heredocs, substs, segments: segmentsOf(s, cls.join(''), substs) }
   // the code points, for words(): not enumerable, so the result's JSON (golden, tests) is unchanged
   Object.defineProperty(out, 'chars', { value: s })

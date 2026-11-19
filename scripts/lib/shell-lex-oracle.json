@@ -10655,6 +10655,2185 @@
     "m2"
    ],
    "matrix": "heredoc(q)"
+  },
+  {
+   "cmd": "echo $(cat <<E\nm9 ; x\nE\nm1) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "$(|body-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $(cat <<'E'\nm9 ; x\nE\nm1) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "$(|body-q-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $(cat <<-E\n\tm9 ; x\n\tE\nm1) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "$(|body-dash",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $(cat <<'E'\nfoo ) m9\nE\nm1) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "$(|paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo $(cat <<'E'\nfoo ` m9\nE\nm1) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "$(|bt-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo $(cat <<'E'\nPatrik's m9\nE\nm1) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "$(|squote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo $(cat <<'E'\nfoo \" m9\nE\nm1) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "$(|dquote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo $(cat <<'E'\nfoo # ) m9\nE\nm1) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "$(|comment-paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $(cat <<'E' | m1\n{\"a\": \"(x) y; m9\"}\nE\nm2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "$(|json-body",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $(cat <<E) ; m1\nm9\nE\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "hsub": "$(|close-on-op-line",
+   "zsh": [
+    "m1",
+    "m2",
+    "m9"
+   ]
+  },
+  {
+   "cmd": "echo $(cat <<A <<B\nm8\nA\nm9\nB\nm1) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "$(|two-heredocs",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $(m1 <<'A' ; cat <<'B'\nm8\nA\nm9\nB\nm2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "$(|two-commands",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $(cat <<E\n${HOME} m9\nE) ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "$(|unquoted-body-close-line",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "echo $(cat <<E ; m1\nm9\nE) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "$(|cmd-after-on-op-line",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "echo $(cat <<E\nm9) ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "$(|unterminated-in-frame",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "echo $(cat <<'E' $(echo\nm1)\nm9\nE\nm2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "$(|nested-frame-nl",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $(cat <<'E' $(cat <<'K'\nm8\nK\nm1)\nm9\nE\nm2) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "$(|nested-frame-heredoc",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<E\nm9 ; x\nE\nm1 ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "(|body-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<'E'\nm9 ; x\nE\nm1 ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "(|body-q-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<-E\n\tm9 ; x\n\tE\nm1 ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "(|body-dash",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<'E'\nfoo ) m9\nE\nm1 ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "(|paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<'E'\nfoo ` m9\nE\nm1 ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "(|bt-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<'E'\nPatrik's m9\nE\nm1 ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "(|squote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<'E'\nfoo \" m9\nE\nm1 ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "(|dquote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<'E'\nfoo # ) m9\nE\nm1 ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "(|comment-paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<'E' | m1\n{\"a\": \"(x) y; m9\"}\nE\nm2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "(|json-body",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<E ) ; m1\nm9\nE\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "hsub": "(|close-on-op-line",
+   "zsh": [
+    "m1",
+    "m2"
+   ]
+  },
+  {
+   "cmd": "( cat <<A <<B\nm8\nA\nm9\nB\nm1 ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "(|two-heredocs",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( m1 <<'A' ; cat <<'B'\nm8\nA\nm9\nB\nm2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "(|two-commands",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<E\n${HOME} m9\nE ) ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "(|unquoted-body-close-line",
+   "zsh": [],
+   "syntax": true,
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "( cat <<E ; m1\nm9\nE ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "(|cmd-after-on-op-line",
+   "zsh": [],
+   "syntax": true,
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "( cat <<E\nm9 ) ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "(|unterminated-in-frame",
+   "zsh": [],
+   "syntax": true,
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "( cat <<'E' $(echo\nm1)\nm9\nE\nm2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "(|nested-frame-nl",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "( cat <<'E' $(cat <<'K'\nm8\nK\nm1)\nm9\nE\nm2 ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "(|nested-frame-heredoc",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "cat <(cat <<E\nm9 ; x\nE\nm1) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "<(|body-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "cat <(cat <<'E'\nm9 ; x\nE\nm1) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "<(|body-q-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "cat <(cat <<-E\n\tm9 ; x\n\tE\nm1) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "<(|body-dash",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "cat <(cat <<'E'\nfoo ) m9\nE\nm1) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "<(|paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "cat <(cat <<'E'\nfoo ` m9\nE\nm1) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "<(|bt-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "cat <(cat <<'E'\nPatrik's m9\nE\nm1) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "<(|squote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "cat <(cat <<'E'\nfoo \" m9\nE\nm1) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "<(|dquote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "cat <(cat <<'E'\nfoo # ) m9\nE\nm1) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "<(|comment-paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "cat <(cat <<'E' | m1\n{\"a\": \"(x) y; m9\"}\nE\nm2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "<(|json-body",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "cat <(cat <<E) >/dev/null ; m1\nm9\nE\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "hsub": "<(|close-on-op-line",
+   "zsh": [
+    "m1",
+    "m2",
+    "m9"
+   ]
+  },
+  {
+   "cmd": "cat <(cat <<A <<B\nm8\nA\nm9\nB\nm1) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "<(|two-heredocs",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "cat <(m1 <<'A' ; cat <<'B'\nm8\nA\nm9\nB\nm2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "<(|two-commands",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "cat <(cat <<E\n${HOME} m9\nE) >/dev/null ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "<(|unquoted-body-close-line",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "cat <(cat <<E ; m1\nm9\nE) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "<(|cmd-after-on-op-line",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "cat <(cat <<E\nm9) >/dev/null ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "<(|unterminated-in-frame",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "cat <(cat <<'E' $(echo\nm1)\nm9\nE\nm2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "<(|nested-frame-nl",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "cat <(cat <<'E' $(cat <<'K'\nm8\nK\nm1)\nm9\nE\nm2) >/dev/null ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "<(|nested-frame-heredoc",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<E\nm9 ; x\nE\nm1` ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "`|body-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<'E'\nm9 ; x\nE\nm1` ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "`|body-q-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<-E\n\tm9 ; x\n\tE\nm1` ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "`|body-dash",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<'E'\nfoo ) m9\nE\nm1` ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "`|paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<'E'\nfoo ` m9\nE\nm1` ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "`|bt-in-body",
+   "zsh": [],
+   "syntax": true,
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "echo `cat <<'E'\nPatrik's m9\nE\nm1` ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "`|squote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<'E'\nfoo \" m9\nE\nm1` ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "`|dquote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<'E'\nfoo # ) m9\nE\nm1` ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "`|comment-paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<'E' | m1\n{\"a\": \"(x) y; m9\"}\nE\nm2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "`|json-body",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<E` ; m1\nm9\nE\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "hsub": "`|close-on-op-line",
+   "zsh": [
+    "m1",
+    "m2",
+    "m9"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<A <<B\nm8\nA\nm9\nB\nm1` ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "`|two-heredocs",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `m1 <<'A' ; cat <<'B'\nm8\nA\nm9\nB\nm2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "`|two-commands",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<E\n${HOME} m9\nE` ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "`|unquoted-body-close-line",
+   "zsh": [
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<E ; m1\nm9\nE` ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "`|cmd-after-on-op-line",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<E\nm9` ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "`|unterminated-in-frame",
+   "zsh": [
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<'E' $(echo\nm1)\nm9\nE\nm2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "`|nested-frame-nl",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo `cat <<'E' $(cat <<'K'\nm8\nK\nm1)\nm9\nE\nm2` ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "`|nested-frame-heredoc",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo \"$(cat <<E\nm9 ; x\nE\nm1)\" ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "\"$(|body-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo \"$(cat <<'E'\nm9 ; x\nE\nm1)\" ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "\"$(|body-q-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo \"$(cat <<-E\n\tm9 ; x\n\tE\nm1)\" ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "\"$(|body-dash",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo \"$(cat <<'E'\nfoo ) m9\nE\nm1)\" ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "\"$(|paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo \"$(cat <<'E'\nfoo ` m9\nE\nm1)\" ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "\"$(|bt-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo \"$(cat <<'E'\nPatrik's m9\nE\nm1)\" ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "\"$(|squote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo \"$(cat <<'E'\nfoo \" m9\nE\nm1)\" ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "\"$(|dquote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo \"$(cat <<'E'\nfoo # ) m9\nE\nm1)\" ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "\"$(|comment-paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo \"$(cat <<'E' | m1\n{\"a\": \"(x) y; m9\"}\nE\nm2)\" ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "\"$(|json-body",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo \"$(cat <<E)\" ; m1\nm9\nE\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "hsub": "\"$(|close-on-op-line",
+   "zsh": [
+    "m1",
+    "m2",
+    "m9"
+   ]
+  },
+  {
+   "cmd": "echo \"$(cat <<A <<B\nm8\nA\nm9\nB\nm1)\" ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "\"$(|two-heredocs",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo \"$(m1 <<'A' ; cat <<'B'\nm8\nA\nm9\nB\nm2)\" ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "\"$(|two-commands",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo \"$(cat <<E\n${HOME} m9\nE)\" ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "\"$(|unquoted-body-close-line",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "echo \"$(cat <<E ; m1\nm9\nE)\" ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "\"$(|cmd-after-on-op-line",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "echo \"$(cat <<E\nm9)\" ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "\"$(|unterminated-in-frame",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "echo \"$(cat <<'E' $(echo\nm1)\nm9\nE\nm2)\" ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "\"$(|nested-frame-nl",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo \"$(cat <<'E' $(cat <<'K'\nm8\nK\nm1)\nm9\nE\nm2)\" ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "\"$(|nested-frame-heredoc",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<E\nm9 ; x\nE\nm1\n} ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "{|body-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<'E'\nm9 ; x\nE\nm1\n} ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "{|body-q-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<-E\n\tm9 ; x\n\tE\nm1\n} ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "{|body-dash",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<'E'\nfoo ) m9\nE\nm1\n} ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "{|paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<'E'\nfoo ` m9\nE\nm1\n} ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "{|bt-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<'E'\nPatrik's m9\nE\nm1\n} ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "{|squote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<'E'\nfoo \" m9\nE\nm1\n} ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "{|dquote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<'E'\nfoo # ) m9\nE\nm1\n} ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "{|comment-paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<'E' | m1\n{\"a\": \"(x) y; m9\"}\nE\nm2\n} ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "{|json-body",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<E\n} ; m1\nm9\nE\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "{|close-on-op-line",
+   "zsh": [],
+   "syntax": true,
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "{ cat <<A <<B\nm8\nA\nm9\nB\nm1\n} ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "{|two-heredocs",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ m1 <<'A' ; cat <<'B'\nm8\nA\nm9\nB\nm2\n} ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "{|two-commands",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<E\n${HOME} m9\nE\n} ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "{|unquoted-body-close-line",
+   "zsh": [
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<E ; m1\nm9\nE\n} ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "{|cmd-after-on-op-line",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<E\nm9\n} ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "{|unterminated-in-frame",
+   "zsh": [],
+   "syntax": true,
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "{ cat <<'E' $(echo\nm1)\nm9\nE\nm2\n} ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "{|nested-frame-nl",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "{ cat <<'E' $(cat <<'K'\nm8\nK\nm1)\nm9\nE\nm2\n} ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "{|nested-frame-heredoc",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $( ( cat <<E\nm9 ; x\nE\nm1 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "( in $(|body-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $( ( cat <<'E'\nm9 ; x\nE\nm1 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "( in $(|body-q-then-close",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $( ( cat <<-E\n\tm9 ; x\n\tE\nm1 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "( in $(|body-dash",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $( ( cat <<'E'\nfoo ) m9\nE\nm1 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "( in $(|paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo $( ( cat <<'E'\nfoo ` m9\nE\nm1 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "( in $(|bt-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo $( ( cat <<'E'\nPatrik's m9\nE\nm1 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "( in $(|squote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo $( ( cat <<'E'\nfoo \" m9\nE\nm1 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [],
+   "hsub": "( in $(|dquote-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ],
+   "syntax": true
+  },
+  {
+   "cmd": "echo $( ( cat <<'E'\nfoo # ) m9\nE\nm1 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "( in $(|comment-paren-in-body",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $( ( cat <<'E' | m1\n{\"a\": \"(x) y; m9\"}\nE\nm2 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "( in $(|json-body",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $( ( cat <<E ) ) ; m1\nm9\nE\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "hsub": "( in $(|close-on-op-line",
+   "zsh": [
+    "m1",
+    "m2",
+    "m9"
+   ]
+  },
+  {
+   "cmd": "echo $( ( cat <<A <<B\nm8\nA\nm9\nB\nm1 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m3"
+   ],
+   "hsub": "( in $(|two-heredocs",
+   "zsh": [
+    "m1",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $( ( m1 <<'A' ; cat <<'B'\nm8\nA\nm9\nB\nm2 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "( in $(|two-commands",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $( ( cat <<E\n${HOME} m9\nE ) ) ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "( in $(|unquoted-body-close-line",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "echo $( ( cat <<E ; m1\nm9\nE ) ) ; m3",
+   "markers": [
+    "m1",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "( in $(|cmd-after-on-op-line",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "echo $( ( cat <<E\nm9 ) ) ; m3",
+   "markers": [
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m3"
+   ],
+   "hsub": "( in $(|unterminated-in-frame",
+   "zsh": [],
+   "zsh_syntax": true
+  },
+  {
+   "cmd": "echo $( ( cat <<'E' $(echo\nm1)\nm9\nE\nm2 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "( in $(|nested-frame-nl",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "echo $( ( cat <<'E' $(cat <<'K'\nm8\nK\nm1)\nm9\nE\nm2 ) ) ; m3",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m8",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2",
+    "m3"
+   ],
+   "hsub": "( in $(|nested-frame-heredoc",
+   "zsh": [
+    "m1",
+    "m2",
+    "m3"
+   ]
+  },
+  {
+   "cmd": "cat <<T $(echo\nm1\nT\n)\nm9\nT\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "hsub": "top-pending|$(",
+   "zsh": [
+    "m1",
+    "m2"
+   ]
+  },
+  {
+   "cmd": "cat <<T `echo\nm1\nT\n`\nm9\nT\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "hsub": "top-pending|`",
+   "zsh": [
+    "m1",
+    "m2"
+   ]
+  },
+  {
+   "cmd": "cat <<T \"$(echo\nm1\nT\n)\"\nm9\nT\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "hsub": "top-pending|\"$(",
+   "zsh": [
+    "m1",
+    "m2"
+   ]
+  },
+  {
+   "cmd": "cat <<T <(echo\nm1\nT\n)\nm9\nT\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "hsub": "top-pending|<(",
+   "zsh": [
+    "m1",
+    "m2"
+   ]
+  },
+  {
+   "cmd": "cat <<T $((1\n+2))\nm9\nT\nm2",
+   "markers": [
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "hsub": "top-pending|$((",
+   "zsh": [
+    "m2"
+   ]
+  },
+  {
+   "cmd": "cat <<T ; ((1\n+2)) ; m1\nm9\nT\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m1",
+    "m2"
+   ],
+   "hsub": "top-pending|((",
+   "zsh": [
+    "m1",
+    "m2"
+   ]
+  },
+  {
+   "cmd": "cat <<T ${x:-a\nb}\nm9\nT\nm2",
+   "markers": [
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m2"
+   ],
+   "hsub": "top-pending|${",
+   "zsh": [
+    "m2"
+   ]
+  },
+  {
+   "cmd": "cat <<T ; ( echo\nm1\nT\n)\nm9\nT\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m9"
+   ],
+   "ran": [
+    "m2",
+    "m9"
+   ],
+   "hsub": "top-pending|(",
+   "zsh": [
+    "m2",
+    "m9"
+   ]
+  },
+  {
+   "cmd": "cat <<T ; { m3\nm1\nT\n}\nm9\nT\nm2",
+   "markers": [
+    "m1",
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "ran": [
+    "m2",
+    "m3",
+    "m9"
+   ],
+   "hsub": "top-pending|{",
+   "zsh": [
+    "m2",
+    "m3",
+    "m9"
+   ]
   }
  ]
 }

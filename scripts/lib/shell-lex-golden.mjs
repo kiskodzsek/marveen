@@ -104,6 +104,17 @@ const CASES = [
   ['env-prefix', 'A=1 B="x y" cmd arg', 'assignments are words of the segment'],
   ['empty', '', 'nothing'],
   ['only-sep', ' ; ;; & ', 'no segment'],
+  // card 09283e90: a heredoc inside $( ) (bash 3.2 and zsh measured, scripts/lib/shell-lex-oracle.json hsub cases)
+  ['hsub-payload', "R=$(curl -s -X POST u --data-binary @- <<'JSON'\n{\"a\": \"(x) y; ./m.sh\"}\nJSON\n)\necho \"$R\"", 'the body is inert, the frame closes after it'],
+  ['hsub-close-on-op-line', "echo $(cat <<E) ; ./a.sh\n./m.sh\nE", 'the frame closed on the operator line: no body, the lines after it are code'],
+  ['hsub-subshell', "( cat <<'J' )\nx ; ./m.sh\nJ\nls", 'a ( ) subshell is read at its parent level: the body after the ) line'],
+  ['hsub-nested', "R=$(cat <<'J' $(cat <<'K'\nk\nK\n./a.sh)\nj\nJ\n)", 'each frame reads its own heredoc at its own newline'],
+  ['hsub-two-frames', "A=$(cat <<'J'\n1\nJ\n); B=$(cat <<'K'\n2\nK\n)", 'two frames, a heredoc each'],
+  ['hsub-bash32-paren', "R=$(cat <<'J'\na) ./m.sh\nJ\n)", 'bash 3.2 closes the frame at the body line: the old reading, a problem'],
+  ['hsub-bash32-squote', "R=$(cat <<'J'\nPatrik's\nJ\n)", 'bash 3.2 opens a quote in the body: the old reading, a problem'],
+  ['hsub-procsubst', "cat <(cat <<'J'\nx\nJ\n)", 'in <( ) the old reading (bash 3.2 reads # there differently), a problem'],
+  ['top-pending-subst-nl', "cat <<T $(echo\n./m.sh\nT\n)\nbody\nT", 'a newline in $( ) does not read the top heredoc: ./m.sh and T run in it'],
+  ['top-pending-subshell-nl', "cat <<T ; ( echo\nbody\nT\n)", 'a newline in a ( ) subshell reads it'],
 ]
 
 function answer(input) {

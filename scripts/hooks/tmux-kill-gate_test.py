@@ -270,6 +270,21 @@ BLOCK = [
     "echo 'tmux kill-server' |& sh",
     'echo agent-dave |& xargs tmux kill-session -t',
     "echo agent-dave |& xargs -I X sh -c 'tmux kill-session -t X'",
+    # card 09283e90: the shared lexer reads a heredoc in $( ) with its body. A body fed to a shell or an interpreter in
+    # the frame (the innermost segment owns the operator), the live substitutions of an unquoted body (top level and
+    # in a frame: cat <<J + $(tmux kill-server) passed on main), and a top heredoc pending across a $( )'s newline
+    # (the lexer made the frame's command lines body text: passed on main)
+    "R=$(sh <<'X'\ntmux kill-server\nX\n)",
+    "R=$(cat <<'X' | sh\ntmux kill-server\nX\n)",
+    "R=$(bash -s <<'X'\ntmux kill-server\nX\n)",
+    "R=$(echo $(sh <<'X'\ntmux kill-server\nX\n))",
+    "R=$(node <<'X'\nrequire('child_process').execSync('tmux kill-server')\nX\n) ; node x.js",
+    "R=$(python3 - <<'X'\nimport os; os.system('tmux kill-server')\nX\n)",
+    'cat <<J\n$(tmux kill-server)\nJ',
+    'cat <<J\nx `tmux kill-server` y\nJ',
+    'R=$(cat <<J\n$(tmux kill-server)\nJ\n)',
+    'cat <<T $(echo\ntmux kill-server\nT\n)\nbody\nT',
+    "R=$(cat <<'J'\na) tmux kill-server\nJ\n)",
 ]
 # Viktor 43177 MEDIUM 1: compound-command keywords, for three kill forms each
 for _k in ('tmux kill-server', 'tmux kill-session -t agent-x', 'pkill tmux'):
@@ -384,6 +399,10 @@ ALLOW = [
     """python3 -c "print('LOW 2: (>/tmp/x tmux kill-server) a REDIR-ellenőrzés')\"""",
     # Viktor 43364 M19: only the literal DIRECTLY after the call is a command, not a later one on the same line
     "python3 - <<'E'\nimport os\nos.system('ls'); msg = '>x tmux kill-server'\nE",
+    # card 09283e90: a quoted body is data for cat, in a $( ) too; an escaped $( in an unquoted body is text
+    "R=$(cat <<'X'\ntmux kill-server is prose here\nX\n)",
+    "cat <<'J'\n$(tmux kill-server)\nJ",
+    'cat <<J\n\\$(tmux kill-server)\nJ',
 ]
 
 bad = 0
