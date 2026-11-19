@@ -583,15 +583,20 @@ export function segmentEntersScheduleDir(seg) {
 // directory (`cd ~/.claude && find scheduled-tasks ... | xargs sed -i`). Then the bare word is anchored to
 // `.claude/scheduled-tasks` and the rules above judge it like the spelled-out path. The repository's own
 // scheduled-tasks/ templates and a `grep scheduled-tasks notes.md` elsewhere stay unnamed.
-const BARE_SCHEDULE_DIR_RX = /(^|[\s=(<>|;&:"'])(?:\.\/)?scheduled-tasks(?![\w.-])/gi
-const CLAUDE_DIR_MENTION_RX = /\.claude(?:-config)?(?=$|[\s/;&|),'"])/i
+// Viktor 48057 LOW (card 62d0caef): a `../` prefix counts too (`cd ~/.claude/skills && cp x ../scheduled-tasks/...`),
+// CLAUDE_CONFIG_DIR is a .claude mention (`cd "$CLAUDE_CONFIG_DIR"`, a sub-agent's natural spelling), and a
+// here-string (`<<<`) opens no heredoc, so it does not blank the lines after it.
+const BARE_SCHEDULE_DIR_RX = /(^|[\s=(<>|;&:"'])(?:\.\.?\/)*scheduled-tasks(?![\w.-])/gi
+// CLAUDE_CONFIG_DIR only as a variable ($X, ${X}): the bare name in prose (a verdict text naming the rows, 2026-11-19
+// replay: 1 of 66973 calls) is no directory.
+const CLAUDE_DIR_MENTION_RX = /(?:\.claude(?:-config)?|\$\{?CLAUDE_CONFIG_DIR\}?)(?=$|[\s/;&|),'"])/i
 // The .claude mention counts in the SHELL text only: a heredoc body is data (2026-11-19 replay: Viktor writing gate
 // probe rows that spell `cd ~/.claude && find scheduled-tasks ...` into a file, 3 of 66632 calls). A cwd or a
 // shell-level `cd ~/.claude` still anchors a bare word inside an interpreter's heredoc.
 export function blankHeredocBodies(command) {
   const lines = String(command ?? '').split('\n')
   for (let i = 0; i < lines.length; i++) {
-    for (const m of lines[i].matchAll(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g)) {
+    for (const m of lines[i].matchAll(/(?<!<)<<(?!<)-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g)) {
       while (++i < lines.length && lines[i].trim() !== m[2]) lines[i] = ''
     }
   }
@@ -603,8 +608,12 @@ export function anchorBareScheduleDir(command, opts = {}) {
   if (!BARE_SCHEDULE_DIR_RX.test(s)) return s
   let rel = CLAUDE_DIR_MENTION_RX.test(blankHeredocBodies(s).replace(/\\(.)/g, '$1'))
   if (!rel && opts.cwd) {
+    // each match with its own ./ ../ prefix: from a cwd of ~/.claude/skills, ../scheduled-tasks is the store
     const store = realViaAncestor(resolve(scheduleDirOf(opts))).toLowerCase()
-    rel = realViaAncestor(resolve(opts.cwd, 'scheduled-tasks')).toLowerCase() === store
+    BARE_SCHEDULE_DIR_RX.lastIndex = 0      // matchAll starts at the global regex's lastIndex, which test() moved
+    for (const m of s.matchAll(BARE_SCHEDULE_DIR_RX)) {
+      if (realViaAncestor(resolve(opts.cwd, m[0].slice(m[1].length))).toLowerCase() === store) { rel = true; break }
+    }
   }
   return rel ? s.replace(BARE_SCHEDULE_DIR_RX, '$1.claude/scheduled-tasks') : s
 }

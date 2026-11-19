@@ -243,6 +243,42 @@ describe('self-pace-gate: the store named relatively from ~/.claude', () => {
   })
 })
 
+// Viktor 48057 LOW (card 62d0caef, probe rows S01 S01b S18 S02 S03): allowed on a3e3be63.
+describe('self-pace-gate: the store named relatively, CLAUDE_CONFIG_DIR, ../ and a here-string', () => {
+  let skills: string
+  beforeAll(() => {
+    skills = join(home, '.claude', 'skills')
+    mkdirSync(skills, { recursive: true })
+  })
+  it('denies a bare word after cd into CLAUDE_CONFIG_DIR, a ../ from ~/.claude/skills, and after a here-string', () => {
+    for (const [c, cwd] of [
+      [`cd "$CLAUDE_CONFIG_DIR" && sed -i '' s/a/b/ scheduled-tasks/x/SKILL.md`, undefined],
+      ['cd $CLAUDE_CONFIG_DIR; cp /tmp/e scheduled-tasks/x/SKILL.md', undefined],
+      ['cd $CLAUDE_CONFIG_DIR/ && cp /tmp/e scheduled-tasks/x/SKILL.md', undefined],
+      ['cd ${CLAUDE_CONFIG_DIR} && cp /tmp/e scheduled-tasks/x/SKILL.md', undefined],
+      ['cd ~/.claude/skills && cp /tmp/e ../scheduled-tasks/x/SKILL.md', undefined],
+      ['cp /tmp/e ../scheduled-tasks/x/SKILL.md', 'SKILLS'],                 // by the cwd alone, no .claude in the text
+      ['cp /tmp/e ./../scheduled-tasks/x/SKILL.md', 'SKILLS'],
+      ['cat <<<hi\ncd ~/.claude && cp /tmp/e scheduled-tasks/x/SKILL.md', undefined],
+      ['tr a b <<< "$x"\ncd ~/.claude\nfind scheduled-tasks -name "*.pending" | xargs rm', undefined],
+    ] as const) {
+      const o: Record<string, string> = cwd === 'SKILLS' ? { cwd: skills } : {}
+      expect({ c, cwd, d: bash(c, o) }).toEqual({ c, cwd, d: { deny: true, reason: 'schedule-dir' } })
+    }
+  })
+  it('leaves ../scheduled-tasks elsewhere, a here-string alone and reads in the store alone', () => {
+    expect(bash('cp a ../scheduled-tasks/x/task-config.json').deny).toBe(false)              // the repo templates
+    expect(bash('cp a ../scheduled-tasks/x/task-config.json', { cwd: join(root, 'agent', 'cfg') }).deny).toBe(false)
+    expect(bash('cat <<<hi').deny).toBe(false)
+    // the 7-day replay's one hit: the name in a prose argument, not a variable
+    expect(bash('python3 -I tools/verdikt-add.py x "LOW: sub-kapun cd CLAUDE_CONFIG_DIR, ../scheduled-tasks átmegy" | tail -1').deny).toBe(false)
+    expect(bash('cd "$CLAUDE_CONFIG_DIR" && cat scheduled-tasks/x/SKILL.md').deny).toBe(false)
+    expect(bash('ls ../scheduled-tasks/x && cat ../scheduled-tasks/x/SKILL.md', { cwd: skills }).deny).toBe(false)
+    // a real heredoc after a here-string on the same line is still a heredoc: its body stays data
+    expect(bash("cat <<<hi; python3 - <<'PY'\nprint('cd ~/.claude')\nPY\nfind scheduled-tasks -name '*.pending' | xargs rm").deny).toBe(false)
+  })
+})
+
 describe('self-pace-gate: the hook end to end on a store write', () => {
   it('prints a deny with the schedule-store message and the main-agent route', () => {
     const r = spawnSync(process.execPath, [join(__dirname, '..', '..', 'scripts', 'self-pace-gate.mjs')], {
