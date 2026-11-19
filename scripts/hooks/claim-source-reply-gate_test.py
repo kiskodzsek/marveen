@@ -336,6 +336,15 @@ ok('ahead control: "HH:MM-kor mérve" without the date', gate.merve_ahead('Kerne
 MIDNIGHT = _t.strptime('2026-11-16 23:59', '%Y-%m-%d %H:%M')
 ok('ahead across midnight: 23:59 -> "mérve 00:02"', gate.merve_ahead('Mérve 00:02.', MIDNIGHT) == ['00:02'])
 ok('not ahead across midnight: 23:59 -> "mérve 23:50"', gate.merve_ahead('Mérve 23:50.', MIDNIGHT) == [])
+# Viktor 47347 (card 7d85ceea): three rows only his probe covered (V17, V21, V22; mutants k15, k16b, k20)
+ok('ahead: the same stamp twice is listed once (V17)',
+   gate.merve_ahead('Mérve 10:05, és 10:05-kor mérve.', AT) == ['10:05'], f"got {gate.merve_ahead('Mérve 10:05, és 10:05-kor mérve.', AT)}")
+ok('not ahead: the MM:SS tail of an H:MM:SS before "mérve" is no time (V21)',
+   gate.merve_ahead('Kernel: 8:10:05 mérve.', AT) == [], f"got {gate.merve_ahead('Kernel: 8:10:05 mérve.', AT)}")
+AT_0000 = _t.strptime('2026-11-18 00:00', '%Y-%m-%d %H:%M')
+ok('not ahead: hour 24 is no time (V22)', gate.merve_ahead('Mérve 24:05.', AT_0000) == [],
+   f"got {gate.merve_ahead('Mérve 24:05.', AT_0000)}")
+ok('ahead control: the same minute as a real hour (00:05 at 00:00)', gate.merve_ahead('Mérve 00:05.', AT_0000) == ['00:05'])
 
 # hook level, against the real clock (no time seam in the hook)
 def _hm(delta):
