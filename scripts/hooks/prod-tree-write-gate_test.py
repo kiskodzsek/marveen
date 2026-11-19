@@ -1085,9 +1085,67 @@ class MainScheduleDir(unittest.TestCase):
                     'ls scheduled-tasks | while read n; do cp /tmp/a "/tmp/out/$n"; done'):
             self.assertEqual(self.go(bash(cmd, cwd='/tmp')), '', cmd)
 
+    def test_viktor_47811_relative_naming_is_denied(self):
+        # L1 (card 291bd837): a bare scheduled-tasks word names the store when the command runs in ~/.claude, by
+        # the cwd or by a `cd ~/.claude` in the shell text (X01, X02, X09, X10); on the gate before every row allowed
+        cl = HOME + '/.claude'
+        for cmd, cwd in (("cd ~/.claude && find scheduled-tasks -name SKILL.md | xargs sed -i '' s/a/b/", '/tmp'),
+                         ('ls -d scheduled-tasks/* | while read d; do cp /tmp/e "$d/SKILL.md"; done', cl),
+                         ('find scheduled-tasks -name "*.pending" | xargs rm', cl),
+                         ('cd ~/.claude && ls -d scheduled-tasks/* | while read d; do cp /tmp/e "$d/SKILL.md"; done',
+                          '/tmp'),
+                         ('cd ~/.claude && cp /tmp/e ./scheduled-tasks/kernel-flotta-keret/SKILL.md', '/tmp')):
+            self.assertIn('"deny"', self.go(bash(cmd, cwd=cwd)), cmd)
+        # the same bare word away from ~/.claude stays free (X08, the repo templates), and so does a read in it
+        for cmd, cwd in (('grep -rn scheduled-tasks /tmp/notes.md', '/tmp'),
+                         ('cp /tmp/a scheduled-tasks/x/task-config.json', P),
+                         ('ls scheduled-tasks/kernel-flotta-keret && cat scheduled-tasks/kernel-flotta-keret/SKILL.md',
+                          cl)):
+            self.assertEqual(self.go(bash(cmd, cwd=cwd)), '', cmd)
+        # a heredoc body is data: `.claude` written into a file does not anchor a bare word in the shell text
+        self.assertEqual(self.go(bash("cat > /tmp/rows.txt <<'EOF'\ncd ~/.claude && find scheduled-tasks\nEOF\n"
+                                      "ls scheduled-tasks | while read n; do cp /tmp/a \"/tmp/out/$n\"; done",
+                                      cwd='/tmp')), '')
+        # ... also where the bare word would make an unresolved write a deny (mutation M11: the body not blanked)
+        self.assertEqual(self.go(bash("cat > /tmp/rows.txt <<'EOF'\ncd ~/.claude\nEOF\n"
+                                      "grep -l scheduled-tasks docs/*.md | xargs sed -i '' s/a/b/", cwd='/tmp')), '')
+
+    def test_viktor_47811_interpreter_writes_are_denied(self):
+        # INFO (card 291bd837): an interpreter whose text names the store and carries a write call; the 7-day main
+        # transcript replay found one such call (a python shutil write into the store, 11-14), and no read
+        st = '~/.claude/scheduled-tasks'
+        for cmd in ("python3 - <<'EOF'\nimport os\np = os.path.expanduser('%s/x/SKILL.md')\nopen(p, 'w').write('x')\n"
+                    "EOF" % st,
+                    'python3 -c "open(\'%s/x/SKILL.md\', \'a\').write(\'x\')"' % self.ST,
+                    'node -e "require(\'fs\').writeFileSync(\'%s/x/SKILL.md\', \'x\')"' % self.ST,
+                    "python3 - <<'EOF'\nimport shutil\nshutil.copy('/tmp/a', '%s/x/SKILL.md')\nEOF" % self.ST,
+                    "cd ~/.claude && python3 -c \"import pathlib;pathlib.Path('scheduled-tasks/x/SKILL.md')"
+                    ".write_text('x')\"",
+                    "python3 - <<'EOF'\nimport json, os\nh = os.path.expanduser('~')\n"
+                    "p = os.path.join(h, '.claude', 'scheduled-tasks', 'x', 'task-config.json')\n"
+                    "json.dump({}, open(p, 'w'))\nEOF"):
+            out = self.go(bash(cmd, cwd='/tmp'))
+            self.assertIn('"deny"', out, cmd)
+            self.assertIn('ütemezés-tár', out, cmd)
+        # reads by an interpreter stay free, in a heredoc too
+        for cmd in ("python3 - <<'EOF'\nimport json\nprint(json.load(open('%s/x/task-config.json')))\nEOF" % self.ST,
+                    'node -e "console.log(require(\'fs\').readFileSync(\'%s/x/SKILL.md\', \'utf8\'))"' % self.ST,
+                    "python3 -c \"import pathlib;print(pathlib.Path('%s/x/SKILL.md').read_text())\"" % self.ST,
+                    # an explicit read mode (mutation M16: 'r' read as a write mode)
+                    "python3 -c \"print(open('%s/x/SKILL.md', 'r').read())\"" % self.ST,
+                    "python3 -c \"print(open('%s/x/SKILL.md', mode='rb').read())\"" % self.ST,
+                    # a write call spelled in a non-interpreter command (mutation M14: the interpreter not required)
+                    'grep -rn "json.dump(" %s/' % self.ST,
+                    "grep -rn \"open(p, 'w')\" ~/.claude/scheduled-tasks/kernel-flotta-keret/SKILL.md"):
+            self.assertEqual(self.go(bash(cmd, cwd='/tmp')), '', cmd)
+        # a write elsewhere in a block that only mentions the store in another line's heredoc is not the store's
+        self.assertEqual(self.go(bash("cat %s/kernel-flotta-keret/SKILL.md\n"
+                                      "python3 -c \"open('/tmp/out.txt', 'w').write('x')\"" % self.ST, cwd='/tmp')),
+                         '')
+
     def test_interpreter_reads_stay_free(self):
-        # Viktor 47421 option (b) is left out: on the main agent's 7-day transcripts it denied 36 harmless reads
-        # for 0 real writes, so a python/node line that names the store is a documented limit, not a deny
+        # Viktor 47421 option (b) as a whole is left out: on the main agent's 7-day transcripts it denied 36
+        # harmless reads for 0 real writes; only an interpreter line with a write call is a deny (card 291bd837)
         for cmd in ('python3 -I -c "import json;print(json.load(open(\'%s/kernel-flotta-keret/task-config.json\')))"'
                     % self.ST,
                     'cat %s | python3 -c "import sys;print(sys.stdin.read())"' % self.f):
@@ -1115,6 +1173,52 @@ class MainScheduleDir(unittest.TestCase):
             gate.main_schedule_dir = real
         rows = [r for r in log_rows() if r['decision'] == 'error-allow']
         self.assertEqual((len(rows), rows[0]['agent']), (1, 'main'))
+
+
+class LinkOperand(unittest.TestCase):
+    """Card 291bd837 (Dave 11-19 03:21): `rm -f $S/rp-new/scripts/agent-msg.sh`, where that path is a symlink to the
+    prod scripts/agent-msg.sh, was denied as 'rm a védett útra': rm, unlink and ln act on the link, not on the file
+    behind it. Writing THROUGH the link, and a link to a directory, keep the realpath reading."""
+    S = HOME + '/scratch'
+
+    def setUp(self):
+        shutil.rmtree(self.S, ignore_errors=True)
+        os.makedirs(self.S)
+        os.symlink(P + '/scripts/x.py', self.S + '/Lf')      # a link to a protected FILE
+        os.symlink(P + '/scripts', self.S + '/Ld')           # a link to a protected DIRECTORY
+
+    def tearDown(self):
+        shutil.rmtree(self.S, ignore_errors=True)
+
+    def dd(self, cmd):
+        return gate.decide(bash(cmd.replace('$S', self.S), cwd=self.S), P, HOME)[0]
+
+    def test_the_link_itself_is_free(self):
+        for cmd in ('rm -f $S/Lf', 'rm $S/Lf', 'unlink $S/Lf', 'rm -f "$S/Lf"', 'ln -s /tmp/x $S/Lf',
+                    'ln -sf %s/scripts/x.py $S/Lf' % P, 'rm -rf $S/Ld', 'rm -f Lf',
+                    # Dave's command: rebuild a scratch copy, then point the link at prod again
+                    'rm -f $S/Lf; ln -s %s/scripts/x.py $S/Lf' % P):
+            self.assertEqual(self.dd(cmd), 'allow', cmd)
+
+    def test_through_the_link_stays_denied(self):
+        for cmd in ('cp /tmp/x $S/Lf', 'echo x > $S/Lf', 'sed -i "" s/a/b/ $S/Lf', 'chmod 777 $S/Lf',
+                    'rm -rf $S/Ld/', 'rm $S/Ld/x.py', 'cp /tmp/x $S/Ld/x.py', 'mv /tmp/x $S/Ld',
+                    'ln -sf /tmp/x $S/Ld', 'ln -s /tmp/x $S/Ld/', 'ln -s /tmp/x %s/scripts/x.py' % P,
+                    'ln -sf /tmp/x %s/scripts/x.py' % P, 'rm %s/scripts/x.py' % P, 'unlink %s/scripts/x.py' % P,
+                    'echo x | tee $S/Lf', 'tee -a $S/Lf < /tmp/x'):   # tee writes through, like cp (mutation M5)
+            self.assertEqual(self.dd(cmd), 'deny', cmd)
+
+    def test_a_link_inside_the_prod_tree_stays_protected(self):
+        # the link's own place counts by its parent's realpath too: reached through a link to a prod directory.
+        # plink points at a directory outside: `ln -sfn` / `-h` would replace plink itself in the prod tree (the
+        # gate before allowed it, reading only the realpath /tmp), so ln onto a directory link reads both places
+        os.symlink('/tmp', P + '/scripts/plink')
+        try:
+            for cmd in ('rm %s/scripts/plink' % P, 'rm $S/Ld/plink', 'unlink $S/Ld/plink', 'ln -sfn /tmp/x $S/Ld/plink',
+                        'ln -shf /tmp/x %s/scripts/plink' % P, 'ln -sf /tmp/x %s/scripts/plink' % P):
+                self.assertEqual(self.dd(cmd), 'deny', cmd)
+        finally:
+            os.unlink(P + '/scripts/plink')
 
 
 if __name__ == '__main__':

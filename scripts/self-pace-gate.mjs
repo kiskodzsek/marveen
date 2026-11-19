@@ -577,6 +577,38 @@ export function segmentEntersScheduleDir(seg) {
   return /^(?:cd\s|pushd\s|for\s|[A-Za-z_][A-Za-z0-9_]*=)/.test(s) && namesScheduleDir(s)
 }
 
+// Viktor 47811 L1 (card 291bd837): the store named RELATIVELY. A bare `scheduled-tasks` path segment names the
+// store when the command runs where that relative path IS the store: the cwd's scheduled-tasks resolves to it
+// (~/.claude, or an agent's .claude-config whose scheduled-tasks is a symlink to it), or the text names a .claude
+// directory (`cd ~/.claude && find scheduled-tasks ... | xargs sed -i`). Then the bare word is anchored to
+// `.claude/scheduled-tasks` and the rules above judge it like the spelled-out path. The repository's own
+// scheduled-tasks/ templates and a `grep scheduled-tasks notes.md` elsewhere stay unnamed.
+const BARE_SCHEDULE_DIR_RX = /(^|[\s=(<>|;&:"'])(?:\.\/)?scheduled-tasks(?![\w.-])/gi
+const CLAUDE_DIR_MENTION_RX = /\.claude(?:-config)?(?=$|[\s/;&|),'"])/i
+// The .claude mention counts in the SHELL text only: a heredoc body is data (2026-11-19 replay: Viktor writing gate
+// probe rows that spell `cd ~/.claude && find scheduled-tasks ...` into a file, 3 of 66632 calls). A cwd or a
+// shell-level `cd ~/.claude` still anchors a bare word inside an interpreter's heredoc.
+export function blankHeredocBodies(command) {
+  const lines = String(command ?? '').split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    for (const m of lines[i].matchAll(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g)) {
+      while (++i < lines.length && lines[i].trim() !== m[2]) lines[i] = ''
+    }
+  }
+  return lines.join('\n')
+}
+export function anchorBareScheduleDir(command, opts = {}) {
+  const s = String(command ?? '')
+  BARE_SCHEDULE_DIR_RX.lastIndex = 0
+  if (!BARE_SCHEDULE_DIR_RX.test(s)) return s
+  let rel = CLAUDE_DIR_MENTION_RX.test(blankHeredocBodies(s).replace(/\\(.)/g, '$1'))
+  if (!rel && opts.cwd) {
+    const store = realViaAncestor(resolve(scheduleDirOf(opts))).toLowerCase()
+    rel = realViaAncestor(resolve(opts.cwd, 'scheduled-tasks')).toLowerCase() === store
+  }
+  return rel ? s.replace(BARE_SCHEDULE_DIR_RX, '$1.claude/scheduled-tasks') : s
+}
+
 // The real path of `p`, resolving the nearest existing ancestor (a new file or a new task
 // directory does not exist yet, but its parent's symlink still counts).
 function realViaAncestor(p) {
@@ -1341,7 +1373,7 @@ export function gateDecision(toolName, toolInput, opts = {}) {
     // SCHEDDIR1118: the per-task store, on separator-true segments; a cd / for /
     // variable that carries the store makes the later segments count as inside it.
     let inScheduleDir = false
-    const schedSegs = splitSegmentsKeepQuotes(safeCommand)
+    const schedSegs = splitSegmentsKeepQuotes(anchorBareScheduleDir(safeCommand, opts))
     // a store named anywhere in the command (not only as a text sender's text): every other segment then runs on
     // the allowlist (a pipe, a while loop, a process substitution carry it; Viktor 47414 M1)
     let tainted = schedSegs.some(segmentNamesStoreAsPath)

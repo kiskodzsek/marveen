@@ -206,6 +206,43 @@ describe('self-pace-gate: the per-task schedule store, Bash', () => {
   })
 })
 
+// Viktor 47811 L1 (card 291bd837): a bare scheduled-tasks word is the store when the command runs in ~/.claude
+// (its cwd, or a `cd ~/.claude` in the shell text). On the gate before, X01 X02 X09 X10 X11 X12 were allowed.
+describe('self-pace-gate: the store named relatively from ~/.claude', () => {
+  let cl: string
+  let cfg: string
+  beforeAll(() => {
+    cl = join(home, '.claude')
+    cfg = join(root, 'agent2', '.claude-config')   // an agent's config dir: its scheduled-tasks links to the store
+    mkdirSync(cfg, { recursive: true })
+    symlinkSync(store, join(cfg, 'scheduled-tasks'))
+  })
+  it('denies a write that names the store only by the bare word', () => {
+    for (const [c, cwd] of [
+      ["cd ~/.claude && find scheduled-tasks -name SKILL.md | xargs sed -i '' s/a/b/", undefined],
+      ['ls -d scheduled-tasks/* | while read d; do cp /tmp/e "$d/SKILL.md"; done', 'CL'],
+      ['find scheduled-tasks -name "*.pending" | xargs rm', 'CL'],
+      ['cd ~/.claude && ls -d scheduled-tasks/* | while read d; do cp /tmp/e "$d/SKILL.md"; done', undefined],
+      ['cd ~/.claude && cp /tmp/e scheduled-tasks/x/SKILL.md', undefined],
+      ['cd ~/.claude && cp /tmp/e ./scheduled-tasks/x/SKILL.md', undefined],
+      ['cp /tmp/e scheduled-tasks/x/SKILL.md', 'CFG'],
+    ] as const) {
+      const o: Record<string, string> = cwd === 'CL' ? { cwd: cl } : cwd === 'CFG' ? { cwd: cfg } : {}
+      expect({ c, cwd, d: bash(c, o) }).toEqual({ c, cwd, d: { deny: true, reason: 'schedule-dir' } })
+    }
+  })
+  it('leaves the bare word alone away from ~/.claude, a read in it, and a heredoc body that spells .claude', () => {
+    expect(bash('grep -rn scheduled-tasks /tmp/notes.md').deny).toBe(false)
+    expect(bash('cp a scheduled-tasks/x/SKILL.md').deny).toBe(false)               // the repo templates
+    expect(bash('ls scheduled-tasks/x && cat scheduled-tasks/x/SKILL.md', { cwd: cl }).deny).toBe(false)
+    expect(bash("cat > /tmp/rows.txt <<'EOF'\ncd ~/.claude && find scheduled-tasks\nEOF\nls scheduled-tasks | while read n; do cp /tmp/a \"/tmp/out/$n\"; done").deny).toBe(false)
+    // where an anchored word WOULD deny: an interpreter heredoc (a text-tool heredoc such as cat's is blanked earlier)
+    expect(bash("python3 - <<'PY'\nprint('cd ~/.claude')\nPY\nfind scheduled-tasks -name '*.pending' | xargs rm").deny).toBe(false)
+    expect(bash("node - <<'JS'\nconsole.log('.claude')\nJS\ncp /tmp/e scheduled-tasks/x/SKILL.md").deny).toBe(false)
+    expect(bash("cd ~/.claude\nfind scheduled-tasks -name '*.pending' | xargs rm").deny).toBe(true)
+  })
+})
+
 describe('self-pace-gate: the hook end to end on a store write', () => {
   it('prints a deny with the schedule-store message and the main-agent route', () => {
     const r = spawnSync(process.execPath, [join(__dirname, '..', '..', 'scripts', 'self-pace-gate.mjs')], {
