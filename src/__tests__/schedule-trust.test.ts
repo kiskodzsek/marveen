@@ -349,6 +349,105 @@ describe('an owner editor save approves only what the editor shows (Viktor 39055
   })
 })
 
+// Card 248e8f7c (Klodel 47998): the PUT may set a preCheck, only a shipped
+// {{PROJECT_ROOT}}/scripts/prechecks/<name>.sh (schedule-api-precheck.test.ts has
+// the shape rules). The write approves nothing: the task waits for the owner's
+// one-click approve, which pins the script chain.
+describe('PUT preCheck over the API (card 248e8f7c)', () => {
+  const SHIPPED = '{{PROJECT_ROOT}}/scripts/prechecks/kernel-quota-precheck.sh'
+  const cfgOf = (name: string) => JSON.parse(readFileSync(join(io.SCHEDULED_TASKS_DIR, name, 'task-config.json'), 'utf8'))
+
+  it('the shipped script file exists in this tree (the test is about a real path)', () => {
+    expect(existsSync(join(PROJECT_ROOT, 'scripts', 'prechecks', 'kernel-quota-precheck.sh'))).toBe(true)
+  })
+
+  it('a token PUT stores the preCheck and ends the approval', async () => {
+    await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+    expect(await trustOf('napi-riport')).toBe('approved')
+    const r = await call('PUT', '/api/schedules/napi-riport', { preCheck: SHIPPED })
+    expect(r.status).toBe(200)
+    expect(cfgOf('napi-riport').preCheck).toBe(SHIPPED)
+    expect(await trustOf('napi-riport')).toBe('agent')
+    expect(db.getScheduleTrust('napi-riport')).toBeUndefined()
+  })
+
+  it('an owner PUT of the preCheck does not approve it either (hidden field)', async () => {
+    await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+    expect((await call('PUT', '/api/schedules/napi-riport', { preCheck: SHIPPED }, { owner: true })).status).toBe(200)
+    expect(cfgOf('napi-riport').preCheck).toBe(SHIPPED)
+    expect(await trustOf('napi-riport')).not.toMatch(/approved|legacy/)
+  })
+
+  it('the owner one-click approve then approves the task as stored', async () => {
+    await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+    await call('PUT', '/api/schedules/napi-riport', { preCheck: SHIPPED })
+    expect((await approve('napi-riport', { owner: true })).status).toBe(200)
+    expect(await trustOf('napi-riport')).toBe('approved')
+  })
+
+  it('the first tick after the PUT alerts as "awaits approval", not as a file write (Viktor 48006 L1)', async () => {
+    const runner = await import('../web/schedule-runner.js')
+    const alerts = () => (db.getDb().prepare("SELECT content FROM agent_messages WHERE content LIKE '[UTEMEZES-BIZALOM]%'").all() as Array<{ content: string }>).map(r => r.content)
+    await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+    await call('PUT', '/api/schedules/napi-riport', { preCheck: SHIPPED })
+    expect(await runner.runPreCheckAsync(io.readScheduledTask('napi-riport')!)).toEqual({ skip: false })
+    expect(alerts()).toHaveLength(1)
+    expect(alerts()[0]).toContain('preCheck-et kapott (az API-n is beállítható), tulajdonosi jóváhagyásra vár')
+    expect(alerts()[0]).not.toContain('fájlból került')
+    expect(alerts()[0]).toContain('Ha nem tudsz erről a beállításról, szólj Viktornak.')
+    // a command is still the file-write case
+    io.writeScheduledTask('cmd-task', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, type: 'command', command: 'echo hi', preCheck: SHIPPED })
+    trust.alertScheduleTrust(io.readScheduledTask('cmd-task')!, 'agent', 'test')
+    expect(alerts()).toHaveLength(2)
+    expect(alerts()[1]).toContain('amit az API nem tud beállítani (command): fájlból került a tárba')
+    expect(alerts()[1]).toContain('Ha nem a tulajdonos írta, szólj Viktornak.')
+    // no preCheck at all (the direct-digest branch alerts too): not worded as a preCheck
+    io.writeScheduledTask('digest-task', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, sendDigestDirect: true })
+    trust.alertScheduleTrust(io.readScheduledTask('digest-task')!, 'agent', 'test')
+    expect(alerts()).toHaveLength(3)
+    expect(alerts()[2]).not.toContain('preCheck-et kapott')
+    // Viktor 48011 L2: a preCheck the PUT would not accept, or a preCheck next to another
+    // hidden field, is still worded as a file write
+    const fileWrite = 'amit az API nem tud beállítani (command): fájlból került a tárba'
+    io.writeScheduledTask('ops-pc', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: 'ops/x.sh' })
+    trust.alertScheduleTrust(io.readScheduledTask('ops-pc')!, 'agent', 'test')
+    io.writeScheduledTask('pc-digest', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: SHIPPED, sendDigestDirect: true })
+    trust.alertScheduleTrust(io.readScheduledTask('pc-digest')!, 'agent', 'test')
+    io.writeScheduledTask('pc-chat', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: SHIPPED, telegramChatId: '-1001234567' })
+    trust.alertScheduleTrust(io.readScheduledTask('pc-chat')!, 'agent', 'test')
+    expect(alerts()).toHaveLength(6)
+    for (const a of alerts().slice(3)) expect(a).toContain(fileWrite)
+    // a mismatch keeps its own text and the file-write closing, preCheck shape or not
+    io.writeScheduledTask('pc-mm', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID, preCheck: SHIPPED })
+    trust.alertScheduleTrust(io.readScheduledTask('pc-mm')!, 'mismatch', 'test')
+    expect(alerts()).toHaveLength(7)
+    expect(alerts()[6]).not.toContain('preCheck-et kapott')
+    expect(alerts()[6]).toContain('Ha nem a tulajdonos írta, szólj Viktornak.')
+  })
+
+  it('a token approve is refused', async () => {
+    await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+    await call('PUT', '/api/schedules/napi-riport', { preCheck: SHIPPED })
+    expect((await approve('napi-riport')).status).not.toBe(200)
+    expect(await trustOf('napi-riport')).toBe('agent')
+  })
+
+  it('a bad preCheck is a 400, the stored task and its approval stay as they were', async () => {
+    await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+    const before = readFileSync(join(io.SCHEDULED_TASKS_DIR, 'napi-riport', 'task-config.json'), 'utf8')
+    for (const preCheck of [
+      '{{PROJECT_ROOT}}/scripts/prechecks/../hooks/x.sh', '{{PROJECT_ROOT}}/scripts/prechecks/missing.sh',
+      join(PROJECT_ROOT, 'scripts', 'prechecks', 'kernel-quota-precheck.sh'), 'kernel-quota-precheck.sh',
+      '{{PROJECT_ROOT}}/scripts/prechecks/kernel_heartbeat_precheck.py', 5, null,
+    ]) {
+      const r = await call('PUT', '/api/schedules/napi-riport', { preCheck, prompt: 'Új szöveg.' })
+      expect(r.status, JSON.stringify(preCheck)).toBe(400)
+    }
+    expect(readFileSync(join(io.SCHEDULED_TASKS_DIR, 'napi-riport', 'task-config.json'), 'utf8')).toBe(before)
+    expect(await trustOf('napi-riport')).toBe('approved')
+  })
+})
+
 describe('POST /api/schedules/:name/approve', () => {
   it('the shared token gets 403 and an audit row; the trust does not change', async () => {
     await call('POST', '/api/schedules', NEW_TASK)

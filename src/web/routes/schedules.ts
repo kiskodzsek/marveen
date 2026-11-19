@@ -344,6 +344,7 @@ Az eredmeny CSAK a kibovitett prompt szovege legyen, semmi mas. Ne hasznalj code
       JSON.parse(body.toString()),
       readScheduledTask(name)?.type,
       scheduleAgentIds(),
+      PROJECT_ROOT,
     )
     if (!verdict.ok) { json(res, { error: verdict.error }, 400); return true }
     const data = verdict.update

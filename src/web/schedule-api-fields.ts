@@ -12,8 +12,11 @@
 //
 // The API therefore writes only what the dashboard's own task form sends
 // (web/app.js saveSchedule) plus `enabled` (docs/scheduled-tasks.md). Command
-// tasks, pre-checks, digest routing and chat ids stay with the installer's
-// seeders, which call writeScheduledTask in-process.
+// tasks, digest routing and chat ids stay with the installer's seeders, which
+// call writeScheduledTask in-process. A preCheck is the one narrow exception
+// (card 248e8f7c, Klodel 47998): see SCHEDULE_API_PRECHECK_RX.
+import { lstatSync, realpathSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { isReservedSender } from '../reserved-sender.js'
 
 export const SCHEDULE_API_STRING_FIELDS = ['description', 'prompt', 'schedule', 'agent', 'type', 'targetSession'] as const
@@ -21,6 +24,35 @@ export const SCHEDULE_API_BOOLEAN_FIELDS = ['enabled', 'skipIfBusy', 'forceSend'
 
 /** Task types the API may set. `command` is deliberately absent. */
 export const SCHEDULE_API_TYPES: readonly string[] = ['task', 'heartbeat']
+
+/**
+ * preCheck over the API (card 248e8f7c, Klodel 47998, 2026-11-19): ONLY a script shipped
+ * in the install's scripts/prechecks/, written in the {{PROJECT_ROOT}} form, one path
+ * segment, `.sh`, an existing regular file (not a symlink) whose directory resolves to
+ * <root>/scripts/prechecks. A preCheck is bash in the dashboard process, so this write
+ * never approves anything: the changed definition loses its approval (recordWriteTrust ->
+ * clearScheduleTrust; an owner save does not approve it either, the field is not in the
+ * editor) and the preCheck runs only after the owner's one-click approve, which hashes the
+ * script chain (PRECHECKTRUST1114). Removing or changing a preCheck to anything else stays
+ * with the installer.
+ */
+export const SCHEDULE_API_PRECHECK_PREFIX = '{{PROJECT_ROOT}}/scripts/prechecks/'
+export const SCHEDULE_API_PRECHECK_RX = /^\{\{PROJECT_ROOT\}\}\/scripts\/prechecks\/[a-z0-9][a-z0-9_-]{0,63}\.sh$/
+export const SCHEDULE_API_PRECHECK_REFUSAL =
+  'preCheck must be {{PROJECT_ROOT}}/scripts/prechecks/<name>.sh, an existing regular file of the install'
+
+/** Why `preCheck` cannot be stored over the API, or null when it can. `root` = the install root. */
+export function preCheckApiRefusal(preCheck: unknown, root: string | undefined): string | null {
+  if (typeof preCheck !== 'string' || !SCHEDULE_API_PRECHECK_RX.test(preCheck) || !root) return SCHEDULE_API_PRECHECK_REFUSAL
+  const file = join(root, 'scripts', 'prechecks', preCheck.slice(SCHEDULE_API_PRECHECK_PREFIX.length))
+  try {
+    if (!lstatSync(file).isFile()) return SCHEDULE_API_PRECHECK_REFUSAL      // lstat: a symlink is not a file
+    if (realpathSync(dirname(file)) !== join(realpathSync(root), 'scripts', 'prechecks')) return SCHEDULE_API_PRECHECK_REFUSAL
+  } catch {
+    return SCHEDULE_API_PRECHECK_REFUSAL
+  }
+  return null
+}
 
 export interface ScheduleApiUpdate {
   description?: string
@@ -32,6 +64,7 @@ export interface ScheduleApiUpdate {
   enabled?: boolean
   skipIfBusy?: boolean
   forceSend?: boolean
+  preCheck?: string
 }
 
 export type ScheduleApiVerdict =
@@ -60,11 +93,14 @@ export const COMMAND_TASK_API_REFUSAL =
  * Validate a PUT body against the API allowlist. `existingType` is the stored
  * task's type: nothing can become a command task over HTTP, and an existing
  * command task accepts only `{enabled: false}` (see COMMAND_TASK_API_REFUSAL).
+ * `root` (the install root) is needed only for `preCheck`; without it a preCheck
+ * is refused.
  */
 export function validateScheduleUpdate(
   body: unknown,
   existingType: string | undefined,
   knownAgents: ReadonlySet<string>,
+  root?: string,
 ): ScheduleApiVerdict {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     return { ok: false, error: 'Body must be a JSON object' }
@@ -77,7 +113,7 @@ export function validateScheduleUpdate(
     }
     return { ok: true, update: { enabled: false } }
   }
-  const allowed = new Set<string>([...SCHEDULE_API_STRING_FIELDS, ...SCHEDULE_API_BOOLEAN_FIELDS])
+  const allowed = new Set<string>([...SCHEDULE_API_STRING_FIELDS, ...SCHEDULE_API_BOOLEAN_FIELDS, 'preCheck'])
   const refused = Object.keys(data).filter(k => !allowed.has(k))
   if (refused.length > 0) {
     return { ok: false, error: `Field(s) not editable via the API: ${refused.join(', ')}` }
@@ -95,6 +131,11 @@ export function validateScheduleUpdate(
     update[key] = data[key] as boolean
   }
 
+  if (data.preCheck !== undefined) {
+    const refusal = preCheckApiRefusal(data.preCheck, root)
+    if (refusal) return { ok: false, error: refusal }
+    update.preCheck = data.preCheck as string
+  }
   if (update.agent !== undefined) {
     const refusal = scheduleAgentRefusal(update.agent, knownAgents)
     if (refusal) return { ok: false, error: refusal }
