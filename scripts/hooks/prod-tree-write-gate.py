@@ -306,6 +306,22 @@ class Prod(object):
                 return k
         return None
 
+    def classify_link(self, path):
+        """classify() for an operand that is a symlink acted on itself (rm, unlink, mv): the link's own path, in
+        its normalised form and under its parent's realpath; NOT the file the link points at."""
+        forms = [fold(path)]
+        try:
+            forms.append(fold(os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))))
+        except ResolveError:
+            raise
+        except Exception as e:
+            raise ResolveError('realpath: %s' % type(e).__name__)
+        kinds = [self.kind_of(f) for f in forms]
+        for k in ('protected', 'ancestor', 'cfg_ancestor', 'inside'):
+            if k in kinds:
+                return k
+        return None
+
 
 def find_repo(path):
     """Nearest directory at or above `path` (or its nearest existing parent) that holds a .git entry."""
@@ -879,6 +895,27 @@ def rest_pattern(partial, rest):
     return re.compile(''.join(out), re.S), constrained
 
 
+# rm / unlink act on a symlink operand ITSELF, not on what it points at (card 291bd837: Dave 11-19 03:21,
+# `rm -f $S/rp-new/scripts/agent-msg.sh`, a scratch link to the prod script, was denied as a write to the prod
+# file). A trailing slash makes the shell follow the link, so it keeps the realpath reading. Not mv: its
+# destination is checked with the same name, and `mv x link-to-dir` writes INTO the directory behind the link.
+# ln / gln: an existing destination that is a link to a FILE is replaced (-f) or refused (File exists), never
+# written through; a link to a DIRECTORY gets the new entry inside it, so that keeps the realpath reading.
+LINK_ITSELF = frozenset(['rm', 'grm', 'unlink', 'ln', 'gln'])
+
+
+def is_link_operand(w, p, what=''):
+    raw = (w.raw or '').rstrip('"\'')
+    if raw.endswith('/') or raw.endswith('/.'):
+        return False
+    try:
+        if not os.path.islink(p):
+            return False
+        return what not in ('ln', 'gln') or not os.path.isdir(p)
+    except (OSError, ValueError):
+        return False
+
+
 def check_target(w, st, destructive=False, what='írás'):
     alts = expand_loops(w, st)
     if len(alts) != 1 or alts[0] is not w:
@@ -896,7 +933,14 @@ def check_target_one(w, st, destructive=False, what='írás'):
         st.unknown.append(w.raw[:120])
         return
     try:
-        k = st.prod.classify(p)
+        if kind == 'path' and what in LINK_ITSELF and is_link_operand(w, p, what):
+            k = st.prod.classify_link(p)
+        elif kind == 'path' and what in ('ln', 'gln') and os.path.islink(p):
+            # a link to a directory: `ln -s` writes inside it, `ln -sfn` / `-h` replaces the link itself; both count
+            ks = (st.prod.classify(p), st.prod.classify_link(p))
+            k = next((x for x in ('protected', 'ancestor', 'cfg_ancestor', 'inside') if x in ks), None)
+        else:
+            k = st.prod.classify(p)
     except ResolveError as e:
         st.errors.append('útfeloldás (%s): %s' % (e, w.raw[:80]))
         return
@@ -1608,6 +1652,8 @@ def tar_cdirs(args, lt):
 def dest_basenames(dest, srcs, st, name):
     """cp/mv/ln/... into a directory: destination/basename(source) is a write too"""
     dk, dp = word_path(dest, st)
+    if dk == 'path' and name in ('ln', 'gln') and is_link_operand(dest, dp, name):
+        return                                   # ln onto a link to a FILE replaces the link: nothing goes inside
     if dk == 'path':
         for s_ in srcs:
             sl = s_.literal()
@@ -2119,6 +2165,21 @@ def main_skill_bak(payload, prod_root, now):
 # sub-agents get the same store closed in scripts/self-pace-gate.mjs (SCHEDDIR1118).
 MAIN_SCHED_DIR = ('.claude', 'scheduled-tasks')
 MAIN_SCHED_MENTION = re.compile(r'\.claude(?:-config)?/+scheduled-tasks(?![\w.-])', re.I)
+# Viktor 47811 L1 (card 291bd837): the store named RELATIVELY -- a bare `scheduled-tasks` path segment while the
+# command runs in ~/.claude (its cwd, or a `cd ~/.claude` / any .claude path in the text). The repository's own
+# scheduled-tasks/ templates and a `grep scheduled-tasks notes.md` elsewhere stay unnamed (X08).
+MAIN_SCHED_BARE = re.compile(r'(?:^|[\s=(<>|;&:]|\./)scheduled-tasks(?![\w.-])', re.I)
+MAIN_CLAUDE_DIR = re.compile(r'\.claude(?:-config)?(?=$|[\s/;&|),])', re.I)   # ',': os.path.join(h, '.claude', ...)
+# Viktor 47811 INFO (card 291bd837): an interpreter whose text names the store AND carries a write call there (open
+# for w/a/x/+, json dump, writeFile*, shutil, os.replace/rename/remove/unlink, write_text/bytes, rmtree, fs rename/
+# unlink/rm). A heredoc body belongs to the line that opens it. Reads (json.load, read_text, readFileSync) stay free.
+MAIN_SCHED_INTERP = re.compile(r'(?:^|[\s;&|(`/])(?:python[\d.]*|node|perl|ruby|deno|bun|osascript)(?=$|[\s;&|)])', re.I)
+MAIN_SCHED_WRITE = re.compile(
+    r'''\bopen\s*\([^\n]*?,\s*(?:mode\s*=\s*)?['"](?=[rwxabt+]{1,4}['"])[rbt]*[wax+]'''
+    r'''|\.open\s*\(\s*(?:mode\s*=\s*)?['"](?=[rwxabt+]{1,4}['"])[rbt]*[wax+]|\bdump\s*\(|\b(?:write|append)File(?:Sync)?\s*\(|\bshutil\.'''
+    r'''|\bos\.(?:replace|rename|remove|unlink|makedirs|mkdir|rmdir)\b|\.write_(?:text|bytes)\s*\(|\brmtree\b'''
+    r'''|\bfs\.(?:rename|unlink|rm|rmdir|mkdir|copyFile|cp)(?:Sync)?\s*\(|\.(?:unlink|rename|touch|mkdir)\s*\(''')
+MAIN_HEREDOC_OPEN = re.compile(r'''<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1''')
 MAIN_SCHED_HINT = ('az ütemezés-tár (~/.claude/scheduled-tasks/) fájljait a főágens sem írja: a fájlírás '
                    'schedule-trust eltérést ad (system 47365). Ütemezést a dashboard API-n módosíts: '
                    'PUT /api/schedules/<név> (új: POST /api/schedules), idézett heredoc payloaddal '
@@ -2185,6 +2246,8 @@ def main_schedule_dir(payload, home):
     named = bool(MAIN_SCHED_MENTION.search(norm))
     if not named and 'scheduled-tasks' not in norm.casefold() and not (cwd and sp.classify(cwd) == 'protected'):
         return None     # neither named nor the cwd: nothing to analyse (keeps the main agent's hot path cheap)
+    # the .claude mention in the shell text only: a heredoc body is data here (the interpreter rule below reads it)
+    named = named or main_sched_relative(norm, cwd, home, main_sched_shell_text(norm))
     if len(cmd) > MAX_CMD:
         return 'Bash: túl hosszú parancs az ütemezés-tár említésével -- %s' % MAIN_SCHED_HINT if named else None
     st = State(sp, cwd, home)
@@ -2196,9 +2259,76 @@ def main_schedule_dir(payload, home):
     if named and (st.unknown or st.errors):
         return 'Bash: nem feloldható írási cél (%s) az ütemezés-tár említésével -- %s' % (
             (st.unknown or st.errors)[0][:80], MAIN_SCHED_HINT)
-    # Viktor 47421 option (b), an interpreter on a line naming the store, is left out: on the main agent's 7-day
-    # transcripts it denied 36 harmless reads (python json.load of a task-config.json) for 0 real writes; the
-    # interpreter class stays a documented limit, like curl -O / wget (B49, B50) and cat heredoc | bash (B18).
+    # Viktor 47421 option (b), ANY interpreter on a line naming the store, stays out: on the main agent's 7-day
+    # transcripts it denied 36 harmless reads (python json.load of a task-config.json) for 0 real writes. The
+    # narrower form (Viktor 47811 INFO): the interpreter's line names the store AND carries a write call.
+    block = main_sched_interp_write(cmd, cwd, home)
+    if block:
+        return 'Bash: értelmező írási hívással az ütemezés-tárat megnevező sorban (%s) -- %s' % (
+            ' '.join(block.split())[:80], MAIN_SCHED_HINT)
+    # Still a documented limit: curl -O / wget (B49, B50), cat heredoc | bash (B18), a path built at run time.
+    return None
+
+
+def main_sched_shell_text(cmd):
+    """The command with every heredoc body blanked (the opener and closing lines stay)."""
+    lines = cmd.split('\n')
+    i = 0
+    while i < len(lines):
+        tags = [m.group(2) for m in MAIN_HEREDOC_OPEN.finditer(lines[i])]
+        for tag in tags:
+            i += 1
+            while i < len(lines) and lines[i].strip() != tag:
+                lines[i] = ''
+                i += 1
+        i += 1
+    return '\n'.join(lines)
+
+
+def main_sched_relative(norm, cwd, home, mention_text=None):
+    """Viktor 47811 L1: a bare `scheduled-tasks` path segment counts as naming the store when the command runs in
+    ~/.claude: the cwd is that directory, or the text (`mention_text`, default `norm`) names a .claude directory
+    (`cd ~/.claude && ...`)."""
+    if not MAIN_SCHED_BARE.search(norm):
+        return False
+    if MAIN_CLAUDE_DIR.search(norm if mention_text is None else mention_text):
+        return True
+    if not cwd:
+        return False
+    try:
+        return fold(os.path.realpath(cwd)) == fold(os.path.realpath(os.path.join(home, MAIN_SCHED_DIR[0])))
+    except (OSError, ValueError):
+        return False
+
+
+def main_sched_blocks(cmd):
+    """The command's lines, a heredoc body joined to the line that opens it (the interpreter's own text)."""
+    lines = cmd.split('\n')
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        tags = [m.group(2) for m in MAIN_HEREDOC_OPEN.finditer(line)]
+        i += 1
+        for tag in tags:
+            body = []
+            while i < len(lines) and lines[i].strip() != tag:
+                body.append(lines[i])
+                i += 1
+            i += 1      # the closing tag line
+            line += '\n' + '\n'.join(body)
+        out.append(line)
+    return out
+
+
+def main_sched_interp_write(cmd, cwd, home):
+    """Viktor 47811 INFO: the first block that runs an interpreter, names the store (absolute, or relatively in
+    ~/.claude) and carries a write call; None when there is none."""
+    for block in main_sched_blocks(cmd):
+        norm = re.sub(r'/(?:\.?/)+', '/', re.sub(r'["\']', '', re.sub(r'\\(.)', r'\1', block)))
+        if not (MAIN_SCHED_MENTION.search(norm) or main_sched_relative(norm, cwd, home)):
+            continue
+        if MAIN_SCHED_INTERP.search(block) and MAIN_SCHED_WRITE.search(block):
+            return block
     return None
 
 
