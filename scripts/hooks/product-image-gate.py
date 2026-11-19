@@ -172,10 +172,12 @@ def dashboard_command(text):
     return bool(m) and '\n' not in t and m.group(1).lower() in DASHBOARD_COMMANDS
 
 
-def latest_conversation_row(con, sql, args):
-    """The first row of an id-DESC inbound query (its LAST column is the text) that is no dashboard command."""
+def latest_conversation_row(con, sql, args, private_chat=None):
+    """The first row of an id-DESC inbound query (its LAST column is the text) that is no dashboard command.
+    marveen-commands.py answers only in the owner's private chat (ALLOWED_CHAT_ID); a /command in the group goes
+    to the model, so with private_chat given a row counts unless its FIRST column (chat_id) is that chat."""
     for row in con.execute(sql + ' ORDER BY id DESC LIMIT ?', (*args, INBOUND_SCAN)):
-        if not dashboard_command(row[-1]):
+        if not dashboard_command(row[-1]) or (private_chat is not None and str(row[0]) != private_chat):
             return row
     return None
 
@@ -243,7 +245,7 @@ def owner_latest_inbound_chat(payload, now=None):
         try:
             row = latest_conversation_row(
                 con, "SELECT chat_id, created_at, text FROM conversation_log WHERE agent_id=? AND direction='in'"
-                " AND chat_id IN (?, ?)", (str(agent), priv, group))
+                " AND chat_id IN (?, ?)", (str(agent), priv, group), private_chat=priv)
         finally:
             con.close()
         if not row:

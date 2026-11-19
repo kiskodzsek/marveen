@@ -2366,6 +2366,58 @@ def dashboard_commands_pinned_to_marveen_commands(root):
 
 
 @case
+def command_pattern_pinned_to_command_prompt(root):
+    # Viktor 48149 I2: OWNER_COMMAND is a copy of command_prompt.COMMAND_RX (the hook's own command shape)
+    import ast
+    import importlib.util
+    src = open(os.path.join(os.path.dirname(HOOK), 'command_prompt.py'), encoding='utf-8').read()
+    pat = None
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Assign) and any(getattr(t, 'id', '') == 'COMMAND_RX' for t in node.targets):
+            pat = ast.literal_eval(node.value.args[0])
+    spec = importlib.util.spec_from_file_location('pig_pin2', HOOK)
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    return _why(pat is not None and pat == g.OWNER_COMMAND.pattern, (pat, g.OWNER_COMMAND.pattern))
+
+
+# Viktor 48149 F1 rows (VIK_V1, VIK_V2): marveen-commands.py answers only in ALLOWED_CHAT_ID (the owner's PRIVATE
+# chat); a /command in the GROUP goes to the model, so it is a real turn and still counts.
+@case
+def NEG_group_dashboard_name_is_a_real_turn_group_reply_passes(root):
+    out = []
+    for cmd in ('/model opus keep', '/status', '/help@marveen_bot'):
+        sub = tempfile.mkdtemp(dir=root)
+        db = ledger(sub, PRIV, GROUP, texts={0: 'Kész a jelentés?', 1: cmd})
+        rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Kész, itt a jelentés.'})
+        out.append((cmd, rc, 'PRIVÁT-VÁLASZ-KAPU' in err))
+    return _why(all(r[1] == 0 and not r[2] for r in out), out)
+
+
+@case
+def NEG_group_dashboard_name_private_reply_still_needs_marker(root):
+    out = []
+    for cmd in ('/model opus keep', '/status'):
+        sub = tempfile.mkdtemp(dir=root)
+        db = ledger(sub, PRIV, GROUP, texts={0: 'Kész a jelentés?', 1: cmd})
+        rc, err = run_ledger(sub, db, {'chat_id': PRIV, 'text': 'Rendben, megnézem.'}, raw=True)
+        out.append((cmd, rc, 'PRIVÁT-KAPU' in err))
+    return _why(all(r[1] == 2 and r[2] for r in out), out)
+
+
+@case
+def private_command_scan_limit(root):
+    # Viktor 48149 I1 (VIK_V6): 49 private commands behind a real private message still find it (block), 50 give up
+    out = []
+    for n in (49, 50):
+        sub = tempfile.mkdtemp(dir=root)
+        db = ledger(sub, *([PRIV] * (n + 1)), texts={i: '/status' for i in range(1, n + 1)} | {0: 'Rendben, mehet.'})
+        rc, err = run_ledger(sub, db, {'chat_id': GROUP, 'text': 'Kész, itt a jelentés.'})
+        out.append((n, rc))
+    return _why(out == [(49, 2), (50, 0)], out)
+
+
+@case
 def NEG_latest_private_plain_message_group_reply_still_blocked(root):
     # A plain private message, an older private "másik chat" followed by a plain one, and a "másik chat" said in
     # the GROUP (not the latest private) do not open the group reply.
