@@ -45,6 +45,17 @@ class StepPhrase(unittest.TestCase):
                      'Poszt-szöveg: „Idén karácsonyra indítsd el anyukádnak a Meséld el!-t.”'):
             self.assertIsNone(gate.step_phrase(text), text)
 
+    def test_hole_old_card_c4f0b5bb(self):
+        # Viktor 7c4bd122 HOLE-OLD: words between the verb and "be", the conditional, English, "engedélyezd"
+        for text in ('Kérlek jelentkezz már be.', 'Lépnél be újra?', 'lépj már végre be', 'Please log in again',
+                     'engedélyezd a Codexet', 'Log in again, please.', 'Kész. Sign in again a Metában.',
+                     'Engedélyezned kell a hozzáférést.'):
+            self.assertIsNotNone(gate.step_phrase(text), text)
+        self.assertEqual(gate.step_phrase('Kész. Sign in again a Metában.'), 'Sign in again')
+        for text in ('A log in again gomb nálunk volt.', 'Belépett a Metába.', 'Nem kell engedélyezned semmit.',
+                     'Engedélyeztük a Codexet.', 'Ne lépj már be, Pulzus intézi.', 'A belépés rendben van.'):
+            self.assertIsNone(gate.step_phrase(text), text)
+
     def test_hidden_characters_do_not_hide_a_step(self):
         self.assertIsNotNone(gate.step_phrase('Nyomd​ meg a gombot.'))
         self.assertIsNotNone(gate.step_phrase('ＮＹＯＭＤ ＭＥＧ.'))
@@ -188,6 +199,11 @@ class Hook(unittest.TestCase):
                      'nem kaptunk 403-at', 'nem kaptunk  401-et'):   # two spaces (a wrapped paste): 13 chars back
             self.assertFalse(gate.has_failure(gate.fold(text)), text)
         self.assertTrue(gate.has_failure(gate.fold('10 hiba')))   # "0 hiba" only as its own number
+        # Viktor 48114 I1: three survivors of his round-3 mutants (post-verb "nem kaptam", "nem volt"; ";" ends a sentence)
+        self.assertFalse(gate.has_failure(gate.fold('401-et nem kaptam')))
+        self.assertFalse(gate.has_failure(gate.fold('hiba nem volt')))
+        self.assertFalse(gate.sentence_with(gate.fold('a meglévő belépés rendben; a deploy elbukott'),
+                                            gate.EXISTING.search, gate.has_failure))
 
     def test_round2_viktor_48105(self):
         # R2: "be" + a lép-/jelentkez- word that is no sign-in
