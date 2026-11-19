@@ -24,6 +24,12 @@ log in / authenticate, not "signing" / "belépő" / "belépett" / "hitelesített
 "existing") word have to stand in one sentence, and a negation after the failure word ("hiba nélkül", "a 401 megszűnt")
 or a few words before it ("nem volt hiba", "0 hiba") cancels it. A password or 2FA step is deliberately not a sign-in
 topic: for a NEW service there is no existing sign-in to probe, so the rule would block it with no way through.
+Viktor 48105 (round 2): a sentence ends only at [.!?;] before a space or the end, or at a line break ("(v2.1.3): 401",
+"claude.ai" stay one sentence); "lépésenként", "lépcsőzetesen", "jelentkezését" are no sign-in; a post-verb negation
+("hibát nem kaptunk", "401-et nem adott", "egy 401-et sem kaptunk") and "semmi(lyen)" cancel the failure word.
+Known limits: a no-failure wording with a bare failure noun ("az error log üres") still reads as a failure, and a probe
+reported over two sentences ("Lefuttattam ... a meglévő belépéssel. 401-et adott.") does not count: the price of the
+one-sentence rule, which keeps "A Vercel deploy elbukott. Külön téma: a belépés rendben van." from passing.
 The owner's chats unknown (no MARVEEN_OWNER_CHATS, store/projektek.json unreadable or of another shape): the gate
 passes and says so on stderr, once per call (Viktor 41257 MEDIUM).
 Passes: a negated sentence ("nem kell nyomnod", "ne töltsd fel"), past tense ("megnyomtad", "feltöltöttük": no
@@ -82,7 +88,7 @@ MSG_ID = re.compile(r'(?<!\d)\d{4,7}(?!\d)')
 LOGIN_TOPIC = re.compile(
     r'(?<![a-z])(?:belep(?!o|ett)|bejelentkez|hitelesit(?!ett)|autentik|o?auth(?![a-z])|authenticat[a-z]*'
     r'|login|log[\s-]?in(?![a-z])|sign[\s-]?in(?![a-z])|setup-token'
-    r'|be\s+(?:kell(?:ene)?\s+|tudsz\s+|tudnal\s+)?(?:lep|jelentkez)[a-z]*'
+    r'|be\s+(?:kell(?:ene)?\s+|tudsz\s+|tudnal\s+)?(?:lep(?!es|cso)|jelentkez(?!es|o))[a-z]*'
     r'|(?:lepj|lepnel|lepsz|lepjel|jelentkezz|jelentkeznel|jelentkezzel)[a-z]*\s+(?:[a-z]+\s+){0,3}be(?![a-z]))')
 # The probe with the existing sign-in failed. Folded text. A failure word right after a negation ("nem bukott el",
 # "not failed", "nem volt hiba", "nem adott 401-et", "0 hiba") or right before one ("hiba nélkül", "a 401 megszűnt")
@@ -92,9 +98,11 @@ FAIL_OWN = re.compile(r'(?<![a-z])(?:nem\s+mukodik|nem\s+megy|nem\s+sikerult|nem
 FAIL_WORD = re.compile(r'(?<![a-z0-9])(?:elbuk\w*|bukott\w*|hibas?|hibat|hibaval|401|403|failed|failure|'
                        r'authentication_failed|unauthorized|lejart\w*|expired|invalid|sikertelen\w*|(?:vissza|el)utasit\w*|'
                        r'rejected|denied|error\w*)(?![a-z0-9])')
-FAIL_NEGATED = re.compile(r'(?:(?<![a-z])(?:nem|not|no|sem|nincs|never|without)\s+(?:el\s+|volt\s+|adott\s+|kaptam\s+|kaptunk\s+'
-                          r'|kapott\s+|jott\s+|lett\s+)?|(?<![\d])0\s+)$')
-FAIL_POSTNEG = re.compile(r'^(?:-?[a-z]{0,4})?\s+(?:nelkul|megszunt\w*|elmult|nem\s+jott)(?![a-z])')
+FAIL_NEGATED = re.compile(r'(?:(?<![a-z])(?:nem|not|no|sem|nincs|never|without)\s+(?:el\s+|volt\s+(?:[a-z]+\s+)?|adott\s+|kaptam\s+'
+                          r'|kaptunk\s+|kapott\s+|jott\s+|lett\s+)?(?:semmi(?:lyen)?\s+|egy\s+)?|(?<![a-z])semmi(?:lyen)?\s+'
+                          r'|(?<![\d.])0\s+)$')
+FAIL_POSTNEG = re.compile(r'^(?:-?[a-z]{0,4})?\s+(?:nelkul|megszunt\w*|elmult|sem|nem\s+(?:jott|kaptunk|kaptam|kapott|adott|volt'
+                          r'|dobott|jelzett))(?![a-z])')
 EXISTING = re.compile(r'(?<![a-z])(?:meglev\w*|mostani\w*|jelenlegi\w*|existing|current|flotta\w*|fleet)(?![a-z])')
 
 
@@ -103,7 +111,7 @@ def has_failure(text_folded):
     if FAIL_OWN.search(text_folded):
         return True
     for m in FAIL_WORD.finditer(text_folded):
-        if FAIL_NEGATED.search(text_folded[max(0, m.start() - 16):m.start()]):
+        if FAIL_NEGATED.search(text_folded[max(0, m.start() - 28):m.start()]):
             continue
         if FAIL_POSTNEG.search(text_folded[m.end():m.end() + 24]):
             continue
@@ -111,10 +119,13 @@ def has_failure(text_folded):
     return False
 
 
+SENTENCE_END = re.compile(r'[.!?;]+(?=\s|$)|\n+')
+
+
 def sentence_with(text_folded, *checks):
     """Whether ONE sentence of the folded text passes every check (Viktor 7c4bd122 L2: "A Vercel deploy elbukott.
     Külön téma: a belépés rendben van." is no failed sign-in)."""
-    return any(all(c(s) for c in checks) for s in SENTENCE.split(text_folded))
+    return any(all(c(s) for c in checks) for s in SENTENCE_END.split(text_folded))
 
 
 def login_topic(text):

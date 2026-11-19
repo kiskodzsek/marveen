@@ -189,6 +189,40 @@ class Hook(unittest.TestCase):
             self.assertFalse(gate.has_failure(gate.fold(text)), text)
         self.assertTrue(gate.has_failure(gate.fold('10 hiba')))   # "0 hiba" only as its own number
 
+    def test_round2_viktor_48105(self):
+        # R2: "be" + a lép-/jelentkez- word that is no sign-in
+        for text in ('Írd be lépésenként a parancsokat.', 'Állítsd be lépcsőzetesen a fényerőt.',
+                     'Add be jelentkezését a tanfolyamra.', 'Tedd be lépés közben a kártyát.'):
+            self.assertFalse(gate.login_topic(text), text)
+        self.assertTrue(gate.login_topic('Be kell lépned a Claude-ba a gépen.'))
+        # R3: a post-verb negation, "semmi(lyen)", "egy ... sem", a word after "nem volt"; m24: "nem jött"
+        for text in ('hibát nem kaptunk', '401-et nem adott', 'semmi hiba', 'nem kaptunk semmilyen hibát',
+                     'egy 401-et sem kaptunk', 'nem volt semmi hiba', 'nem volt permission denied', 'nem jött 401',
+                     'nem adott egy 401-et', '401-et nem dobott', 'hibát nem jelzett'):
+            self.assertFalse(gate.has_failure(gate.fold(text)), text)
+        # R1: a dot inside a word or a version is no sentence end, and "2.0 401" is no "0 401"
+        names = {'mira', 'kernel', 'dave', 'pulzus', 'main'}
+        con = sqlite3.connect(self.db)
+        now = int(time.time())
+        rows = ((41320, 'A meglévő belépéssel futtattam (v2.1.3): 401.'),
+                (41321, 'A meglévő belépés a ~/.claude/.credentials.json mellett: 401.'),
+                (41322, 'claude 2.0 401 a meglévő belépéssel'),
+                (41323, 'A meglévő belépéssel: authentication_failed\n(claude -p)'),
+                (41324, 'A Vercel deploy elbukott\nKülön téma: a belépés rendben van'))
+        for mid, content in rows:
+            con.execute("INSERT INTO agent_messages VALUES (?, 'pulzus', 'main', ?, 'done', ?)", (mid, content, now - 60))
+        con.commit()
+        con.close()
+        for mid, _ in rows[:-1]:
+            self.assertIsNone(gate.value_problem('pulzus %d: a meglévő belépéssel elbukott, 401' % mid, names, 'main',
+                                                 login=True), mid)
+        self.assertIsNone(gate.value_problem('pulzus 41320: a meglévő belépéssel (claude.ai) 401', names, 'main',
+                                             login=True))
+        # a line break alone also ends a sentence: the failure and the sign-in word are apart
+        p = gate.value_problem('pulzus 41324: a meglévő belépéssel elbukott, 401', names, 'main', login=True)
+        self.assertIsNotNone(p)
+        self.assertIn('elbukott belépés-próbáról', p)
+
     def test_neg_failure_and_sign_in_in_one_sentence(self):
         # L2: the failure word and the sign-in word (the queue row) / the existing word (the mark) in ONE sentence
         names = {'mira', 'kernel', 'dave', 'pulzus', 'main'}
@@ -200,11 +234,13 @@ class Hook(unittest.TestCase):
             con.execute("INSERT INTO agent_messages VALUES (?, ?, ?, ?, 'done', ?)", row)
         con.commit()
         con.close()
-        self.assertIn('elbukott belépés-próbáról',
-                      gate.value_problem('pulzus 41315: a meglévő belépéssel elbukott', names, 'main', login=True))
+        p = gate.value_problem('pulzus 41315: a meglévő belépéssel elbukott', names, 'main', login=True)
+        self.assertIsNotNone(p)   # a FAIL, not a TypeError ERROR, when the gate lets it through (Viktor 48105 INFO)
+        self.assertIn('elbukott belépés-próbáról', p)
         self.assertIsNone(gate.value_problem('pulzus 41316: a meglévő belépéssel elbukott', names, 'main', login=True))
-        self.assertIn('MEGLÉVŐ', gate.value_problem('pulzus 41316: a meglévő belépés rendben. A deploy elbukott.',
-                                                    names, 'main', login=True))
+        p = gate.value_problem('pulzus 41316: a meglévő belépés rendben. A deploy elbukott.', names, 'main', login=True)
+        self.assertIsNotNone(p)
+        self.assertIn('MEGLÉVŐ', p)
 
     def test_neg_separable_sign_in_step_end_to_end(self):
         # L1 end to end: TG 6174's claim mark no longer lets "Be kell lépned ..." through; a probe mark does
