@@ -18,6 +18,8 @@ reply mark for the chat right before (scripts/reply-mark.py PATRIK-DONTES --chat
 One mark = one message (scripts/lib/reply_marks.py). Word matching: an accident guard against a reflex question, not
 a proof; whoever writes a false reason passes.
 The owner's chats unknown: the gate passes and says so on stderr (as patrik-step-reply-gate.py).
+Viktor 48130: "Mehet ...?" up to 80 characters in the sentence; a negation counts in its own clause only; the Balázs
+exception only for a sentence that addresses him ("Balázs, ..."); "a jóváhagyásod szerint / megkaptuk" is a report.
 Passes: a negated sentence ("nem kell döntened", "nincs teendőd, nem kell jóváhagynod"), a report of his decision
 ("jóváhagytad", "Patrik döntése szerint"), a quoted text („...”), a sentence addressed to Balázs, edits
 (edit_message), other chats, unreadable input.
@@ -50,18 +52,19 @@ RED = '\U0001F534'
 # a decision ("jóváhagytad", "Patrik döntése szerint") is absent by design.
 DECISION = re.compile(r'(?<![a-z0-9])(?:' + '|'.join([
     r'igen\s*(?:/|vagy|-)\s*nem',
-    r'mehet(?:-e)?(?:\s+[\w-]+){0,3}\s*\?',
-    r'indulhat(?:ok|unk|nak)?(?:-e)?(?:\s+[\w-]+){0,3}\s*\?', r'indulhat(?:ok|unk|nak)?-e',
+    r'mehet(?:-e)?[^!?\n]{0,80}\?',
+    r'indulhat(?:ok|unk|nak)?(?:-e)?[^!?\n]{0,80}\?', r'indulhat(?:ok|unk|nak)?-e',
     r'dontes(?:ed)?\s+kell(?:ene)?(?:\s+toled|\s+toletek)?', r'kell\s+(?:egy\s+|ket\s+)?dontes(?:ed)?',
     r'dontsd\s+el', r'dontsetek\s+el', r'te\s+dontod',
     r'a\s+te\s+dontesed(?!\s+(?:szerint|alapjan|volt|nyoman))', r'dontesedre', r'dontened\s+kell', r'kell\s+dontened',
-    r'jovahagyod', r'jovahagyasod(?:at|ra)?(?!\s+(?:utan|nelkul))', r'jovahagyast\s+kerek', r'jovahagynod\s+kell', r'kell\s+jovahagynod',
+    r'jovahagyod', r'jovahagyasod(?:at|ra)?(?!\s+(?:utan|nelkul|szerint|megkaptuk|megvan))', r'jovahagyast\s+kerek', r'jovahagynod\s+kell', r'kell\s+jovahagynod',
     r'rabolintasz', r'rabolintassz', r'igent\s+mondasz', r'igent\s+kerek',
     r'(?:melyik|melyiket)\s+(?:legyen|valasztod|kered)',
 ]) + r')(?![a-z0-9])')
 A_OR_B = re.compile(r'(?<![\w])(?:\(?[AB12][).]?)\s+vagy\s+\(?[AB12][).]?(?![\w])[^?\n]{0,80}\?')
 NEGATION = re.compile(r'(?<![a-z])(?:nem|ne|se|sem|nincs|nelkuled)(?![a-z])')
 NEG_WINDOW_WORDS = 4
+CLAUSE = re.compile(r'[,:;()]|\s[-\u2013]\s')
 
 REASONS = ('penz', 'titok', 'jog', 'termek-ar', 'eles-env-kulcs', 'kulso-level', 'adat-torles', 'uj-epites')
 REASON = re.compile(r'(?<![a-z0-9-])(' + '|'.join(re.escape(r) for r in REASONS) + r')(?![a-z0-9-])')
@@ -97,6 +100,7 @@ def decision_phrase(text):
     """The first decision the unquoted text asks of the reader, or None."""
     t = INVISIBLE.sub('', unicodedata.normalize('NFKC', str(text or '')))
     t = URL.sub(' ', QUOTED.sub(' ', t))
+    # The red circle is the "döntés kell tőle" mark of the patrik-telegram-kommunikacio skill (rule 5): it always asks.
     if RED in t:
         return RED
     start = 0
@@ -106,14 +110,14 @@ def decision_phrase(text):
         sentence = t[start:stop] + ('?' if end_m and '?' in end_m.group(0) else '')
         start = end_m.end() if end_m else len(t)
         low = fold(sentence)
-        if 'balazs' in low and 'patrik' not in low:
+        if re.match(r'\W*balazs\s*[,:!]', low) and 'patrik' not in low:
             continue
         m = A_OR_B.search(sentence)
         if m:
             return m.group(0)[:40]
         low_q = low
         for m in DECISION.finditer(low_q):
-            before = low_q[:m.start()].split()[-NEG_WINDOW_WORDS:]
+            before = CLAUSE.split(low_q[max(0, m.start() - 160):m.start()])[-1].split()[-NEG_WINDOW_WORDS:]
             if any(NEGATION.fullmatch(w.strip(',:()')) for w in before):
                 continue
             return m.group(0)

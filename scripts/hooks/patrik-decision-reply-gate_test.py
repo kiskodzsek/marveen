@@ -32,7 +32,15 @@ class DecisionPhrase(unittest.TestCase):
                      'Igen / nem?', 'Egy döntés kell tőled: a próba új csatornán megy.', 'Döntsd el, melyik.',
                      'Ez a te döntésed.', 'A kártyák a döntésedre várnak.', 'Jóváhagyod?', 'Rábólintasz?',
                      'Ha igent mondasz, indul.', 'Melyik legyen?', 'Az A vagy a B tetszik? A vagy B?',
-                     '🔴 Pénz: 12 000 Ft havonta.', 'Indulhatnak-e a lépések ma éjjel'):
+                     '🔴 Pénz: 12 000 Ft havonta.', 'Indulhatnak-e a lépések ma éjjel',
+                     # Viktor 48130 M1, L1, L2 (work/dg-1119/test-rows.txt)
+                     'Nem találtam hibát, mehet?', 'Ha nincs ellenvetésed, mehet?', 'Ne haragudj, mehet?',
+                     'Mehet élesbe a PR #385?', 'Mehet a deploy 23:00-kor?', 'Mehet a merge (Pulzus)?',
+                     'Mehet a Marabel kiadás ma éjjel is?', 'Mehet a v2.1 kiadás?',
+                     'Döntés tőled, nem sürgős: indulhat-e a próba?', 'Balázs is átnézte, mehet?',
+                     'Mehet így, vagy mit változtassunk?',
+                     'Tőled egyetlen szó kell, mert pénzbe kerül: mehet a Metricool fizetős csomagja?',
+                     'Patrik, Balázs: mehet?', 'Balázs, Patrik: mehet?'):   # addressed to both: it asks Patrik too
             self.assertIsNotNone(gate.decision_phrase(text), text)
 
     def test_negated_reported_quoted_or_not_his_passes(self):
@@ -41,7 +49,13 @@ class DecisionPhrase(unittest.TestCase):
                      'Patrik döntése szerint megy.', 'Mehet. Elindítottuk.', 'Indul a kör, eredmény este.',
                      'Balázs, mehet?', 'A poszt szövege: „Mehet a nyár?”', 'https://example.com/mehet?x=1',
                      'Ez a döntés megvan, holnap kész.', 'A Codex-kör fut, a kimenetet küldöm.',
-                     'Pénz csak a jóváhagyásod után megy ki.', 'Nem kell döntés tőled, megcsináljuk.'):
+                     'Pénz csak a jóváhagyásod után megy ki.', 'Nem kell döntés tőled, megcsináljuk.',
+                     'Balázs, mehet a merge?', 'Pulzus szerint nem kell döntened, a szabály lefedi.',
+                     'Ezt most tényleg nem kell jóváhagynod.',
+                     'Kérdezted, mehet-e: igen, a TG 6533 szerint már élesben van.',
+                     'https://example.com/mehet? ott a leírás.',
+                     # Viktor 48130 I2: a report, not a request
+                     'A jóváhagyásodat megkaptuk, indul.', 'A jóváhagyásod szerint ment ki.'):
             self.assertIsNone(gate.decision_phrase(text), text)
 
     def test_hidden_characters_do_not_hide_a_decision(self):
@@ -107,6 +121,19 @@ class Hook(unittest.TestCase):
         self.assertIn('PATRIK-DONTES', err)
         self.assertIn('lefedi', err)
         self.assertEqual(self.run_gate(PRIV, 'Mehet?')[0], 2)
+
+    def test_mark_is_held_for_the_call_not_spent(self):
+        # Viktor 48130 I3 (k26): with a tool_use_id the mark gets a "hold" row; the spend stays with PostToolUse
+        self.mark()
+        env = dict(os.environ, MAIN_AGENT_ID='main', MARVEEN_AGENT_ID='main', MARVEEN_OWNER_CHATS=f'{PRIV},{GROUP}',
+                   REPLY_MARKS_PATH=self.marks, LEDGER_DB_PATH=self.db, CLAUDE_PROJECT_DIR=self.tmp)
+        payload = {'tool_name': TOOL, 'tool_use_id': 'toolu_hold_1', 'tool_input': {'chat_id': GROUP, 'text': 'Mehet?'}}
+        p = subprocess.run([sys.executable, '-I', GATE], input=json.dumps(payload), env=env, capture_output=True,
+                           text=True, timeout=30)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        rows = [json.loads(l) for l in open(self.marks, encoding='utf-8') if l.strip()]
+        self.assertTrue(any(r.get('call') == 'toolu_hold_1' and r.get('hold') for r in rows), rows[-2:])
+        self.assertFalse(any('used' in r for r in rows), rows[-2:])   # reply_marks.spend_pending: no "used" row
 
     def test_decision_with_mark_passes_once(self):
         self.mark()
