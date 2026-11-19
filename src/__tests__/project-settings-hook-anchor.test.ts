@@ -70,6 +70,7 @@ const EXPECTED: Record<string, string[]> = {
     'patrik-reply-volume-gate.py', // card 9df14a4c: max 6 lines / 600 chars, one reply per owner message (Telegram reply)
     'summary-form-reply-gate.py', // retro R9 (card dddca664): the main agent's summaries to Patrik carry no ┆ line, path or code (Telegram reply)
     'patrik-step-reply-gate.py', // Klodel 41154: a step put on Patrik only with a PATRIK-LEPES mark (Telegram reply)
+    'patrik-decision-reply-gate.py', // card dd706ced: a decision asked of Patrik only with a PATRIK-DONTES mark (Telegram reply)
     // Patrik's-chat reply gates (main agent only): #141, #147, and the three that ran
     // only from the prod checkout's uncommitted settings until fix/ci-red-main-1111.
     'mea-culpa-reply-gate.py', 'render-claim-reply-gate.py',

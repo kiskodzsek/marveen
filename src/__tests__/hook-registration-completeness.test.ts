@@ -118,6 +118,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of reply-marks-spend.py and the hold/spend half of scripts/lib/reply_marks.py (run: python3 -I scripts/hooks/reply-marks-spend_test.py); not itself a hook (Klodel 41147)',
   'patrik-step-reply-gate_test.py':
     'the unit test of patrik-step-reply-gate.py (run: python3 -I scripts/hooks/patrik-step-reply-gate_test.py); not itself a hook (Klodel 41154)',
+  'patrik-decision-reply-gate_test.py':
+    'the unit test of patrik-decision-reply-gate.py (run: python3 -I scripts/hooks/patrik-decision-reply-gate_test.py); not itself a hook (card dd706ced)',
   'patrik-reply-volume-gate_test.py':
     'the unit test of patrik-reply-volume-gate.py (run: python3 -I scripts/hooks/patrik-reply-volume-gate_test.py); not itself a hook (card 9df14a4c)',
   'pr-kerdes-gate_test.py':
@@ -186,6 +188,8 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'the PostToolUse half of the reply marks (Klodel 41147): it spends the marks that patrik-reply-volume-gate.py and product-image-gate.py held for a sent reply, and both of those are CHECKOUT_ONLY on the main agent; seeded alone it would spend marks no gate on that agent holds, a silent no-op',
   'patrik-step-reply-gate.py':
     'a step put on the owner in his own chats needs a PATRIK-LEPES mark naming who measured that no internal route exists (Klodel 41154, Patrik TG 6049): the rule is about the MAIN agent, the one that talks to Patrik; the reply marks it takes are spent by reply-marks-spend.py, itself CHECKOUT_ONLY. Seeding it fleet-wide is a separate decision',
+  'patrik-decision-reply-gate.py':
+    'a decision asked of the owner in his own chats needs a PATRIK-DONTES mark naming why only he can decide and the TG or msg_id carrying it (card dd706ced, hibanapló 2026-11-16 13:54, TG 6276): like patrik-step-reply-gate.py above, the rule is about the MAIN agent, and its marks are spent by reply-marks-spend.py, itself CHECKOUT_ONLY',
   'summary-form-reply-gate.py':
     'the MAIN agent\'s summaries to the owner (retro 2026-11-13 R9, card dddca664; Patrik TG 4735): the evening decision summary and the daily result list are written and sent by the main agent only, like patrik-reply-volume-gate.py below; the gate itself passes every other agent',
   'patrik-reply-volume-gate.py':
