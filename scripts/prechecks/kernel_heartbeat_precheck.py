@@ -2,6 +2,8 @@
 """preCheck for Kernel's three silent-by-default heartbeats (Klodel 42455/42460).
 
   kernel_heartbeat_precheck.py quota      kernel-flotta-keret (cron */15): the fleet seat's 7-day pct >= 100,
+                                          its 5-hour pct >= 100, or >= 80 not yet reported for that window,
+                                          or the prompt's review time passed and not yet reported,
                                           or an own seat's (OWN_SEATS) while the sampler reads it
   kernel_heartbeat_precheck.py disk       kernel-lemez-10gib  (cron */30): free space < 10 GiB
   kernel_heartbeat_precheck.py gitconfig  kernel-gitconfig-or (cron 17 * * * *): ~/.gitconfig vs the guard baseline
@@ -42,6 +44,17 @@ QUOTA_FILE = os.path.join(ROOT, 'store', 'fleet-quota.jsonl')
 QUOTA_MAX_AGE_S = 3600          # an older last line means the sampler stopped: wake the round to say so
 QUOTA_MAX_FUTURE_S = 300        # a ts further ahead (ms instead of s, a wrong clock) also wakes the round
 QUOTA_LIMIT_PCT = 100           # the task's own threshold ("ha >=100")
+# The task's 5-hour rule (Klodel 47788, 2026-11-19): ">= 80 -> one line to Klodel, once per fiveHour.resetsAt;
+# >= 100 -> one line". The round records what it sent in SENT_STATE, keyed by the window's resetsAt (a decimal
+# string); this script only READS it. A key that is there means "already said", so 80-99 % skips; >= 100 % always
+# wakes (the round itself stays quiet when that line was sent). An unreadable state file reads as empty: wake.
+FIVE_HOUR_WARN_PCT = 80
+FIVE_HOUR_LIMIT_PCT = 100
+SENT_STATE = os.path.join(ROOT, 'agents', 'kernel', 'state', 'flotta-keret-jelzes.json')
+# The prompt says it is out of date after 2026-11-21 03:00 Europe/Budapest (the fleet leaves the Dave seat):
+# one line to Klodel. 1795226400 = 2026-11-21 03:00 CET (TZ=Europe/Budapest date -r). Recorded as PROMPT_KEY.
+PROMPT_REVIEW_AT = 1795226400
+PROMPT_KEY = 'prompt-review'
 OWN_SEATS = ('own:dave',)       # own-seat agents the task watches too (card 6db4cc15, Klodel 43760)
 DISK_PATH = ROOT
 DISK_MIN_GIB = 10               # the task's own threshold ("< 10 GiB"); GiB = 2**30 bytes, as df -k / host-monitor
@@ -66,6 +79,16 @@ def _last_json_line(path):
 
 def _finite(v):
     return not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)
+
+
+def _sent_keys():
+    """The keys of the round's sent-state file; empty on any read or parse error (the wake direction)."""
+    try:
+        with open(SENT_STATE, encoding='utf-8') as f:
+            d = json.load(f)
+    except Exception:
+        return set()
+    return set(k for k in d if isinstance(k, str)) if isinstance(d, dict) else set()
 
 
 def quota():
@@ -97,6 +120,21 @@ def quota():
             raise ValueError(f'{name} pct is not a finite number')   # fail-open, as for the fleet seat
         if not (own_pct < QUOTA_LIMIT_PCT):
             out.append(f'PRECHECK: {name} 7d pct {own_pct:g} (>= {QUOTA_LIMIT_PCT}), status ok.')
+    # The 5-hour window of the fleet seat (Klodel 47788). Only a seat read 'ok' counts, as in the task text. No
+    # fiveHour object: nothing to compare (the sampler gives none). A present but unreadable one: fail-open.
+    five = seat.get('fiveHour')
+    if status == 'ok' and five is not None:
+        fpct, freset = five['pct'], five['resetsAt']
+        if not _finite(fpct) or not _finite(freset):
+            raise ValueError('fiveHour pct or resetsAt is not a finite number')
+        if not (fpct < FIVE_HOUR_LIMIT_PCT):
+            out.append(f'PRECHECK: fleet 5h pct {fpct:g} (>= {FIVE_HOUR_LIMIT_PCT}), resetsAt {int(freset)}.')
+        elif not (fpct < FIVE_HOUR_WARN_PCT) and str(int(freset)) not in _sent_keys():
+            out.append(f'PRECHECK: fleet 5h pct {fpct:g} (>= {FIVE_HOUR_WARN_PCT}), resetsAt {int(freset)}, '
+                       f'not yet reported.')
+    if _now() >= PROMPT_REVIEW_AT and PROMPT_KEY not in _sent_keys():
+        out.append(f'PRECHECK: the prompt review time 2026-11-21 03:00 has passed, not yet reported '
+                   f'(record it as "{PROMPT_KEY}").')
     return ' '.join(out) if out else 'SKIP'
 
 

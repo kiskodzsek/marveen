@@ -47,6 +47,8 @@ class Base(unittest.TestCase):
         self.m.DISK_PATH = self.d
         self.m.GUARD_STATE = os.path.join(self.d, 'guard.json')
         self.m.GITCONFIG = os.path.join(self.d, 'gitconfig')
+        self.m.SENT_STATE = os.path.join(self.d, 'sent.json')   # never the live state file
+        self.m.PROMPT_REVIEW_AT = self.now + 10**6                 # the date rule is off unless a test moves it
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -201,6 +203,121 @@ class OwnSeat(Base):
     def test_stale_line_still_wins(self):
         self.q({'sevenDay': {'pct': 100}, 'status': 'ok'}, age_s=3601)
         self.assertIn('min old', self.out('quota'))
+
+
+class FiveHour(Base):
+    """Klodel 47788 (2026-11-19): the fleet seat's 5-hour window, >= 80 % once per resetsAt, >= 100 % always."""
+    R = 1_800_003_600
+
+    def q(self, pct, reset=None, status='ok', seven=9, five=True):
+        seat = {'sevenDay': {'pct': seven}, 'status': status}
+        if five:
+            seat['fiveHour'] = {'pct': pct, 'resetsAt': self.R if reset is None else reset}
+        with open(self.m.QUOTA_FILE, 'w') as f:
+            f.write(json.dumps({'seats': {'fleet': seat}, 'ts': self.now - 60}) + '\n')
+
+    def sent(self, obj=None, raw=None):
+        with open(self.m.SENT_STATE, 'w') as f:
+            f.write(raw if raw is not None else json.dumps(obj))
+
+    def test_under_80_skips(self):
+        for pct in (0, 79.9):
+            with self.subTest(pct=pct):
+                self.q(pct)
+                self.assertEqual(self.out('quota'), 'SKIP')
+
+    def test_80_to_99_wakes_when_not_reported(self):
+        for pct in (80, 95, 99.9):
+            with self.subTest(pct=pct):
+                self.q(pct)
+                self.assertEqual(self.out('quota'),
+                                 f'PRECHECK: fleet 5h pct {pct:g} (>= 80), resetsAt {self.R}, not yet reported.')
+
+    def test_80_to_99_skips_when_that_window_is_reported(self):
+        self.sent({str(self.R): 'forecast-80 sent 15:30 (47788)'})
+        self.q(85)
+        self.assertEqual(self.out('quota'), 'SKIP')
+
+    def test_a_report_for_another_window_does_not_count(self):
+        self.sent({str(self.R - 18000): 'sent'})
+        self.q(85)
+        self.assertIn('not yet reported', self.out('quota'))
+
+    def test_100_always_wakes(self):
+        for state in (None, {str(self.R): 'sent'}):
+            with self.subTest(state=state):
+                if state is not None:
+                    self.sent(state)
+                self.q(100)
+                self.assertEqual(self.out('quota'), f'PRECHECK: fleet 5h pct 100 (>= 100), resetsAt {self.R}.')
+
+    def test_unreadable_state_reads_as_not_reported(self):
+        for raw in ('', '{', '[1, 2]', '"x"', 'null'):
+            with self.subTest(raw=raw):
+                self.sent(raw=raw)
+                self.q(85)
+                self.assertIn('not yet reported', self.out('quota'))
+
+    def test_only_an_ok_seat_counts(self):
+        self.q(95, status='stale')
+        self.assertEqual(self.out('quota'), 'SKIP')
+
+    def test_no_five_hour_object_skips(self):
+        self.q(None, five=False)
+        self.assertEqual(self.out('quota'), 'SKIP')
+
+    def test_unreadable_five_hour_never_skips(self):
+        for pct, reset in ((None, None), (True, 1), (float('nan'), 1), (85, 'x'), (85, None)):
+            with self.subTest(pct=pct, reset=reset):
+                with open(self.m.QUOTA_FILE, 'w') as f:
+                    f.write(json.dumps({'seats': {'fleet': {'sevenDay': {'pct': 9}, 'status': 'ok',
+                                                            'fiveHour': {'pct': pct, 'resetsAt': reset}}},
+                                        'ts': self.now - 60}) + '\n')
+                self.assertNotEqual(self.out('quota'), 'SKIP')
+        with open(self.m.QUOTA_FILE, 'w') as f:
+            f.write(json.dumps({'seats': {'fleet': {'sevenDay': {'pct': 9}, 'status': 'ok', 'fiveHour': {}}},
+                                'ts': self.now - 60}) + '\n')
+        self.assertNotEqual(self.out('quota'), 'SKIP')
+
+    def test_seven_day_and_five_hour_both_reported(self):
+        self.q(100, seven=100)
+        out = self.out('quota')
+        self.assertIn('fleet 7d pct 100', out)
+        self.assertIn('fleet 5h pct 100', out)
+
+    def test_output_carries_no_file_text(self):
+        self.sent({'<script>': 1})
+        self.q(85)
+        out = self.out('quota')
+        self.assertNotIn('<script>', out)
+        self.assertNotIn('forecast', out)
+
+
+class PromptReview(Base):
+    """The prompt is out of date after 2026-11-21 03:00 Europe/Budapest: one wake until the round records it."""
+    def q(self):
+        with open(self.m.QUOTA_FILE, 'w') as f:
+            f.write(json.dumps({'seats': {'fleet': {'sevenDay': {'pct': 9}, 'status': 'ok',
+                                                    'fiveHour': {'pct': 1, 'resetsAt': 1}}},
+                                'ts': self.now - 60}) + '\n')
+
+    def test_the_constant_is_2026_11_21_0300_budapest(self):
+        m = load()
+        self.assertEqual(m.PROMPT_REVIEW_AT, 1795226400)
+        self.assertEqual(time.strftime('%Y-%m-%d %H:%M', time.gmtime(m.PROMPT_REVIEW_AT + 3600)), '2026-11-21 03:00')
+
+    def test_before_skips(self):
+        self.m.PROMPT_REVIEW_AT = self.now + 1
+        self.q()
+        self.assertEqual(self.out('quota'), 'SKIP')
+
+    def test_after_wakes_once(self):
+        self.m.PROMPT_REVIEW_AT = self.now
+        self.q()
+        self.assertIn('prompt review time', self.out('quota'))
+        with open(self.m.SENT_STATE, 'w') as f:
+            json.dump({'prompt-review': 'sent'}, f)
+        self.assertEqual(self.out('quota'), 'SKIP')
 
 
 class Disk(Base):
