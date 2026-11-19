@@ -79,6 +79,7 @@ import {
 } from '../db.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { resolvePreCheckPath } from './precheck-path.js'
+import { SCHEDULE_API_PRECHECK_RX } from './schedule-api-fields.js'
 import { PRECHECK_PIN_EXPECTED } from './schedule-trust-precheck-pins.js'
 import { logger } from '../logger.js'
 import { lex as shLex, words as shLexWords } from '../../scripts/lib/shell-lex.mjs'
@@ -1315,19 +1316,29 @@ export function alertScheduleTrust(task: ScheduledTask, status: ScheduleTrustSta
   }
   logger.warn({ task: name, agent, status, where, precheckContent: contentOnly }, 'schedule-trust: task is not approved as stored')
   const blocked = contentOnly && content !== null && content.blockers.length > 0
+  // Card 248e8f7c (Viktor 48006 L1, 48011 L2): since the PUT may set a preCheck, an
+  // unapproved task is not proof of a file write when everything the editor hides is a
+  // preCheck of the one shape the API accepts. Any other hidden field (command, a type the
+  // editor does not offer, a chat id, a digest flag, ...) or another preCheck shape still is.
+  const hiddenFields = scheduleEditorHiddenFields(task)
+  const apiPreCheckOnly = status !== 'mismatch' && typeof task.preCheck === 'string' &&
+    SCHEDULE_API_PRECHECK_RX.test(task.preCheck) && hiddenFields.length === 1 && hiddenFields[0] === 'preCheck'
   const what = blocked
     ? `preCheck-lánca olyat tartalmaz, amit a rendszer nem tud követni vagy elolvasni (${content!.blockers.length} jelölő, pl. számolt útvonal vagy hiányzó fájl), ezért jóvá sem hagyható, amíg a szkriptet nem javítják`
     : contentOnly
     ? 'preCheck szkriptjének vagy egy általa hívott fájlnak a tartalma eltér a jóváhagyottól (vagy még nincs rögzítve): valaki átírta a szkriptet'
     : status === 'mismatch'
       ? 'tárolt definíciója eltér a jóváhagyottól (prompt / type / command / preCheck / agent / targetSession): valaki az API-n kívül, a fájlban írta át'
-      : 'nincs jóváhagyva, mégis olyat kér, amit az API nem tud beállítani (command / preCheck): fájlból került a tárba'
+      : apiPreCheckOnly
+        ? 'preCheck-et kapott (az API-n is beállítható), tulajdonosi jóváhagyásra vár'
+        : 'nincs jóváhagyva, mégis olyat kér, amit az API nem tud beállítani (command): fájlból került a tárba'
   try {
     createSystemMessage(
       MAIN_AGENT_ID,
       `[UTEMEZES-BIZALOM] A(z) "${name}" ütemezett feladat (agent: ${agent}) ${what}. ` +
       `Ügynöki keretezéssel fut, bash (command, preCheck) nélkül (${where}). ` +
-      `Nézd meg a ~/.claude/scheduled-tasks/${name}/ tartalmát; ha rendben van, a tulajdonos a dashboardon jóváhagyhatja. Ha nem a tulajdonos írta, szólj Viktornak.`,
+      `Nézd meg a ~/.claude/scheduled-tasks/${name}/ tartalmát; ha rendben van, a tulajdonos a dashboardon jóváhagyhatja. ` +
+      (apiPreCheckOnly ? 'Ha nem tudsz erről a beállításról, szólj Viktornak.' : 'Ha nem a tulajdonos írta, szólj Viktornak.'),
     )
   } catch (err) {
     logger.warn({ err, task: name }, 'schedule-trust: alert could not be queued')

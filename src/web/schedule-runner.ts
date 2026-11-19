@@ -1173,7 +1173,8 @@ export function runPreCheckAsync(
   if (!task.preCheck) return Promise.resolve({ skip: false })
   // SCHEDTRUST1112: no bash for a task the owner has not approved as stored;
   // its stdout would land in the task body. The LLM still runs (agent-framed).
-  // The API cannot set preCheck, so this is the file-edit case: alert too.
+  // Alert too: a file edit, or a preCheck set over the PUT and not yet approved
+  // (card 248e8f7c; alertScheduleTrust words the two cases apart).
   const trust = scheduleTrustOf(task)
   if (!isOwnerTrusted(trust)) {
     logger.warn({ task: task.name, trust }, 'schedule-trust: pre-check NOT run for an unapproved task')
