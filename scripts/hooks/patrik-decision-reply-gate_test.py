@@ -73,6 +73,12 @@ class DecisionPhrase(unittest.TestCase):
             self.assertIsNone(gate.decision_phrase(text), text)
         for text in requests:
             self.assertIsNotNone(gate.decision_phrase(text), text)
+        # Viktor 48182 L1: a dot inside the sentence (domain, version, date) does not stop the question search
+        for text in ('A jóváhagyásod megvan a marabel.hu kiadáshoz?', 'A jóváhagyásod megvan a 2.0-s kiadáshoz is?',
+                     'A jóváhagyásod megvan a 11.20-i élesítéshez?', 'A jóváhagyásodat megkaptuk a v1.2-re is?'):
+            self.assertIsNotNone(gate.decision_phrase(text), text)
+        for text in ('A jóváhagyásod megvan a 2.0-hoz, indítom.', 'A jóváhagyásod szerint a marabel.hu kiment.'):
+            self.assertIsNone(gate.decision_phrase(text), text)
 
     def test_hidden_characters_do_not_hide_a_decision(self):
         self.assertIsNotNone(gate.decision_phrase('Me​het?'))

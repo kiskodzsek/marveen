@@ -57,7 +57,7 @@ DECISION = re.compile(r'(?<![a-z0-9])(?:' + '|'.join([
     r'dontes(?:ed)?\s+kell(?:ene)?(?:\s+toled|\s+toletek)?', r'kell\s+(?:egy\s+|ket\s+)?dontes(?:ed)?',
     r'dontsd\s+el', r'dontsetek\s+el', r'te\s+dontod',
     r'a\s+te\s+dontesed(?!\s+(?:szerint|alapjan|volt|nyoman))', r'dontesedre', r'dontened\s+kell', r'kell\s+dontened',
-    r'jovahagyod', r'jovahagyasod(?:at|ra)?(?!\s+(?:utan|nelkul|szerint|megkaptuk|megvan)(?![a-z0-9])(?![^.!?;\n]{0,80}\?))', r'jovahagyast\s+kerek', r'jovahagynod\s+kell', r'kell\s+jovahagynod',
+    r'jovahagyod', r'jovahagyasod(?:at|ra)?(?!\s+(?:utan|nelkul|szerint|megkaptuk|megvan)(?![a-z0-9])(?![^?]{0,80}\?))', r'jovahagyast\s+kerek', r'jovahagynod\s+kell', r'kell\s+jovahagynod',
     r'rabolintasz', r'rabolintassz', r'igent\s+mondasz', r'igent\s+kerek',
     r'(?:melyik|melyiket)\s+(?:legyen|valasztod|kered)',
 ]) + r')(?![a-z0-9])')
