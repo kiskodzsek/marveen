@@ -1005,6 +1005,118 @@ class MainSkillBak(unittest.TestCase):
             self.assertEqual(self.go(dict(p, cwd=P)), '')
 
 
+class MainScheduleDir(unittest.TestCase):
+    """Card a74793b8 (Klodel 47389; system 47365, first case 42457): the main agent does not write the per-task
+    schedule store ~/.claude/scheduled-tasks/ by file, by any route the Bash analysis names; reads stay free."""
+    ST = HOME + '/.claude/scheduled-tasks'
+
+    def setUp(self):
+        shutil.rmtree(self.ST, ignore_errors=True)
+        os.makedirs(self.ST + '/kernel-flotta-keret')
+        self.f = self.ST + '/kernel-flotta-keret/SKILL.md'
+        open(self.f, 'w').write('x\n')
+        open(os.path.join(LOG, 'gate.jsonl'), 'w').close()
+
+    def go(self, payload, tp=MAIN_TP):
+        return gate.run(json.dumps(dict(payload, transcript_path=tp)), P, LOG, HOME, now=time.time())
+
+    def test_the_47365_case_write_tools_are_denied(self):
+        for tool in ('Write', 'Edit', 'MultiEdit', 'NotebookEdit'):
+            out = self.go(write(self.f, tool))
+            self.assertIn('"deny"', out, tool)
+            self.assertIn('PUT /api/schedules', out)
+        self.assertEqual([r['agent'] for r in log_rows() if r['decision'] == 'deny'], ['main'] * 4)
+
+    def test_path_forms(self):
+        self.assertIn('"deny"', self.go(write('~/.claude/scheduled-tasks/kernel-flotta-keret/SKILL.md')))
+        self.assertIn('"deny"', self.go(write('kernel-flotta-keret/task-config.json', cwd=self.ST)))
+        self.assertIn('"deny"', self.go(write(self.ST + '/uj-feladat/SKILL.md')))          # a new task directory
+        self.assertIn('"deny"', self.go(write(HOME + '/.Claude/Scheduled-Tasks/x/SKILL.md')))
+        lnk = HOME + '/schedlnk'                                   # an agent's .claude-config/scheduled-tasks link
+        os.symlink(self.ST, lnk)
+        try:
+            self.assertIn('"deny"', self.go(write(lnk + '/kernel-flotta-keret/SKILL.md')))
+            self.assertIn('"deny"', self.go(write('~/schedlnk/kernel-flotta-keret/SKILL.md')))   # ~ then realpath
+        finally:
+            os.unlink(lnk)
+        # by the text alone, where this test tree has no link (mutation gaps M4, M8)
+        self.assertIn('"deny"', self.go(write(P + '/agents/dave/.claude-config/scheduled-tasks/x/SKILL.md')))
+        self.assertIn('"deny"', self.go(write('/Users/other/.Claude/Scheduled-Tasks/x/SKILL.md')))
+
+    def test_bash_write_routes_are_denied(self):
+        for cmd in ('cp /tmp/a ' + self.f, 'cp -p %s %s.bak-1118' % (self.f, self.f), 'mv /tmp/a ' + self.f,
+                    'echo x > ' + self.f, 'echo x | tee ~/.claude/scheduled-tasks/kernel-flotta-keret/SKILL.md',
+                    'sed -i "" s/a/b/ ' + self.f, 'rm -rf ' + self.ST + '/kernel-flotta-keret',
+                    'cd %s/kernel-flotta-keret && cp /tmp/a SKILL.md' % self.ST):
+            out = self.go(bash(cmd, cwd='/tmp'))
+            self.assertIn('"deny"', out, cmd)
+            self.assertIn('ütemezés-tár', out, cmd)
+
+    def test_viktor_47421_unresolved_targets_and_spellings_are_denied(self):
+        # M1: an unresolved write target (a pipe into xargs, a while-read loop, process substitution) with the
+        # store named in the text is a deny, as decide() does for the prod tree (B01, B02, B03)
+        for cmd in ('find %s -name SKILL.md | xargs sed -i "" s/a/b/' % self.ST,
+                    'ls %s | while read n; do cp /tmp/a "%s/$n/SKILL.md"; done' % (self.ST, self.ST),
+                    'while read n; do cp /tmp/a "$n"; done < <(ls -d %s/*)' % self.ST):
+            self.assertIn('"deny"', self.go(bash(cmd, cwd='/tmp')), cmd)
+        # L2: what bash resolves before the path is used (B08 /./, B09 quoted $HOME, B38 split quote,
+        # B44 a bare scheduled-tasks word after cd ~/.claude, B45 a relative path from the ~/.claude cwd)
+        for cmd, cwd in (('cp /tmp/a ~/.claude/./scheduled-tasks/kernel-flotta-keret/SKILL.md', '/tmp'),
+                         ('cp /tmp/a "$HOME/.claude"/scheduled-tasks/kernel-flotta-keret/SKILL.md', '/tmp'),
+                         ("cp /tmp/a ~/.claude/sched'ul'ed-tasks/kernel-flotta-keret/SKILL.md", '/tmp'),
+                         ('cd ~/.claude && cp /tmp/a scheduled-tasks/kernel-flotta-keret/SKILL.md', '/tmp'),
+                         ('cp /tmp/a scheduled-tasks/kernel-flotta-keret/SKILL.md', HOME + '/.claude')):
+            self.assertIn('"deny"', self.go(bash(cmd, cwd=cwd)), cmd)
+        # an over-long command that names the store is a deny, not a silent allow
+        self.assertIn('"deny"', self.go(bash('cp /tmp/a %s # %s' % (self.f, 'x' * gate.MAX_CMD), cwd='/tmp')))
+        # B01 B02 spelled so that only the normalised text names the store (mutation gaps: a backslash, /./,
+        # the raw text as the name check)
+        for cmd in ('find ~/.claude/./scheduled-tasks -name SKILL.md | xargs sed -i "" s/a/b/',
+                    'find ~/.claude/sched\\uled-tasks -name SKILL.md | xargs sed -i "" s/a/b/',
+                    'cp /tmp/a ~/.claude/sched\\uled-tasks/kernel-flotta-keret/SKILL.md'):
+            self.assertIn('"deny"', self.go(bash(cmd, cwd='/tmp')), cmd)
+        # a parse error with the store named is a deny too (mutation gap: M1 on st.unknown only)
+        self.assertIn('nem feloldható', self.go(bash('cat %s; echo "unclosed' % self.f, cwd='/tmp')))
+
+    def test_bare_word_without_the_store_stays_free(self):
+        # the bare scheduled-tasks word only starts the analysis; an unresolved write elsewhere is not a deny
+        # unless the store itself is named (mutation gap: M1 without the named condition)
+        for cmd in ('grep -l scheduled-tasks docs/*.md | xargs sed -i "" s/a/b/',
+                    'ls scheduled-tasks | while read n; do cp /tmp/a "/tmp/out/$n"; done'):
+            self.assertEqual(self.go(bash(cmd, cwd='/tmp')), '', cmd)
+
+    def test_interpreter_reads_stay_free(self):
+        # Viktor 47421 option (b) is left out: on the main agent's 7-day transcripts it denied 36 harmless reads
+        # for 0 real writes, so a python/node line that names the store is a documented limit, not a deny
+        for cmd in ('python3 -I -c "import json;print(json.load(open(\'%s/kernel-flotta-keret/task-config.json\')))"'
+                    % self.ST,
+                    'cat %s | python3 -c "import sys;print(sys.stdin.read())"' % self.f):
+            self.assertEqual(self.go(bash(cmd, cwd='/tmp')), '', cmd)
+
+    def test_reads_and_text_stay_free(self):
+        for cmd in ('cat ' + self.f, 'grep -rn klodel2 ' + self.ST, 'ls -la ~/.claude/scheduled-tasks | head',
+                    'cp %s /tmp/copy.md' % self.f, 'shasum -a 256 ' + self.f,
+                    'bash scripts/agent-msg.sh klodel kernel "a ~/.claude/scheduled-tasks/x SKILL.md-je"'):
+            self.assertEqual(self.go(bash(cmd, cwd='/tmp')), '', cmd)
+        self.assertEqual(self.go(write(P + '/scheduled-tasks/x/task-config.json')), '')   # the repo templates
+        self.assertEqual([r['decision'] for r in log_rows() if r['decision'] not in ('seen',)], [])
+
+    def test_sub_agent_left_to_the_self_pace_gate(self):
+        self.assertEqual(self.go(write(self.f), tp=SUB_TP), '')   # outside the prod tree: SCHEDDIR1118 covers it
+
+    def test_rule_error_allows_and_leaves_a_trace(self):
+        real = gate.main_schedule_dir
+        try:
+            def boom(*a):
+                raise OSError('x')
+            gate.main_schedule_dir = boom
+            self.assertEqual(self.go(write(self.f)), '')
+        finally:
+            gate.main_schedule_dir = real
+        rows = [r for r in log_rows() if r['decision'] == 'error-allow']
+        self.assertEqual((len(rows), rows[0]['agent']), (1, 'main'))
+
+
 if __name__ == '__main__':
     try:
         unittest.main(verbosity=1)
