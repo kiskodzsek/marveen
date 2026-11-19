@@ -58,6 +58,22 @@ class DecisionPhrase(unittest.TestCase):
                      'A jóváhagyásodat megkaptuk, indul.', 'A jóváhagyásod szerint ment ki.'):
             self.assertIsNone(gate.decision_phrase(text), text)
 
+    def test_report_words_viktor_48157(self):
+        # Viktor 48157 F1: the report exception needs a word boundary and no question in the clause (his i2probe ROWS);
+        # I1: "megvan" as a report; I2: "jóváhagyásodat / jóváhagyásodra" as a request.
+        reports = ('A jóváhagyásod szerint mentem tovább.', 'A jóváhagyásodat megkaptuk, indul.',
+                   'A jóváhagyásod megvan, indítom.', 'A jóváhagyásod után élesítettem.',
+                   'A jóváhagyásod nélkül nem nyúltam hozzá.', 'A jóváhagyásod szerint, ahogy kérted, kész.')
+        requests = ('Ehhez a jóváhagyásod szerintem kell.', 'A jóváhagyásod szerintem holnapig kellene.',
+                    'A jóváhagyásodat utána kérem a deployhoz.', 'A jóváhagyásod utána kellene, a merge előtt.',
+                    'A jóváhagyásod nélkülözhetetlen ehhez.', 'A jóváhagyásod megvan erre?', 'Kell a jóváhagyásod.',
+                    'A jóváhagyásodra várok.', 'A jóváhagyásod\nszerintem kell.', 'Kérem a jóváhagyásodat.',
+                    'A jóváhagyásod megvan a holnapi kiadáshoz is?')
+        for text in reports:
+            self.assertIsNone(gate.decision_phrase(text), text)
+        for text in requests:
+            self.assertIsNotNone(gate.decision_phrase(text), text)
+
     def test_hidden_characters_do_not_hide_a_decision(self):
         self.assertIsNotNone(gate.decision_phrase('Me​het?'))
         self.assertIsNotNone(gate.decision_phrase('ＭＥＨＥＴ?'))
