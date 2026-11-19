@@ -151,6 +151,36 @@ def owner_group_chat():
 # no longer opens the private chat without the PRIVÁT-OK marker, and no longer closes the group.
 LATEST_INBOUND_MAX_AGE_S = 30 * 60
 
+# Card 147ac81f (mérve 2026-11-16 14:26, conversation_log 15538): the owner's "/model opus keep" in his private chat
+# is answered by the dashboard (marveen-commands.py), the agent never gets that turn, yet as the latest inbound row
+# it held the private chat "where he wrote last" for 30 minutes and stopped a finished group report (TG 6296).
+# A single-line /name command whose name the dashboard answers is no conversation: skipped when looking for the
+# latest inbound row. The names are marveen-commands.py BUILTIN_NAMES (pinned equal by product-image-gate_test.py);
+# a custom /command goes to the model, so it still counts.
+DASHBOARD_COMMANDS = frozenset({
+    "help", "status", "queue", "runs", "jobs", "approvals", "model",
+    "context", "usage", "board", "commands",
+})
+OWNER_COMMAND = re.compile(r'^/([A-Za-z][A-Za-z0-9_]{0,31})(?:@[A-Za-z0-9_]+)?(?:\s|$)')
+INBOUND_SCAN = 50
+
+
+def dashboard_command(text):
+    """True when an inbound text is a single-line owner /command the dashboard answers (no agent turn)."""
+    t = str(text or '').strip()
+    m = OWNER_COMMAND.match(t)
+    return bool(m) and '\n' not in t and m.group(1).lower() in DASHBOARD_COMMANDS
+
+
+def latest_conversation_row(con, sql, args, private_chat=None):
+    """The first row of an id-DESC inbound query (its LAST column is the text) that is no dashboard command.
+    marveen-commands.py answers only in the owner's private chat (ALLOWED_CHAT_ID); a /command in the group goes
+    to the model, so with private_chat given a row counts unless its FIRST column (chat_id) is that chat."""
+    for row in con.execute(sql + ' ORDER BY id DESC LIMIT ?', (*args, INBOUND_SCAN)):
+        if not dashboard_command(row[-1]) or (private_chat is not None and str(row[0]) != private_chat):
+            return row
+    return None
+
 
 GROUP_WORD = re.compile(r'masik\s*chat|csoport')
 # An imperative that sends the work somewhere: írj/írd, posztolj, küldd/küldj, tedd/rakd, menj/mehet, beszéljük,
@@ -187,9 +217,9 @@ def owner_asked_group(payload):
             return False
         con = sqlite3.connect(f'file:{ledger_lib.db_path()}?mode=ro', uri=True, timeout=5)  # never create a ledger
         try:
-            row = con.execute(
-                "SELECT id, text FROM conversation_log WHERE agent_id=? AND direction='in' AND chat_id=?"
-                " ORDER BY id DESC LIMIT 1", (str(agent), priv)).fetchone()
+            row = latest_conversation_row(
+                con, "SELECT id, text FROM conversation_log WHERE agent_id=? AND direction='in' AND chat_id=?",
+                (str(agent), priv))
         finally:
             con.close()
         if not row or not asks_for_group(row[1]):
@@ -213,9 +243,9 @@ def owner_latest_inbound_chat(payload, now=None):
             return None
         con = sqlite3.connect(f'file:{ledger_lib.db_path()}?mode=ro', uri=True, timeout=5)  # never create a ledger
         try:
-            row = con.execute(
-                "SELECT chat_id, created_at FROM conversation_log WHERE agent_id=? AND direction='in' AND chat_id IN (?, ?)"
-                " ORDER BY id DESC LIMIT 1", (str(agent), priv, group)).fetchone()
+            row = latest_conversation_row(
+                con, "SELECT chat_id, created_at, text FROM conversation_log WHERE agent_id=? AND direction='in'"
+                " AND chat_id IN (?, ?)", (str(agent), priv, group), private_chat=priv)
         finally:
             con.close()
         if not row:
