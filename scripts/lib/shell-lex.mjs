@@ -197,7 +197,19 @@ function lexOnce(text, split, bash32, cache, stop = false) {
     let quoted = false
     while (p < n && !META.has(s[p])) {
       const ch = s[p]
-      if (ch === "'") {
+      if (ch === '$' && p + 1 < n && (s[p + 1] === '"' || s[p + 1] === "'")) {
+        // card 70a5fb2a (Viktor 49212 O2): bash 3.2 ends the body at the delimiter's value, measured: $'J' at J,
+        // $'J\x41' at JA (ANSI-C), $"J" at J; the $ is not part of it (shell_lex.py read_delimiter, the same)
+        if (s[p + 1] === '"') {
+          p++
+          continue
+        }
+        quoted = true
+        let e = p + 2
+        while (e < n && s[e] !== "'") e += s[e] === '\\' && e + 1 < n ? 2 : 1
+        delim += ansiC(s.slice(p + 2, Math.min(e, n)).join(''))
+        p = e < n ? e + 1 : e
+      } else if (ch === "'") {
         quoted = true
         let e = p + 1
         while (e < n && s[e] !== "'") e++

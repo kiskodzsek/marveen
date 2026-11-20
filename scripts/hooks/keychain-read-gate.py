@@ -1599,6 +1599,10 @@ def _hits(cmd, script=False):
             alt = lexer_normalise(cmd, lx['cls'], 0, len(cmd))
             if alt != normalise(cmd):
                 found += [h for h in hits_in(alt, script) if h not in found]
+        else:  # card 70a5fb2a (Viktor): the old path joins every one; the text with none joined is judged too
+            alt = normalise(re.sub(r'\\+\n', '\n', cmd))
+            if alt != normalise(cmd):
+                found += [h for h in hits_in(alt, script) if h not in found]
     return found
 
 
@@ -3467,6 +3471,10 @@ def script_hits(cmd, cwd):
     _OWN_LEXED[0] = 0
     if lx is None:  # the old path (card fae0712e: fail-closed, today's decision)
         text = normalise(blank_span(cmd, span))
+        if '\\\n' in cmd:  # card 70a5fb2a (Viktor): and the text with no backslash-newline joined (only adds)
+            split = normalise(re.sub(r'\\+\n', '\n', blank_span(cmd, span)))
+            if split != text:
+                text += '\n' + split
     else:
         # the blanking stands only where the lexer agrees: the body of the text's first heredoc, quoted delimiter
         first = lx['heredocs'][0] if lx['heredocs'] else None

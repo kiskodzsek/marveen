@@ -352,6 +352,12 @@ BLOCK = [
     # backslash; its terminator line `J\` ends the body for the shell, and lexer_normalise joined it onto the next line
     "curl -d @- <<'J\\'\nhello\nJ\\\ns3curity dump-keychain",
     "git commit -F - <<'J\\'\nmsg\nJ\\\ns3curity find-generic-password -w",
+    # card 70a5fb2a round 2 (Viktor 49212 O1, both passed main 915e2f70 and c2da88a9, bash ran the stub): an
+    # unterminated heredoc later in the text sends the gate down the old (lexer-free) path, where normalise() joins
+    # EVERY backslash-newline (a terminator line, an escaped backslash): the text with none joined is judged too
+    "cat <<'J\\' >/dev/null\nhello\nJ\\\ns3curity find-generic-password -s probe\ncat <<Z",
+    ': x \\\\\ns3curity find-generic-password -s probe\ncat <<Z',
+    ': # note \\\ns3curity dump-keychain\ncat <<Z',
 ]
 # Viktor 41970 INFO 6: one row per WRAP_ARGS entry, so a dropped or mistyped entry fails here. A spec of its own,
 # not read from the gate: wrapper -> (short flags with a word, whole flags with the next word, positional words).
@@ -1604,6 +1610,20 @@ def script_cases():
             ("git commit -F - <<'J\\'\nmsg\nJ\\\npython3 measure.py", d),
             ("curl -d @- <<-'J\\'\n\thello\n\tJ\\\n./measure.py", d),
             ("cat <<'J\\' > /dev/null\nhello\nJ\\\n./measure.py", d),
+            # card 70a5fb2a round 2 (Viktor 49212; bash 3.2 ran every row; c2da88a9's gate allowed each, measured,
+            # except the $'J\x41' row, which it already blocked: its body never ended there):
+            # O1: the old (lexer-free) path, sent there by an unterminated heredoc or quote later in the text, joined
+            # every backslash-newline; the text with none joined is read too
+            ("curl -d @- <<'J\\'\nhello\nJ\\\n./measure.py\ncat <<Z", d),
+            ("cat <<'J\\' >/dev/null\nhello\nJ\\\n./measure.py\necho \"unterminated", d),
+            (': x \\\\\n./measure.py\ncat <<Z', d),
+            (': # note \\\n./measure.py\ncat <<Z', d),
+            # O2: a $'..' / $".." delimiter: bash 3.2 ends the body at its value (J; $'J\x41' at JA, ANSI-C), not at $J
+            ("git commit -F - <<$'J'\nhello\nJ\n./measure.py\n$J", d),
+            ("git commit -F - <<$'J'\nhello\nJ\npython3 measure.py\n$J", d),
+            ('git commit -F - <<$"J"\nhello\nJ\n./measure.py\n$J', d),
+            ("curl -d @- http://127.0.0.1:9 <<$'J'\nhello\nJ\n./measure.py\n$J", d),
+            ("git commit -F - <<$'J\\x41'\nhello\nJA\n./measure.py", d),
             # card fae0712e: the script rules take the shell structure from scripts/lib/shell_lex.py. A command inside
             # a backtick (Viktor 42695 LOW 1: the backtick right after the path hid it), every word after a shell's -c,
             # unquoted too (LOW 2)
@@ -2424,6 +2444,12 @@ def script_cases():
             # backslash-newline still joins, and a harmless command after the terminator passes
             ("curl -d @- <<'J\\'\n./measure.py\nJ\\\necho done", d),
             ("curl -d @- <<'J\\'\nx\\\nJ\\\necho done", d),
+            # card 70a5fb2a round 2: a $'..' / $".." delimiter's body is still data up to its real terminator line,
+            # and the old path's unjoined reading adds nothing where only harmless commands stand
+            ("git commit -F - <<$'J'\n./measure.py\nJ\necho done", d),
+            ('git commit -F - <<$"J"\n./measure.py\nJ\necho done', d),
+            ("git commit -F - <<$'J\\x41'\n./measure.py\nJA\necho done", d),
+            (': x \\\\\necho done\ncat <<Z', d),
             # mutation round 1: the operator's forms, the command's prefixes, the terminator only as a whole line
             ("git commit -F - <<-'MSG'\n\t./measure.py\n\tMSG", d),
             ("git commit -F - << 'MSG'\n./measure.py\nMSG", d),

@@ -3887,6 +3887,195 @@
    }
   },
   {
+   "id": "heredoc-dollar-squote",
+   "why": "card 70a5fb2a (Viktor 49212 O2): $'J' delimits at J, the $ is not part of it (bash 3.2)",
+   "input": "cat <<$'J'\nx\nJ\nls",
+   "want": {
+    "cls": "ccccccccccchhttcc",
+    "problems": [],
+    "heredocs": [
+     {
+      "op": 4,
+      "opEnd": 10,
+      "delim": "J",
+      "quoted": true,
+      "stripTabs": false,
+      "bodyStart": 11,
+      "bodyEnd": 13,
+      "end": 15
+     }
+    ],
+    "substs": [],
+    "segments": [
+     {
+      "start": 0,
+      "end": 10,
+      "depth": 0,
+      "frame": "top",
+      "frameAt": -1,
+      "words": [
+       [
+        "cat",
+        0,
+        3,
+        false,
+        false
+       ],
+       [
+        "<<$'J'",
+        4,
+        10,
+        false,
+        true
+       ]
+      ]
+     },
+     {
+      "start": 15,
+      "end": 17,
+      "depth": 0,
+      "frame": "top",
+      "frameAt": -1,
+      "words": [
+       [
+        "ls",
+        15,
+        17,
+        false,
+        false
+       ]
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "heredoc-dollar-squote-ansi",
+   "why": "a $'...' delimiter is ANSI-C decoded: J\\x41 delimits at JA (bash 3.2)",
+   "input": "cat <<$'J\\x41'\nx\nJA\nls",
+   "want": {
+    "cls": "ccccccccccccccchhtttcc",
+    "problems": [],
+    "heredocs": [
+     {
+      "op": 4,
+      "opEnd": 14,
+      "delim": "JA",
+      "quoted": true,
+      "stripTabs": false,
+      "bodyStart": 15,
+      "bodyEnd": 17,
+      "end": 20
+     }
+    ],
+    "substs": [],
+    "segments": [
+     {
+      "start": 0,
+      "end": 14,
+      "depth": 0,
+      "frame": "top",
+      "frameAt": -1,
+      "words": [
+       [
+        "cat",
+        0,
+        3,
+        false,
+        false
+       ],
+       [
+        "<<$'J\\x41'",
+        4,
+        14,
+        false,
+        true
+       ]
+      ]
+     },
+     {
+      "start": 20,
+      "end": 22,
+      "depth": 0,
+      "frame": "top",
+      "frameAt": -1,
+      "words": [
+       [
+        "ls",
+        20,
+        22,
+        false,
+        false
+       ]
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "heredoc-dollar-dquote",
+   "why": "$\"J\" delimits at J, quoted (bash 3.2)",
+   "input": "cat <<$\"J\"\nx\nJ\nls",
+   "want": {
+    "cls": "ccccccccccchhttcc",
+    "problems": [],
+    "heredocs": [
+     {
+      "op": 4,
+      "opEnd": 10,
+      "delim": "J",
+      "quoted": true,
+      "stripTabs": false,
+      "bodyStart": 11,
+      "bodyEnd": 13,
+      "end": 15
+     }
+    ],
+    "substs": [],
+    "segments": [
+     {
+      "start": 0,
+      "end": 10,
+      "depth": 0,
+      "frame": "top",
+      "frameAt": -1,
+      "words": [
+       [
+        "cat",
+        0,
+        3,
+        false,
+        false
+       ],
+       [
+        "<<$\"J\"",
+        4,
+        10,
+        false,
+        true
+       ]
+      ]
+     },
+     {
+      "start": 15,
+      "end": 17,
+      "depth": 0,
+      "frame": "top",
+      "frameAt": -1,
+      "words": [
+       [
+        "ls",
+        15,
+        17,
+        false,
+        false
+       ]
+      ]
+     }
+    ]
+   }
+  },
+  {
    "id": "heredoc-unquoted",
    "why": "unquoted: the body is live (class u)",
    "input": "cat <<E\n$(id)\nE",
