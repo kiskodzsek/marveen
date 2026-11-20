@@ -47,6 +47,16 @@ commit`, `time git commit`, `nice -n 10 git commit`, `timeout 60 git commit`, `n
 npx, `deno test|lint|check`, and the pnpm / yarn bare-name script or bin (`pnpm lint`, `yarn lint`, `pnpm vitest`);
 `command -v vitest` only looks the name up and is not a check.
 
+PIPED SEND (card ba07fdfe, Klodel 49041; the 463 case `send-and-close.sh ... | tail -2 && send-stamped.sh klodel ...`):
+a SEND (agent-msg.sh, kernel-msg.sh, send-and-close.sh, send-stamped.sh, msg-close.sh, card-comment.sh,
+shared-append.sh; the command word itself or the script an interpreter runs) piped into another command without
+`set -o pipefail`, with '&&' after that pipeline: the next step runs on the pipe's status (tail's), not the send's, so a
+failed send goes on as if it had gone out. Blocked whatever follows the '&&'. A piped send with no '&&' after it (the
+output only shortened) is NOT blocked; neither is a send with `set -o pipefail` before it or without a pipe. The
+14-day fleet replay through this guard (158460 Bash calls): 79 new blocks (Viktor 61, Kernel 18), each read: a send
+piped only into tail / grep / cut / head, then '&&'; 0 changed verdict elsewhere. The 1094 piped sends without '&&'
+are left alone (a first heuristic count, before control flow was skipped, gave 82 for the blocked shape).
+
 Known limits (allowed, fail open): control flow (if/for/while/case, { }), anything inside ( ) or $( ), unbalanced
 quotes, any error; wrappers not modelled: sudo, xargs (`... | xargs git commit -m`), nested shells (`bash -c '...'`,
 `sh -c`); a package-manager option with a separate value that is not listed in PKG_OPTS_WITH_ARG (a deny list).
@@ -271,6 +281,24 @@ SWAP = 'live-swap.sh'
 
 DETACHED = 'launch_detached.py'
 
+SENDS = {'agent-msg.sh', 'kernel-msg.sh', 'send-and-close.sh', 'send-stamped.sh', 'msg-close.sh', 'card-comment.sh',
+         'shared-append.sh'}
+SEND_HINTS = ('msg.sh', 'send-and-close', 'send-stamped', 'msg-close', 'card-comment', 'shared-append')
+
+
+def is_send(w):
+    """A send script run by this simple command: the command word, or the script an interpreter runs. An argument
+    of another command (`ls -l .../agent-msg.sh`, `grep x agent-msg.sh`) is not a send (the replay's first false hit)."""
+    w = _strip_wrappers(w)
+    if not w:
+        return False
+    if os.path.basename(w[0]) in SENDS:
+        return True
+    if os.path.basename(w[0]) in INTERPRETERS:
+        rest = [x for x in w[1:] if not x.startswith('-')]
+        return bool(rest) and os.path.basename(rest[0]) in SENDS
+    return False
+
 
 def _dry(b, args):
     """run_review.py's argparse takes an unambiguous prefix (--dr); launch_detached.py's first word is the LOG file,
@@ -437,7 +465,8 @@ def verdict(payload):
     if payload.get('tool_name') != 'Bash':
         return None
     cmd = (payload.get('tool_input') or {}).get('command')
-    if not isinstance(cmd, str) or not any(k in cmd for k in ('commit', 'run_review', 'launch_detached', 'live-swap')):
+    if not isinstance(cmd, str) or not any(k in cmd for k in ('commit', 'run_review', 'launch_detached', 'live-swap')
+                                           + SEND_HINTS):
         return None
     segs = split_top(cmd)
     if not segs:
@@ -454,11 +483,15 @@ def verdict(payload):
     if any(m and m[0] in KEYWORDS for members, _ in pipes for m in members):
         return None
     errexit = pipefail = False
+    piped_send = None  # label of the first send whose status a pipe loses before an '&&' (card ba07fdfe)
     info = []  # per pipeline: (kind, errexit_at, label)  kind: None | 'kept' | 'lost'
-    for members, _ in pipes:
+    for members, op in pipes:
         for m in members:
             e, pf = set_flags(m)
             errexit, pipefail = errexit or e, pipefail or pf
+        sends = [k for k, m in enumerate(members) if is_send(m)]
+        if piped_send is None and sends and sends[-1] < len(members) - 1 and not pipefail and op == '&&':
+            piped_send = ' '.join(members[sends[-1]])[:70]
         checks = [k for k, m in enumerate(members) if is_check(m)]
         kind = None
         if checks:
@@ -491,6 +524,12 @@ def verdict(payload):
                         'vagy "&"), így piros futásnál is lefut. A set -e itt NEM véd (mérve: a zsh eval alatt nem '
                         'állít meg). Kösd &&-del, vagy indítsd külön hívásban, a kimenet elolvasása után. / '
                         'The action is not &&-chained to the check before it; set -e does not stop it in this tool.')
+    if piped_send:
+        return ('KULDES-LANC-OR: a "' + piped_send + '" küldés csőbe megy (nincs set -o pipefail), és utána && áll: a '
+                'következő lépés a cső végének (pl. tail) eredményén múlik, nem a küldésén, így egy elbukott küldés '
+                'után is lefut (463-as eset). Hagyd el a csövet, tedd elé: set -o pipefail, vagy a következő lépést '
+                'külön hívásban, a küldés kimenetének elolvasása után. / A piped send without pipefail before &&: the '
+                'next step runs on the pipe\'s status, not the send\'s.')
     return None
 
 
