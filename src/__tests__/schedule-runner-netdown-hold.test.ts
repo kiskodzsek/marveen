@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ScheduledTask } from '../web/scheduled-tasks-io.js'
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -53,6 +54,19 @@ describe('readNetdownSince (file)', () => {
     utimesSync(p, old, old)
     expect(readNetdownSince(now, p)).toBeNull()
     expect(readNetdownSince(now, SANDBOX)).toBeNull()
+  })
+  it('Viktor r1 (1): a FIFO at the marker path returns null at once (no writer, no wait); a symlinked marker is refused', () => {
+    const fifo = join(SANDBOX, 'netdown-fifo')
+    execFileSync('mkfifo', [fifo])
+    const t0 = Date.now()
+    expect(readNetdownSince(t0, fifo)).toBeNull()
+    expect(Date.now() - t0).toBeLessThan(2_000)
+    const real = join(SANDBOX, 'netdown-real')
+    writeFileSync(real, `${Math.floor(t0 / 1000) - 60} 0\n`)
+    const link = join(SANDBOX, 'netdown-link')
+    symlinkSync(real, link)
+    expect(readNetdownSince(t0, real)).not.toBeNull()
+    expect(readNetdownSince(t0, link)).toBeNull()
   })
 })
 

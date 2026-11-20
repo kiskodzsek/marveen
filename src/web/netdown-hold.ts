@@ -9,7 +9,7 @@
 // still set, so nothing fires in a burst when the network returns), and on the
 // first sweep after the marker is gone the main agent gets ONE summary: how long,
 // which tasks, how many.
-import { readFileSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 
@@ -43,12 +43,20 @@ export function netdownSinceFromMarker(text: string, mtimeMs: number, nowMs: num
 
 /** The outage start (ms) when the net-down marker is present and fresh, else null. Never throws. */
 export function readNetdownSince(nowMs: number, path: string = NETDOWN_MARKER_PATH): number | null {
+  // Viktor 91d9911e r1: open first, then fstat the same fd. A stat-then-read let a FIFO swapped in between block
+  // the dashboard's event loop (measured); O_NONBLOCK keeps a FIFO open from waiting, O_NOFOLLOW refuses a link.
+  let fd: number | null = null
   try {
-    const st = statSync(path)
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW)
+    const st = fstatSync(fd)
     if (!st.isFile() || st.size > 4096) return null
-    return netdownSinceFromMarker(readFileSync(path, 'utf-8'), st.mtimeMs, nowMs)
+    const buf = Buffer.alloc(4096)
+    const n = readSync(fd, buf, 0, buf.length, 0)
+    return netdownSinceFromMarker(buf.toString('utf-8', 0, n), st.mtimeMs, nowMs)
   } catch {
     return null
+  } finally {
+    if (fd !== null) try { closeSync(fd) } catch { /* closed */ }
   }
 }
 
