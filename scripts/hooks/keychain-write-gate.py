@@ -186,17 +186,36 @@ def split_commands(text, subs=None):
             in_word = True
             i += 2
             continue
-        if c in ("'", '"'):
+        if c == "'":
             j = text.find(c, i + 1)
-            while c == '"' and j != -1 and text[j - 1] == '\\':
-                j = text.find(c, j + 1)
             if j == -1:
                 raise Unsplittable()
-            part = text[i + 1:j]
-            if c == '"':
-                part = part.replace('\\"', '"')
-                if subs is not None:
-                    subs.extend(dquote_substitutions(part))
+            cur.append(text[i + 1:j])
+            in_word = True
+            i = j + 1
+            continue
+        if c == '"':
+            # Bash's rule: inside double quotes a backslash escapes only " \ $ ` and a newline. The old scan took
+            # every quote after a backslash for an escaped one, so `"dir\\"` (an escaped backslash, then the closing
+            # quote) ran on to the next quote; inside `bash -c '...'` the text was then Unsplittable, which passes at
+            # depth > 0, and the command after it went unjudged (card c6b9ff2f, Viktor 48557 INFO 3).
+            j, buf = i + 1, []
+            while j < n and text[j] != '"':
+                if text[j] == '\\' and j + 1 < n:
+                    nxt = text[j + 1]
+                    if nxt in '"\\$`':
+                        buf.append(nxt)
+                    elif nxt != '\n':
+                        buf.append('\\' + nxt)
+                    j += 2
+                    continue
+                buf.append(text[j])
+                j += 1
+            if j >= n:
+                raise Unsplittable()
+            part = ''.join(buf)
+            if subs is not None:
+                subs.extend(dquote_substitutions(text[i + 1:j].replace('\\"', '"')))
             cur.append(part)
             in_word = True
             i = j + 1

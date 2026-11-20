@@ -124,6 +124,9 @@ BLOCK = [
     f'sed -zi s/a/b/ {C}',
     f'perl -lpi -e 1 {C}',
     f'sed -ni s/a/b/p {C}',
+    # card c6b9ff2f: an escaped backslash before a closing double quote ends the string (the shared splitter)
+    f"bash -c 'echo \"a\\\\\" ; cp a ~/.claude/{C} ; echo \"b\"'",
+    f'echo "a\\\\" ; cp a ~/.claude/{C} ; echo "b"',
 ]
 
 # every row must pass
@@ -163,6 +166,7 @@ ALLOW = [
     f'install --suffix {C} a /x/b',            # an option's value is no destination (Viktor 48634 INFO 2, N28)
     f'install --owner {C} a /x/b',
     f'sed --posix -n 1p {C}',                  # a long option is no in-place cluster (Viktor 48634 INFO 1, R06)
+    f'echo "C:\\\\" ; echo "never cp a {C}"',     # card c6b9ff2f: closed where bash closes it, the rest is echo text
     'cp a b',
     'echo credit > report.txt',
     # documented gap (NOT MODELLED): an interpreter's own open(..., 'w') passes

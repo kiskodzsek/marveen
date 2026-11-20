@@ -169,9 +169,18 @@ BLOCK = [
     'bash -c "sh -c \'s3curity delete-generic-password -s y\'"',  # S3: two levels
     'bash -c "sh -c \'eval s3curity delete-generic-password -s y\'"',
     "ksh -c 's3curity delete-generic-password -s y'",  # S5
+    # card c6b9ff2f (Viktor 48557 INFO 3): an escaped backslash before a closing double quote ends the string; the
+    # old scan ran on to the next quote, and inside bash -c the text was Unsplittable (a pass at depth > 0)
+    "bash -c 'echo \"a\\\\\" ; s3curity add-generic-password -a x -s y -w z ; echo \"b\"'",
+    "sh -c 'printf \"%s\\\\\" x && s3curity delete-generic-password -s y && echo \"b\"'",
+    'echo "a\\\\" ; s3curity delete-generic-password -s y ; echo "b"',
+    'echo "q\\"\\\\" ; s3curity delete-generic-password -s y',  # an escaped quote, then an escaped backslash
 ]
 
 ALLOW = [
+    # card c6b9ff2f: a string ending in an escaped backslash is closed where bash closes it; text in it is data
+    'echo "C:\\\\" ; echo "s3curity add-generic-password is the write subcommand"',
+    "bash -c 'echo \"dir\\\\\" ; ls'",
     # the throwaway keychain, named by an absolute path to an existing file outside the keychain directories
     's3curity add-generic-password -U -a x -s y -w z {KC}',
     's3curity add-generic-password -a x -s y -w z -T /usr/bin/true {KC}',
