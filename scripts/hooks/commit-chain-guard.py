@@ -307,7 +307,7 @@ def is_send(w):
         while i < len(w) and len(w[i]) > 1 and w[i][0] in '-+':
             if w[i] == '-c':
                 return False
-            i += 2 if w[i] in ('-o', '+o', '-O', '+O') else 1
+            i += 2 if w[i] in ('-o', '+o', '-O', '+O', '--rcfile', '--init-file') else 1
         return i < len(w) and os.path.basename(w[i]) in SENDS
     return False
 
@@ -490,8 +490,13 @@ def set_flags(w):
             e = True
         if letters.endswith('o'):
             name = w[i + 1] if i + 1 < len(w) else ''
+            zname = name.lower().replace('_', '')  # zsh spelling: PIPE_FAIL, no_pipe_fail (Viktor ba07fdfe r2)
             if name == 'pipefail':
                 pf = on
+            elif zname == 'pipefail' and not on:  # off in any spelling; on only as plain pipefail (bash refuses others)
+                pf = False
+            elif zname == 'nopipefail' and on:  # zsh: set -o nopipefail switches it OFF (measured)
+                pf = False
             elif name == 'errexit' and on:
                 e = True
             i += 2

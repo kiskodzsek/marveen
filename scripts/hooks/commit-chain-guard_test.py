@@ -174,6 +174,10 @@ SEND_CASES = [
     ('B48 send piped into a send', 'bash scripts/agent-msg.sh a b c | bash tools/kernel-msg.sh klodel - && echo x', 2),
     ('unsetopt pipefail', 'setopt pipefail; unsetopt pipefail; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 2),
     ('setopt nopipefail', 'set -o pipefail; setopt no_pipefail; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 2),
+    ('R15 zsh set -o nopipefail is off', 'set -o pipefail; set -o nopipefail; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 2),
+    ('R16 zsh set +o PIPE_FAIL is off', 'set -o pipefail; set +o PIPE_FAIL; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 2),
+    ('R17 zsh set -o no_pipe_fail is off', 'set -o pipefail; set -o no_pipe_fail; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 2),
+    ('R24 bash --rcfile takes a value', 'bash --rcfile /dev/null scripts/agent-msg.sh a b c | tail -1 && echo x', 2),
     # allowed
     ('pipefail before the piped send', 'set -o pipefail; bash tools/send-and-close.sh x | tail -2 && bash tools/send-stamped.sh k f', 0),
     ('set -euo pipefail before', 'set -euo pipefail\nbash scripts/agent-msg.sh a b c | tail -1 && echo x', 0),
