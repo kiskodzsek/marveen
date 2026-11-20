@@ -9,7 +9,7 @@
 // the shells), a malformed entry or a gap longer than BG_SHELL_RESTORE_MAX_GAP_MS:
 // dropped, a new clock starts (the restart waits longer, the safe side).
 import { describe, it, expect, vi, afterAll, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, symlinkSync, lstatSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -105,6 +105,13 @@ describe('bgShellRestore (pure)', () => {
     expect(bgShellRestore(null, KEY, NOW)).toBeNull()
     expect(bgShellRestore([entry()], KEY, NOW)).toBeNull()
     expect(bgShellRestore(entry({ key: undefined }), KEY, NOW)).toBeNull()
+  })
+  it('Viktor r1 (1): a zero-run start before the clock or after the last sighting is dropped', () => {
+    expect(bgShellRestore(entry({ zeroSinceMs: NOW + 60 * 60_000 }), KEY, NOW)).toBeNull()
+    expect(bgShellRestore(entry({ zeroSinceMs: NOW - 60_000 + 1 }), KEY, NOW)).toBeNull()
+    expect(bgShellRestore(entry({ zeroSinceMs: NOW - 20 * 60_000 - 1 }), KEY, NOW)).toBeNull()
+    expect(bgShellRestore(entry({ zeroSinceMs: NOW - 20 * 60_000 }), KEY, NOW)).not.toBeNull()
+    expect(bgShellRestore(entry({ zeroSinceMs: NOW - 60_000 }), KEY, NOW)).not.toBeNull()
   })
   it('a negative or fractional streak is clamped, not trusted', () => {
     expect(bgShellRestore(entry({ zeroStreak: -3 }), KEY, NOW)?.zeroStreak).toBe(0)
@@ -229,6 +236,35 @@ describe('the clock across a dashboard restart (runner, fake timers)', () => {
     await vi.advanceTimersByTimeAsync(2 * INTERVAL_MS)
     expect(existsSync(STORE_FILE)).toBe(true)
     expect(stored().dave).toBeUndefined()
+  })
+
+  it('Viktor r1 (2): a clock that started while tmux gave no key is never persisted, even once a key appears', async () => {
+    vi.useFakeTimers({ now: T0 })
+    tmux.key = null
+    await startAt(await freshRunner(), T0)
+    expect(existsSync(STORE_FILE) && stored().dave !== undefined).toBe(false)
+    // The agent restarted meanwhile: a new pane process answers now, the same clock still runs in memory.
+    tmux.key = '1795209999:5151'
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS)
+    expect(existsSync(STORE_FILE) && stored().dave !== undefined).toBe(false)
+  })
+
+  it('Viktor r1 (3): a link planted at the old fixed tmp path is not followed', async () => {
+    const victim = join(SANDBOX, 'victim.txt')
+    writeFileSync(victim, 'untouched')
+    const planted = `${STORE_FILE}.tmp`
+    rmSync(planted, { force: true })
+    symlinkSync(victim, planted)
+    try {
+      vi.useFakeTimers({ now: T0 })
+      await startAt(await freshRunner(), T0)
+      expect(readFileSync(victim, 'utf-8')).toBe('untouched')
+      expect(lstatSync(STORE_FILE).isSymbolicLink()).toBe(false)
+      expect(stored().dave).toMatchObject({ key: KEY, sinceMs: T0 + INITIAL_DELAY_MS })
+    } finally {
+      rmSync(planted, { force: true })
+      rmSync(victim, { force: true })
+    }
   })
 
   it('a hand-written garbage file does not break the sweep', async () => {

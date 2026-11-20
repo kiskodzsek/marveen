@@ -320,6 +320,8 @@ export function bgShellRestore(
   if (!num(e.sinceMs) || !num(e.seenMs) || !num(e.zeroStreak)) return null
   if (e.sinceMs > e.seenMs || e.seenMs > nowMs || nowMs - e.seenMs > BG_SHELL_RESTORE_MAX_GAP_MS) return null
   if (e.zeroSinceMs !== undefined && !num(e.zeroSinceMs)) return null
+  // Viktor 8121c1f5 r1: a 0-run starts after the clock and by the last sighting
+  if (e.zeroSinceMs !== undefined && (e.zeroSinceMs < e.sinceMs || e.zeroSinceMs > e.seenMs)) return null
   const zeroStreak = Math.max(0, Math.floor(e.zeroStreak))
   return e.zeroSinceMs === undefined
     ? { sinceMs: e.sinceMs, zeroStreak }
@@ -345,6 +347,8 @@ export function bgShellPersistDue(
 let bgShellPersisted: Record<string, PersistedBgShell> | null = null
 // Agents whose persisted clock was already looked at in this dashboard's life.
 const bgShellRestoreTried = new Set<string>()
+// Viktor 8121c1f5 r1: the pane key read ONCE when a clock starts (null: tmux failed then, the clock is never persisted)
+const bgShellClockKey = new Map<string, { sinceMs: number; key: string | null }>()
 
 function readBgShellPersisted(): Record<string, PersistedBgShell> {
   if (bgShellPersisted !== null) return bgShellPersisted
@@ -357,8 +361,9 @@ function readBgShellPersisted(): Record<string, PersistedBgShell> {
 
 function writeBgShellPersisted(map: Record<string, PersistedBgShell>): void {
   try {
-    const tmp = `${BG_SHELL_PERSIST_PATH}.tmp`
-    writeFileSync(tmp, JSON.stringify(map, null, 2))
+    // Viktor 8121c1f5 r1: a fresh name, created exclusively: a link planted at the tmp path is not followed
+    const tmp = `${BG_SHELL_PERSIST_PATH}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+    writeFileSync(tmp, JSON.stringify(map, null, 2), { flag: 'wx' })
     renameSync(tmp, BG_SHELL_PERSIST_PATH)
   } catch (err) {
     logger.warn({ err }, 'context-guard: background-shell clock persist failed')
@@ -401,7 +406,12 @@ function persistBgShellClock(name: string, session: string, nowMs: number): void
     // The key is the pane process the clock STARTED on, read once: a clock that
     // outlived its pane in memory (a misread across an agent restart) keeps the
     // old key and is dropped at the next restore, not handed to the new process.
-    const key = prev !== undefined && prev.sinceMs === sinceMs ? prev.key : readPaneKey(session)
+    let at = bgShellClockKey.get(name)
+    if (at === undefined || at.sinceMs !== sinceMs) {
+      at = { sinceMs, key: prev !== undefined && prev.sinceMs === sinceMs ? prev.key : readPaneKey(session) }
+      bgShellClockKey.set(name, at)
+    }
+    const key = at.key
     if (key === null) {
       next = undefined
     } else {
@@ -410,6 +420,7 @@ function persistBgShellClock(name: string, session: string, nowMs: number): void
       if (zeroSinceMs !== undefined) next.zeroSinceMs = zeroSinceMs
     }
   }
+  if (sinceMs === undefined) bgShellClockKey.delete(name)
   if (!bgShellPersistDue(prev, next)) return
   if (next === undefined) delete map[name]
   else map[name] = next
