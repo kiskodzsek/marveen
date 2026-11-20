@@ -76,7 +76,9 @@ file a command runs is read and judged too:
     that first word is an existing regular file (the sourced script gets them as $1...: `source runner.sh m.py`,
     Viktor 41831 LOW 1; a sentence-ending "." in prose is followed by a word that is no file); python -m mod: the files
     the module runs from the cwd, mod.py, mod/__init__.py, mod/__main__.py and each dotted parent); when an
-    interpreter runs, also a `< file` redirect and the files of a `cat` (`cat m.py | python3`, quoted too); and a
+    interpreter runs or eval does, also a `< file` redirect (`0<f`, `a1<f` too) and the files of a `cat`, a path to it
+    too (`cat m.py | python3`, `eval "$(/bin/cat m.sh)"`, quoted too), and of a `head` / `tail` in a substitution or
+    piped into an interpreter (`eval "$(head m.sh)"`, `tail m.py | python3`; card 3bcd4514); and a
     path in command position run directly (`./x.py`, `/abs/x.sh`, `tools/x.py`). A quoted interpreter name counts
     (`'python3' m.py`, `os.system("python3 m.py")`). For these script rules a quote is a command position only where
     a payload opens (`bash -c "./x.sh"`, `bash -c -- '...'`, `eval "..."`, `watch -n 1 '...'`, `tmux new '...'`,
@@ -724,16 +726,98 @@ _HN_NOT_SHELL_EXT = frozenset(
     '.json .jsonl .md .markdown .txt .diff .patch .csv .tsv .log .py .pyi .js .mjs .cjs .ts .tsx .jsx .html .htm '
     '.css .xml .yml .yaml .toml .ini .sql .rb .pl .php'.split())
 _HN_SHEBANG_RX = re.compile(r'#![ \t]*\S*?(?:/env[ \t]+(?:-\S+[ \t]+)*)?(?:ba|z|k|da)?sh\b')
+# card 3bcd4514 (Viktor 48033 LOW L1): a shell's options before the file's name, one that takes a word too: -o / +o /
+# -O / +O (a cluster ending in it, `-eo pipefail`), --rcfile / --init-file. `bash -o errexit made.md` ran made.md,
+# the word after -o cut the old `(?:-\S+[ \t]+)*` walk. Each option is also read alone, as main read it (`bash -o
+# made.md` stays blocked: an over-read, bash does not run it). The walk is bounded: unbounded, `-o` read with its
+# word ran each walk from every shell word to the text's end (`bash -o bash -o ...`, quadratic, measured 11-20 past
+# 120 s at 300 KB). Past _HN_MAX_OPTS options the shell counts as a reader and the file as its script (fail-closed;
+# the interpreter walk blocks such a call past MAX_ARGS words anyway).
+_HN_MAX_OPTS = 16
+_HN_ARG = r'[^\s;&|<>()\'"`-][^\s;&|<>()]*'
+_HN_OPT = (r'[ \t]+(?:[-+][A-Za-z]*[oO][ \t]+' + _HN_ARG + r'|--(?:rcfile|init-file)[ \t]+' + _HN_ARG
+           + r'|[-+][^\s;&|<>()]*)')
+_HN_OPTS = r'(?:' + _HN_OPT + r'){0,%d}' % _HN_MAX_OPTS
+_HN_OPTS_OVER = r'(?:[ \t]+[-+][^\s;&|<>()]*){%d}' % (_HN_MAX_OPTS + 1)
+# A shell that reads code from its stdin or from a substitution in its words (card 3bcd4514): a shell word with no
+# operand after its options (`bash`, `bash -x`, `bash < f`, `bash <(cat f)`; a newline ends the command too), or
+# with -s / -c anywhere in a cluster (`sh -s`, `bash -cx "$(< f)"`), eval anywhere, source / . of a <( or of
+# /dev/stdin. Over-read on purpose, as everywhere in this gate: the shell word may be prose (`echo bash < f`); a
+# shell with a script operand reads its stdin as data (`bash agent-msg.sh dave x - < f`, the fleet's own message
+# form) and is no reader.
+_HN_READER = []  # compiled on first use: _SHELL_NAME and STDIN_SOURCE are defined further down
 
 
-def _hn_shell_file(path, body, cmd):
-    """True when a shell may run this file's text as code: not a data or non-shell extension, a shell shebang, or a
-    shell word / source / . right before its name in the command."""
+def _hn_reader_rx():
+    if not _HN_READER:
+        _HN_READER.append(re.compile(
+            r'(?<![\w.-])' + _SHELL_NAME + r'(?![\w.-])[\'"]?(?:' + _HN_OPTS_OVER + r'|' + _HN_OPTS
+            + r'(?:[ \t]*(?:$|[;&|)\n<>]|\d+[<>])|[ \t]+[-+][A-Za-z]*[sc]|[ \t]+#'
+            r'|[ \t]+[\'"]?(?:/dev/stdin|/dev/fd/0|/proc/self/fd/0)(?![\w/.-])))'
+            r'|(?<![\w.-])eval(?![\w.-])'
+            r'|(?<![\w.-])(?:source|\.)[ \t]+<\(|(?<![\w.-])' + STDIN_SOURCE))
+    return _HN_READER[0]
+
+
+_HN_FEED_READERS = frozenset(('cat', 'head', 'tail'))
+# words that may stand before the reader and leave what it prints unchanged (`command cat f`, `LC_ALL=C cat f`,
+# `nice -n 5 head f`, `sudo -u x cat f`): _FEEDER_WRAPPERS plus sudo / doas
+_HN_PRE_WORDS = frozenset(('builtin', 'command', 'exec', 'nohup', 'time', 'env', 'nice', 'sudo', 'doas'))
+# a redirection operator with its fd (`2>`, `0<`, `<`, `>>`) is one token, so `2>/dev/null cat f` starts at cat; a
+# digit glued to a word stays in the word (`a1<f`: the word is a1, the < is stdin's)
+_HN_TOKEN_RX = re.compile(r'\d*<+|\d*>+|[^\s;&|()<>`]+|[;&|()`\n]+')
+
+
+def _hn_fed(base, cmd):
+    """True when the command hands the file named base to a reader's stdin or output: a < redirect of it (`< f`,
+    `0<f`, `$(< f)`; not << / <<<, whose word is no file), or a word of a cat / head / tail command (`cat f | bash`,
+    `$(cat f)`, `<(cat f)`). One forward pass over the tokens: each simple command's first word, a redirection's
+    target skipped (`< x cat f`, `2>/dev/null cat f`: cat is the command)."""
+    pre, feeder, skip, prev = True, False, False, None
+    for m in _HN_TOKEN_RX.finditer(cmd):
+        tok = m.group()
+        if tok[0] in ';&|()`\n':
+            pre, feeder, skip, prev = True, False, False, tok
+            continue
+        redir = prev is not None and prev[-1] in '<>'
+        if tok[-1] in '<>':
+            prev = tok
+            continue
+        word = strip_quotes(tok)
+        if word == base or word.endswith('/' + base):
+            if (redir and prev.lstrip('0123456789') == '<') or feeder:
+                return True
+        if pre and not redir:
+            name = os.path.basename(word)
+            if skip:
+                skip = False
+            elif name in _HN_FEED_READERS:
+                pre, feeder = False, True
+            elif word.startswith('-'):
+                skip = word in _FEEDER_ARG_FLAGS
+            elif not (name in _HN_PRE_WORDS or word.isdigit() or _FEEDER_ASSIGN_RX.match(word)):
+                pre = False
+        prev = tok
+    return False
+
+
+def _hn_shell_file(path, body, cmd, piped=()):
+    """True when a shell may run this file's text as code: not a data or non-shell extension, a shell shebang, a
+    shell word / source / . right before its name in the command (after options, -o's word too), or (card 3bcd4514)
+    the command feeds the file to a reader of code: a < redirect / a cat-like word of it (_hn_fed), or a word of a
+    pipeline into a shell (piped: stdin_pipelines' words), and a shell that reads its stdin or a substitution as code
+    stands in the command (_hn_reader_rx). Not seen: a name the command computes, and other filters (`sed '' f |
+    bash` outside a pipeline into a shell, `$(sed '' f)`)."""
     if os.path.splitext(path)[1].lower() not in _HN_NOT_SHELL_EXT or _HN_SHEBANG_RX.match(body):
         return True
-    base = re.escape(os.path.basename(path))
-    return re.search(r'(?:^|[\s;&|(`/])(?:(?:ba|z|k|da)?sh|source|\.)[ \t]+(?:-\S+[ \t]+)*[\'"]?[^\s;&|]*?' + base
-                     + r'(?![^\s;&|\'")])', cmd) is not None
+    name = os.path.basename(path)
+    base = re.escape(name)
+    if re.search(r'(?:^|[\s;&|(`/])(?:(?:ba|z|k|da)?sh|source|\.)(?:' + _HN_OPTS_OVER + r'|' + _HN_OPTS
+                 + r'[ \t]+[\'"]?[^\s;&|]*?' + base + r'(?![^\s;&|\'")]))', cmd) is not None:
+        return True
+    # piped: the lexer's words, unquoted already (`sed p 'f' | bash`, `'f'`, `\f`: measured 11-20)
+    fed = any(os.path.basename(w) == name for w in piped) or _hn_fed(name, cmd)
+    return fed and _hn_reader_rx().search(cmd) is not None
 
 
 # card 39d885ef (Viktor 43793 MEDIUM 1): True while pipes_union() reads the text a second time, with every
@@ -1577,9 +1661,24 @@ MODULE_FLAG_RX = re.compile(r'-[a-zA-Z]*m')
 MODULE_JOINED_RX = re.compile(r'-[bBdEhiIOPqsSuvVx]*m([A-Za-z_\'"$`].*)')
 MODULE_NAME_RX = re.compile(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*){0,7}')
 # The script on stdin (Viktor 41715 LOW d): `python3 < m.py`, `python3 - < m.py`, `cat m.py | python3`. Only when the
-# command runs an interpreter.
-REDIRECT_RX = re.compile(r'(?<![<\d&])<(?![<(&])[ \t]*' + PATH_TOKEN)
-CAT_RX = re.compile(SCRIPT_POSITION + r'cat((?:[ \t]+[\'"]?' + WORD + r'+[\'"]?)+)')
+# command runs an interpreter, or (card 3bcd4514) a reader of shell code stands in it (_hn_reader_rx, eval too):
+# `eval "$(cat m.sh)"` and `eval "$(< m.sh)"` ran the file's keychain call on main. A < after a digit is read too (card 3bcd4514): `bash 0<m.sh` (fd 0) and `bash -s a1<m.sh` (a
+# digit glued to a word is no fd: the word is a1, the < is stdin's) ran m.sh on main; `2<f` (another fd) is read on
+# purpose (only a file more).
+REDIRECT_RX = re.compile(r'(?<!<)<(?![<(&])[ \t]*' + PATH_TOKEN)
+# card 3bcd4514: a path to the binary is the same binary (`eval "$(/bin/cat m.sh)"` ran its keychain call on main)
+_CAT_ARGS = r'((?:[ \t]+[\'"]?' + WORD + r'+[\'"]?)+)'
+CAT_RX = re.compile(SCRIPT_POSITION + r'(?:' + WORD + r'*/)?cat' + _CAT_ARGS)
+# head and tail print the file too (`eval "$(head m.sh)"`, `head m.py | python3` ran it on main), but only where what
+# they print can become code: in a substitution, or piped straight into an interpreter. Everywhere else (`head -1
+# HANDOFF.md && bash x.sh`, `tail out.txt; python3 ...`) they read an output file: the replay of 11-20 had 105
+# fleet commands blocked by such a file (mutation logs, HANDOFF.md, the error register) and none of them ran it.
+HEADTAIL_RX = re.compile(r'(?:\$\(|<\(|`)[ \t]*' + CHAIN + r'(?:' + WORD + r'*/)?(?:head|tail)' + _CAT_ARGS
+                         + r'|' + SCRIPT_POSITION + r'(?:' + WORD + r'*/)?(?:head|tail)' + _CAT_ARGS
+                         + r'(?=[ \t]*\|(?!\|)[ \t]*\\?[\'"]?' + INTERP + r'[\'"]?(?=\s|$)'
+                         # an interpreter given its code by -c / -e reads the pipe as data (`tail -1 reg.jsonl |
+                         # python3 -c 'import json...'`, the fleet's error-register form: 5 of the replay's rows)
+                         + r'(?![^\n;&|()]*?[ \t][\'"]?-(?-i:[A-Za-z]*[ce])(?=[\s\'"]|$)))', re.I)
 # Shell variables set in the command (Viktor 41715 LOW f: `F=m.py; python3 $F`), and every cd in order, a relative one
 # on top of the one before (LOW b: `cd sub && python3 only.py`).
 ASSIGN_RX = re.compile(r'''(?<![\w$])([A-Za-z_]\w*)=(['"]?)([^\s'";|&<>()`$]+)\2(?=\s|$|;)''')
@@ -2489,10 +2588,13 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
         raw = expand(cmd)
         groups += interp_groups(raw, raw != cmd)
         word_texts.append(raw)
-    if INTERP_RX.search(text):  # the script on stdin: only when an interpreter runs
+    # the script on stdin: only when an interpreter runs, or (card 3bcd4514) a reader of shell code: eval (`eval
+    # "$(cat m.sh)"`), and a shell under a name INTERP does not list (`$SHELL < m.sh`, `bash5 < m.sh`, `fish`; found
+    # by the mutation round). The reader's eval reads the quoted and escaped forms too (`"eval"`, `\eval`)
+    if INTERP_RX.search(text) or _hn_reader_rx().search(text):
         groups += [[m.group(1)] for m in REDIRECT_RX.finditer(text)]
-        for m in CAT_RX.finditer(text):
-            cat_words = m.group(1).split()
+        for m in [*CAT_RX.finditer(text), *HEADTAIL_RX.finditer(text)]:
+            cat_words = (m.group(1) or m.group(2)).split()
             if len(cat_words) > MAX_ARGS:
                 raise TooManyArgs(f'cat: {len(cat_words)} szó, MAX_ARGS {MAX_ARGS}')
             groups += [[strip_quotes(w)] for w in cat_words if not w.startswith('-')]
@@ -3447,7 +3549,8 @@ def script_hits(cmd, cwd):
             return found + ['script-too-slow']
         with open(path, 'rb') as f:
             body = f.read(MAX_SCRIPT_BYTES).decode('utf-8', errors='replace')
-        if hits(body, script=True) or literal_hit(body) or (_hn_shell_file(path, body, cmd) and hidden_name(body)):
+        if hits(body, script=True) or literal_hit(body) or (_hn_shell_file(path, body, cmd, pipe_words)
+                                                             and hidden_name(body)):
             found.append('script-file')
             break
     return found
