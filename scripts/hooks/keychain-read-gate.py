@@ -17,6 +17,14 @@ dump-$(echo keychain)`, `eval security "$(..)"`, `bash -c "security $(..)"`) blo
 subcommand with a made argument (`security find-certificate -c "$NAME"`) passes, and so does a loop variable over a
 literal list of non-secret subcommands (`for s in add-trusted-cert create-keypair; do security $s -h; done`). Not
 seen: a name with quotes inside it (`s"ec"urity $(..)`; the rule reads the text before the quote removal).
+Known limits of the made-subcommand rule (Viktor 49221, Kernel's independent probe 49215; old, LOW, not seen on
+main either): (1) a subcommand a glob makes at run time: only a $ or a backtick counts as "made", so `security
+dump-k*`, `security [d]ump-keychain`, `security dump-keych?in` pass, and the shell runs the secret subcommand when a
+file of that name is in the cwd (the same command may create it: `touch dump-keychain; security dump-k*`); brace
+expansion (`dump-{keychain,x}`) blocks. (2) The loop-variable exception and a sourced file: after `source f` or `. f`
+the gate still takes the loop variable for its literal list value (`for s in add-trusted-cert; do :; done; . ./f.sh;
+security $s`, f.sh setting s=dump-keychain); every rewrite the shell text itself shows (assignment, read, printf
+-v, mapfile, declare, eval, let, +=, a function, unset with a default) blocks.
 Hidden name (card 03a336e5, Viktor 47750/47751 LOW): a simple command whose first word is not literal (a $ or a
 backtick in it: `$(echo security)`, `` `echo security` ``, `$s`, `${S:-security}`, `sec$(echo urity)`) and that has
 find-generic-password, find-internet-password or dump-keychain as a word of its own blocks, whatever the name
@@ -28,7 +36,9 @@ extension, a shell shebang, or a shell / source / . before its name): a made nam
 Command position: the start of the command, or after ; & | ( ) { } a newline, a backtick, $( , an opening quote
 (`bash -c "security ..."`, `ssh host 'security ...'`), after find's -exec / -execdir / -ok, and after the
 wrapper and keyword words env, sudo, doas, sandbox-exec, exec, command, nohup, time, nice, xargs, caffeinate, arch,
-builtin, timeout, stdbuf, setsid, if, then, else, elif, do, while, until, `!`, their flags, numbers (`timeout 5`,
+builtin, timeout, stdbuf, setsid, if, then, else, elif, do, while, until, zsh's coproc, noglob, nocorrect and
+repeat (card d58d5c30, Viktor 49221 MEDIUM: `noglob security find-...` ran in zsh, the agent shell), `!`, their
+flags, numbers (`timeout 5`, `repeat 1`,
 `nice -n 5`), VAR=value assignments and redirections (`>/dev/null`, `2> err`, `</dev/null`, `>&2`; Viktor 41970
 INFO 5, card 15896271). The & of a redirection (`>&2`, `<&3`, `&>x`) is no command end: `x >&2 security ...`
 runs x with the word as an argument, and passes. A path before it counts (`/usr/bin/security`). Case-insensitive: the default macOS volume
@@ -146,7 +156,7 @@ import sys
 import time
 
 WRAPPERS = (r'(?:env|sudo|doas|sandbox-exec|exec|command|nohup|time|nice|xargs|caffeinate|arch|builtin|timeout|stdbuf|setsid'
-            r'|if|then|else|elif|do|while|until|eval|watch)')
+            r'|if|then|else|elif|do|while|until|eval|watch|coproc|noglob|nocorrect|repeat)')
 # Command position, then any words that may stand before the command: wrapper words, their flags, a number (a
 # duration or a niceness: `timeout 5`, `nice -n 5`), VAR=value assignments, `!`. One token matches one way only (a
 # token starts with a letter and is a wrapper, with `-`, with a digit or `+`/`.`, or is NAME=...; `\s+` ends it):

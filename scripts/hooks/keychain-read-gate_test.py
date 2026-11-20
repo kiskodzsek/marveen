@@ -735,7 +735,16 @@ BLOCK += ['s3curity ` printf dump-keychain`', 's3curity dump-` printf keychain`'
           'shopt -s extglob\ns3curity +(dump-keychai)n$(true)', 'shopt -s extglob\ns3curity !(zzz)$(true)',
           'setopt kshglob; s3curity @(dump-keychai)n$(true)', 'setopt extendedglob; s3curity (#i)DUMP-keychai(n)$(true)']
 
+# card d58d5c30 round 5 (Viktor 49221 MEDIUM; all passed main d1d4936b = the live gate, zsh ran the stub): zsh's
+# precommand modifiers before a literal call
+BLOCK += ['noglob s3curity find-generic-password -s x', 'nocorrect s3curity dump-keychain',
+          'repeat 1 s3curity dump-keychain', 'coproc s3curity find-internet-password -s x',
+          'true; nocorrect noglob /usr/bin/s3curity export -o x.p12', 'repeat 2 nocorrect s3curity dump-keychain']
+
 ALLOW = [
+    # card d58d5c30 round 5: the four zsh words in prose, and before a harmless command
+    'echo coproc noglob nocorrect repeat 1 s3curity dump-keychain', "git commit -m 'repeat: noglob, nocorrect, coproc'",
+    'noglob ls *.py', 'repeat 3 echo hi', 'nocorrect s3curity list-keychains',
     # card c7234bed (L1): the decoded feeders into no shell, a harmless decoded call, another program's substitution
     # card c7234bed (48033 M1 rework): the two rows that blocked unread before (the old count of a quoted text's raw
     # sites, and of a bash -c payload read twice; nothing secret runs in either): an echo prints its quoted text, and
