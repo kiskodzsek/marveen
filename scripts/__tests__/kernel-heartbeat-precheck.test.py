@@ -48,6 +48,8 @@ class Base(unittest.TestCase):
         self.m.GUARD_STATE = os.path.join(self.d, 'guard.json')
         self.m.GITCONFIG = os.path.join(self.d, 'gitconfig')
         self.m.SENT_STATE = os.path.join(self.d, 'sent.json')   # never the live state file
+        self.m.DISK_SENT_STATE = os.path.join(self.d, 'lemez.json')   # never the live disk state / host log
+        self.m.HOST_LOG = os.path.join(self.d, 'host-monitor.log')
         self.m.PROMPT_REVIEW_AT = self.now + 10**6                 # the date rule is off unless a test moves it
 
     def tearDown(self):
@@ -336,6 +338,86 @@ class Disk(Base):
                     self.assertEqual(out, 'SKIP')
                 else:
                     self.assertIn('< 10 GiB', out)
+
+    def stretch(self, log_lines, sent=None, raw_sent=None):
+        """Under the limit, with a host-monitor log and the round's sent-state (never the live files)."""
+        self.free(int(9 * GIB))
+        self.m.HOST_LOG = os.path.join(self.d, 'host-monitor.log')
+        self.m.DISK_SENT_STATE = os.path.join(self.d, 'lemez.json')
+        with open(self.m.HOST_LOG, 'w') as f:
+            f.write(''.join(ln + '\n' for ln in log_lines))
+        if raw_sent is not None or sent is not None:
+            with open(self.m.DISK_SENT_STATE, 'w') as f:
+                f.write(raw_sent if raw_sent is not None else json.dumps({'last_sent_host_state_ts': sent, 'free_gib': 8}))
+        return self.out('disk')
+
+    def at(self, stamp):
+        return time.mktime(time.strptime(stamp, '%Y-%m-%d %H:%M:%S'))
+
+    WARN = '2026-11-20 02:50:33 ok -> band=warn free=65% swap=23% swapgb=0 disk=6GiB load1=3.15/12cpu therm=0 reason=free disk 6 GiB'
+    OLD = '2026-11-18 17:31:15 warn -> band=ok free=74% swap=26% swapgb=0 disk=11GiB load1=8.98/12cpu therm=0'
+
+    def test_reported_stretch_skips(self):
+        # 2026-11-20: reported at 03:00:35 for the stretch that began 02:50:33 -> the later rounds stay quiet
+        self.now = self.at('2026-11-20 08:30:00')
+        self.assertEqual(self.stretch([self.OLD, self.WARN], sent=self.at('2026-11-20 03:00:35')), 'SKIP')
+
+    def test_report_at_the_stretch_start_skips(self):
+        self.now = self.at('2026-11-20 08:30:00')
+        self.assertEqual(self.stretch([self.WARN], sent=self.at('2026-11-20 02:50:33')), 'SKIP')
+
+    def test_report_from_an_earlier_stretch_wakes(self):
+        self.now = self.at('2026-11-20 08:30:00')
+        self.assertIn('< 10 GiB', self.stretch([self.OLD, self.WARN], sent=self.at('2026-11-20 02:50:32')))
+
+    def test_a_later_band_move_wakes(self):
+        # warn -> crit after the report: a new line, so a new stretch to report
+        self.now = self.at('2026-11-20 08:30:00')
+        crit = '2026-11-20 05:00:00 warn -> band=crit free=60% disk=3GiB reason=free disk 3 GiB'
+        self.assertIn('< 10 GiB', self.stretch([self.WARN, crit], sent=self.at('2026-11-20 03:00:35')))
+
+    def test_last_band_line_back_to_ok_wakes(self):
+        # the monitor says ok while statvfs says < 10 GiB: do not trust the old report
+        self.now = self.at('2026-11-20 08:30:00')
+        back = '2026-11-20 04:00:00 warn -> band=ok free=65% disk=10GiB'
+        self.assertIn('< 10 GiB', self.stretch([self.WARN, back], sent=self.at('2026-11-20 03:00:35')))
+
+    def test_a_report_from_the_future_wakes(self):
+        # a forged far-future mark must not silence every later stretch
+        self.now = self.at('2026-11-20 08:30:00')
+        self.assertIn('< 10 GiB', self.stretch([self.WARN], sent=self.now + 3600))
+
+    def test_unreadable_inputs_wake(self):
+        self.now = self.at('2026-11-20 08:30:00')
+        ok_sent = self.at('2026-11-20 03:00:35')
+        cases = {
+            'no sent file': dict(log_lines=[self.WARN]),
+            'sent not json': dict(log_lines=[self.WARN], raw_sent='{'),
+            'sent not a dict': dict(log_lines=[self.WARN], raw_sent='[1]'),
+            'sent ts a string': dict(log_lines=[self.WARN], raw_sent='{"last_sent_host_state_ts": "1795140035"}'),
+            'sent ts NaN': dict(log_lines=[self.WARN], raw_sent='{"last_sent_host_state_ts": NaN}'),
+            'sent ts bool': dict(log_lines=[self.WARN], raw_sent='{"last_sent_host_state_ts": true}'),
+            'empty log': dict(log_lines=[], sent=ok_sent),
+            'no band line': dict(log_lines=['2026-11-20 02:50:33 something else'], sent=ok_sent),
+            'bad date': dict(log_lines=['2026-13-45 99:99:99 ok -> band=warn'], sent=ok_sent),
+        }
+        for name, kw in cases.items():
+            with self.subTest(name):
+                self.assertIn('< 10 GiB', self.stretch(**kw))
+        os.remove(self.m.HOST_LOG)
+        self.assertIn('< 10 GiB', self.out('disk'))   # no log file at all
+
+    def test_over_the_limit_skips_whatever_the_state(self):
+        self.free(int(11 * GIB))
+        self.m.HOST_LOG = os.path.join(self.d, 'none.log')
+        self.m.DISK_SENT_STATE = os.path.join(self.d, 'none.json')
+        self.assertEqual(self.out('disk'), 'SKIP')
+
+    def test_default_disk_state_paths_are_the_live_ones(self):
+        m = load()
+        root = os.path.dirname(os.path.dirname(os.path.dirname(MODULE)))
+        self.assertEqual(m.DISK_SENT_STATE, os.path.join(root, 'agents', 'kernel', 'state', 'lemez-10gib-jelzes.json'))
+        self.assertEqual(m.HOST_LOG, os.path.join(root, 'store', 'host-monitor.log'))
 
     def test_default_thresholds_are_the_tasks_own(self):
         m = load()
