@@ -166,6 +166,14 @@ SEND_CASES = [
     ('send behind env and cd ;', 'cd /x; env A=1 bash tools/msg-close.sh "r" 1 | tail -1 && echo done', 2),
     ('send piped twice', 'bash scripts/agent-msg.sh a b c 2>&1 | tee /tmp/o | tail -1 && echo x', 2),
     ('pipefail set AFTER the send pipeline', 'bash scripts/agent-msg.sh a b c | tail -1 && set -o pipefail && echo x', 2),
+    # round 1 (Viktor ba07fdfe): each of these passed on 4ab58b30
+    ('B47 bash -o pipefail is the inner shell only', 'bash -o pipefail scripts/agent-msg.sh a b c | tail -2 && echo ok', 2),
+    ('B47 bash -O extglob', 'bash -O extglob scripts/agent-msg.sh a b c | tail -2 && echo ok', 2),
+    ('B33 set +o pipefail switches it off', 'set -o pipefail; set +o pipefail; bash scripts/agent-msg.sh a b c | tail && echo x', 2),
+    ('B34 set -- -o pipefail is positional', 'set -- -o pipefail; bash scripts/agent-msg.sh a b c | tail && echo x', 2),
+    ('B48 send piped into a send', 'bash scripts/agent-msg.sh a b c | bash tools/kernel-msg.sh klodel - && echo x', 2),
+    ('unsetopt pipefail', 'setopt pipefail; unsetopt pipefail; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 2),
+    ('setopt nopipefail', 'set -o pipefail; setopt no_pipefail; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 2),
     # allowed
     ('pipefail before the piped send', 'set -o pipefail; bash tools/send-and-close.sh x | tail -2 && bash tools/send-stamped.sh k f', 0),
     ('set -euo pipefail before', 'set -euo pipefail\nbash scripts/agent-msg.sh a b c | tail -1 && echo x', 0),
@@ -177,6 +185,13 @@ SEND_CASES = [
     ('grep in a send script', 'grep -n x tools/card-comment.sh | head -3 && echo y', 0),
     ('send name inside quotes only', 'echo "agent-msg.sh a | tail" | wc -l && echo x', 0),
     ('control flow fails open', 'for f in a b; do bash scripts/agent-msg.sh a b $f | tail -1 && echo x; done', 0),
+    ('zsh setopt pipefail (INFO V04)', 'setopt pipefail; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 0),
+    ('zsh setopt PIPE_FAIL (INFO V05)', 'setopt PIPE_FAIL; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 0),
+    ('set +o then -o pipefail: on', 'set +o pipefail; set -o pipefail; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 0),
+    ('set -eo pipefail combined', 'set -eo pipefail; bash scripts/agent-msg.sh a b c | tail -1 && echo x', 0),
+    ('bash -o pipefail, send last in the pipe', 'cat m | bash -o pipefail scripts/agent-msg.sh a b - && echo x', 0),
+    ('known limit: send behind a variable', 'X=tools/send-stamped.sh; bash $X klodel f | tail -1 && echo next', 0),
+    ('known limit: send inside bash -c', "bash -c 'bash scripts/agent-msg.sh a b c' | tail -1 && echo x", 0),
 ]
 
 
