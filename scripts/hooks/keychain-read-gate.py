@@ -11,6 +11,12 @@ hidden-name rule below. Do not rely on it.
 What blocks (exit 2): a `security` call in command position whose subcommand reads or exports secrets:
   find-generic-password, find-internet-password, dump-keychain, export,
 or that reads its subcommands from stdin (`security -i`, `security -p <prompt>`), which would hide the subcommand.
+Made subcommand (card d58d5c30, Viktor 48033 LOW L2): `security` in command position whose first word after its
+options is not literal (a $ or a backtick in it: `security $(echo dump-keychain)`, `security "$X"`, `security
+dump-$(echo keychain)`, `eval security "$(..)"`, `bash -c "security $(..)"`) blocks, whatever it prints. A literal
+subcommand with a made argument (`security find-certificate -c "$NAME"`) passes, and so does a loop variable over a
+literal list of non-secret subcommands (`for s in add-trusted-cert create-keypair; do security $s -h; done`). Not
+seen: a name with quotes inside it (`s"ec"urity $(..)`; the rule reads the text before the quote removal).
 Hidden name (card 03a336e5, Viktor 47750/47751 LOW): a simple command whose first word is not literal (a $ or a
 backtick in it: `$(echo security)`, `` `echo security` ``, `$s`, `${S:-security}`, `sec$(echo urity)`) and that has
 find-generic-password, find-internet-password or dump-keychain as a word of its own blocks, whatever the name
@@ -58,8 +64,10 @@ block, measured by Viktor 42251), and a quoted string that starts with a wrapped
 starts with the call (`git commit -m "sudo -u root security dump-keychain"`).
 Allowed: every other `security` subcommand (list-keychains, find-identity, find-certificate, show-keychain-info,
 verify-cert ...) and the word in plain text (`grep find-generic-password notes.md`, `git commit -m "fix: security"`).
-Known false positive: a quoted string that starts with the blocked call (`grep "security dump-keychain" f`):
-search for the subcommand alone instead.
+Known false positive: a quoted string that starts with the blocked call (`grep "security dump-keychain" f`, and
+since card d58d5c30 `grep "security $(date)" f`, and a quoted text whose closing backtick of a quoted call is
+followed by a quote: `git commit -m "doc: run `security list-keychains`"`, Viktor 48765 F01; and `xargs -i security
+{}`, which macOS xargs does not run): search for the subcommand alone instead, or write a name that is not the call.
 Script files (card bc009036; Kernel 41497, Viktor 41502, 2026-11-13: a keychain measurement ran as
 `python3 measure.py` and wrote a fake token into the login keychain; the gate saw only "python3 measure.py"). The
 file a command runs is read and judged too:
@@ -234,7 +242,7 @@ RULES = [
                                                     re.I))),
     ('stdin-mode', NeedRule('security', re.compile(POSITION + BINARY + r'(?:\s+-\S+)*?\s+-[a-z]*[ip][a-z]*'
                                                    r'(?=\s|$|[;&|)`\'"])', re.I))),
-]
+]  # + made-subcommand (card d58d5c30), after FnRule below
 # git's credential paths into the login keychain (Viktor 41943 HIGH, Klodel 41948, card 04d67b39): the system git
 # config names osxkeychain as the helper, so `git credential fill` (and approve / reject, which store and erase) and
 # the helper itself (`git credential-osxkeychain get`, `git-credential-osxkeychain get`, by path too) read or write
@@ -592,15 +600,173 @@ def env_value_hit(text, var_rx, needle_rx):
 class FnRule:
     """A rule judged by a function (the same `search(text)` call as a compiled pattern). plain: judged on the
     command text only (and with its quotes taken off), not on the text with the wrapped commands' bounds: the
-    function walks the wrappers itself, and a bound inside `git;config ...` would cut git from its own options."""
-    def __init__(self, fn, plain=False):
-        self.search, self.plain = fn, plain
+    function walks the wrappers itself, and a bound inside `git;config ...` would cut git from its own options.
+    raw (card d58d5c30): judged only on the texts before the quote removal: the removal turns quoted data into a
+    command position (`grep "a\\|security" $F` read as `a|security $F`)."""
+    def __init__(self, fn, plain=False, raw=False):
+        self.search, self.plain, self.raw = fn, plain, raw
 
 
 GIT_RULES += [('git-credential-helper', FnRule(lambda t: env_value_hit(t, _PARAMS_RX, _OSXKEYCHAIN_RX))),
               ('git-config-override', FnRule(lambda t: env_value_hit(t, _ONLY_PARAMS_RX, _INCLUDE_NAMED_RX))),
               ('git-config-override', FnRule(config_override, plain=True)),
               ('git-config-override', FnRule(config_write))]
+
+# card d58d5c30 (Viktor 48033 LOW L2): the literal name with a subcommand the shell makes at run time (`security
+# $(echo dump-keychain)`, `` `echo ...` ``, `"$X"`, `${X}`, `dump-$(echo keychain)`, `eval security "$(..)"`,
+# `bash -c "security $(..)"`): bash and zsh ran the secret subcommand, main allowed all 11 forms (measured 11-20, a
+# stub on PATH). What the substitution prints is unknown here, so the first word after the options that is not
+# literal blocks, whatever it turns out to be (the mirror of the hidden-name rule). Not literal: a $ that starts an
+# expansion ($x, ${, $(, $', $", $@ ...), a brace list or range (`{dump-keychain,}`, `dump-{keychain,x}`, `{a..b}`),
+# or a backtick that OPENS a substitution. A backtick closes the code span or substitution it stands in (`` `security
+# add-trusted-cert` `` in prose, `` `security ...`, ``, `` `SECURITY NOTICE` ``: the fleet replay of 11-20 had 20 such
+# rows of documentation and gate texts) only when BOTH: an odd number of backticks stands before it (Viktor 48765
+# P1: `` security ` printf dump-keychain` `` opens with a blank after it), and no command's first char follows it
+# (an escaped `\`` or a backtick in a comment or in single quotes counts in the parity, and `` echo \`; security
+# `printf dump-keychain` `` ran in bash and zsh: parity alone let it pass, measured 11-20, d58d5c30 r2).
+# xargs gives the call its subcommand from stdin (Viktor P4): no word after the options, or the -I / -i / -J string
+# in it.
+# Read on the texts before the quote removal only (FnRule raw): the removal made `grep "x\|security" $F` a pipe into
+# `security $F` (a replay row). The quoted name is read here instead: "security" / 'security' (\security needs
+# nothing: normalise() takes the backslash off a letter; the mutation round's `\\?` changed no verdict), its
+# opening quote after a command position (POSITION counts a quote as one, so a lookbehind on the quote made every
+# quoted argument a command: `grep -n "security" "$K"`, a row of the replay's second run).
+# One form is read: a loop variable over a literal list (`for s in add-trusted-cert create-keypair; do security $s
+# -h`, Viktor's and Kernel's help loops in the same replay): when every `for <var> in` list of that variable in the
+# text is plain words, none a secret subcommand or an option, and the variable's name occurs nowhere else in the text
+# but in `for NAME in` and as a whole `$NAME` / `${NAME}` (Viktor P3: printf -v, `${s:=}`, zsh `for s (..)`, select,
+# foreach name it otherwise), the call is the list's subcommands and passes. Any other word equal to the name counts,
+# quoted or escaped too (`printf -v 's'`, `printf -v \s` name it): a one-letter name also in `sed 's/^ *//'` or
+# `grep '^\s+-'` blocks the loop (one fleet replay row, Kernel's help loop, 11-20); a longer name passes.
+_MADE_SUB_RX = re.compile(POSITION + r'(?:"' + BINARY + r'"|\'' + BINARY + r"'|" + BINARY + r')'
+                          + OPTIONS + r'(?:\s+(?=([^\s;&|<>`]*)(\$[\w({@*#?!$\'"-]|`|\{[^\s{}]*(?:,|\.\.))))', re.I)
+_BT_OPENS_RX = re.compile(r'[\w$(/\\{"\'-]')  # a command's first char after a backtick: it opens a substitution
+# The command xargs runs is found by its WRAP_ARGS walk (wrap_command_start: its flags and their words, one way to
+# read each word), not by a regex over the words between: `[^;&|\n]*?` took any word there, and with no end to the
+# name the call was `xargs grep securityProfile` and `xargs grep -l security` (d58d5c30 r2 fleet replay: 14 runs of
+# another gate's test, whose rows hold the first, blocked; Viktor's, Kernel's and mine).
+_XARGS_RX = re.compile(r'(?<![\w-])xargs\b', re.I)
+_XARGS_CALL_RX = re.compile(r'(?:' + WORD + r'*/)?(["\']?)security\1(?![^\s;&|)<>])((?:[ \t]+-\S+)*)'
+                            r'(?:[ \t]+([^\s;&|)<>]+))?', re.I)
+
+
+def _xargs_sub(text):
+    for x in _XARGS_RX.finditer(text):
+        k = wrap_command_start(text, x.end(), 'xargs', True)
+        # Viktor 48860 LOW 2 (his prop2 J2): `xargs env security`, `xargs nice -n 5 security`: walk each wrapper the
+        # command is, up to WRAP_PASSES (past that: not read, blocks)
+        for _ in range(WRAP_PASSES):
+            if k is None or k < 0:
+                break
+            w = _WRAP_NAME_RX.match(text, k)
+            if not w:
+                break
+            k = wrap_command_start(text, w.end(), w.group(1).lower(), True)
+        else:
+            k = -1
+        if k is None:
+            continue
+        if k < 0:
+            return x  # past MAX_ARGS flag words: not read, blocks (as wrapper_bounds)
+        m = _XARGS_CALL_RX.match(text, k)
+        if not m:
+            continue
+        if m.group(3) is None:
+            return m
+        r = re.search(r'\s-(?:[IJ][ \t]*(\S+)|i(\S*))', ' ' + text[x.end():k])  # BSD -J % puts it at the % too
+        if r and (r.group(1) or r.group(2) or '{}') in m.group(3):
+            return m
+    return None
+
+
+_MADE_VAR_RX = re.compile(r'"?\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))"?(?=[\s;&|)]|$)')
+_FOR_RX = re.compile(r'(?<![\w$-])for[ \t]+([A-Za-z_]\w*)[ \t]+in[ \t]+([^;\n]*)')
+_LIST_WORD_RX = re.compile(r'[A-Za-z0-9_./:+=,@%^-]+')
+_SECRET_SUB_RX = re.compile(SECRET_SUB, re.I)
+_SECRET_SUB_NAMES = tuple(SECRET_SUB[3:-1].split('|'))  # the alternatives of SECRET_SUB, one source
+_PREFIX_UNSURE_RX = re.compile(r'[$`{}*?\[\]~()^#]')  # Viktor r3: zsh (..), ^, # and bash extglob @(..) glob too
+
+
+def _prefix_rules_out(prefix):
+    """True when the literal start of the made word already rules out every secret subcommand: whatever the shell
+    makes after it, the word starts with this, and no secret subcommand (nor an abbreviation of one) does. Quotes and
+    backslashes are taken off; a `$`, a backtick, a brace, a glob or a tilde in it: not sure, not ruled out."""
+    if not prefix or _PREFIX_UNSURE_RX.search(prefix):
+        return False
+    lit = prefix.replace('\\', '').replace('"', '').replace("'", '').lower()
+    return not any(n.startswith(lit) for n in _SECRET_SUB_NAMES)  # an empty start ('"$X"') rules out nothing
+
+
+_READ_VAR_RX = re.compile(r'\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))')
+_NAME_WORD_RX = re.compile(r'(?<![\w])[A-Za-z_]\w*')
+
+
+def _literal_loops(text):
+    """The names that are for-loop variables over plain non-secret words only, and that occur NOWHERE else in the
+    text but in `for NAME in` and as a whole `$NAME` / `${NAME}` word (Viktor prop: printf -v, unset + ${s:=},
+    zsh ${s::=}, zsh for s (..), select, foreach all name the variable some other way)."""
+    lists, spans = {}, set()
+    for m in _FOR_RX.finditer(text):
+        lists.setdefault(m.group(1), []).append(m.group(2).split())
+        spans.add(m.start(1))
+    uses = {m.start(1) if m.group(1) else m.start(2) for m in _READ_VAR_RX.finditer(text)}  # $s=1 only reads
+    other = set()  # one pass over every name-like word: a name seen outside `for NAME in` and `$NAME` is taken
+    for o in _NAME_WORD_RX.finditer(text):
+        if o.group(0) in lists and o.start() not in spans and o.start() not in uses:
+            other.add(o.group(0))
+    return {n for n, ls in lists.items() if n not in other and all(ls) and all(
+        _LIST_WORD_RX.fullmatch(w) and not w.startswith('-') and not _SECRET_SUB_RX.fullmatch(w)
+        for words in ls for w in words)}
+
+
+def _real_backticks(text):
+    """The positions of the backticks the shell reads as a substitution's ends (Viktor 48860 LOW 1: an escaped
+    `\\``, a `'`'`, a `$'\\`'` or a commented backtick before the real opener made it look odd). A closing backtick
+    needs an odd count by this AND by the plain count. One reading per text, counted with bisect.
+    The lexer's reading: the backticks of the code class. Not his hand count (prop2 J1), measured with bash and zsh
+    (r3/gbt-hd3): `cat <<'E'` + a body holding one backtick + `<name> ` printf dump-keychain`` ran dump-keychain, and
+    the hand count took the literal body backtick for real. A heredoc body, quoted or not, is read apart from the line
+    around it, so none of its backticks counts (`<<\\E` reaches here as `<<E`: normalise takes the backslash off a
+    letter). When the lexer does not read the text (a problem such as a trailing unclosed quote, which bash runs the
+    lines before; or past its bounds): no backtick is real, so every one after the name opens and blocks (the hand
+    count there let the heredoc form with a trailing `echo "` through, bash ran it: r3/gbt-hd4)."""
+    lx = lex_or_none(text)
+    if lx is None:
+        return []
+    cls = lx['cls']
+    return [b.start() for b in re.finditer('`', text) if cls[b.start()] == 'c']
+
+
+def made_subcommand(text):
+    """The made-subcommand rule (card d58d5c30, see above); a literal search for the name first (as NeedRule)."""
+    if 'security' not in text.lower():
+        return None
+    x = _xargs_sub(text)
+    if x:
+        return x
+    loops = plain = real = None
+    for m in _MADE_SUB_RX.finditer(text):
+        bt = m.end() + len(m.group(1))
+        if m.group(2) == '`':
+            if plain is None:  # positions once, counted with bisect: text.count(.., 0, bt) per call was quadratic
+                plain = [b.start() for b in re.finditer('`', text)]  # (50 000 closing spans, 1.15 MB: 7.1 s, r3)
+                real = _real_backticks(text)
+            if (bisect.bisect_left(plain, bt) % 2 and bisect.bisect_left(real, bt) % 2
+                    and not _BT_OPENS_RX.match(text, bt + 1)):
+                continue  # an odd count before it (plain AND real) and no command's first char after it: it closes a span
+        if _prefix_rules_out(m.group(1)):
+            continue  # `<name> definer`...`: no secret subcommand starts with the word's literal start
+        v = _MADE_VAR_RX.match(text, m.end())
+        if v:
+            if loops is None:
+                loops = _literal_loops(text)
+            if (v.group(1) or v.group(2)) in loops:
+                continue
+        return m
+    return None
+
+
+RULES += [('made-subcommand', FnRule(made_subcommand, raw=True))]
 
 # Card 03a336e5 (Viktor 47750/47751 LOW, defense-in-depth; the class the docstring names): a command NAME the shell
 # makes at run time (`$(echo security) dump-keychain`, `` `echo security` ``, `s=security; $s ...`, `${S:-security}`,
@@ -1529,11 +1695,13 @@ def hits_in(text, script=False):
     # Second pass with every quote and backslash removed: "security" find-..., s"ec"urity, security "export".
     # More false positives than the first pass, which the gate already accepts (see the docstring).
     texts = [text] if bounded == text else [text, bounded]
+    raw = list(texts)  # card d58d5c30: the texts before the quote removal (an FnRule with raw=True reads only these)
     texts += [re.sub(r'[\'"\\]', '', t) for t in texts]
     found = []
     plain = [text, re.sub(r'[\'"\\]', '', text)]
     for name, rx in RULES + ([] if script else GIT_RULES + CMD_RULES):
-        if name not in found and any(rx.search(t) for t in (plain if getattr(rx, 'plain', False) else texts)):
+        pick = raw if getattr(rx, 'raw', False) else plain if getattr(rx, 'plain', False) else texts
+        if name not in found and any(rx.search(t) for t in pick):
             found.append(name)
     return found
 
@@ -2679,6 +2847,7 @@ WRAP_PASSES = 8
 _WRAP_NAME = (r'\\?[\'"]?(?:' + WORD + r'*/)?(' + '|'.join(sorted(WRAP_ARGS, key=len, reverse=True))
               + r')[\'"]?(?=[ \t])')
 WRAP_RX = re.compile(POSITION + _WRAP_NAME, re.I)  # the secret rules' positions (an opening quote is one)
+_WRAP_NAME_RX = re.compile(_WRAP_NAME, re.I)  # a wrapper right where a walk ended (xargs env ..., d58d5c30 r3)
 SCRIPT_WRAP_RX = re.compile(SCRIPT_POSITION + _WRAP_NAME, re.I)  # the script rules' positions
 NEXT_WRAP_RX = re.compile(CHAIN + _WRAP_NAME, re.I)  # a wrapper the walk exposed, read where the command starts
 # The walk ends at CMD_END. A ")" or a backtick there (`sudo -u $(whoami) ...`) needs no mark: it is a command
