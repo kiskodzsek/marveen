@@ -140,7 +140,7 @@ if [ -r "$MG" ] && command -v python3 >/dev/null 2>&1; then
   MG_ERR="$(printf '%s' "$C" | python3 -I "$MG" --from "$FROM" --to "$TO" 2>&1 >/dev/null)"
   MG_RC=$?
   case "$MG_RC" in
-    0) : ;;
+    0) if [ -n "$MG_ERR" ]; then printf '%s\n' "$MG_ERR" >&2; fi ;;  # a pass with a warning (rule 9) shows it
     3) echo "FAIL: send gate refused the message to $TO; nothing was sent." >&2
        printf '%s\n' "$MG_ERR" >&2
        exit 3 ;;
