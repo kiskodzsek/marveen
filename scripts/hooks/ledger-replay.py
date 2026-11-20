@@ -205,6 +205,22 @@ def _fit_output(transcript, open_q, owner, byte_budget, reply_tool=None):
     return out
 
 
+def _owner_user_id():
+    """The owner's Telegram user id (= this install's owner chat, scripts/lib/owner_chat.py), or None.
+    LEDGER_OWNER_USER_ID overrides (tests). Resolved here, not in ledger_lib: that file stays free of sys.path changes
+    for the preCheck walk of ledger-live-drain.py (schedule-trust.test.ts b4)."""
+    v = os.environ.get("LEDGER_OWNER_USER_ID")
+    if v is not None:
+        return v.strip() or None
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+        import owner_chat
+        oid = owner_chat.resolve_owner_chat_id(os.path.join(ledger_lib._install_dir(), ".env"))
+        return str(oid).strip() if oid else None
+    except Exception:
+        return None
+
+
 def main():
     payload = None
     try:
@@ -214,7 +230,7 @@ def main():
     agent_id = ledger_lib.agent_id_from_payload(payload)
 
     try:
-        rows = ledger_lib.recent(agent_id, _window_limit())
+        rows = ledger_lib.recent_with_ids(agent_id, _window_limit())
         open_q = ledger_lib.open_question(agent_id)
     except Exception:
         sys.exit(0)  # ledger unavailable -> no-op
@@ -222,6 +238,25 @@ def main():
         sys.exit(0)  # nothing to replay
 
     owner = ledger_lib.owner_name()
+
+    # SENDERNAME1120 (Klodel 48611): an inbound turn is labelled with its real sender, from the channel plugin's
+    # sender log, not with the owner's name by default. Any failure keeps the old label: the replay must not die.
+    try:
+        senders = ledger_lib.inbound_senders()
+        owner_id = _owner_user_id()
+        names = ledger_lib.sender_names()
+
+        def label(chat_id, message_id):
+            return ledger_lib.inbound_label(chat_id, message_id, owner, owner_id, senders, names)
+    except Exception:
+        def label(chat_id, message_id):
+            return owner
+    open_who = owner
+    if open_q:
+        try:
+            open_who = label(open_q[0], open_q[1])
+        except Exception:
+            open_who = owner
 
     # REPLAYTOOL924: the open-question directive named the Telegram reply tool
     # unconditionally, so a respawned session was told to answer a DISCORD DM with
@@ -241,8 +276,11 @@ def main():
 
     max_snippet = _max_snippet()
     transcript = []
-    for direction, chat_id, text, ts, att_kind, att_file_id in rows:
-        who = owner if direction == "in" else "Te"
+    for direction, chat_id, text, ts, att_kind, att_file_id, message_id in (r[:7] for r in rows):
+        try:
+            who = label(chat_id, message_id) if direction == "in" else "Te"
+        except Exception:
+            who = owner if direction == "in" else "Te"
         snippet = _snippet(text, max_snippet)
         # A transcript-less voice turn carries its file_id so the fresh session
         # can still fetch the audio content instead of seeing an opaque
@@ -263,7 +301,7 @@ def main():
     # Authoritative guard: keep the FINAL payload's real UTF-8 byte size under the
     # harness's injection cap, dropping oldest turns and re-measuring until it
     # fits (freshest END survives).
-    out = _fit_output(transcript, open_q, owner, _byte_budget(), reply_tool)
+    out = _fit_output(transcript, open_q, open_who, _byte_budget(), reply_tool)
 
     print(json.dumps(out, ensure_ascii=False))
     sys.exit(0)
