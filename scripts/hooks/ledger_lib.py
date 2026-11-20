@@ -332,6 +332,98 @@ def recent(agent_id, limit=RECENT_LIMIT):
         con.close()
 
 
+def recent_with_ids(agent_id, limit=RECENT_LIMIT):
+    """Like recent(), with the inbound's message_id appended: (direction, chat_id, text, ts, attachment_kind,
+    attachment_file_id, message_id). A separate function, not a wider recent(): callers unpack recent()'s six
+    fields, and a wider tuple would ValueError in them (HOOKARITAS821)."""
+    con = connect()
+    try:
+        rows = con.execute(
+            "SELECT direction, chat_id, text, ts, attachment_kind, attachment_file_id, message_id"
+            " FROM conversation_log"
+            " WHERE agent_id=? ORDER BY created_at DESC, id DESC LIMIT ?",
+            (str(agent_id), int(limit)),
+        ).fetchall()
+        return list(reversed(rows))
+    finally:
+        con.close()
+
+
+# --- Who wrote an inbound turn (SENDERNAME1120) ---
+# Hibanapló 2026-11-20 (Klodel 48611): the replay labelled EVERY inbound turn with the owner's name, so a team-group
+# message from another member (TG 6674) reached a fresh session as "the owner's last message", and the agent asked
+# that member for the owner's decision. The Telegram plugin logs each inbound's sender: <state>/inbound-senders.jsonl
+# (and its rotated .1), one {"at", "chat_id", "message_id", "user_id"} row per message. No person's id or name is in
+# this file: the caller passes the owner's user id (ledger-replay.py: the install's owner chat, scripts/lib/
+# owner_chat.py; a Telegram private chat id is the user id), other names come from <install>/store/sender-names.json
+# ({"<user_id>": "<name>"}). This file adds nothing to sys.path: the preCheck walk of ledger-live-drain.py, which
+# imports it, must resolve every import (src/__tests__/schedule-trust.test.ts b4).
+UNKNOWN_SENDER = "ismeretlen feladó"
+
+
+def _telegram_state_dir():
+    v = os.environ.get("TELEGRAM_STATE_DIR")
+    return v if v and v.strip() else os.path.join(_install_dir(), ".claude", "channels", "telegram")
+
+
+def inbound_senders(state_dir=None):
+    """({(chat_id, message_id): user_id}, {chat_ids seen}) from the plugin's sender log, the rotated .1 first so a
+    newer row wins. An unreadable or missing log gives two empty collections."""
+    state_dir = state_dir or _telegram_state_dir()
+    by_msg, chats = {}, set()
+    for name in ("inbound-senders.jsonl.1", "inbound-senders.jsonl"):
+        try:
+            with open(os.path.join(state_dir, name), encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(row, dict) or row.get("user_id") is None:
+                        continue
+                    chat, mid = str(row.get("chat_id")), str(row.get("message_id"))
+                    by_msg[(chat, mid)] = str(row["user_id"]).strip()
+                    chats.add(chat)
+        except OSError:
+            continue
+    return by_msg, chats
+
+
+def sender_names():
+    """{user_id: name} from LEDGER_SENDER_NAMES (JSON) or <install>/store/sender-names.json; {} when absent."""
+    raw = os.environ.get("LEDGER_SENDER_NAMES")
+    try:
+        if raw is None:
+            with open(os.path.join(_install_dir(), "store", "sender-names.json"), encoding="utf-8") as f:
+                raw = f.read()
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k).strip(): str(v).strip() for k, v in data.items() if str(v).strip()}
+
+
+def inbound_label(chat_id, message_id, owner, owner_id, senders=None, names=None):
+    """The name for an inbound turn: the owner's name only when the sender log says the owner wrote it (or the turn is
+    in the owner's private chat, where nobody else writes); a listed name; "ismeretlen [<user_id>]" for an unlisted
+    sender; UNKNOWN_SENDER for a chat the log knows but a message it does not (e.g. older than the log). A chat the
+    log has never seen (another provider, no log at all) keeps the owner's name, as before this change."""
+    by_msg, chats = senders if senders is not None else inbound_senders()
+    owner_id = str(owner_id).strip() if owner_id else None
+    names = names if names is not None else sender_names()
+    chat, mid = str(chat_id), str(message_id)
+    uid = by_msg.get((chat, mid))
+    if uid is not None:
+        if owner_id and uid == owner_id:
+            return owner
+        return names.get(uid) or f"ismeretlen [{uid}]"
+    if owner_id and chat == owner_id:
+        return owner
+    if chat not in chats:
+        return owner
+    return UNKNOWN_SENDER
+
 def source_for(agent_id, chat_id):
     """The channel envelope source ("plugin:<provider>:<server>") most recently
     recorded for this agent+chat, or None if unknown (PROVIDERVAK908).
