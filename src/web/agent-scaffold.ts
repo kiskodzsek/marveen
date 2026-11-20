@@ -819,6 +819,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsImageQuarantineGate(name)) injectImageQuarantineGate(existing)
   if (agentGetsKeychainReadGate(name)) injectKeychainReadGate(existing)
   if (agentGetsKeychainWriteGate(name)) injectKeychainWriteGate(existing)
+  if (agentGetsCredentialsWriteGate(name)) injectCredentialsWriteGate(existing)
   if (agentGetsRevocationNote(name)) injectRevocationNote(existing)
   if (agentGetsProdTreeWriteGate(name)) injectProdTreeWriteGate(existing)
   if (agentGetsTmuxKillGate(name)) injectTmuxKillGate(existing)
@@ -1744,6 +1745,51 @@ export function ensureKeychainWriteGate(name: string): boolean {
   if (hookEntriesSettled(settings, 'PreToolUse', 'keychain-write-gate.py', injectKeychainWriteGate)) return false
   if (isUnsafeHookCommand(command)) return false
   injectKeychainWriteGate(settings)
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  return true
+}
+
+// Card a467f621 (Viktor 48495; CLAUDE.md fleet AUTH rule 1): the credentials-write gate. An agent shell does not
+// write a Claude Code .credentials.json by accident (cp, mv, ln, install, ditto, rsync, tee, touch, dd, sed -i,
+// curl -o, a redirection): a hand-placed or linked file brought the 401 cascade back every time. Claude Code's own
+// block covers its file tools only. An ACCIDENT guard, not a boundary (same uid; an interpreter's open(..., 'w') is
+// not seen, the script header lists the rest). Every sub-agent; the main agent carries the same hook in the
+// repo-shipped project settings.
+export function agentGetsCredentialsWriteGate(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+export function injectCredentialsWriteGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'credentials-write-gate.py'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  const entry = {
+    matcher: 'Bash',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  // One canonical entry: a prior one under another matcher or with a stale command is a gate that never fires.
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('credentials-write-gate.py')),
+    entry,
+  ]
+}
+
+// Idempotent migration for the running fleet (same shape as ensureKeychainWriteGate). Returns true if written; a
+// settings file that is not there is not created (a never-spawned agent gets the hook on its first spawn).
+export function ensureCredentialsWriteGate(name: string): boolean {
+  if (!agentGetsCredentialsWriteGate(name)) return false
+  const settingsPath = agentSettingsPath(name)
+  if (!existsSync(settingsPath)) return false
+  let settings: Record<string, unknown> = {}
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'credentials-write-gate.py'))
+  if (hookEntriesSettled(settings, 'PreToolUse', 'credentials-write-gate.py', injectCredentialsWriteGate)) return false
+  if (isUnsafeHookCommand(command)) return false
+  injectCredentialsWriteGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }

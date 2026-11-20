@@ -66,6 +66,7 @@ const EXPECTED: Record<string, string[]> = {
     'memory-frontmatter-bash-gate.py', 'image-quarantine-gate.mjs',
     'keychain-read-gate.py', // c1921b55
     'keychain-write-gate.py', // 759161e3
+    'credentials-write-gate.py', // a467f621
     'time-claim-gate.py', // Klodel 38401: Write/Edit/MultiEdit of shared/*.md + Bash card comments
     'link-request-reply-gate.py', // #219, card 18b2002b: a reply to "add a linket" carries a URL (Telegram reply/edit_message)
     'patrik-reply-volume-gate.py', // card 9df14a4c: max 6 lines / 600 chars, one reply per owner message (Telegram reply)
