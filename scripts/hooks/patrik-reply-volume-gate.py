@@ -11,6 +11,14 @@ elo_uzenet "privat" / "csoport", or MARVEEN_OWNER_CHATS):
   2. volume: the agent already replied in this chat since the latest inbound message there (store/claudeclaw.db
      conversation_log, by row id), unless the text has a line "KÉSZ-EREDMÉNY: <what>" -- a finished
      deliverable (e.g. the images Patrik asked for) may follow the answer it was promised in.
+  3. count (Klodel 48564, hibanapló 2026-11-20: 13 replies to the team group between 09:40 and 09:58 UTC while Patrik
+     was upset; rule 2 let each through, because an inbound message came between them): WHILE PATRIK IS UPSET -- a
+     frustrated line of his within the last hour, the same test as patrik-mood-reply-gate.py (frustrated_line, loaded
+     from that file, one definition) -- WINDOW_MAX of the agent's own replies in this chat within the last WINDOW_S
+     seconds (conversation_log out rows by created_at) block the next one. On a calm day there is no count limit
+     (Klodel 48590: unconditioned, the 9-day replay blocked 643 of 1022 owner-chat replies). Escapes: a KESZ-EREDMENY
+     mark (a finished result) or a KIESES mark (an outage report, CLAUDE.md: 5 minutes, then every 15), and a
+     KIADAS-ELOTTE mark as for rule 2. Each lets ONE message through.
   The release line (card 36731203, 2026-11-16 23:16): CLAUDE.md asks for one line to Patrik BEFORE and one AFTER a
   release; the "before" line came after an answer to Patrik's last message and was blocked. A KIADAS-ELOTTE mark lets
   ONE such line through; its value must hold the msg_id of Pulzus's release message to the main agent in the
@@ -24,6 +32,7 @@ unrelated reply.
 Wiring: .claude/settings.json PreToolUse, matcher "mcp__plugin_telegram_telegram__reply" (main agent only).
 Tests: patrik-reply-volume-gate_test.py next to this file.
 """
+import importlib.util
 import json
 import os
 import re
@@ -39,6 +48,8 @@ MAX_LINES = 6
 MAX_CHARS = 600
 RELEASER = 'pulzus'  # CLAUDE.md "Kiadás és éles üzem": Pulzus collects, merges and deploys the batch
 RELEASE_MSG_MAX_AGE_S = 6 * 3600
+WINDOW_S = 20 * 60   # rule 3 (Klodel 48564): at most WINDOW_MAX own replies per chat in this window
+WINDOW_MAX = 4
 MSG_ID = re.compile(r'(?<!\d)\d{4,7}(?!\d)')
 
 
@@ -62,10 +73,11 @@ def owner_chats():
     return out
 
 
-def check(text, replies_since_inbound, escaped=False):
+def check(text, replies_since_inbound, escaped=False, recent=0, upset=None):
     """Pure decision: the block message, or None. escaped: a KESZ-EREDMENY reply mark was taken for this message
     (scripts/reply-mark.py; one mark lets ONE more message through, Viktor 40894; it is spent only when the reply
-    is sent, so a reply another gate blocks keeps it, Klodel 41147)."""
+    is sent, so a reply another gate blocks keeps it, Klodel 41147). upset: the TG message id of Patrik's frustrated
+    line within the last hour, or None; rule 3 counts only while he is upset."""
     text = str(text or '')
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if len(lines) > MAX_LINES or len(text.strip()) > MAX_CHARS:
@@ -78,6 +90,12 @@ def check(text, replies_since_inbound, escaped=False):
                 'nem kerül): python3 -I scripts/reply-mark.py KESZ-EREDMENY --chat <chat_id> "<mi>"; kiadás ELŐTTI sor: '
                 'python3 -I scripts/reply-mark.py KIADAS-ELOTTE --chat <chat_id> "<Pulzus kiadás-üzenetének msg_id-je>"; '
                 'minden más a kártyára.')
+    if upset is not None and recent >= WINDOW_MAX and not escaped:
+        return (f'VÁLASZ-KAPU (Patrik TG 18129 "spammels", Klodel 48564): Patrik az elmúlt órában frusztrált volt '
+                f'(TG {upset}), és ebben a chatben az utolsó {WINDOW_S // 60} percben már {recent} válaszod ment ki '
+                f'(legfeljebb {WINDOW_MAX}). Kész eredmény '
+                'mehet: python3 -I scripts/reply-mark.py KESZ-EREDMENY --chat <chat_id> "<mi>"; kiesés-jelzés: '
+                'python3 -I scripts/reply-mark.py KIESES --chat <chat_id> "<mi áll>"; minden más a kártyára.')
     return None
 
 
@@ -120,6 +138,30 @@ def replies_since_inbound(agent_id, chat_id):
         con.close()
 
 
+def replies_in_window(agent_id, chat_id, now=None):
+    """Rule 3: the agent's outbound rows in this chat within the last WINDOW_S seconds."""
+    import ledger_lib
+    now = int(time.time() if now is None else now)
+    con = sqlite3.connect(f'file:{ledger_lib.db_path()}?mode=ro', uri=True, timeout=5)  # never create a ledger
+    try:
+        row = con.execute(
+            "SELECT COUNT(*) FROM conversation_log WHERE agent_id=? AND chat_id=? AND direction='out'"
+            " AND created_at >= ?", (str(agent_id), str(chat_id), now - WINDOW_S)).fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        con.close()
+
+
+def frustrated_line():
+    """Patrik's frustrated line within the last hour (TG message id) or None, by patrik-mood-reply-gate.py's own
+    function: one definition of "upset" for both gates."""
+    spec = importlib.util.spec_from_file_location('patrik_mood_reply_gate',
+                                                  os.path.join(HERE, 'patrik-mood-reply-gate.py'))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.frustrated_line()
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -147,14 +189,26 @@ def main():
         n = replies_since_inbound(agent_id, chat)
     except Exception:
         n = 0  # no readable ledger: the volume rule cannot decide, the size rule still holds
+    try:
+        recent = replies_in_window(agent_id, chat)
+    except Exception:
+        recent = 0  # the same: no ledger, no count
+    upset = None
+    if recent >= WINDOW_MAX:
+        try:
+            upset = frustrated_line()
+        except Exception:
+            upset = None  # unreadable mood: rule 3 cannot decide, rules 1-2 still hold
     escaped = False
     mark_kind = 'KESZ-EREDMENY'
-    if n >= 1:
+    if n >= 1 or upset is not None:
         try:
             sys.path.insert(0, os.path.join(os.path.dirname(HERE), 'lib'))
             import reply_marks
             reply_marks.bind_call(payload)  # held for this call, spent by reply-marks-spend.py once sent (41147)
             escaped = reply_marks.take('KESZ-EREDMENY', chat, agent_id) is not None
+            if not escaped and reply_marks.take('KIESES', chat, agent_id) is not None:
+                escaped, mark_kind = True, 'KIESES'
             if not escaped:
                 rel = reply_marks.take('KIADAS-ELOTTE', chat, agent_id)
                 if rel is not None:
@@ -167,7 +221,7 @@ def main():
                     mark_kind = 'KIADAS-ELOTTE'
         except Exception:
             escaped = False
-    msg = check(ti.get('text', ''), n, escaped)
+    msg = check(ti.get('text', ''), n, escaped, recent, upset)
     if msg:
         print(msg, file=sys.stderr)
         return 2

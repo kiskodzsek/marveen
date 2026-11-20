@@ -3,7 +3,8 @@
 
   python3 -I scripts/reply-mark.py <KIND> --chat <chat_id | privat | csoport> "<value>"
 
-KIND: PRIVAT-OK (why private) | KESZ-EREDMENY (what finished result) | BALAZS-KERES (TG <message id>) |
+KIND: PRIVAT-OK (why private) | KESZ-EREDMENY (what finished result) | KIESES (what is down: an outage report,
+  patrik-reply-volume-gate.py rule 3, Klodel 48564) | BALAZS-KERES (TG <message id>) |
 BELSO-UT-MERVE (msg_id of the internal route measured) |
 PATRIK-LEPES (who measured that there is no internal route, and that msg_id: patrik-step-reply-gate.py) |
 KIADAS-ELOTTE (Pulzus's release message msg_id: the "before" line of a release, patrik-reply-volume-gate.py) |
@@ -20,7 +21,7 @@ sys.path.insert(0, os.path.join(HERE, 'hooks'))
 import reply_marks  # noqa: E402
 import owner_chat  # noqa: E402
 
-ALIASES = {'PRIVÁT-OK': 'PRIVAT-OK', 'KÉSZ-EREDMÉNY': 'KESZ-EREDMENY', 'BALÁZS-KÉRÉS': 'BALAZS-KERES',
+ALIASES = {'PRIVÁT-OK': 'PRIVAT-OK', 'KÉSZ-EREDMÉNY': 'KESZ-EREDMENY', 'KIESÉS': 'KIESES', 'BALÁZS-KÉRÉS': 'BALAZS-KERES',
            'BELSŐ-ÚT-MÉRVE': 'BELSO-UT-MERVE', 'PATRIK-LÉPÉS': 'PATRIK-LEPES', 'KIADÁS-ELŐTTE': 'KIADAS-ELOTTE',
            'PATRIK-DÖNTÉS': 'PATRIK-DONTES'}
 

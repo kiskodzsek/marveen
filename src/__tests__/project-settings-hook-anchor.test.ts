@@ -69,6 +69,7 @@ const EXPECTED: Record<string, string[]> = {
     'time-claim-gate.py', // Klodel 38401: Write/Edit/MultiEdit of shared/*.md + Bash card comments
     'link-request-reply-gate.py', // #219, card 18b2002b: a reply to "add a linket" carries a URL (Telegram reply/edit_message)
     'patrik-reply-volume-gate.py', // card 9df14a4c: max 6 lines / 600 chars, one reply per owner message (Telegram reply)
+    'patrik-mood-reply-gate.py', // Klodel 48551/48590: no laughing in Patrik's chats while he is upset (Telegram reply/edit_message)
     'summary-form-reply-gate.py', // retro R9 (card dddca664): the main agent's summaries to Patrik carry no ┆ line, path or code (Telegram reply)
     'patrik-step-reply-gate.py', // Klodel 41154: a step put on Patrik only with a PATRIK-LEPES mark (Telegram reply)
     'patrik-decision-reply-gate.py', // card dd706ced: a decision asked of Patrik only with a PATRIK-DONTES mark (Telegram reply)
