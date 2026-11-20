@@ -11,6 +11,7 @@ import {
   agentSessionName,
   restartAgentProcess,
   capturePane,
+  paneInstanceKey,
   isSessionReadyForPrompt,
   noteSaturationBannerUntrusted,
   clearSaturationBannerOverride,
@@ -269,6 +270,161 @@ export function bgShellHold(
  *  (error banner, modal) keeps the restart that is its only way out. */
 export function withShellHold(guardPaneState: PaneState, hold: boolean): PaneState {
   return hold && guardPaneState === 'idle' ? 'busy' : guardPaneState
+}
+
+// Card 8121c1f5 (measured 2026-11-20, store/dashboard.log, dave): the shell clock
+// lived only in bgShellSince, so every dashboard restart started a new 45-minute
+// wait (19:31, 19:43, 20:11, 20:27 for one shell): the cap could not pass while
+// the dashboard restarted more often than that. The clock is persisted, tied to
+// the pane's process (paneInstanceKey), and restored on the first reading after
+// the start. A restart of the AGENT gives a new key, so its new shells start a
+// new clock, as before.
+const BG_SHELL_PERSIST_PATH = join(PROJECT_ROOT, 'store', 'context-guard-bgshell.json')
+
+/**
+ * Card 8121c1f5: the longest gap between the last persisted sighting of a
+ * running clock and the first reading after a dashboard start that still
+ * restores it. One sweep (the sighting can be that old when the dashboard stops)
+ * plus BG_SHELL_ZERO_DROP_MS: a longer gap counts like a run of 0 readings that
+ * long, which drops the clock (the restart then waits longer, the safe side).
+ */
+export const BG_SHELL_RESTORE_MAX_GAP_MS = INTERVAL_MS + BG_SHELL_ZERO_DROP_MS
+
+/** Card 8121c1f5: a running clock's sighting is rewritten at most this often
+ *  when nothing else changed (fast rounds read the pane every 20 s). */
+export const BG_SHELL_PERSIST_EVERY_MS = 60_000
+
+export interface PersistedBgShell {
+  key: string
+  sinceMs: number
+  seenMs: number
+  zeroStreak: number
+  zeroSinceMs?: number
+}
+
+/**
+ * Pure, card 8121c1f5: the clock a persisted entry restores, or null when it
+ * must be dropped: malformed, another pane process (or none read), a sighting
+ * from the future or older than BG_SHELL_RESTORE_MAX_GAP_MS, or a start after
+ * the sighting.
+ */
+export function bgShellRestore(
+  entry: unknown,
+  key: string | null,
+  nowMs: number,
+): { sinceMs: number; zeroStreak: number; zeroSinceMs?: number } | null {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+  const e = entry as Partial<PersistedBgShell>
+  if (key === null || e.key !== key) return null
+  const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+  if (!num(e.sinceMs) || !num(e.seenMs) || !num(e.zeroStreak)) return null
+  if (e.sinceMs > e.seenMs || e.seenMs > nowMs || nowMs - e.seenMs > BG_SHELL_RESTORE_MAX_GAP_MS) return null
+  if (e.zeroSinceMs !== undefined && !num(e.zeroSinceMs)) return null
+  // Viktor 8121c1f5 r1: a 0-run starts after the clock and by the last sighting
+  if (e.zeroSinceMs !== undefined && (e.zeroSinceMs < e.sinceMs || e.zeroSinceMs > e.seenMs)) return null
+  const zeroStreak = Math.max(0, Math.floor(e.zeroStreak))
+  return e.zeroSinceMs === undefined
+    ? { sinceMs: e.sinceMs, zeroStreak }
+    : { sinceMs: e.sinceMs, zeroStreak, zeroSinceMs: e.zeroSinceMs }
+}
+
+/**
+ * Pure, card 8121c1f5: whether the persisted entry needs a write after this
+ * reading. A clock that stopped: only if an entry is still there. A running
+ * clock: when its start, streak, zero-run start or pane key changed, or the
+ * last sighting is BG_SHELL_PERSIST_EVERY_MS old.
+ */
+export function bgShellPersistDue(
+  prev: PersistedBgShell | undefined,
+  next: PersistedBgShell | undefined,
+): boolean {
+  if (next === undefined) return prev !== undefined
+  if (prev === undefined) return true
+  return prev.key !== next.key || prev.sinceMs !== next.sinceMs || prev.zeroStreak !== next.zeroStreak ||
+    prev.zeroSinceMs !== next.zeroSinceMs || next.seenMs - prev.seenMs >= BG_SHELL_PERSIST_EVERY_MS
+}
+
+let bgShellPersisted: Record<string, PersistedBgShell> | null = null
+// Agents whose persisted clock was already looked at in this dashboard's life.
+const bgShellRestoreTried = new Set<string>()
+// Viktor 8121c1f5 r1: the pane key read ONCE when a clock starts (null: tmux failed then, the clock is never persisted)
+const bgShellClockKey = new Map<string, { sinceMs: number; key: string | null }>()
+
+function readBgShellPersisted(): Record<string, PersistedBgShell> {
+  if (bgShellPersisted !== null) return bgShellPersisted
+  try {
+    const parsed = JSON.parse(readFileSync(BG_SHELL_PERSIST_PATH, 'utf-8'))
+    bgShellPersisted = (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) ? parsed as Record<string, PersistedBgShell> : {}
+  } catch { bgShellPersisted = {} }
+  return bgShellPersisted
+}
+
+function writeBgShellPersisted(map: Record<string, PersistedBgShell>): void {
+  try {
+    // Viktor 8121c1f5 r1: a fresh name, created exclusively: a link planted at the tmp path is not followed
+    const tmp = `${BG_SHELL_PERSIST_PATH}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`
+    writeFileSync(tmp, JSON.stringify(map, null, 2), { flag: 'wx' })
+    renameSync(tmp, BG_SHELL_PERSIST_PATH)
+  } catch (err) {
+    logger.warn({ err }, 'context-guard: background-shell clock persist failed')
+  }
+}
+
+/** Card 8121c1f5: tmux through the mocked module in tests; never throws. */
+function readPaneKey(session: string): string | null {
+  try { return paneInstanceKey(session) } catch { return null }
+}
+
+/** Card 8121c1f5: on the first pane reading of an agent after the dashboard
+ *  started, seed the clock from the persisted entry if it still belongs to this
+ *  pane process; a stale entry is dropped. */
+function restoreBgShellClock(name: string, session: string, nowMs: number): void {
+  if (bgShellRestoreTried.has(name)) return
+  bgShellRestoreTried.add(name)
+  const map = readBgShellPersisted()
+  if (!(name in map) || bgShellSince.has(name)) return
+  const restored = bgShellRestore(map[name], readPaneKey(session), nowMs)
+  if (restored === null) {
+    delete map[name]
+    writeBgShellPersisted(map)
+    logger.info({ name }, 'context-guard: persisted background-shell clock dropped (another pane process, malformed, or too old)')
+    return
+  }
+  bgShellSince.set(name, restored.sinceMs)
+  bgShellZeroStreak.set(name, restored.zeroStreak)
+  if (restored.zeroSinceMs !== undefined) bgShellZeroSince.set(name, restored.zeroSinceMs)
+  logger.info({ name, sinceMs: restored.sinceMs }, 'context-guard: background-shell clock restored after a dashboard restart')
+}
+
+/** Card 8121c1f5: mirror the in-memory clock of one agent into the store. */
+function persistBgShellClock(name: string, session: string, nowMs: number): void {
+  const map = readBgShellPersisted()
+  const prev = map[name]
+  const sinceMs = bgShellSince.get(name)
+  let next: PersistedBgShell | undefined
+  if (sinceMs !== undefined) {
+    // The key is the pane process the clock STARTED on, read once: a clock that
+    // outlived its pane in memory (a misread across an agent restart) keeps the
+    // old key and is dropped at the next restore, not handed to the new process.
+    let at = bgShellClockKey.get(name)
+    if (at === undefined || at.sinceMs !== sinceMs) {
+      at = { sinceMs, key: prev !== undefined && prev.sinceMs === sinceMs ? prev.key : readPaneKey(session) }
+      bgShellClockKey.set(name, at)
+    }
+    const key = at.key
+    if (key === null) {
+      next = undefined
+    } else {
+      const zeroSinceMs = bgShellZeroSince.get(name)
+      next = { key, sinceMs, seenMs: nowMs, zeroStreak: bgShellZeroStreak.get(name) ?? 0 }
+      if (zeroSinceMs !== undefined) next.zeroSinceMs = zeroSinceMs
+    }
+  }
+  if (sinceMs === undefined) bgShellClockKey.delete(name)
+  if (!bgShellPersistDue(prev, next)) return
+  if (next === undefined) delete map[name]
+  else map[name] = next
+  writeBgShellPersisted(map)
 }
 
 // agent name -> when the daily-handoff tier last fired (ms). Seeded on first
@@ -743,6 +899,8 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   // turn, up to BG_SHELL_WAIT_MAX_MS; the saturation net still fires. Only a
   // sweep that looked at the pane moves the clock (null: not captured here).
   const bgShells = pane !== null ? backgroundShellCount(pane) : 0
+  // Card 8121c1f5: the clock of a shell that ran across a dashboard restart.
+  if (pane !== null) restoreBgShellClock(name, session, nowMs)
   // Card d23bec1d: a 0 counts toward dropping the clock only on an idle pane.
   // The RAW pane state on purpose: it says whether the footer reading is
   // trustworthy (typing and unknown read 0 under a tall input box); the guard
@@ -766,6 +924,7 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
       if (shell.zeroSinceMs === undefined) bgShellZeroSince.delete(name)
       else bgShellZeroSince.set(name, shell.zeroSinceMs)
     }
+    persistBgShellClock(name, session, nowMs)
   }
   if (shell.hold && agentGuardPaneState === 'idle' && !bgShellHoldLogged.has(name)) {
     bgShellHoldLogged.add(name)

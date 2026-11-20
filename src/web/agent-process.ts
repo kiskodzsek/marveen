@@ -3894,6 +3894,22 @@ export function capturePane(session: string, host: string | null = null): string
   }
 }
 
+/**
+ * Card 8121c1f5: one string that changes whenever the pane gets a new process:
+ * the tmux session's creation time (a sub-agent restart is kill-session +
+ * new-session) and the pane's pid (the main agent is restarted with
+ * `respawn-pane -k` inside the same session). Same target as capturePane.
+ * null when tmux fails or answers in another shape.
+ */
+export function paneInstanceKey(session: string, host: string | null = null): string | null {
+  try {
+    const out = captureTmux(host, ['display-message', '-p', '-t', exactTmuxTarget(session), '#{session_created}:#{pane_pid}']).trim()
+    return /^\d+:\d+$/.test(out) ? out : null
+  } catch {
+    return null
+  }
+}
+
 // Capture a pane for STUCK-INPUT detection, with the editor's dim "ghost
 // suggestion" autocomplete removed. Captures WITH colour (`-e`) and strips the
 // SGR-2 (dim) ghost + all ANSI, so a hint shown in an empty input box is never
