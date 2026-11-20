@@ -119,6 +119,7 @@ Any error while matching blocks (fail-closed; exit 1 would not block). Input tha
 The command text is never logged: it may itself carry a secret.
 Tests: keychain-read-gate_test.py next to this file.
 """
+import bisect
 import json
 import os
 import re
@@ -736,17 +737,35 @@ def _group_openers(text, code=None):
     return match
 
 
-_UNESC_RX = re.compile(r'\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|([nrfvtae]))')
+_UNESC_RX = re.compile(r'\\(?:x([0-9A-Fa-f]{1,2})|([0-7]{1,3})|([nrfvtae])|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8}))')
+# echo -e, %b, zsh's echo and print (card c7234bed, Viktor 47808 LOW L1): \0 then up to three octal digits is one
+# char (`echo -e 'x\0012...'` prints a newline; printf's own format reads \001 then "2")
+_UNESC_ZERO_RX = re.compile(r'\\(?:x([0-9A-Fa-f]{1,2})|0([0-7]{0,3})|([0-7]{1,3})|([nrfvtae])|u([0-9A-Fa-f]{1,4})'
+                            r'|U([0-9A-Fa-f]{1,8}))')
 
 
-def _printf_unescape(v):
+def _unesc_char(x, o, c, u):
+    if x or o is not None:
+        return chr(int(x, 16) if x else int(o or '0', 8) & 0xff)
+    if u:  # \uHHHH / \UHHHHHHHH: zsh's printf, echo and print, bash 4.2+ (Viktor 47808 LOW L1)
+        n = int(u, 16)
+        return chr(n) if n <= 0x10FFFF and not 0xD800 <= n <= 0xDFFF else ''
+    return '\n' if c in 'nrfv' else ' '
+
+
+def _printf_unescape(v, zero=False):
     """Card 39d885ef (Viktor 43793): what printf / echo -e print for the backslash escapes of a word (\\n, \\r, \\f,
-    \\v a newline: a command position; \\t, \\a, \\e a blank; \\xHH and octal their char)."""
+    \\v a newline: a command position; \\t, \\a, \\e a blank; \\xHH, octal and \\u / \\U their char). zero: the echo
+    -e / %b reading, where \\0NNN is one octal char (card c7234bed)."""
+    if zero:
+        def one(m):
+            x, z, o, c, u4, u8 = m.groups()
+            return _unesc_char(x, z if z is not None else o, c, u4 or u8)
+        return _UNESC_ZERO_RX.sub(one, v)
+
     def one(m):
-        x, o, c = m.groups()
-        if x or o:
-            return chr(int(x, 16) if x else int(o, 8) & 0xff)
-        return '\n' if c in 'nrfv' else ' '
+        x, o, c, u4, u8 = m.groups()
+        return _unesc_char(x, o, c, u4 or u8)
     return _UNESC_RX.sub(one, v)
 
 
@@ -765,11 +784,34 @@ def _printf_output(fmt, args):
             if m.group(1) == '%':
                 return '%'
             a = args.pop(0) if args else ''
-            return _printf_unescape(a) if m.group(1).endswith('b') else a
+            return _printf_unescape(a, zero=True) if m.group(1).endswith('b') else a
         out.append(_printf_unescape(_PRINTF_CONV_RX.sub(conv, fmt)))
         if not args or not _PRINTF_CONV_RX.search(fmt) or sum(map(len, out)) > _PRINTF_MAX_OUT:
             break
     return ''.join(out)[:_PRINTF_MAX_OUT]
+
+
+_FEEDER_WRAPPERS = frozenset({'builtin', 'command', 'exec', 'nohup', 'time', 'env', 'nice'})
+_FEEDER_ARG_FLAGS = frozenset({'-u', '-a', '-n', '-S', '-P', '-C'})  # env -u NAME, exec -a NAME, nice -n N ...
+_FEEDER_ASSIGN_RX = re.compile(r'[A-Za-z_]\w*=')
+_FEEDER_MAX_WORDS = 32
+
+
+def _feeder_words(cw):
+    """Card c7234bed (Viktor 47808 LOW L1): a feeder's words with the words before it skipped that leave what it
+    prints unchanged (`builtin printf`, `command -p echo -e`, `env -i A=1 printf`, `nohup`, `time -p`, `nice -n 5`,
+    VAR=value): its name's basename first, then its arguments. [] when no name stands within _FEEDER_MAX_WORDS words."""
+    i, wrapped = 0, False
+    while i < min(len(cw), _FEEDER_MAX_WORDS):
+        w = cw[i]
+        if w.rsplit('/', 1)[-1] in _FEEDER_WRAPPERS:
+            wrapped = True
+        elif wrapped and w.startswith('-'):
+            i += w in _FEEDER_ARG_FLAGS
+        elif not _FEEDER_ASSIGN_RX.match(w):
+            return [w.rsplit('/', 1)[-1]] + cw[i + 1:]
+        i += 1
+    return []
 
 
 _REDIR_OP_RX = re.compile(r'&?[<>]+[&|]?')
@@ -840,6 +882,251 @@ def pipes_union(make_src, lexed=True, since=None):
     finally:
         _KEEP_ESC[0] = False
     return list(dict.fromkeys(l1 + l2)), list(dict.fromkeys(w1 + w2))
+
+
+# card c7234bed (Viktor 47570 MEDIUM, 48033 M1): shell code a command or process substitution prints, where a shell
+# runs it. `eval "$(echo python3 m.py)"`, `bash -c "$(printf ...)"`, `sh <<<"$(echo ...)"`, `. <(echo ...)`, `bash <(printf
+# ...)`, `x=$(echo ...); eval "$x"` and `. /dev/stdin <<<'python3 m.py'` passed on main and on 39d885ef, while bash
+# or zsh ran m.py (measured, work/c7234bed/truth1). A SITE is a substitution in the command of a reader of shell code
+# (the lexer's segment, its reader word at a code position anywhere before the opener: 48033 M1, `bash -o pipefail -c
+# "$(..)"`, `eval -- "$(..)"`, `eval "true; $(..)"`, `sh < <(..)`): eval (not of a <( ), source / . (of a <( only), a
+# shell word (not of a <( that is a here-string's word), a <<< whose command has a shell word or a /dev/stdin source.
+# What a site prints: every echo, printf or print at a code position in its body, each to the end of its own command
+# (`$(true; echo ..)`, `$(if ..; then echo ..; fi)`, `$( (echo ..) )`, a nested one), read as a pipeline into a shell
+# reads it (the printf and echo -e decoding of 39d885ef). A $var a reader takes (`eval "$x"`, `bash -c "$x"`, `bash
+# <<<"$x"`, `echo "$x" | bash`, `. <(echo "$x")`: 48033 INFO V1) reads every feeder substitution of the text (x was set
+# from one). A heredoc body a shell reads is read the same way (its own eval / bash -c lines; in an unquoted one the
+# outer shell runs every substitution first, so each is a site), and so are the lines a site prints (to GEN_MAX_DEPTH).
+# The word of a here-string to `source` / `.` of /dev/stdin is read too. Each only at a code position (the lexer's
+# class; a $( in "..." is one). Only adds lines. A substitution of another program (`eval "$(ssh-agent -s)"`, `eval
+# "$(brew shellenv)"`) prints what that program prints: not read (H1, accepted). When the lexer does not read the
+# text: a reader anywhere in the GEN_RAW_BEFORE chars before the opener, every feeder word of the body.
+_GEN_READER_RX = re.compile(r'(?P<ev>(?<![\w./-])eval(?![\w./-]))|(?P<so>(?<![\w./-])(?:source|\.)(?=[ \t]))'
+                            r'|(?P<sh>(?<!' + _ALONE + r')' + _SHELL_NAME + r'(?!' + _ALONE + r'))|(?P<hs><<<)')
+GEN_FEEDER_RX = re.compile(r'(?<![\w./-])(?:[\w./-]*/)?(?:echo|printf|print)(?=[ \t\n;&|)`]|\Z)')
+GEN_VAR_RX = re.compile(r'\$(?:\{?[A-Za-z_0-9]|\{?[@*])')
+GEN_SOURCE_HERE_RX = re.compile(STDIN_SOURCE + r'[^\n;&|]*?<<<[ \t]*')
+GEN_HERE_READER_RX = re.compile(r'(?<!' + _ALONE + r')' + _SHELL_NAME + r'(?!' + _ALONE + r')|' + STDIN_SOURCE)
+GEN_PIPE_SHELL_RX = re.compile(r'[ \t]*\|&?[ \t]*(?:[\w./-]*/)?' + _SHELL_NAME + r'(?!' + _ALONE + r')')
+GEN_HS_PS_RX = re.compile(r'<<<[ \t]*\Z')
+GEN_OPEN_RX = re.compile(r'\$\((?!\()|<\(|`')
+GEN_KINDS = ('$(', '`', '<(')
+GEN_RAW_STOPS = ';&\n)`'
+GEN_RAW_BEFORE = 160  # the lexer-less path: a reader within this many chars before (a text the lexer does not read
+# is no command bash runs as is; a Python or JSON file: reading every opener after any reader cost 0.26 s on a 207 KB
+# JSON file, 13x, and 6 fleet commands went past the script budget in the replay)
+GEN_LEX_MAX = 65536  # past it (and on a script file's text) the lexer-less path: lexing a 1 MB text cost 1-4 s a reading
+# (the replay: 6 fleet commands went past the script budget; the gate lexes no script file's text, card 39d885ef)
+GEN_RAW_SCAN = 16384  # the lexer-less path reads a substitution's body to this many chars at most
+GEN_FEEDER_START_RX = re.compile(r'[ \t\n]*(?:[\w./-]*/)?(?:echo|printf|print)(?=[ \t\n;&|)`]|\Z)')
+GEN_RAW_PART = 2048  # the lexer-less path reads a feeder to this many chars at most (over a JSON file's quotes a
+# raw body ran to the file's end: 114 readings of up to 200 KB, 3 489 lines)
+MAX_GEN_SUBSTS = 64
+GEN_MAX_DEPTH = 2
+
+
+def _subst_end(text, i, limit=None):
+    """The index right after the substitution whose opener (`$(`, `<(`, `>(` or a backtick) starts at i, or -1 when it
+    does not close. Quotes inside are skipped ('...' whole, "..." with its backslash escapes), and a comment (a # that
+    starts a word, to the line's end: 48033 M1 (7), `$(echo x # it's` + newline); a $( or ( inside opens a level.
+    limit: read at most this many chars (-1 past it)."""
+    n = len(text) if limit is None else min(len(text), i + limit)
+    if text[i] == '`':
+        j = i + 1
+        while j < n:
+            if text[j] == '\\':
+                j += 2
+                continue
+            if text[j] == '`':
+                return j + 1
+            j += 1
+        return -1
+    depth, j = 1, i + 2
+    while j < n:
+        ch = text[j]
+        if ch == '\\':
+            j += 2
+            continue
+        if ch == '#' and (j == i + 2 or text[j - 1] in ' \t\n;&|('):
+            k = text.find('\n', j, n)
+            if k < 0:
+                return -1
+            j = k
+            continue
+        if ch == "'":
+            k = text.find("'", j + 1, n)
+            if k < 0:
+                return -1
+            j = k + 1
+            continue
+        if ch == '"':
+            j += 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == '\\' else 1
+            j += 1
+            continue
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return -1
+
+
+def _gen_segment(segs, p):
+    """The lexer's innermost command segment that holds p (a ${ } or $(( )) is part of its command), or None. segs:
+    (the segments sorted by start, their starts)."""
+    ss, starts = segs
+    i = bisect.bisect_right(starts, p) - 1
+    while i >= 0:  # the holder with the greatest start is the innermost
+        s = ss[i]
+        if p < s['end'] and s['frame'] not in ('${', '$(('):
+            return s
+        i -= 1
+    return None
+
+
+def _gen_reads(text, cls, lo, o, kind):
+    """True when a reader of shell code in text[lo:o] (at a code position, when cls is known) takes what the
+    substitution of kind opening at o prints (a $var: kind '$(') as shell code."""
+    for m in _GEN_READER_RX.finditer(text, lo, o):
+        if cls is not None and cls[m.start()] != 'c':
+            continue
+        g = m.lastgroup
+        if g == 'ev' and kind != '<(' or g == 'so' and kind == '<(':
+            return True
+        if g == 'sh' and not (kind == '<(' and GEN_HS_PS_RX.search(text, lo, o)):
+            return True
+        if g == 'hs' and kind != '<(':  # a here-string feeds a shell or a /dev/stdin source of its own command
+            raw = max(text.rfind(c, 0, o) for c in ';&\n') + 1
+            hi = min([k for k in (text.find(c, o) for c in ';&\n') if k >= 0] or [len(text)])
+            if GEN_HERE_READER_RX.search(text, raw if cls is None else min(lo, raw), hi) is not None:
+                return True
+    return False
+
+
+def generated_lines(text, depth=0, all_sites=False, lexed=True):
+    """The command lines the echo / printf / print substitutions at a site of text print (see the block above), and the
+    words of the here-strings `source` / `.` read from /dev/stdin. None past MAX_GEN_SUBSTS sites (the caller blocks
+    unread). all_sites: every substitution is a site (an unquoted heredoc body a shell reads). lexed=False (a script
+    file's text) or a text past GEN_LEX_MAX: the lexer-less path."""
+    if not ('echo' in text or 'print' in text or '<<' in text):
+        return []
+    # a raw look first (no lexing: the gate lexes no script file's text for nothing, card 39d885ef): a reader word
+    # and an opener with a feeder word after it (either first: `x=$(echo ..); eval "$x"`), a heredoc with a reader,
+    # or a /dev/stdin here-string
+    if not all_sites and _GEN_READER_RX.search(text) is None:
+        return []
+    op = GEN_OPEN_RX.search(text)
+    if not ((op is not None and GEN_FEEDER_RX.search(text, op.end()) is not None)
+            or '<<' in text and GEN_HERE_READER_RX.search(text) is not None):
+        return []
+    lx = lex_or_none(text) if lexed and len(text) <= GEN_LEX_MAX else None
+    cls = lx['cls'] if lx is not None else None
+    feed = [f.start() for f in GEN_FEEDER_RX.finditer(text) if cls is None or cls[f.start()] == 'c']
+    here = list(GEN_SOURCE_HERE_RX.finditer(text)) if '<<<' in text else []
+    docs = [h for h in lx['heredocs']] if lx is not None else []
+    if not feed and not here and not docs:
+        return []
+    # (opener, its kind, body start, body end) of each substitution with a feeder word in its body
+    subs = []
+    if lx is not None:
+        for x in lx['substs']:
+            if x['kind'] in GEN_KINDS:
+                a, b = x['inner']
+                k = bisect.bisect_left(feed, a)
+                if k < len(feed) and feed[k] < b:
+                    subs.append((x['start'], x['kind'], a, b))
+    else:  # only an opener with a reader in its window, or one a feeder starts (the var rule): the body's end costs
+        for m in GEN_OPEN_RX.finditer(text):
+            o = m.start()
+            kind = '<(' if text[o] == '<' else '`' if text[o] == '`' else '$('
+            if not (all_sites or _gen_reads(text, None, max(0, o - GEN_RAW_BEFORE), o, kind)
+                    or GEN_FEEDER_START_RX.match(text, m.end())):
+                continue
+            e = _subst_end(text, o, GEN_RAW_SCAN)
+            if e < 0:
+                continue
+            a, b = m.end(), e - 1
+            k = bisect.bisect_left(feed, a)
+            if k < len(feed) and feed[k] < b:
+                subs.append((o, kind, a, b))
+    ss = sorted(lx['segments'], key=lambda s: s['start']) if lx is not None else []
+    segs = (ss, [s['start'] for s in ss])
+    sites, rest = [], []
+    for sub in subs:
+        o, kind = sub[0], sub[1]
+        s = _gen_segment(segs, o) if lx is not None else None
+        ok = all_sites or _gen_reads(text, cls, s['start'] if s is not None else max(0, o - GEN_RAW_BEFORE), o, kind) \
+            or s is not None and kind != '<(' and GEN_PIPE_SHELL_RX.match(text, s['end']) is not None
+        (sites if ok else rest).append(sub)
+    if rest and '$' in text:  # a $var a reader takes: any feeder may have set it
+        for v in GEN_VAR_RX.finditer(text):
+            p = v.start()
+            if cls is not None and cls[p] not in 'cd':
+                continue
+            s = _gen_segment(segs, p) if lx is not None else None
+            lo = s['start'] if s is not None else max(0, p - GEN_RAW_BEFORE)
+            if (_gen_reads(text, cls, lo, p, '$(') or any(a <= p < b for _, _, a, b in sites)
+                    or s is not None and GEN_PIPE_SHELL_RX.match(text, s['end'])):
+                sites += rest
+                break
+    if len(sites) > MAX_GEN_SUBSTS:
+        return None
+    lines = []
+    for _, _, a, b in sites:
+        for f in feed[bisect.bisect_left(feed, a):bisect.bisect_left(feed, b)]:
+            if lx is not None:
+                s = _gen_segment(segs, f)
+                parts = [text[f:min(s['end'], b) if s is not None else b]]
+            else:  # to the body's end, GEN_RAW_PART at most, and to its first stop (the stop may be quoted). The whole
+                # body first: its lines keep their order when the list is made unique (`eval "$(echo $(echo s3c''urity)
+                # dump-k''eychain)"` in a shell file: the cut part first put a `$` line between the two words)
+                bb = min(b, f + GEN_RAW_PART)
+                stop = min([k for k in (text.find(c, f, bb) for c in GEN_RAW_STOPS) if k >= 0] or [bb])
+                parts = list(dict.fromkeys((text[f:bb], text[f:stop])))
+            for part in parts:
+                lines += stdin_pipelines(part + ' | bash')[0]
+    for m in here:
+        if cls is not None and cls[m.start()] != 'c':
+            continue
+        w = shell_word(text, m.end())[0]
+        lines += [ln for ln in w.split('\n') if ln.strip()]
+    if depth < GEN_MAX_DEPTH:
+        for h in docs:  # a heredoc body a shell (or a /dev/stdin source) of its command reads
+            s = _gen_segment(segs, h['op'])
+            lo = s['start'] if s is not None else 0
+            if any(cls[m.start()] == 'c' for m in GEN_HERE_READER_RX.finditer(text, lo, h['op'])) \
+                    or s is not None and GEN_PIPE_SHELL_RX.match(text, s['end']) is not None:
+                sub = generated_lines(text[h['bodyStart']:h['bodyEnd']], depth + 1, all_sites=not h['quoted'], lexed=lexed and h['quoted'])
+                if sub is None:
+                    return None
+                lines += sub
+        lines = list(dict.fromkeys(lines))
+        if lines:  # what a site prints may hold a site of its own
+            more = generated_lines('\n'.join(lines), depth + 1, lexed=lexed)
+            if more is None:
+                return None
+            lines += more
+    return list(dict.fromkeys(lines))
+
+
+def gen_union(make_src, since=None, lexed=True):
+    """Card c7234bed: generated_lines() of make_src(), united with the reading that keeps a backslash-letter (as
+    pipes_union: printf's \\n). None when either is None."""
+    if since is None:
+        since = _ESC_TAKEN[0]
+    g1 = generated_lines(make_src(), lexed=lexed)
+    if g1 is None or (_ESC_SKIP[0] and _ESC_TAKEN[0] == since):
+        return g1
+    _KEEP_ESC[0] = True
+    try:
+        g2 = generated_lines(make_src(), lexed=lexed)
+    finally:
+        _KEEP_ESC[0] = False
+    return None if g2 is None else list(dict.fromkeys(g1 + g2))
 
 
 def stdin_pipelines(text, lexed=True):
@@ -925,16 +1212,18 @@ def stdin_pipelines(text, lexed=True):
                 lines.append(' '.join(cw[1:]))
             for v in cw:
                 words.extend(v.split())
-            if cw[0].rsplit('/', 1)[-1] in ('printf', 'echo') and any('\\' in v for v in cw[1:]):  # 39d885ef
-                for v in cw[1:]:
-                    u = _printf_unescape(v)
-                    if u != v:
-                        for ln in u.split('\n'):
-                            lines.append(ln)
-                            words.extend(ln.split())
-            if cw[0].rsplit('/', 1)[-1] == 'printf' and len(cw) > 1 + (cw[1] == '--'):
-                f = 1 + (cw[1] == '--')  # card 39d885ef: the arguments put into the format (printf 'x\n%s y\n' z)
-                for ln in _printf_output(cw[f], cw[f + 1:]).split('\n'):
+            fw = _feeder_words(cw)  # card c7234bed (Viktor 47808 LOW L1): after builtin / command / env ..., and print
+            if fw and fw[0] in ('printf', 'echo', 'print') and any('\\' in v for v in fw[1:]):  # 39d885ef
+                for v in fw[1:]:
+                    for u in dict.fromkeys((_printf_unescape(v), _printf_unescape(v, zero=True))):
+                        if u != v:
+                            for ln in u.split('\n'):
+                                lines.append(ln)
+                                words.extend(ln.split())
+            # a bare `printf` (fw[1] missing) raised IndexError here, on main too (`cw[1]`): an 'error' block
+            if fw and fw[0] == 'printf' and len(fw) > 1 and len(fw) > 1 + (fw[1] == '--'):
+                f = 1 + (fw[1] == '--')  # card 39d885ef: the arguments put into the format (printf 'x\n%s y\n' z)
+                for ln in _printf_output(fw[f], fw[f + 1:]).split('\n'):
                     lines.append(ln)
                     words.extend(ln.split())
     # each once: a word repeated in many pipelines is one lookup, not one per pipeline (MAX_TRIES)
@@ -961,7 +1250,11 @@ def payload_texts(text, script=False, subst=False):
     out, seen, last, word_end = [], set(), -1, 0
 
     def add(p, verbatim):
-        if p in seen or (verbatim and not PAYLOAD_QUOTED.search(p) and not (subst and '`' in p)):
+        # card c7234bed (48033 M1 rework): a verbatim payload with a substitution and a feeder word in it is read as a
+        # text of its own too: generated_lines() reads code positions only, and in the outer text it is quoted
+        # (`bash -c 'eval $(echo ..)'` passed on main and on 79e1a907)
+        if p in seen or (verbatim and not PAYLOAD_QUOTED.search(p) and not (subst and '`' in p)
+                         and not (GEN_OPEN_RX.search(p) and GEN_FEEDER_RX.search(p))):
             return True
         if len(out) == MAX_PAYLOADS:
             return False
@@ -1037,6 +1330,12 @@ def _hits(cmd, script=False):
     lines = pipes_union(lambda: normalise(src), lexed=not script)[0]  # since: normalise(src) is made inside
     if lines:
         found += [h for h in hits_in('\n'.join(lines), script) if h not in found]
+    # card c7234bed: what an echo / printf substitution prints where a reader of shell code runs it (generated_lines)
+    gen = gen_union(lambda: normalise(src), lexed=not script)  # a script file's text: not lexed (39d885ef)
+    if gen is None:
+        found += [h for h in ['payload-unread'] if h not in found]
+    elif gen:
+        found += [h for h in hits_in('\n'.join(gen), script) if h not in found]
     # card fae0712e: normalise() joins every backslash-newline, also one whose backslash ends a comment or is half of
     # an escaped backslash, and the next line (a command for the shell) became part of a word: `: |#\` + newline +
     # `security dump-keychain` passed. The command text with only the shell's own joins (lexer_normalise) is judged TOO,
@@ -2936,6 +3235,15 @@ def script_hits(cmd, cwd):
     for src in dict.fromkeys(pipe_srcs):
         if '<<<' in src:
             text += ''.join('\n' + w for w, _ in stdin_payloads(src, pipes=False))
+    # card c7234bed: what an echo / printf substitution prints where a reader of shell code runs it (generated_lines),
+    # from both pipe readings (the escape-kept one decodes printf's \n)
+    gen = []
+    for src in dict.fromkeys(pipe_srcs):
+        g = generated_lines(src)
+        if g is None:
+            return found + ['payload-unread']
+        gen += g
+    text += ''.join('\n' + ln for ln in dict.fromkeys(gen))
     # card af12091a (Viktor 45748 K1, 47244 (1)): a payload as the shell reads it (payload_texts: '\'' -> ', \" -> ")
     # is a command text too, and so are the payloads in it: a call whose outer quoting hid its operator
     # (`eval 'python3 -W '\''a;b'\'' m.py'`, `eval 'eval "python3 -W \"a;b\" m.py"'`) reads as code there. They are
