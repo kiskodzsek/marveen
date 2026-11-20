@@ -817,6 +817,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsBashEgressParser(name)) injectBashEgressParser(existing)
   if (agentGetsImageQuarantineGate(name)) injectImageQuarantineGate(existing)
   if (agentGetsKeychainReadGate(name)) injectKeychainReadGate(existing)
+  if (agentGetsKeychainWriteGate(name)) injectKeychainWriteGate(existing)
   if (agentGetsRevocationNote(name)) injectRevocationNote(existing)
   if (agentGetsProdTreeWriteGate(name)) injectProdTreeWriteGate(existing)
   if (agentGetsTmuxKillGate(name)) injectTmuxKillGate(existing)
@@ -1698,6 +1699,50 @@ export function ensureKeychainReadGate(name: string): boolean {
   if (hookEntriesSettled(settings, 'PreToolUse', 'keychain-read-gate.py', injectKeychainReadGate)) return false
   if (isUnsafeHookCommand(command)) return false
   injectKeychainReadGate(settings)
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  return true
+}
+
+// Card 759161e3 (Viktor 48285; hibanapló 2026-11-13 21:36 and 2026-11-20 01:00, the same class twice): the
+// keychain-write gate. An agent shell does not write or delete in the login keychain by accident with `security`:
+// a relative, missing or absent keychain argument makes security(1) fall back to the default (login) keychain with
+// rc 0 and no message. An ACCIDENT guard, not a boundary (same uid; the script header lists what it does not see).
+// Every sub-agent; the main agent carries the same hook in the repo-shipped project settings.
+export function agentGetsKeychainWriteGate(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+export function injectKeychainWriteGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'keychain-write-gate.py'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  const entry = {
+    matcher: 'Bash',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  // One canonical entry: a prior one under another matcher or with a stale command is a gate that never fires.
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('keychain-write-gate.py')),
+    entry,
+  ]
+}
+
+// Idempotent migration for the running fleet (same shape as ensureKeychainReadGate). Returns true if written; a
+// settings file that is not there is not created (a never-spawned agent gets the hook on its first spawn).
+export function ensureKeychainWriteGate(name: string): boolean {
+  if (!agentGetsKeychainWriteGate(name)) return false
+  const settingsPath = agentSettingsPath(name)
+  if (!existsSync(settingsPath)) return false
+  let settings: Record<string, unknown> = {}
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'keychain-write-gate.py'))
+  if (hookEntriesSettled(settings, 'PreToolUse', 'keychain-write-gate.py', injectKeychainWriteGate)) return false
+  if (isUnsafeHookCommand(command)) return false
+  injectKeychainWriteGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }
