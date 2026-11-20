@@ -752,13 +752,17 @@ def _hn_reader_rx():
     if not _HN_READER:
         _HN_READER.append(re.compile(
             r'(?<![\w.-])' + _SHELL_NAME + r'(?![\w.-])[\'"]?(?:' + _HN_OPTS_OVER + r'|' + _HN_OPTS
-            + r'(?:[ \t]*(?:$|[;&|)\n<>]|\d+[<>])|[ \t]+[-+][A-Za-z]*[sc]))'
+            + r'(?:[ \t]*(?:$|[;&|)\n<>]|\d+[<>])|[ \t]+[-+][A-Za-z]*[sc]|[ \t]+#'
+            r'|[ \t]+[\'"]?(?:/dev/stdin|/dev/fd/0|/proc/self/fd/0)(?![\w/.-])))'
             r'|(?<![\w.-])eval(?![\w.-])'
             r'|(?<![\w.-])(?:source|\.)[ \t]+<\(|(?<![\w.-])' + STDIN_SOURCE))
     return _HN_READER[0]
 
 
 _HN_FEED_READERS = frozenset(('cat', 'head', 'tail'))
+# words that may stand before the reader and leave what it prints unchanged (`command cat f`, `LC_ALL=C cat f`,
+# `nice -n 5 head f`, `sudo -u x cat f`): _FEEDER_WRAPPERS plus sudo / doas
+_HN_PRE_WORDS = frozenset(('builtin', 'command', 'exec', 'nohup', 'time', 'env', 'nice', 'sudo', 'doas'))
 # a redirection operator with its fd (`2>`, `0<`, `<`, `>>`) is one token, so `2>/dev/null cat f` starts at cat; a
 # digit glued to a word stays in the word (`a1<f`: the word is a1, the < is stdin's)
 _HN_TOKEN_RX = re.compile(r'\d*<+|\d*>+|[^\s;&|()<>`]+|[;&|()`\n]+')
@@ -769,11 +773,11 @@ def _hn_fed(base, cmd):
     `0<f`, `$(< f)`; not << / <<<, whose word is no file), or a word of a cat / head / tail command (`cat f | bash`,
     `$(cat f)`, `<(cat f)`). One forward pass over the tokens: each simple command's first word, a redirection's
     target skipped (`< x cat f`, `2>/dev/null cat f`: cat is the command)."""
-    first, prev = None, None
+    pre, feeder, skip, prev = True, False, False, None
     for m in _HN_TOKEN_RX.finditer(cmd):
         tok = m.group()
         if tok[0] in ';&|()`\n':
-            first, prev = None, tok
+            pre, feeder, skip, prev = True, False, False, tok
             continue
         redir = prev is not None and prev[-1] in '<>'
         if tok[-1] in '<>':
@@ -781,10 +785,18 @@ def _hn_fed(base, cmd):
             continue
         word = strip_quotes(tok)
         if word == base or word.endswith('/' + base):
-            if (redir and prev.lstrip('0123456789') == '<') or first in _HN_FEED_READERS:
+            if (redir and prev.lstrip('0123456789') == '<') or feeder:
                 return True
-        if first is None and not redir:
-            first = os.path.basename(word)
+        if pre and not redir:
+            name = os.path.basename(word)
+            if skip:
+                skip = False
+            elif name in _HN_FEED_READERS:
+                pre, feeder = False, True
+            elif word.startswith('-'):
+                skip = word in _FEEDER_ARG_FLAGS
+            elif not (name in _HN_PRE_WORDS or word.isdigit() or _FEEDER_ASSIGN_RX.match(word)):
+                pre = False
         prev = tok
     return False
 
@@ -1661,7 +1673,7 @@ CAT_RX = re.compile(SCRIPT_POSITION + r'(?:' + WORD + r'*/)?cat' + _CAT_ARGS)
 # they print can become code: in a substitution, or piped straight into an interpreter. Everywhere else (`head -1
 # HANDOFF.md && bash x.sh`, `tail out.txt; python3 ...`) they read an output file: the replay of 11-20 had 105
 # fleet commands blocked by such a file (mutation logs, HANDOFF.md, the error register) and none of them ran it.
-HEADTAIL_RX = re.compile(r'(?:\$\(|`)[ \t]*(?:' + WORD + r'*/)?(?:head|tail)' + _CAT_ARGS
+HEADTAIL_RX = re.compile(r'(?:\$\(|<\(|`)[ \t]*' + CHAIN + r'(?:' + WORD + r'*/)?(?:head|tail)' + _CAT_ARGS
                          + r'|' + SCRIPT_POSITION + r'(?:' + WORD + r'*/)?(?:head|tail)' + _CAT_ARGS
                          + r'(?=[ \t]*\|(?!\|)[ \t]*\\?[\'"]?' + INTERP + r'[\'"]?(?=\s|$)'
                          # an interpreter given its code by -c / -e reads the pipe as data (`tail -1 reg.jsonl |
