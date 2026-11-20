@@ -91,6 +91,7 @@ import {
   saturationRefusesDispatch,
 } from './agent-process.js'
 import { isRestartInFlight } from './restart-lock.js'
+import { readNetdownSince, loadNetdownHold, saveNetdownHold, type NetdownAlertHold } from './netdown-hold.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { ownerRecentlyActive } from './owner-activity.js'
 import { runCommandTask } from './command-task.js'
@@ -2227,6 +2228,67 @@ function pendingRetryAlertText(view: PendingRetryView, prefix: string, ageMinute
       ]).join('\n')
 }
 
+// Card 91d9911e: the scheduler alerts held during a network outage (see
+// netdown-hold.ts). Persisted (r2, Viktor 49109 LOW 2): the hold claims the
+// one-shot stamps, so losing it in a dashboard restart would lose alerts that
+// would otherwise have reached the main agent's queue. Loaded on first use.
+let netdownHoldCache: NetdownAlertHold | null = null
+function netdownHold(): NetdownAlertHold {
+  if (netdownHoldCache === null) netdownHoldCache = loadNetdownHold()
+  return netdownHoldCache
+}
+function persistNetdownHold(): void {
+  if (!saveNetdownHold(netdownHold())) logger.warn('scheduler: net-down hold persist failed (kept in memory)')
+}
+
+function fmtClockHu(ms: number): string {
+  return new Date(ms).toLocaleTimeString('hu-HU', { hour: '2-digit', minute: '2-digit' })
+}
+
+/** Card 91d9911e: the network is back -- one summary of the held alerts, if any. The hold is
+ *  emptied only once the summary is in the main agent's queue; a failed insert retries next tick. */
+function flushNetdownHold(nowMs: number): void {
+  const hold = netdownHold()
+  const held = hold.size
+  const text = hold.summary(nowMs, fmtClockHu, (task, agent) => taskInflightMap.has(`${task}@${agent}`))
+  if (text === null) return
+  try {
+    createSystemMessage(MAIN_AGENT_ID, text)
+  } catch (err) {
+    logger.warn({ err, held }, 'scheduler: net-down summary failed, kept for the next tick')
+    return
+  }
+  hold.clear()
+  persistNetdownHold()
+  logger.info({ held }, 'scheduler: net-down summary sent to the main agent')
+}
+
+/** Card 91d9911e: a busy-pane notice (or its owner escalation) during a network
+ *  outage goes into the hold; the caller still sets the entry's one-shot flag.
+ *  The kanban 'waiting' move of the stage-1 notice is skipped with it: the card
+ *  is not stuck, the network is. */
+function holdInflightAlert(kind: 'inflight' | 'inflight-owner', entry: TaskInflightEntry, sinceMs: number): void {
+  netdownHold().hold(kind, entry.taskName, entry.agentName, sinceMs)
+  persistNetdownHold()
+  logger.info({ task: entry.taskName, agent: entry.agentName, kind }, 'scheduler: busy-pane alert held (network down)')
+}
+
+/**
+ * Card 91d9911e: a pending-retry alert during a network outage. The row's
+ * one-shot stamp is claimed exactly as the send path would (so the alert does
+ * not fire when the network returns), and the alert goes into the hold instead
+ * of the main agent's queue or the owner's channel.
+ */
+function holdPendingRetryAlert(kind: 'retry' | 'retry-owner', view: PendingRetryView, nowMs: number, sinceMs: number): void {
+  const claimed = kind === 'retry'
+    ? markPendingTaskRetryAlert(view.taskName, view.agentName, nowMs)
+    : markPendingTaskRetryOwnerAlert(view.taskName, view.agentName, nowMs)
+  if (!claimed) return
+  netdownHold().hold(kind, view.taskName, view.agentName, sinceMs)
+  persistNetdownHold()
+  logger.info({ task: view.taskName, agent: view.agentName, kind }, 'scheduler: pending-retry alert held (network down)')
+}
+
 // Stage 1: inter-agent notice to the main agent once a pending retry crosses
 // ALERT_THRESHOLD_MS. This used to go straight to the operator's channel
 // (see sendPendingRetryAlert below, now the stage-2 escalation) -- too
@@ -2592,6 +2654,11 @@ export function startScheduleRunner(): NodeJS.Timeout {
     try {
     const tasks = listScheduledTasks()
     const now = Date.now()
+    // Card 91d9911e: one reading of the watchdog's net-down marker per tick. While
+    // it is fresh the scheduler's notices are held; the first tick after it is
+    // gone sends their one summary.
+    const netdownSince = readNetdownSince(now)
+    if (netdownSince === null) flushNetdownHold(now)
     // Scan the real interval elapsed since the previous tick (30 min on the
     // first tick), not a fixed 60s window -- a late/dropped tick must not let a
     // sparse daily cron's single occurrence slip through a gap unscanned (#621).
@@ -2684,10 +2751,12 @@ export function startScheduleRunner(): NodeJS.Timeout {
         }
         taskInflightMap.delete(key)
       } else if (decision === 'alert') {
-        sendTaskInflightMainAgentNotice(entry, now - entry.injectedAt)
+        if (netdownSince !== null) holdInflightAlert('inflight', entry, netdownSince)
+        else sendTaskInflightMainAgentNotice(entry, now - entry.injectedAt)
         entry.alerted = true
       } else if (decision === 'escalate') {
-        sendTaskTimeoutAlert(entry, now - entry.injectedAt)
+        if (netdownSince !== null) holdInflightAlert('inflight-owner', entry, netdownSince)
+        else sendTaskTimeoutAlert(entry, now - entry.injectedAt)
         entry.ownerAlerted = true
       } else if (decision === 'lost' && !entry.parkedEnterSent && isOwnPromptParkedOverfull(pane, getInjectedPrompt(entry.session))) {
         // Not lost: our prompt is parked in a box taller than the pane, where
@@ -2851,8 +2920,14 @@ export function startScheduleRunner(): NodeJS.Timeout {
       // do not alert.
       const reason = result === 'mcp-missing' ? mcpMissingReason(row.task_name, row.agent_name) : result
       const stillPresent = updatePendingTaskRetry(row.task_name, row.agent_name, now, reason)
-      if (stillPresent && view.alertDue) sendPendingRetryMainAgentNotice(view, now)
-      if (stillPresent && view.ownerAlertDue) sendPendingRetryAlert(view, now)
+      if (stillPresent && view.alertDue) {
+        if (netdownSince === null) sendPendingRetryMainAgentNotice(view, now)
+        else holdPendingRetryAlert('retry', view, now, netdownSince)
+      }
+      if (stillPresent && view.ownerAlertDue) {
+        if (netdownSince === null) sendPendingRetryAlert(view, now)
+        else holdPendingRetryAlert('retry-owner', view, now, netdownSince)
+      }
 
       // SCHEDPARK814 stale-parked-input janitor. A 'busy' verdict that keeps
       // repeating past the threshold is the one case worth a second look: the
