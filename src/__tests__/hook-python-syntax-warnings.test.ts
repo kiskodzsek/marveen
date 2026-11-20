@@ -4,6 +4,8 @@
 // warning; with warnings as errors it is a SyntaxError at compile time, which no
 // try/except in the hook can catch, so a future Python would turn the gate into a
 // silent exit 1. Every Python hook must compile with SyntaxWarning as an error.
+// Before Python 3.12 the same invalid escape is a DeprecationWarning (Viktor 48990, measured on 3.9.6), so that is
+// an error here too: on an older python3 the test would otherwise pass without checking anything.
 import { describe, it, expect } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { readdirSync } from 'node:fs'
@@ -16,6 +18,7 @@ const hooksDir = join(here, '..', '..', 'scripts', 'hooks')
 const COMPILE_ALL = [
   'import sys, warnings',
   "warnings.simplefilter('error', SyntaxWarning)",
+  "warnings.simplefilter('error', DeprecationWarning)",
   'bad = []',
   'for p in sys.argv[1:]:',
   '    try:',
