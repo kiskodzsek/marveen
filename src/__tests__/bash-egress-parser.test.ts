@@ -30,6 +30,23 @@ import {
 } from '../web/agent-scaffold.js'
 import { MAIN_AGENT_ID } from '../config.js'
 
+// Card c97e4bdf: a size-relative time budget for the tests that catch a quadratic regression (2.7-3.6 s at idle while
+// the readings were lexed again). A fixed 2000 ms failed on a loaded machine (load 36 on 12 CPUs: 2172 and 3030 ms)
+// while the code was linear (0.55 and 0.83 s at idle). A quarter of the input runs first, then the full size; the test
+// fails only when the full run is over 2000 ms AND took more than 6 times the quarter (measured: linear 3.2-3.9,
+// also 3.6-3.9 under a uniform slowdown; a quadratic mutant 9.3-9.7), so a machine slow on both runs does not fail it. The inputs are built outside the timed part.
+function expectLinearTime(label: string, build: (scale: number) => string, check: (cmd: string) => void) {
+  const small = build(0.25)
+  const big = build(1)
+  let t0 = Date.now()
+  check(small)
+  const quarter = Math.max(Date.now() - t0, 1)
+  t0 = Date.now()
+  check(big)
+  const full = Date.now() - t0
+  if (full >= 2000) expect(full / quarter, `${label}: ${full} ms, a quarter ${quarter} ms`).toBeLessThan(6)
+}
+
 // @ts-expect-error -- plain .mjs hook script, no types
 import { isPrivateTarget } from '../../scripts/hooks/bash-egress-parser.mjs'
 
@@ -1524,11 +1541,10 @@ describe('variable names and parameter expansion (card f2a0f976, Viktor 43009 LO
     // measured: the reserves lexing every reading again took 2.7-3.6 s at this size (main 1.2 s, now 0.4-0.5 s)
     const head = 'for u in ' + Array.from({ length: 64 }, (_, k) => `h${k}.local`).join(' ') + '; do '
     for (const seg of ['curl -s $u/p; ', 'curl -s ${u:-x}/p; ']) {
-      const cmd = head + seg.repeat(Math.floor((64000 - head.length) / seg.length)) + `done\ncurl -s https://${H}/x`
-      expect(cmd.length).toBeLessThan(MAX_COMMAND_CHARS)
-      const t0 = Date.now()
-      expect(classify(cmd), seg).toMatchObject({ deny: true, reason: 'curl-external' })
-      expect(Date.now() - t0, seg).toBeLessThan(2000)
+      const build = (scale: number) =>
+        head + seg.repeat(Math.floor(((64000 - head.length) / seg.length) * scale)) + `done\ncurl -s https://${H}/x`
+      expect(build(1).length).toBeLessThan(MAX_COMMAND_CHARS)
+      expectLinearTime(seg, build, (cmd) => expect(classify(cmd), seg).toMatchObject({ deny: true, reason: 'curl-external' }))
     }
   })
   it('STILL OPEN, pinned: a plain $NAME / ${NAME} not assigned in the command is read from the environment (header)', () => {
@@ -1881,11 +1897,12 @@ describe('bash-egress: a variable command word is expanded (772cd001)', () => {
   })
   it('a 64-value loop over thousands of variable-command spans stays within the hook budget', () => {
     const vals = Array.from({ length: 64 }, (_, k) => `127.0.0.${k + 1}`).join(' ')
-    let c = `f=curl; for u in ${vals}; do `
-    while (c.length < 60000) c += '$f -s $u/p; '
-    const t0 = Date.now()
-    expect(classify(c + 'done')).toMatchObject({ deny: false })
-    expect(Date.now() - t0).toBeLessThan(2000)
+    const build = (scale: number) => {
+      let c = `f=curl; for u in ${vals}; do `
+      while (c.length < 60000 * scale) c += '$f -s $u/p; '
+      return c + 'done'
+    }
+    expectLinearTime('variable-command spans', build, (c) => expect(classify(c)).toMatchObject({ deny: false }))
   })
   it('NAME+= before the command is an assignment prefix: the curl after it is the command', () => {
     expect(bashTarget(`V+=x curl -s https://${H}/x`)).toContain(H)
