@@ -1487,6 +1487,27 @@ def script_cases():
             ('echo X=nosuch >/dev/null; python3 $X ./measure.py', d),
             ('X=nosuch; unset X; python3 $X ./measure.py', d),
             ('X=nosuch; X=$(true); python3 $X ./measure.py', d),
+            # card 10624d73: the expansion is trusted only for a plain top-level assignment the shell surely makes
+            # before the use; each of these leaves $X empty or another value in bash (oracle-checked), and blocks
+            ('false && X=stat.py; python3 $X ./measure.py', d),
+            ('true || X=stat.py; python3 $X ./measure.py', d),
+            ('X=stat.py | true; python3 $X ./measure.py', d),
+            ('X=stat.py & python3 $X ./measure.py', d),
+            ('(X=stat.py); python3 $X ./measure.py', d),
+            ('$(X=stat.py); python3 $X ./measure.py', d),
+            ('if false; then X=stat.py; fi; python3 $X ./measure.py', d),
+            ('f() { X=stat.py; }; python3 $X ./measure.py', d),
+            ('X=stat.py; X=; python3 $X ./measure.py', d),
+            ('python3 $X ./measure.py; X=stat.py', d),
+            ('X=stat.py; read X < /dev/null; python3 $X ./measure.py', d),
+            ("X=stat.py; eval 'X='; python3 $X ./measure.py", d),
+            ("X=stat.py; trap 'X=' DEBUG; python3 $X ./measure.py", d),
+            ('X=stat.py; . ./nosuch.sh; python3 $X ./measure.py', d),
+            ('X=stat.py; IFS=.; python3 $X ./measure.py', d),
+            ("X=stat.py; bash -c 'python3 $X ./measure.py'", d),  # single-quoted: the inner bash has no X
+            ('(true; X=stat.py); python3 $X ./measure.py', d),  # a subshell, not right after its "("
+            ('$(true; X=stat.py); python3 $X ./measure.py', d),
+            ('X=stat.py; eval "unset $(printf \'\\x58\')"; python3 $X ./measure.py', d),  # unset without the name
             # Viktor 43324 LELET 4: a directory change cd_bases does not follow (pushd, cd $(..), cd ${PWD}/.., env -C):
             # "this agent-msg.sh is ours everywhere" is not known, d's look-alike runs its words
             ('pushd ' + d + ' >/dev/null; bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
@@ -2593,6 +2614,14 @@ def script_cases():
             ('python3 -Xdev stat.py measure.py', d),
             ('python3 -W measure.py stat.py', d),  # a warning filter, never run
             ('python3 stat.py measure.py', d),  # Viktor 43235 B/C: the same boundary as a path in the script
+            # card 10624d73 (the price of Viktor 43324 LELET 1 won back): a plain top-level assignment before the use
+            # is what bash does, so the words after the script are its argv again (the fleet's measuring forms)
+            ('X=stat.py; python3 $X ./measure.py', d),
+            ('X=stat.py\npython3 $X ./measure.py', d),
+            ('X=stat.py && python3 $X ./measure.py', d),
+            ('X=stat.py; Y=$X; python3 $Y ./measure.py', d),
+            ('P=' + d + '; python3 -I $P/stat.py ' + d + '/measure.py', d),
+            ('X=stat.py; bash -c "python3 $X ./measure.py"', d),  # double quotes: the outer shell expands it
             ('/usr/bin/python3 stat.py regiszter.jsonl 2>/dev/null', d),
             ('python3 stat.py ' + ' '.join('a%d' % i for i in range(80)), d),  # argv past MAX_ARGS: data
             ('python3 -c pass -Wignore measure.py', d),  # -c first: inline code, the rest is its argv

@@ -2365,6 +2365,66 @@ def expand(text, keep=()):
                       else env.get(m.group(1) or m.group(2), m.group(0)), text)
 
 
+
+ASSIGN_WORD_RX = re.compile(r'[A-Za-z_]\w*=.*', re.S)
+# what may change a variable without naming it (a sourced file, eval of a made text) or split $X another way (IFS)
+TRUST_OFF_RX = re.compile(r'(?<![\w./-])(?:source|eval|\.)(?=[ \t])|(?<!\w)IFS(?!\w)')
+
+
+def expansion_trusted(text, keep=()):
+    """Card 10624d73 (Viktor 43324 LELET 1, its price): expand() reads any NAME=value in the text as this shell's
+    assignment, but the real $NAME may be empty (`echo X=notes.py`, a comment, `X=a cmd`, `unset X`, `false && X=a`)
+    and then `python3 $X evil.py` runs evil.py; so an expanded text keeps the old walk (every word judged, no
+    agent-msg reading). This says when the expansion is what the shell does: every name expand() replaced is set
+    exactly once (HOME: not set, or set once), by a simple command of plain assignments only at the top level
+    (lexer: depth 0, not a subshell, a substitution, a pipe, `&`, a heredoc, a comment or a quote; not after && or
+    ||, not inside if / { / a function), before its first use, every use unquoted or in double quotes, and the name
+    appears nowhere else in the text (unset, read, export -n, for NAME, ${NAME:-x}, NAME as a word ...); and no
+    source, `.`, eval (they may set it without naming it) or IFS (it splits $NAME another way). Anything the lexer
+    cannot read: not trusted. Then the measuring forms (`P=$SP/probe; python3 -I $P/x.py <hook file>`) read
+    their argv as data again, as a literal path does."""
+    uses = [m for m in VAR_RX.finditer(text) if (m.group(1) or m.group(2)) not in keep]
+    if not uses:
+        return True
+    if TRUST_OFF_RX.search(text):
+        return False
+    lx = lex_or_none(text)
+    if lx is None:
+        return False
+    cls = lx['cls']
+    segs = lx['segments']
+    n = len(text)
+    for name in {m.group(1) or m.group(2) for m in uses}:
+        mine = [m for m in uses if (m.group(1) or m.group(2)) == name]
+        if any(cls[m.start()] not in 'cd' for m in mine):
+            return False
+        sites = [m.start() for m in re.finditer(r'(?<![\w$])' + name + '=', text)]
+        if len(sites) > 1 or (not sites and name != 'HOME'):
+            return False
+        allowed = {m.start() + (2 if m.group(1) else 1) for m in mine} | set(sites)
+        if any(m.start() not in allowed for m in re.finditer(r'(?<!\w)' + name + r'(?!\w)', text)):
+            return False
+        for p in sites:
+            if cls[p] != 'c' or p > min(m.start() for m in mine):
+                return False
+            seg = max((g for g in segs if g['start'] <= p < g['end']), key=lambda g: g['depth'], default=None)
+            if seg is None or seg['depth'] != 0 or seg['frame'] != 'top':
+                return False
+            if not all(ASSIGN_WORD_RX.fullmatch(w['text']) for w in shell_lex.words(text, lx, seg)):
+                return False
+            q = seg['start'] - 1
+            while q >= 0 and text[q] in ' \t' and cls[q] == 'c':
+                q -= 1
+            if q >= 0 and cls[q] == 'c' and text[q] in '|&(':
+                return False
+            r = seg['end']
+            while r < n and text[r] in ' \t' and cls[r] == 'c':
+                r += 1
+            if r < n and cls[r] == 'c' and (text[r] == '|' and text[r + 1:r + 2] != '|' or
+                                             text[r] == '&' and text[r + 1:r + 2] != '&'):
+                return False
+    return True
+
 def cd_bases(text, cwd, loops=None):
     """cwd, then the directory after each cd in order (a relative cd on top of the one before).
     loops (card deede5e4, script_paths only): the for-loop lists of the text (loop_lists). With it, a cd to a word
@@ -3342,7 +3402,12 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
     # read ok.py only): loop_word_paths reads every loop value AND every plain value assigned to the name
     lnames = frozenset(loop_lists(_blank_data_heredocs(norm))) if 'for' in norm else frozenset()
     text = expand(norm, lnames)
-    groups = interp_groups(text, text != norm) + [[w] for w in extra]
+    # card 10624d73: an expansion the shell makes as read (expansion_trusted) keeps the argv-data reading; on the
+    # command as written too, not only on this text: a payload-marked text turned the quote of `bash -c 'python3 $X
+    # evil.py'` into a boundary, and its $X (empty in the inner bash) looked unquoted (found by the oracle cases)
+    plain = normalise(cmd)
+    trusted = expansion_trusted(norm, lnames) and (norm == plain or expansion_trusted(plain, lnames))
+    groups = interp_groups(text, text != norm and not trusted) + [[w] for w in extra]
     # card 70c94516 (Viktor 43662 LELET 1): normalise() takes the backslash of a $'\x65' escape (`\x` -> `x`), which
     # bash decodes in a word (`python3 $'\x65vil.py'` runs evil.py): such a command is read without it too
     word_texts = [text]
