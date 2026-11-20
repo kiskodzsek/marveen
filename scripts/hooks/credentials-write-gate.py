@@ -10,11 +10,15 @@ An ACCIDENT guard, not a boundary: every agent runs as the same macOS user. NOT 
 - a write from an interpreter: python/node/perl `open(..., 'w')`, `json.dump`, `fs.writeFileSync`, also in a
   here-document a python3/node reads (`python3 - <<EOF`), and a script file's content;
 - a directory copy that carries the file inside it (`cp -R ~/.claude/ X/`, `rsync -a A/ B/`, `ditto A B`, `tar x`,
-  `unzip`): the file name is not in the text;
+  `unzip`): the file name is not in the text (Viktor 48557 Q2: a follow-up, not this gate);
+- a read redirected into a file (`cat ~/.claude/.credentials.json > x`): a copy out, but a read in form;
 - a name built beyond the text: a variable set outside the command, `$(...)` output, a glob or brace that does not
   contain "cred", `xargs`/`find -exec`/`parallel` running the writer, a path from a file;
-- `cd` inside a subshell is read as if it held for the rest of the text (a relative directory test may look in the
-  wrong place); a quoted `">"` word reads as a redirection (a rare false deny).
+- writers not in the list below (scp, curl -O/--output-dir, wget without -O, a remote rsync target), wrappers and
+  options the parser does not know (sudo --user, zsh noglob, GNU abbreviated long options), names set by declare,
+  local, typeset, a for loop or ${X:-...}, ANSI-C quoting (Viktor 48557 L2-L4: rare or deliberate forms);
+- a quoted `">"` word reads as a redirection (a rare false deny), and a shell reading stdin (`bash -s < f`) makes
+  every echo/printf/cat text of the line a command text.
 
 What blocks (exit 2), for every simple command of the text (and, read again, the text a shell runs: `bash|sh|zsh|dash|
 ksh -c STRING`, `eval WORDS`, a `$( )` or backtick inside double quotes, a here-document on a line where such a shell
@@ -22,16 +26,17 @@ runs, the echo/printf/cat text of a text a shell reads on stdin -- the parser of
 here-document body or quoted text that no shell runs is data and passes), when a WRITE TARGET is named
 `.credentials.json` (any letter case: APFS is case-insensitive; a glob or brace that can match it counts):
 - a redirection target: `>`, `>>`, `>|`, `&>`, `N>`, `<>`;
-- cp, mv, ln, install, ditto, rsync (and the g-prefixed GNU names): the destination (the last operand, or `-t DIR` /
-  `--target-directory=DIR`); and a `.credentials.json` SOURCE when the destination is a directory (it lands under
-  the same name): a trailing `/`, `.`/`..`, `-t`, an existing directory (relative to the payload cwd and the text's
-  own `cd`), or a destination with a variable the gate cannot resolve (fail-closed); `ln SRC` with one operand
-  links into the current directory;
-- tee, touch, truncate: every operand; dd `of=`; sed/gsed/perl with an in-place `-i`: every operand;
-  curl `-o`/`--output`, wget `-O`/`--output-document`;
+- cp, mv, ln, link, install, ditto, rsync (and the g-prefixed GNU names): the destination (the last operand, or
+  `-t DIR` / `--target-directory=DIR`), and ANY `.credentials.json` source, whatever the destination (AUTH rule 2
+  forbids the copy too, Viktor 48557 Q1): `cp`, `mv`, `ln -s` of the file anywhere, a backup `cp X{,.bak}`, a
+  restore `cp X{.bak,}` (a one-level brace is read both ways, as the shell expands it and as one word; M1);
+- tee, touch, truncate, sponge (and gtee, gtouch, gtruncate): every operand; dd/gdd `of=`; sed/gsed/perl with an
+  in-place `-i` (a cluster such as -pi or -ni; perl -M... is no in-place): every operand; curl `-o`/`--output`,
+  wget `-O`/`--output-document`, sort/base64 `-o`;
 - a text that cannot be split (an open quote) while it names `.credentials.json` (fail-closed).
 Passes: every read (ls, stat, test -f, `[ -e ]`, cat/grep/head without a redirection to it, shasum, find -name),
-rm (a delete is not a placement), chmod, a mention in a here-document body or a message text.
+rm (a delete is not a placement; it is also the way to take a stale file out), chmod, a mention in a here-document
+body or a message text.
 No allow list: a deliberate placement is exactly what AUTH rule 1 forbids; the fix is the token source.
 Denies go to store/credentials-write-gate/deny.log as sha256 + reason, never the command text (it may hold a token).
 """
@@ -40,6 +45,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 
@@ -49,10 +55,10 @@ DENY_LOG = os.path.join(STATE, 'deny.log')
 PARSER_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'keychain-write-gate.py')
 NAME = '.credentials.json'
 
-COPY_LIKE = {'cp', 'gcp', 'mv', 'gmv', 'ln', 'gln', 'install', 'ginstall', 'ditto', 'rsync'}
+COPY_LIKE = {'cp', 'gcp', 'mv', 'gmv', 'ln', 'gln', 'link', 'install', 'ginstall', 'ditto', 'rsync'}
 # Option letters that take a separate argument (BSD and GNU; `t` = GNU target directory, read as the destination).
 COPY_ARG = {'cp': set('St'), 'gcp': set('St'), 'mv': set('St'), 'gmv': set('St'), 'ln': set('St'), 'gln': set('St'),
-            'install': set('BfgmoSt'), 'ginstall': set('gmoSt'), 'ditto': set(), 'rsync': set('eBfTM')}
+            'link': set(), 'install': set('BfgmoSt'), 'ginstall': set('gmoSt'), 'ditto': set(), 'rsync': set('eBfTM')}
 COPY_LONG_ARG = {'ditto': {'--arch', '--bom'},
                  'rsync': {'--exclude', '--include', '--filter', '--rsh', '--temp-dir', '--exclude-from',
                            '--include-from', '--files-from', '--compare-dest', '--link-dest', '--copy-dest',
@@ -63,9 +69,13 @@ COPY_LONG_ARG = {'ditto': {'--arch', '--bom'},
                            '--only-write-batch', '--protocol', '--modify-window', '--checksum-choice',
                            '--compress-choice', '--compress-level', '--skip-compress', '--remote-option'},
                  'install': {'--mode', '--owner', '--group', '--suffix'}}
-EVERY_OPERAND_ARG = {'tee': set(), 'touch': set('tdr'), 'truncate': set('sr')}
-OUTPUT_OPT = {'curl': ({'-o'}, {'--output'}), 'wget': ({'-O'}, {'--output-document'})}
-IN_PLACE = {'sed', 'gsed', 'perl'}
+EVERY_OPERAND_ARG = {'tee': set(), 'gtee': set(), 'touch': set('tdr'), 'gtouch': set('tdr'), 'truncate': set('sr'),
+                     'gtruncate': set('sr'), 'sponge': set()}
+OUTPUT_OPT = {'curl': ({'-o'}, {'--output'}), 'wget': ({'-O'}, {'--output-document'}), 'sort': ({'-o'}, {'--output'}),
+              'gsort': ({'-o'}, {'--output'}), 'base64': ({'-o'}, {'--output'})}
+# an in-place option: sed -i / -Ei / --in-place, perl -i / -pi / -ni (not -M..., whose module name may hold an i)
+IN_PLACE = {'sed': re.compile(r'^-[nEr]*i|^--in-place'), 'gsed': re.compile(r'^-[nEr]*i|^--in-place'),
+            'perl': re.compile(r'^-[pnlaw0-9]*i')}
 
 _P = None
 
@@ -86,7 +96,7 @@ def is_cred(word, env):
     w = parser().expand(word, env)
     if w is None:
         w = word
-    base = w.rstrip('/').rsplit('/', 1)[-1].lower()
+    base = w.rstrip('/').rsplit('/', 1)[-1].casefold()
     if base == NAME:
         return True
     if '{' in base and 'cred' in base:
@@ -95,20 +105,6 @@ def is_cred(word, env):
         # the shell's glob matches a leading dot only literally (no dotglob): `dir/*` does not name the file
         return fnmatch.fnmatchcase(NAME, base)
     return False
-
-
-def dir_like(word, env, cwd):
-    """The destination is (or may be) a directory: a source then lands under its own name."""
-    if word.endswith('/') or word in ('.', '..'):
-        return True
-    w = parser().expand(word, env)
-    if w is None:
-        return True  # an unresolved variable: fail-closed, only ever asked for a .credentials.json source
-    if not os.path.isabs(w):
-        if cwd is None:
-            return True
-        w = os.path.join(cwd, w)
-    return os.path.isdir(w)
 
 
 def operands(args, argset, long_arg=()):
@@ -145,29 +141,50 @@ def operands(args, argset, long_arg=()):
     return ops, tdir
 
 
-def judge_program(prog, rest, env, cwd):
+BRACE_RX = re.compile(r'^([^{}]*)\{([^{}]*,[^{}]*)\}([^{}]*)$')
+
+
+def brace_words(word):
+    """A one-level unquoted brace `a{b,c}d` -> [abd, acd] (the shell expands it before cp sees it); else [word]."""
+    m = BRACE_RX.match(word)
+    if not m:
+        return [word]
+    return [m.group(1) + part + m.group(3) for part in m.group(2).split(',')]
+
+
+def judge_copy(prog, ops, tdir, env):
+    """The copy-like verdict on an operand list."""
+    if tdir is not None:
+        dest, sources = tdir, ops
+    elif len(ops) >= 2:
+        dest, sources = ops[-1], ops[:-1]
+    elif len(ops) == 1 and prog in ('ln', 'gln'):
+        dest, sources = '.', ops
+    else:
+        return None
+    if is_cred(dest, env):
+        return f'{prog} writes to {NAME}'
+    if any(is_cred(s, env) for s in sources):
+        return f'{prog} copies, moves or links a {NAME} (AUTH rule 2: no copy either)'
+    return None
+
+
+def judge_program(prog, rest, env):
     """The reason a simple command writes .credentials.json, or None."""
     if prog in COPY_LIKE:
         ops, tdir = operands(rest, COPY_ARG[prog], COPY_LONG_ARG.get(prog, ()))
-        if tdir is not None:
-            dest, sources = tdir, ops
-        elif len(ops) >= 2:
-            dest, sources = ops[-1], ops[:-1]
-        elif len(ops) == 1 and prog in ('ln', 'gln'):
-            dest, sources = '.', ops
-        else:
-            return None
-        if is_cred(dest, env):
-            return f'{prog} writes to {NAME}'
-        if any(is_cred(s, env) for s in sources) and (tdir is not None or dir_like(dest, env, cwd)):
-            return f'{prog} puts a {NAME} into a directory'
-        return None
+        wide = [x for w in ops for x in brace_words(w)]  # `cp f{.bak,}` is two operands to cp (Viktor M1)
+        if wide != ops:
+            hit = judge_copy(prog, wide, tdir, env)
+            if hit:
+                return hit
+        return judge_copy(prog, ops, tdir, env)
     if prog in EVERY_OPERAND_ARG:
         ops, _ = operands(rest, EVERY_OPERAND_ARG[prog])
         if any(is_cred(w, env) for w in ops):
             return f'{prog} writes to {NAME}'
         return None
-    if prog == 'dd':
+    if prog in ('dd', 'gdd'):
         if any(w.startswith('of=') and is_cred(w[3:], env) for w in rest):
             return f'dd of= writes to {NAME}'
         return None
@@ -187,14 +204,13 @@ def judge_program(prog, rest, env, cwd):
                 return f'{prog} output writes to {NAME}'
         return None
     if prog in IN_PLACE:
-        in_place = any(w == '--in-place' or w.startswith('--in-place=') or
-                       (w.startswith('-') and not w.startswith('--') and 'i' in w[1:]) for w in rest)
+        in_place = any(IN_PLACE[prog].match(w) for w in rest)
         if in_place and any(is_cred(w, env) for w in rest if not w.startswith('-')):
             return f'{prog} -i edits {NAME} in place'
     return None
 
 
-def judge(cmd, cwd=None, depth=0):
+def judge(cmd, depth=0):
     """The reason for the first write to a .credentials.json in cmd, or None."""
     flat = cmd.replace('\\\n', '').replace("'", '').replace('"', '').replace('\\', '').lower()
     if 'cred' not in flat:
@@ -236,17 +252,7 @@ def judge(cmd, cwd=None, depth=0):
                 env.pop(w, None)
             continue
         prog, rest = P.program(words)
-        if prog == 'cd':
-            arg = rest[0] if rest else '~'
-            to = P.expand(arg, env)
-            if to is None or arg == '-':
-                cwd = None
-            elif os.path.isabs(to):
-                cwd = os.path.normpath(to)
-            elif cwd is not None:
-                cwd = os.path.normpath(os.path.join(cwd, to))
-            continue
-        hit = judge_program(prog, rest, env, cwd)
+        hit = judge_program(prog, rest, env)
         if hit:
             return hit
         if prog in P.SHELLS:
@@ -269,15 +275,15 @@ def judge(cmd, cwd=None, depth=0):
             nested.append(body)
     if depth < 3:
         for text in nested:
-            hit = judge(text, cwd, depth + 1)
+            hit = judge(text, depth + 1)
             if hit:
                 return hit
     return None
 
 
-def decide(cmd, cwd=None):
+def decide(cmd):
     """The replay entry point (E1): the deny reason or None."""
-    return judge(cmd, cwd)
+    return judge(cmd)
 
 
 def log_deny(digest, why):
@@ -300,8 +306,7 @@ def main():
     cmd = (data.get('tool_input') or {}).get('command') or ''
     if not isinstance(cmd, str):
         return 0
-    cwd = data.get('cwd') if isinstance(data.get('cwd'), str) and data.get('cwd') else os.getcwd()
-    why = judge(cmd, cwd)
+    why = judge(cmd)
     if not why:
         return 0
     digest = hashlib.sha256(cmd.encode()).hexdigest()

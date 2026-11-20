@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Tests for credentials-write-gate.py (card a467f621, Viktor 48495).
+"""Tests for credentials-write-gate.py (card a467f621, Viktor 48495; round 2: Viktor 48557).
 
-The table goes through the module's judge(cmd, cwd); a few rows also run the hook as Claude Code does (JSON on
-stdin; exit 0 allow, 2 block), and the deny log through the module with its state under a temp directory.
+The table goes through the module's judge(cmd); a few rows also run the hook as Claude Code does (JSON on stdin;
+exit 0 allow, 2 block), and the deny log through the module with its state under a temp directory.
 Hermetic: no file is written outside the temp tree; the commands are only text. The temp tree is NOT under /tmp
-(a /tmp ancestor would change the relative-path rows; kapu-subagens-bekotes Buktatók), it goes under ~/.cache then.
+(kapu-subagens-bekotes Buktatók), it goes under ~/.cache then.
 Run: python3 -I scripts/hooks/credentials-write-gate_test.py
 """
 import atexit
@@ -25,118 +25,128 @@ if os.path.realpath(base).startswith(('/tmp', '/private/tmp')):
     os.makedirs(base, exist_ok=True)
 TMP = os.path.realpath(tempfile.mkdtemp(prefix='credjson-gate-test-', dir=base))
 atexit.register(shutil.rmtree, TMP, True)
-DIR = os.path.join(TMP, 'cfg')          # an existing directory (an agent's config dir in real use)
-os.makedirs(os.path.join(DIR, 'sub'))
-ELSE = os.path.join(TMP, 'elsewhere')   # a cwd where `sub` does not exist
-os.makedirs(ELSE)
 C = '.credentials.json'
 
-
-def fix(cmd):
-    return cmd.replace('{DIR}', DIR).replace('{ELSE}', ELSE)
-
-
-# (command, cwd or None): every row must block
+# every row must block
 BLOCK = [
-    # the card's list: cp, mv, ln -s, install, ditto, rsync, tee, redirection
-    (f'cp /a/tok.json ~/.claude/{C}', None),
-    (f'cp ~/.claude/{C} agents/dave/.claude-config/', None),
-    (f'cp /x/{C} {{DIR}}', None),
-    (f'cp /x/{C} sub', '{DIR}'),
-    (f'cd {{DIR}} && cp /x/{C} sub', '{ELSE}'),
-    (f'cd {{DIR}}; cd sub; cp /x/{C} .', None),
-    (f'mv old.json {C}', None),
-    (f'mv /x/{C} {{DIR}}/sub', None),
-    (f'ln -s /a/{C} ~/.claude-config/{C}', None),
-    (f'ln -s /a/{C}', None),
-    (f'ln -sf /a/{C} "$HOME/.claude/"', None),
-    (f'install -m 600 tok.json ~/.claude/{C}', None),
-    (f'install -m 600 /x/{C} {{DIR}}', None),
-    (f'ditto a.json ~/.claude/{C}', None),
-    (f'rsync -a a.json ~/.claude/{C}', None),
-    (f'rsync -a --exclude x /a/{C} {{DIR}}/', None),
-    (f'gcp -t ~/.claude/ /a/{C}', None),
-    (f'cp --target-directory=/x /a/{C}', None),
-    (f'cp --target-directory /x /a/{C}', None),
-    (f'cp -- a.json {C}', None),
-    (f'tee ~/.claude/{C} < x', None),
-    (f'echo y | tee -a {C} >/dev/null', None),
-    (f'echo x > ~/.claude/{C}', None),
-    (f'echo x >> {C}', None),
-    (f'echo x 2> {C}', None),
-    (f'echo x &> {C}', None),
-    (f'echo x >| {C}', None),
-    (f'cat a >{C}', None),
-    (f'exec 3<> {C}', None),
-    (f'printf x | cat > "$HOME/.claude/{C}"', None),
+    # the card's list: cp, mv, ln -s, install, ditto, rsync, tee, redirection -- the destination
+    f'cp /a/tok.json ~/.claude/{C}',
+    f'mv old.json {C}',
+    f'ln -s /a/tok.json ~/.claude-config/{C}',
+    f'install -m 600 tok.json ~/.claude/{C}',
+    f'ditto a.json ~/.claude/{C}',
+    f'rsync -a a.json ~/.claude/{C}',
+    f'cp --target-directory=/x/{C} a',
+    f'cp -- a.json {C}',
+    f'link a.json {C}',
+    # any .credentials.json source (Viktor 48557 Q1: AUTH rule 2 forbids the copy too)
+    f'cp ~/.claude/{C} agents/dave/.claude-config/',
+    f'cp ~/.claude/{C} /backup/x.json',
+    f'cp /x/{C} sub',
+    f'mv /x/{C} /y/z',
+    f'mv {C} {C}.expired-1120',
+    f'ln -s /a/{C}',
+    f'ln -sf /a/{C} "$HOME/.claude/"',
+    f'install -m 600 /x/{C} /y/',
+    f'rsync -a --exclude x /a/{C} /b/',
+    f'gcp -t ~/.claude/ /a/{C}',
+    f'cp --target-directory /x /a/{C}',
+    # a one-level brace, as the shell expands it (Viktor 48557 M1: restore and backup)
+    f'cp ~/backup/{C}{{.bak,}}',
+    f'mv ~/.claude/{C}{{.bak,}}',
+    f'cp -p ~/.claude/{{{C}.bak,{C}}}',
+    f'cp ~/.claude/{C}{{,.bak}}',
+    # redirections
+    f'tee ~/.claude/{C} < x',
+    f'echo y | tee -a {C} >/dev/null',
+    f'echo x > ~/.claude/{C}',
+    f'echo x >> {C}',
+    f'echo x 2> {C}',
+    f'echo x &> {C}',
+    f'echo x >| {C}',
+    f'cat a >{C}',
+    f'exec 3<> {C}',
+    f'printf x | cat > "$HOME/.claude/{C}"',
     # the other writers
-    (f'touch {C}', None),
-    (f'touch -t 202611200000 {C}', None),
-    (f'truncate -s 0 {C}', None),
-    (f'dd if=a of=/x/{C}', None),
-    (f"sed -i '' 's/a/b/' ~/.claude/{C}", None),
-    (f"perl -pi -e 's/a/b/' {C}", None),
-    (f'curl -sSLo {C} https://example.invalid/x', None),
-    (f'curl -o {C} https://example.invalid/x', None),
-    (f'curl --output={C} https://example.invalid/x', None),
-    (f'wget -O {C} https://example.invalid/x', None),
-    # letter case (APFS), glob, brace, variables
-    ('cp a ~/.claude/.Credentials.JSON', None),
-    ('cp a ~/.claude/.cred*', None),
-    (f'cp a ~/.claude/{{{C},b}}', None),
-    (f'F=~/.claude/{C}; cp a "$F"', None),
-    (f'export D=/x; cp a $D/{C}', None),
-    (f'cp /a/{C} "$UNKNOWN_DEST"', None),
+    f'touch {C}',
+    f'touch -t 202611200000 {C}',
+    f'truncate -s 0 {C}',
+    f'dd if=a of=/x/{C}',
+    f'gdd if=a of=/x/{C}',
+    f'gtee {C} < x',
+    f'gtouch {C}',
+    f'gtruncate -s 0 {C}',
+    f'echo x | sponge {C}',
+    f'sort -o {C} x',
+    f'base64 -i x -o {C}',
+    f"sed -i '' 's/a/b/' ~/.claude/{C}",
+    f"sed -Ei 's/a/b/' {C}",
+    f"perl -pi -e 's/a/b/' {C}",
+    f"perl -i.bak -pe 's/a/b/' {C}",
+    f'curl -sSLo {C} https://example.invalid/x',
+    f'curl -o {C} https://example.invalid/x',
+    f'curl --output={C} https://example.invalid/x',
+    f'wget -O {C} https://example.invalid/x',
+    # letter case (APFS; casefold: U+017F long s, Viktor 48557 L1), glob, brace, variables
+    'cp a ~/.claude/.Credentials.JSON',
+    'cp a ~/.claude/.credentialſ.json',
+    'cp a ~/.claude/.cred*',
+    f'cp a ~/.claude/{{{C},b}}',
+    f'F=~/.claude/{C}; cp a "$F"',
+    f'export D=/x; cp a $D/{C}',
     # wrappers and text a shell runs
-    (f'sudo cp a {C}', None),
-    (f'env X=1 cp a {C}', None),
-    (f'nohup tee {C} </dev/null', None),
-    (f'bash -c "cp a ~/.claude/{C}"', None),
-    (f"sh -lc 'echo x > {C}'", None),
-    (f'eval cp a {C}', None),
-    (f'echo "$(cp a {C})"', None),
-    (f"bash <<'EOF'\ncp a {C}\nEOF", None),
-    (f"echo 'cp a {C}' | bash", None),
-    (f'true && (cp a {C})', None),
+    f'sudo cp a {C}',
+    f'env X=1 cp a {C}',
+    f'nohup tee {C} </dev/null',
+    f'bash -c "cp a ~/.claude/{C}"',
+    f"sh -lc 'echo x > {C}'",
+    f'eval cp a {C}',
+    f'echo "$(cp a {C})"',
+    f"bash <<'EOF'\ncp a {C}\nEOF",
+    f"echo 'cp a {C}' | bash",
+    f'true && (cp a {C})',
+    f"bash -c \"sh -c 'eval cp x ~/.claude/{C}'\"",   # three levels deep (Viktor 48557 INFO 1, C23)
     # fail-closed: an open quote while the text names the file
-    (f"cp a {C} 'x", None),
+    f"cp a {C} 'x",
 ]
 
 # every row must pass
 ALLOW = [
-    (f'ls -la ~/.claude/{C}', None),
-    (f'stat -f %z {C}', None),
-    (f'test -f {C} && echo y', None),
-    (f'[ -e "$c/{C}" ] && echo CRED-FILE || echo no-cred', None),
-    (f'cat ~/.claude/{C} | wc -c', None),
-    (f'grep -c x {C} 2>/dev/null', None),
-    (f'ls {C} 2>&1 | cut -c1-80', None),
-    (f'shasum -a 256 {C}', None),
-    (f'find ~ -maxdepth 3 -name {C}', None),
-    (f'rm -f ~/.claude-config/{C}', None),
-    (f'chmod 600 {C}', None),
-    (f'echo {C}', None),
-    (f'cp {C}.bak /backup/x.json', None),
-    (f'cp /a/{C} sub', '{ELSE}'),          # `sub` is no directory here: a file copy out, not a placement
-    (f'mv {C} {C}.expired-1120', '{ELSE}'),
-    ('D=/x; cp kepek/* "$D"/', None),          # a dotless glob never names a dotfile in the shell
-    (f'rsync -a --exclude {C} src/ dst/', None),
-    (f'rsync -a --exclude={C} src/ dst/', None),
-    (f"cat > notes.md <<'EOF'\ncp a ~/.claude/{C}\necho x > {C}\nEOF", None),
-    (f'bash scripts/agent-msg.sh kernel klodel "never cp x > {C}"', None),
-    (f'curl -O https://example.invalid/{C}.txt', None),
-    (f'sed -n 1p {C}', None),
-    ('cp a b', None),
-    ('echo credit > report.txt', None),
+    f'ls -la ~/.claude/{C}',
+    f'stat -f %z {C}',
+    f'test -f {C} && echo y',
+    f'[ -e "$c/{C}" ] && echo CRED-FILE || echo no-cred',
+    f'cat ~/.claude/{C} | wc -c',
+    f'grep -c x {C} 2>/dev/null',
+    f'ls {C} 2>&1 | cut -c1-80',
+    f'shasum -a 256 {C}',
+    f'find ~ -maxdepth 3 -name {C}',
+    f'rm -f ~/.claude-config/{C}',
+    f'chmod 600 {C}',
+    f'echo {C}',
+    f'cp {C}.bak /backup/x.json',
+    'cp a{1,2}.txt /x/',
+    'cp f{.bak,} /x/z',
+    'D=/x; cp kepek/* "$D"/',
+    'D=/x; cp credits/* "$D"/',               # a dotless glob never names a dotfile (INFO 1, C04: "cred" passes the pre-check)
+    f'F=~/.claude/{C}; unset F; cp x $F',      # an unset name is unknown again (INFO 1, C26)
+    f'rsync -a --exclude {C} src/ dst/',
+    f'rsync -a --exclude={C} src/ dst/',
+    f"cat > notes.md <<'EOF'\ncp a ~/.claude/{C}\necho x > {C}\nEOF",
+    f'bash scripts/agent-msg.sh kernel klodel "never cp x > {C}"',
+    f'curl -O https://example.invalid/{C}.txt',
+    f'sed -n 1p {C}',
+    f"perl -Mstrict -ne 'print' {C}",          # -M is no in-place (INFO 2)
+    f'perl -MList::Util=max -e 1 {C}',
+    'cp a b',
+    'echo credit > report.txt',
     # documented gap (NOT MODELLED): an interpreter's own open(..., 'w') passes
-    (f"python3 -c \"open('{C}', 'w')\"", None),
+    f"python3 -c \"open('{C}', 'w')\"",
 ]
 
 
-def run(cmd, tool='Bash', cwd=None):
-    payload = {'tool_name': tool, 'tool_input': {'command': cmd}}
-    if cwd:
-        payload['cwd'] = cwd
+def run(cmd, tool='Bash'):
+    payload = {'tool_name': tool, 'tool_input': {'command': cmd}, 'cwd': TMP}
     p = subprocess.run([sys.executable, '-I', HOOK], input=json.dumps(payload), capture_output=True, text=True,
                        timeout=20)
     return p.returncode, p.stderr
@@ -152,28 +162,24 @@ def load():
 def main():
     fails = 0
     mod = load()
-    for raw, cwd in BLOCK:
-        cmd, cwd = fix(raw), (fix(cwd) if cwd else None)
-        if not mod.judge(cmd, cwd):
-            print(f'FAIL block: {cmd!r} (cwd {cwd})')
+    for cmd in BLOCK:
+        if not mod.judge(cmd):
+            print(f'FAIL block: {cmd!r}')
             fails += 1
-    for raw, cwd in ALLOW:
-        cmd, cwd = fix(raw), (fix(cwd) if cwd else None)
-        why = mod.judge(cmd, cwd)
+    for cmd in ALLOW:
+        why = mod.judge(cmd)
         if why:
-            print(f'FAIL allow: {cmd!r} (cwd {cwd}) -> {why}')
+            print(f'FAIL allow: {cmd!r} -> {why}')
             fails += 1
     extra = 0
 
-    # the hook as Claude Code runs it: a block, a pass, the payload cwd, another tool, unreadable stdin
-    for cmd, tool, cwd, want in ((f'cp a ~/.claude/{C}', 'Bash', None, 2), (f'ls -la {C}', 'Bash', None, 0),
-                                 (f'cp /x/{C} sub', 'Bash', DIR, 2), (f'cp /x/{C} sub', 'Bash', ELSE, 0),
-                                 (f'cp a {C}', 'Read', None, 0),
-                                 (f'mv {C} {C}.expired-1120', 'Bash', None, 0)):  # no payload cwd: the hook's own
+    # the hook as Claude Code runs it: a block, a pass, a copy out, another tool, unreadable stdin
+    for cmd, tool, want in ((f'cp a ~/.claude/{C}', 'Bash', 2), (f'ls -la {C}', 'Bash', 0),
+                            (f'cp ~/.claude/{C} /backup/x.json', 'Bash', 2), (f'cp a {C}', 'Read', 0)):
         extra += 1
-        rc, err = run(cmd, tool, cwd)
+        rc, err = run(cmd, tool)
         if rc != want or (want == 2 and 'CREDENTIALS-WRITE-GATE (card a467f621)' not in err):
-            print(f'FAIL hook: {cmd!r} tool {tool} cwd {cwd}: rc={rc} want {want} {err[-160:]!r}')
+            print(f'FAIL hook: {cmd!r} tool {tool}: rc={rc} want {want} {err[-160:]!r}')
             fails += 1
     extra += 1
     p = subprocess.run([sys.executable, '-I', HOOK], input='not json', capture_output=True, text=True, timeout=20)
