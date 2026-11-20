@@ -199,6 +199,10 @@ jobs:
       # SUMMARYFORM1113 (retro 2026-11-13 R9, card dddca664): the main agent's summaries to Patrik are plain sentences
       # (Patrik TG 4735). Hermetic: owner chats from MARVEEN_OWNER_CHATS, no ledger read.
       - run: python3 -I scripts/hooks/summary-form-reply-gate_test.py
+      # MOODGATE1120 (Klodel 48551, 48564, 48590): no laughing in Patrik's chats while he is upset, and the 20-minute
+      # reply count only then. Hermetic: synthetic plugin state (TELEGRAM_STATE_DIR), owner ids from env, a temp ledger.
+      - run: python3 -I scripts/hooks/patrik-mood-reply-gate_test.py
+      - run: python3 -I scripts/hooks/patrik-reply-volume-gate_test.py
       # UPDATESAFE1113 (Klodel 39777, card 840231cf): update.sh wrapper that parks carried-over files, merges the
       # local settings.json difference back and stops before a drop. Hermetic: throw-away git repos, fake update.sh.
       - run: python3 -I scripts/__tests__/marveen-update-safe.test.py

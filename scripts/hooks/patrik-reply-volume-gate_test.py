@@ -4,6 +4,7 @@ conversation_log ledger (synthetic chat ids, no real data)."""
 import importlib.util
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -18,6 +19,7 @@ gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
 PRIV, GROUP, OTHER = '111', '-222', '333'
+PATRIK = PRIV  # Patrik's user id = his private chat id (the mood test's owner_user_id)
 TOOL = 'mcp__plugin_telegram_telegram__reply'
 
 
@@ -95,9 +97,13 @@ class Hook(unittest.TestCase):
         self.log(chat, 'in')
         self.log(chat, 'out')
 
-    def run_gate(self, chat, text, agent='main', tool=TOOL, db=None):
+    def run_gate(self, chat, text, agent='main', tool=TOOL, db=None, env_extra=None):
+        # rule 3's mood test reads the plugin state and Patrik's user id: a synthetic, empty state unless upset() wrote
         env = dict(os.environ, LEDGER_DB_PATH=db or self.db, MAIN_AGENT_ID='main', MARVEEN_AGENT_ID=agent,
-                   MARVEEN_OWNER_CHATS=f'{PRIV},{GROUP}', REPLY_MARKS_PATH=self.marks_path())
+                   MARVEEN_OWNER_CHATS=f'{PRIV},{GROUP}', REPLY_MARKS_PATH=self.marks_path(),
+                   TELEGRAM_STATE_DIR=self.state_dir(), MARVEEN_OWNER_PRIVATE_CHAT=PATRIK,
+                   CLAUDE_PROJECT_DIR=self.tmp)
+        env.update(env_extra or {})
         payload = {'tool_name': tool, 'tool_input': {'chat_id': chat, 'text': text}}
         p = subprocess.run([sys.executable, '-I', GATE], input=json.dumps(payload), env=env,
                            capture_output=True, text=True, timeout=30)
@@ -326,6 +332,148 @@ class Hook(unittest.TestCase):
         missing = os.path.join(self.tmp, 'nincs.db')
         self.assertEqual(self.run_gate(PRIV, 'Rendben.', db=missing)[0], 0)
         self.assertFalse(os.path.exists(missing))
+
+    # --- rule 3, the 20-minute count while Patrik is upset (Klodel 48564, 48590; 13 group replies 09:40-09:58 UTC) ---
+    def state_dir(self):
+        d = os.path.join(self.tmp, 'tg')
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def upset(self, user=None, text='ettől behányt az agyam', minutes_ago=3, msg_id='6617', chat=None):
+        """A line of Patrik's (synthetic ids) in the plugin's inbound logs, as patrik-mood-reply-gate.py reads them."""
+        at = int((time.time() - minutes_ago * 60) * 1000)
+        chat = chat or GROUP
+        with open(os.path.join(self.state_dir(), 'inbound-evidence.jsonl'), 'a') as f:
+            f.write(json.dumps({'at': at, 'chat_id': chat, 'message_id': msg_id, 'text': text}) + '\n')
+        with open(os.path.join(self.state_dir(), 'inbound-senders.jsonl'), 'a') as f:
+            f.write(json.dumps({'at': at, 'chat_id': chat, 'message_id': msg_id, 'user_id': user or PATRIK}) + '\n')
+
+    def log_at(self, chat, direction, at, agent='main'):
+        con = sqlite3.connect(self.db)
+        con.execute('INSERT INTO conversation_log (agent_id, chat_id, direction, text, created_at) '
+                    'VALUES (?, ?, ?, ?, ?)', (agent, chat, direction, 'x', int(at)))
+        con.commit()
+        con.close()
+
+    def todays_series(self, upto):
+        """Replay of 2026-11-20: the group messages and the replies, minutes before now (reply 1 = 17 min ago)."""
+        now = time.time()
+        offsets = [17, 16, 14, 10, 8, 7, 6, 5, 4, 4, 2, 0.5, 0.2]  # 09:40 ... 09:58 UTC
+        for k, m in enumerate(offsets[:upto]):
+            self.log_at(GROUP, 'in', now - m * 60 - 5)
+            self.log_at(GROUP, 'out', now - m * 60)
+
+    def test_count_four_in_window_then_the_fifth_blocks(self):
+        self.upset()
+        self.todays_series(4)
+        self.log_at(GROUP, 'in', time.time())
+        rc, err = self.run_gate(GROUP, 'Megnéztem.')
+        self.assertEqual(rc, 2)
+        self.assertIn('20 percben már 4', err)
+        self.assertIn('TG 6617', err)
+
+    def test_count_three_in_window_passes(self):
+        self.upset()
+        self.todays_series(3)
+        self.log_at(GROUP, 'in', time.time())
+        self.assertEqual(self.run_gate(GROUP, 'Megnéztem.')[0], 0)
+
+    def test_count_todays_thirteen_blocks(self):
+        # the negative test of Klodel 48590: today's series, with Patrik's frustrated lines (TG 6615, 6617) in it
+        self.upset(text='ez szánalmas', minutes_ago=12, msg_id='6615')
+        self.upset(minutes_ago=6)
+        self.todays_series(13)
+        self.log_at(GROUP, 'in', time.time())
+        self.assertEqual(self.run_gate(GROUP, 'Még egy poén.')[0], 2)
+
+    def test_count_calm_day_has_no_limit(self):  # Klodel 48590: no general cap
+        self.todays_series(13)
+        self.log_at(GROUP, 'in', time.time())
+        self.assertEqual(self.run_gate(GROUP, 'Megnéztem.')[0], 0)
+
+    def test_count_frustration_older_than_an_hour_passes(self):
+        self.upset(minutes_ago=61)
+        self.todays_series(5)
+        self.log_at(GROUP, 'in', time.time())
+        self.assertEqual(self.run_gate(GROUP, 'Megnéztem.')[0], 0)
+
+    def test_count_someone_elses_frustration_does_not_count(self):
+        self.upset(user='999')
+        self.todays_series(5)
+        self.log_at(GROUP, 'in', time.time())
+        self.assertEqual(self.run_gate(GROUP, 'Megnéztem.')[0], 0)
+
+    def test_count_private_frustration_counts_for_the_group(self):
+        self.upset(chat=PRIV)
+        self.todays_series(5)
+        self.log_at(GROUP, 'in', time.time())
+        self.assertEqual(self.run_gate(GROUP, 'Megnéztem.')[0], 2)
+
+    def test_count_no_owner_id_passes(self):  # Patrik's id unknown (no env, no projektek.json): rule 3 cannot decide
+        self.upset()
+        self.todays_series(5)
+        self.log_at(GROUP, 'in', time.time())
+        self.assertEqual(self.run_gate(GROUP, 'Megnéztem.', env_extra={'MARVEEN_OWNER_PRIVATE_CHAT': ''})[0], 0)
+
+    def test_count_mood_file_missing_passes(self):  # the mood gate's file cannot be loaded: rules 1-2 still hold
+        self.upset()
+        self.todays_series(5)
+        self.log_at(GROUP, 'in', time.time())
+        d = tempfile.mkdtemp()
+        try:
+            for name in os.listdir(HERE):
+                if name != 'patrik-mood-reply-gate.py' and not os.path.isdir(os.path.join(HERE, name)):
+                    shutil.copy(os.path.join(HERE, name), d)
+            env = dict(os.environ, LEDGER_DB_PATH=self.db, MAIN_AGENT_ID='main', MARVEEN_AGENT_ID='main',
+                       MARVEEN_OWNER_CHATS=f'{PRIV},{GROUP}', REPLY_MARKS_PATH=self.marks_path(),
+                       TELEGRAM_STATE_DIR=self.state_dir(), MARVEEN_OWNER_PRIVATE_CHAT=PATRIK, CLAUDE_PROJECT_DIR=self.tmp)
+            payload = {'tool_name': TOOL, 'tool_input': {'chat_id': GROUP, 'text': 'Megnéztem.'}}
+            p = subprocess.run([sys.executable, '-I', os.path.join(d, os.path.basename(GATE))],
+                               input=json.dumps(payload), env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(p.returncode, 0, p.stderr)
+        finally:
+            shutil.rmtree(d, True)
+
+    def test_count_core_needs_upset(self):
+        self.assertIsNone(gate.check('Rendben.', 0, recent=9))
+        self.assertIsNotNone(gate.check('Rendben.', 0, recent=4, upset='6617'))
+        self.assertIsNone(gate.check('Rendben.', 0, recent=3, upset='6617'))
+        self.assertIsNone(gate.check('Rendben.', 0, escaped=True, recent=9, upset='6617'))
+
+    def test_count_old_replies_fall_out_of_the_window(self):
+        self.upset()
+        now = time.time()
+        for m in (25, 24, 23, 22, 21):
+            self.log_at(GROUP, 'out', now - m * 60)
+        self.log_at(GROUP, 'in', now)
+        self.assertEqual(self.run_gate(GROUP, 'Rendben.')[0], 0)
+
+    def test_count_is_per_chat(self):
+        self.upset()
+        self.todays_series(5)
+        self.log_at(PRIV, 'in', time.time())
+        self.assertEqual(self.run_gate(PRIV, 'Rendben.')[0], 0)
+
+    def test_count_finished_result_mark_passes_once(self):
+        self.upset()
+        self.todays_series(5)
+        self.log_at(GROUP, 'in', time.time())
+        self.mark(GROUP)
+        self.assertEqual(self.run_gate(GROUP, 'Itt a kész lista.')[0], 0)
+
+    def test_count_outage_mark_passes(self):
+        self.upset()
+        self.todays_series(5)
+        self.log_at(GROUP, 'in', time.time())
+        self.mark(GROUP, kind='KIESES', value='a marabel.hu nem válaszol')
+        self.assertEqual(self.run_gate(GROUP, 'Kiesés: a marabel.hu áll, Pulzus dolgozik rajta.')[0], 0)
+
+    def test_count_outage_mark_of_another_chat_is_no_escape(self):
+        self.upset()
+        self.todays_series(5)
+        self.log_at(GROUP, 'in', time.time())
+        self.mark(PRIV, kind='KIESES', value='a marabel.hu nem válaszol')
+        self.assertEqual(self.run_gate(GROUP, 'Kiesés.')[0], 2)
 
     def test_bad_payload_passes(self):
         p = subprocess.run([sys.executable, '-I', GATE], input='nem json', capture_output=True, text=True,
