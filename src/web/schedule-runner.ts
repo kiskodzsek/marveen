@@ -91,7 +91,7 @@ import {
   saturationRefusesDispatch,
 } from './agent-process.js'
 import { isRestartInFlight } from './restart-lock.js'
-import { readNetdownSince, NetdownAlertHold } from './netdown-hold.js'
+import { readNetdownSince, loadNetdownHold, saveNetdownHold, type NetdownAlertHold } from './netdown-hold.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { ownerRecentlyActive } from './owner-activity.js'
 import { runCommandTask } from './command-task.js'
@@ -2229,25 +2229,38 @@ function pendingRetryAlertText(view: PendingRetryView, prefix: string, ageMinute
 }
 
 // Card 91d9911e: the scheduler alerts held during a network outage (see
-// netdown-hold.ts). In memory: a dashboard restart inside an outage loses the
-// summary, not an alert that would have been delivered.
-const netdownHold = new NetdownAlertHold()
+// netdown-hold.ts). Persisted (r2, Viktor 49109 LOW 2): the hold claims the
+// one-shot stamps, so losing it in a dashboard restart would lose alerts that
+// would otherwise have reached the main agent's queue. Loaded on first use.
+let netdownHoldCache: NetdownAlertHold | null = null
+function netdownHold(): NetdownAlertHold {
+  if (netdownHoldCache === null) netdownHoldCache = loadNetdownHold()
+  return netdownHoldCache
+}
+function persistNetdownHold(): void {
+  if (!saveNetdownHold(netdownHold())) logger.warn('scheduler: net-down hold persist failed (kept in memory)')
+}
 
 function fmtClockHu(ms: number): string {
   return new Date(ms).toLocaleTimeString('hu-HU', { hour: '2-digit', minute: '2-digit' })
 }
 
-/** Card 91d9911e: the network is back -- one summary of the held alerts, if any. */
+/** Card 91d9911e: the network is back -- one summary of the held alerts, if any. The hold is
+ *  emptied only once the summary is in the main agent's queue; a failed insert retries next tick. */
 function flushNetdownHold(nowMs: number): void {
-  const held = netdownHold.size
-  const text = netdownHold.flush(nowMs, fmtClockHu)
+  const hold = netdownHold()
+  const held = hold.size
+  const text = hold.summary(nowMs, fmtClockHu, (task, agent) => taskInflightMap.has(`${task}@${agent}`))
   if (text === null) return
   try {
     createSystemMessage(MAIN_AGENT_ID, text)
-    logger.info({ held }, 'scheduler: net-down summary sent to the main agent')
   } catch (err) {
-    logger.warn({ err, held }, 'scheduler: net-down summary failed')
+    logger.warn({ err, held }, 'scheduler: net-down summary failed, kept for the next tick')
+    return
   }
+  hold.clear()
+  persistNetdownHold()
+  logger.info({ held }, 'scheduler: net-down summary sent to the main agent')
 }
 
 /** Card 91d9911e: a busy-pane notice (or its owner escalation) during a network
@@ -2255,7 +2268,8 @@ function flushNetdownHold(nowMs: number): void {
  *  The kanban 'waiting' move of the stage-1 notice is skipped with it: the card
  *  is not stuck, the network is. */
 function holdInflightAlert(kind: 'inflight' | 'inflight-owner', entry: TaskInflightEntry, sinceMs: number): void {
-  netdownHold.hold(kind, entry.taskName, entry.agentName, sinceMs)
+  netdownHold().hold(kind, entry.taskName, entry.agentName, sinceMs)
+  persistNetdownHold()
   logger.info({ task: entry.taskName, agent: entry.agentName, kind }, 'scheduler: busy-pane alert held (network down)')
 }
 
@@ -2270,7 +2284,8 @@ function holdPendingRetryAlert(kind: 'retry' | 'retry-owner', view: PendingRetry
     ? markPendingTaskRetryAlert(view.taskName, view.agentName, nowMs)
     : markPendingTaskRetryOwnerAlert(view.taskName, view.agentName, nowMs)
   if (!claimed) return
-  netdownHold.hold(kind, view.taskName, view.agentName, sinceMs)
+  netdownHold().hold(kind, view.taskName, view.agentName, sinceMs)
+  persistNetdownHold()
   logger.info({ task: view.taskName, agent: view.agentName, kind }, 'scheduler: pending-retry alert held (network down)')
 }
 
