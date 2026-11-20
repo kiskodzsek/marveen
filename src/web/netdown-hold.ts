@@ -36,7 +36,8 @@ export function netdownSinceFromMarker(text: string, mtimeMs: number, nowMs: num
   const first = text.trim().split(/\s+/)[0] ?? ''
   if (/^\d{1,12}$/.test(first)) {
     const sinceMs = Number(first) * 1000
-    if (sinceMs <= nowMs) return sinceMs
+    // Viktor 91d9911e r2: a "0" start is no outage start (1970); the mtime stands in, as for an unreadable field.
+    if (sinceMs > 0 && sinceMs <= nowMs) return sinceMs
   }
   return mtimeMs
 }
@@ -114,10 +115,13 @@ export class NetdownAlertHold {
     if (this.counts.size === 0 || this.sinceMs === null) return null
     const minutes = Math.max(0, Math.round((nowMs - this.sinceMs) / 60_000))
     const rows = [...this.counts.values()].sort((a, b) => (a.agent + a.task).localeCompare(b.agent + b.task))
+    // Viktor 91d9911e r2: the live names from hold() go into the same message as the ones read back from the
+    // file, so they pass the same allowlist; one outside it is shown as a fixed word, its count is kept.
+    const name = (s: string): string => (HOLD_NAME_RX.test(s) ? s : 'szűrt-név')
     const lines = rows.map((r) => {
       const kinds = [...r.kinds.entries()].map(([k, n]) => `${KIND_LABEL[k]} ${n}x`).join(', ')
       const busy = stillBusy?.(r.task, r.agent) ? ' -- MOST IS FOGLALT' : ''
-      return `- "${r.task}" (${r.agent}): ${kinds}${busy}`
+      return `- "${name(r.task)}" (${name(r.agent)}): ${kinds}${busy}`
     })
     return [
       `[scheduler] Hálózat-kiesés alatt (${fmtClock(this.sinceMs)} - ${fmtClock(nowMs)}, ${minutes} perc, a Marabel-figyelő jelzője szerint) ${this.size} ütemező-riasztást tartottam vissza, ez az összesítőjük:`,
