@@ -8,6 +8,12 @@ isolation (H1). It does not see a keychain read made through Python/Node/Swift A
 calls, or a command name hidden in a variable or made by a substitution (`s=security; $s -i`) beyond the
 hidden-name rule below. Do not rely on it.
 
+Known limits (card deede5e4, Viktor r2 point 4 and 49151; the full list is "Not seen" under Script files below):
+a relative script word whose directory or name comes from a value the gate does not bind passes unread: a
+`while read` loop (piped or from a file), `select`, an arithmetic `for ((..))` loop, cdable_vars, find -execdir
+with a relative script, and a variable reassigned after the cd that used it (`D=sub; cd $D; D=zz; python3 m.py`:
+the cd is read with the last value of the name; the main gate passes it too).
+
 What blocks (exit 2): a `security` call in command position whose subcommand reads or exports secrets:
   find-generic-password, find-internet-password, dump-keychain, export,
 or that reads its subcommands from stdin (`security -i`, `security -p <prompt>`), which would hide the subcommand.
@@ -104,13 +110,25 @@ file a command runs is read and judged too:
   - inline code: when the command calls an interpreter, the literal rule runs on the command text itself
     (`python3 -c "..."`, `python3 - <<'PY' ... PY`).
   Not seen: a module the script imports, a file the script builds or downloads, a name assembled at run time
-  ('sec' + 'urity'), keychain APIs (Security.framework, keyring), a variable set outside the command, a quoted path
+  ('sec' + 'urity'), keychain APIs (Security.framework, keyring), a variable set outside the command (card
+  deede5e4: a value made of variables set before it in the command is read, `B=/x; O=$B/y`; a for-loop variable over
+  plain words or globs is read as each of its values, in a cd target too; over anything else, a substitution, the
+  script word blocks unread; a plain assignment of the same name is read as one more value, Viktor deede5e4 r2 P2),
+  a value bound some other way than `for NAME in` or NAME= (while read, read, select, for ((..)), set --, $1 of a
+  bash -c, case, find -execdir with a relative script, xargs, cdable_vars, a CDPATH: Viktor deede5e4 r2 point 4,
+  left Not seen), a relative script word after a directory change the gate does not follow (pushd,
+  `cd $(..)`, `cd $T`, env -C, a cd of option words only, a quoted cd or pushd name, a ~ or brace target, a target
+  glued to a redirection: every such word of the call blocks unread, card deede5e4, Viktor L1 and r2 P3; a target
+  with `..` is read logically AND physically, set -P / cd -P, r2 R1; $PWD and ~+ in a script word are read on each
+  base), a quoted path
   with spaces, an interpreter whose own name a substitution makes (`$(echo python3) m.py`, `p=python3; $p m.py`;
   Viktor 43662 INFO 1, 47750: left INFO), a Ruby %w list, a payload a quote opens after other commands (`command '...'`, `time '...'` run a
   command literally named so, which fails). A wrapped script (`sudo -u root python3 m.py`, `ssh localhost python3
   m.py`, `sg staff 'python3 m.py'`) is read like any other (card 3085a683; for ssh the file is looked up here, which
   is right for localhost and a fail-closed guess for a remote host). The gate's own test assembles its fixtures at
-  run time, so running the test is not blocked.
+  run time, but running it by its path from an agent shell IS blocked (payload caps, the escaped-name rows; card
+  deede5e4, measured): CI runs it; in an agent shell its author runs it and notes it on the card as a false
+  positive (Viktor deede5e4 r2 INFO 1).
   Shell structure (card fae0712e): the script rules take quotes, heredoc bodies, substitutions and simple commands
   from the shared lexer scripts/lib/shell_lex.py (see lexer_view): a separator inside a quoted argument of a data
   command (echo, printf, grep, test ...; unless the text may redefine it: alias, a function, eval, source, PATH=)
@@ -1683,6 +1701,8 @@ HEADTAIL_RX = re.compile(r'(?:\$\(|<\(|`)[ \t]*' + CHAIN + r'(?:' + WORD + r'*/)
 # on top of the one before (LOW b: `cd sub && python3 only.py`).
 ASSIGN_RX = re.compile(r'''(?<![\w$])([A-Za-z_]\w*)=(['"]?)([^\s'";|&<>()`$]+)\2(?=\s|$|;)''')
 VAR_RX = re.compile(r'\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)')
+ASSIGN_CHAIN_RX = re.compile(r'''(?<![\w$])([A-Za-z_]\w*)=(['"]?)((?:[^\s'";|&<>()`$]|\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*)+)\2'''
+                             r'''(?=\s|$|;)''')
 CD_RX = re.compile(r'''(?<![\w./-])cd[ \t]+''' + PATH_TOKEN)
 MAX_BASES = 32
 
@@ -1743,18 +1763,38 @@ def shell_unquote(word):
     return ''.join(out)
 
 
-def expand(text):
-    """$VAR / ${VAR} from assignments in the command itself, and $HOME; ~ is expanded per word later."""
+def expand(text, keep=()):
+    """$VAR / ${VAR} from assignments in the command itself, and $HOME; ~ is expanded per word later.
+    keep: names left as written (for-loop variables: their values are read by loop_word_paths)."""
     env = {'HOME': os.path.expanduser('~')}
     for m in ASSIGN_RX.finditer(text):
         env[m.group(1)] = m.group(3)
-    return VAR_RX.sub(lambda m: env.get(m.group(1) or m.group(2), m.group(0)), text)
+    if '$' in text:
+        # card deede5e4: a value made of variables set before it (`B=/x; O=$B/y; cd $O`), in order; a value with any
+        # other $ (a substitution, an unknown name) stays unknown, and an unknown value read later is not "known"
+        known = {'HOME': env['HOME']}
+        for m in ASSIGN_CHAIN_RX.finditer(text):
+            v = VAR_RX.sub(lambda v: known.get(v.group(1) or v.group(2), v.group(0)), m.group(3))
+            if '$' in v:
+                known.pop(m.group(1), None)
+            else:
+                known[m.group(1)] = v
+                env.setdefault(m.group(1), v)
+    return VAR_RX.sub(lambda m: m.group(0) if (m.group(1) or m.group(2)) in keep
+                      else env.get(m.group(1) or m.group(2), m.group(0)), text)
 
 
-def cd_bases(text, cwd):
-    """cwd, then the directory after each cd in order (a relative cd on top of the one before)."""
+def cd_bases(text, cwd, loops=None):
+    """cwd, then the directory after each cd in order (a relative cd on top of the one before).
+    loops (card deede5e4, script_paths only): the for-loop lists of the text (loop_lists). With it, a cd to a word
+    with a loop variable over plain words is followed to each value, a cd word inside a heredoc body no shell reads
+    (`python3 - <<'PY' ... re.compile('cd|export') ... PY`) is not a directory change, and `env -C` counts only in an
+    env call's own options: the replay of the first draft blocked 675 fleet commands, most on these readings. The
+    agent-msg check (loops None) keeps the reading Viktor 43304 A reviewed."""
     cur = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
     bases = [cur] if cur else []
+    if loops is not None:
+        return _cd_bases_loops(text, cur, bases, loops)
     for m in CD_RX.finditer(text):
         t = os.path.expanduser(m.group(1))
         if os.path.isabs(t):
@@ -1770,6 +1810,92 @@ def cd_bases(text, cwd):
     if CHDIR_OTHER_RX.search(text) or (ENV_WORD_RX.search(text) and ENV_CHDIR_RX.search(text)) or len(CD_WORD_RX.findall(text)) > len(CD_RX.findall(text)):
         return Bases(bases, unknown=True)  # a directory change the lines above did not follow
     return Bases(bases)
+
+
+def _blank_data_heredocs(text):
+    """text with the body of every heredoc no shell reads blanked (same length); text itself without the lexer's
+    reading (then every cd word in a body still counts, as before)."""
+    lx = lex_or_none(text)
+    if lx is None or not lx['heredocs']:
+        return text
+    out = list(text)
+    for hd in lx['heredocs']:
+        ls = text.rfind('\n', 0, hd['op']) + 1
+        le = text.find('\n', hd['opEnd'])
+        if not STDIN_SHELL_RX.search(text[ls:len(text) if le < 0 else le]):
+            for i in range(hd['bodyStart'], hd['bodyEnd']):
+                if out[i] != '\n':
+                    out[i] = ' '
+    return ''.join(out)
+
+
+# a cd and its target word: plain characters and ${NAME}/$NAME, up to a blank or an operator; `cd $(..)`, a bare cd
+# and `cd;` have none (not followed)
+_CD_TARGET_RX = re.compile(r'(?<![\w./-])cd(?:[ \t]+(?:-[A-Za-z@]+|--))*[ \t]+((?:[^\s;&|<>()`$]|\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*)+)')
+_ENV_OPT_ARG = ('-u', '-P', '-S', '--unset', '--split-string')
+_ENV_CHDIR_WORD_RX = re.compile(r'-[A-Za-z]*C.*|--chdir(?:=.*)?')
+_ENV_ASSIGN_WORD_RX = re.compile(r'[A-Za-z_]\w*=.*')
+
+
+def _env_chdir(text):
+    """An env call with -C / --chdir among its own options (before its command word)."""
+    for m in ENV_WORD_RX.finditer(text):
+        end = len(text)
+        for ch in ';&|\n':
+            k = text.find(ch, m.end())
+            if 0 <= k < end:
+                end = k
+        skip = False
+        for w in text[m.end():min(end, m.end() + ARGS_WINDOW)].split()[:MAX_ARGS]:
+            w = strip_quotes(w)
+            if skip:
+                skip = False
+            elif w in _ENV_OPT_ARG:
+                skip = True
+            elif _ENV_CHDIR_WORD_RX.fullmatch(w):
+                return True
+            elif not (w.startswith('-') or _ENV_ASSIGN_WORD_RX.fullmatch(w)):
+                break
+    return False
+
+
+def _cd_bases_loops(text, cur, bases, loops):
+    text = _blank_data_heredocs(text)
+    unknown = bool(CHDIR_OTHER_RX.search(text)) or _env_chdir(text)
+    q = re.sub(r'[\'"\\]', '', text)
+    unknown = unknown or bool(CHDIR_OTHER_RX.search(q)) or len(CD_WORD_RX.findall(q)) != len(CD_WORD_RX.findall(text))
+    curs = [cur] if cur else []
+    # the word must end where the shell's word ends: `cd "$(echo sub)"` matched only its opening quote
+    targets = {m.start(): m.group(1) for m in _CD_TARGET_RX.finditer(text)
+               if m.end() == len(text) or text[m.end()] in ' \t\n;&|)'}
+    for m in CD_WORD_RX.finditer(text):
+        word = targets.get(m.start())
+        # a bare cd, `cd;`, `cd $(..)`, `cd "$(..)"`, only option words (`cd -P`; Viktor deede5e4 r1 P1): not followed
+        if word is None or not shell_unquote(word) or re.fullmatch(r'-[A-Za-z@]+|--', shell_unquote(word)):
+            unknown = True
+            continue
+        try:
+            vals = loop_word_paths(shell_unquote(word), loops)
+        except PathUnread:
+            unknown = True
+            continue
+        vals = [os.path.expanduser(v) for v in vals]
+        if any('$' in v or v == '-' or _GLOB_CHARS_RX.search(v) or v.startswith('~') or '{' in v for v in vals):  # an outside variable, `cd -`, a glob
+            unknown = True
+            continue
+        nxt = []
+        for v in vals:
+            for j in ([v] if os.path.isabs(v) else [os.path.join(c, v) for c in curs]):
+                nxt.append(os.path.normpath(j))
+                if '..' in v.split('/'):  # physical (set -P, cd -P): Viktor deede5e4 r1 R1
+                    nxt.append(j)
+        curs = list(dict.fromkeys(nxt))
+        for c in curs:
+            if c not in bases:
+                bases.append(c)
+        if len(bases) > MAX_BASES:
+            break
+    return Bases(bases, unknown=unknown)
 
 
 class Bases(list):
@@ -1809,6 +1935,58 @@ def agent_msg_everywhere(word, bases):
 
 class TooManyArgs(Exception):
     """An interpreter call with words the gate does not read (past MAX_ARGS or ARGS_WINDOW): the caller blocks."""
+
+
+class PathUnread(Exception):
+    """A script word the gate cannot look up (card deede5e4, Viktor LOW L1): a relative path after a directory change
+    cd_bases does not follow (pushd, `cd $(..)`, `cd $T` with T set outside the command, env -C), or a path with a
+    for-loop variable whose list is not plain words or globs. The file was not read, so the caller blocks (an unread path was a way around:
+    `for d in x; do cd $d; python3 m.py; done`, `pushd x; python3 m.py`)."""
+
+
+# `for NAME in <words>`: the loop variables a script path may name (deede5e4: `for f in m.py; do python3 $f; done`
+# ran m.py unread). A list of plain words is substituted (each value a candidate path, at most MAX_LOOP_PATHS);
+# any other list (a glob, a substitution, a quote run, none: `for f; do`) leaves the variable unknown.
+_LOOP_RX = re.compile(r'(?<![\w$-])for[ \t]+([A-Za-z_]\w*)(?:[ \t]+in[ \t]+([^;\n]*))?')
+_LOOP_WORD_RX = re.compile(r'[A-Za-z0-9_./:+=,@%^~*?\[\]-]+')  # a glob is expanded where the value is looked up
+_GLOB_CHARS_RX = re.compile(r'[*?\[]')
+MAX_LOOP_PATHS = 64
+_PWD_RX = re.compile(r'\$\{PWD\}|\$PWD(?!\w)')
+
+
+def loop_lists(text):
+    """{name: [values] or None (not plain words)} for every for-loop variable in text; a name with two loops gets
+    the values of both (each run of the text may be in either)."""
+    out = {}
+    for m in _LOOP_RX.finditer(text):
+        name, words = m.group(1), (m.group(2) or '').split()
+        words = [strip_quotes(w) for w in words]
+        ok = bool(words) and all(_LOOP_WORD_RX.fullmatch(w) for w in words)
+        if not ok or out.get(name, []) is None:
+            out[name] = None
+        else:
+            out[name] = out.get(name, []) + words
+    return out
+
+
+def loop_word_paths(word, loops):
+    """The paths a word with loop variables names: [word] when it names none; the substituted values when every
+    variable it names is a loop over plain words; raises PathUnread when one is a loop over anything else or the
+    values are more than MAX_LOOP_PATHS. Other $VARs (set outside the command) stay as written (see "Not seen")."""
+    names = [m.group(1) or m.group(2) for m in VAR_RX.finditer(word)]
+    loop_names = [n for n in dict.fromkeys(names) if n in loops]
+    if not loop_names:
+        return [word]
+    outs = [word]
+    for n in loop_names:
+        vals = loops[n]
+        if vals is None:
+            raise PathUnread(f'a script path with ${n}, a loop over not plain words')
+        rx = re.compile(r'\$\{' + n + r'\}|\$' + n + r'(?!\w)')
+        outs = [rx.sub(lambda _m, v=v: v, o) for o in outs for v in dict.fromkeys(vals)]
+        if len(outs) > MAX_LOOP_PATHS:
+            raise PathUnread(f'a script path with loop variables naming more than {MAX_LOOP_PATHS} files')
+    return outs
 
 
 class SourceGroup:
@@ -2579,13 +2757,16 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
     or more than MAX_BASES directories returns MAX_SCRIPTS + 1 entries: the caller blocks). Raises TooManyArgs.
     extra: more words to look up as files (a pipeline into a shell, card 74586987)."""
     norm = normalise(cmd) if normalised is None else normalised
-    text = expand(norm)
+    # a for-loop variable keeps its $NAME here (Viktor deede5e4 r1 P2: `F=ok.py; for F in ev.py; do python3 $F`
+    # read ok.py only): loop_word_paths reads every loop value AND every plain value assigned to the name
+    lnames = frozenset(loop_lists(_blank_data_heredocs(norm))) if 'for' in norm else frozenset()
+    text = expand(norm, lnames)
     groups = interp_groups(text, text != norm) + [[w] for w in extra]
     # card 70c94516 (Viktor 43662 LELET 1): normalise() takes the backslash of a $'\x65' escape (`\x` -> `x`), which
     # bash decodes in a word (`python3 $'\x65vil.py'` runs evil.py): such a command is read without it too
     word_texts = [text]
     if "$'" in cmd and '\\' in cmd:
-        raw = expand(cmd)
+        raw = expand(cmd, lnames)
         groups += interp_groups(raw, raw != cmd)
         word_texts.append(raw)
     # the script on stdin: only when an interpreter runs, or (card 3bcd4514) a reader of shell code: eval (`eval
@@ -2618,17 +2799,53 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
             group += [f for r in dict.fromkeys([raw, raw.rstrip(')')] + ([raw[:k]] if k else []))
                       for f in word_forms([r], 0) if f]
         groups.append(list(dict.fromkeys(group)))
-    bases = cd_bases(text, cwd)
+    # a `for x in os.listdir(d):` of a python heredoc is not the shell's loop (loop_lists of a blanked body)
+    loops = loop_lists(_blank_data_heredocs(text)) if 'for' in text else {}
+    for m in ASSIGN_CHAIN_RX.finditer(text):
+        if loops.get(m.group(1)) is not None:
+            v = expand(m.group(3), lnames)
+            loops[m.group(1)] = None if '$' in v else loops[m.group(1)] + [strip_quotes(v)]
+    bases = cd_bases(text, cwd, loops)
     if groups and len(bases) > MAX_BASES:
         return [''] * (MAX_SCRIPTS + 1)
     out = []
     tries = [0]
 
     def resolve(c):
-        """Add the existing regular files word c names; True if there was one. None: past MAX_TRIES."""
+        """Add the existing regular files word c names; True if there was one. None: past MAX_TRIES. Raises
+        PathUnread (deede5e4): a relative word after a directory change cd_bases does not follow, or a word with a
+        loop variable over not plain words."""
         c = os.path.expanduser(c)
         if not c or c in ('-', '--'):
             return False
+        if c.startswith('~+') and c[2:3] in ('', '/'):
+            c = '$PWD' + c[2:]
+        if _PWD_RX.search(c):  # the shell's current directory: each base (Viktor deede5e4 r1 L2)
+            if bases.unknown or not bases:
+                raise PathUnread(f'$PWD after a directory change the gate does not follow: {c[:40]}')
+            found = False
+            for b in list(bases):
+                r = resolve(_PWD_RX.sub(lambda _m, b=b: b, c))
+                if r is None:
+                    return None
+                found = found or r
+            return found
+        if '$' in c and loops:
+            found = False
+            for v in loop_word_paths(c, loops):
+                if v == c:
+                    break
+                # a value naming a directory: `python3 $f` runs its __main__.py, as a plain script word does ("a
+                # directory runs its __main__.py" above); read for every interpreter (one more file, never fewer)
+                for u in (v, os.path.join(v, '__main__.py')):
+                    r = resolve_glob(u) if _GLOB_CHARS_RX.search(u) else resolve(u)
+                    if r is None:
+                        return None
+                    found = found or r
+            else:
+                return found
+        if bases.unknown and not os.path.isabs(c):
+            raise PathUnread(f'a relative script path after a directory change the gate does not follow: {c[:40]}')
         found = False
         for t in ([c] if os.path.isabs(c) else [os.path.join(b, c) for b in bases]):
             tries[0] += 1
@@ -2648,6 +2865,29 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
                 found = True
                 if real not in out:
                     out.append(real)
+        return found
+
+    def resolve_glob(v):
+        """A loop value with a glob (`for f in sub/*.py; do python3 $f`): each file it matches in each base, as bash
+        expands it there (at most MAX_LOOP_PATHS; more raises PathUnread); none: the word as written."""
+        import glob
+        if bases.unknown and not os.path.isabs(v):
+            raise PathUnread(f'a relative script path after a directory change the gate does not follow: {v[:40]}')
+        hits = []
+        for b in ([None] if os.path.isabs(v) else bases):
+            pat = v if b is None else os.path.join(glob.escape(b), v)
+            for h in glob.iglob(pat):
+                hits.append(h)
+                if len(hits) > MAX_LOOP_PATHS:
+                    raise PathUnread(f'a loop glob naming more than {MAX_LOOP_PATHS} files: {v[:40]}')
+        if not hits:
+            return resolve(v)
+        found = False
+        for h in hits:
+            r = resolve(h)
+            if r is None:
+                return None
+            found = found or r
         return found
 
     for group in groups:
@@ -2671,6 +2911,8 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
                 group = group.rest
             else:
                 group = []
+        # every word, not "the words before the first file": `pushd x && node -r /abs/ok.js m.js` runs m.js too
+        # (Viktor 41756 LOW 2); measured, that exception spared 33 of the replay's rows only
         for c in group:
             if resolve(c) is None:
                 return [''] * (MAX_SCRIPTS + 1)
@@ -3541,6 +3783,8 @@ def script_hits(cmd, cwd):
             paths +=[p for p in script_paths(cmd, cwd, t) if p not in paths]
     except TooManyArgs as e:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
         return found + [f'script-too-many-args ({e})']
+    except PathUnread as e:  # card deede5e4: a script word the gate cannot look up is not "no file" (fail-closed)
+        return found + [f'script-path-unread ({e})']
     if len(paths) > MAX_SCRIPTS:  # not "check the first ten": an eleventh file would slip past (fail-closed)
         return found + ['script-too-many']
     budget = script_budget()

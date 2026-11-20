@@ -16,11 +16,19 @@ AM = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '
 AM_ROOT = os.path.dirname(os.path.dirname(AM))
 
 # The fixtures spell the binary with a 3 for its first e ("s3curity"); fix() restores it at run time, so this file
-# carries no runnable keychain call and running it is not blocked by the gate it tests (card bc009036). The git
-# credential fixtures likewise spell "cr3dential" (card 04d67b39).
+# carries no runnable keychain call (card bc009036). The git credential fixtures likewise spell "cr3dential" (card
+# 04d67b39), and the launchctl ones "l4unchctl" (card deede5e4, Viktor I1). Running this file by its path from an
+# agent shell is still blocked by the gate it tests (measured 2026-11-20, card deede5e4): read as a script, the
+# whole file is past the payload caps ('payload-unread'), and the escaped-name rows (`\0163ecurity`) decode to the
+# call. CI runs it directly (.github/workflows/test.yml). In an agent shell its author runs it and notes the block
+# on the card as a false positive (Klodel's false-positive rule; Viktor deede5e4 r2 INFO 1: a recipe that hides the
+# path from the gate works for any script, so it is not written down here). A loop or pushd around it blocks.
 def fix(cmd):
     return (cmd.replace('s3c', 'sec').replace('S3C', 'SEC').replace('s"3c"', 's"ec"')
-            .replace('cr3d', 'cred').replace('CR3D', 'CRED'))
+            .replace('cr3d', 'cred').replace('CR3D', 'CRED')
+            # card deede5e4 (Viktor I1): the launchctl fixtures too, so the gate does not block a run of this file
+            # (`l4unchctl submit -p ...` blocks as text in script mode, fail-closed)
+            .replace('l4unchctl', 'launchctl'))
 
 
 BLOCK = [
@@ -314,19 +322,19 @@ BLOCK = [
     '<<<x s3curity dump-keychain',
     '<<EOF s3curity dump-keychain',
     # Viktor 42251 LOW 4: launchctl submit runs the command after --
-    'launchctl submit -l a -o /tmp/o -- /usr/bin/s3curity dump-keychain',
-    'launchctl submit -l a -e /tmp/e -o /tmp/o -- s3curity dump-keychain',
+    'l4unchctl submit -l a -o /tmp/o -- /usr/bin/s3curity dump-keychain',
+    'l4unchctl submit -l a -e /tmp/e -o /tmp/o -- s3curity dump-keychain',
     # -p prog runs prog with the words after -- as argv, argv0 any word (Dave, measured on this branch): not read, blocks
-    'launchctl submit -l a -p /usr/bin/s3curity -- s3curity dump-keychain',
-    'launchctl submit -l a -p /usr/bin/s3curity -- x dump-keychain',
-    'launchctl submit -l a -p /usr/bin/env -- x s3curity dump-keychain',
-    'sudo launchctl submit -p /usr/bin/s3curity -l a -- x dump-keychain',
-    'launchctl submit -l a -p /bin/echo -- echo hi',  # fail-closed: any -p blocks
+    'l4unchctl submit -l a -p /usr/bin/s3curity -- s3curity dump-keychain',
+    'l4unchctl submit -l a -p /usr/bin/s3curity -- x dump-keychain',
+    'l4unchctl submit -l a -p /usr/bin/env -- x s3curity dump-keychain',
+    'sudo l4unchctl submit -p /usr/bin/s3curity -l a -- x dump-keychain',
+    'l4unchctl submit -l a -p /bin/echo -- echo hi',  # fail-closed: any -p blocks
     # Viktor 42295 LOW 1: the p in any flag word, joined or bundled (N33, N34), and <<- before the call (N19)
-    'launchctl submit -l a -p/usr/bin/s3curity -- x dump-keychain',
-    'launchctl submit -lp a /usr/bin/s3curity -- x dump-keychain',
-    'launchctl submit -l a -pl /usr/bin/s3curity -- x dump-keychain',
-    'launchctl submit -l a -op x /usr/bin/s3curity -- x dump-keychain',
+    'l4unchctl submit -l a -p/usr/bin/s3curity -- x dump-keychain',
+    'l4unchctl submit -lp a /usr/bin/s3curity -- x dump-keychain',
+    'l4unchctl submit -l a -pl /usr/bin/s3curity -- x dump-keychain',
+    'l4unchctl submit -l a -op x /usr/bin/s3curity -- x dump-keychain',
     '<<- EOF s3curity dump-keychain',
     'echo a; >>log s3curity dump-keychain',
     'sudo -u root >/dev/null s3curity dump-keychain',
@@ -337,8 +345,8 @@ BLOCK = [
     'sandbox-exec -p "(version 1)(allow default)" s3curity dump-keychain',
     'sandbox-exec -n no-network -D A=b s3curity dump-keychain',
     'lockf -k /tmp/l s3curity dump-keychain',
-    'launchctl asuser 501 s3curity dump-keychain',
-    '/bin/launchctl bsexec 1 s3curity dump-keychain',
+    'l4unchctl asuser 501 s3curity dump-keychain',
+    '/bin/l4unchctl bsexec 1 s3curity dump-keychain',
     'login -fp root s3curity dump-keychain',
     'login -f -h h root s3curity dump-keychain',
     'sandbox-exec s3curity dump-keychain',  # a chain word with no flag skipped (mutant sandbox_chain_out)
@@ -886,9 +894,9 @@ ALLOW = [
     'echo a > s3curity dump-keychain',
     'cat f >> out.log',
     'ls 2>/dev/null; s3curity list-keychains',
-    'launchctl list',
-    'launchctl submit -l a -o /tmp/o -- /bin/echo hi',
-    'launchctl load -w /tmp/x.plist',
+    'l4unchctl list',
+    'l4unchctl submit -l a -o /tmp/o -- /bin/echo hi',
+    'l4unchctl load -w /tmp/x.plist',
     'login',
     'echo login root s3curity dump-keychain',
     'sandbox-exec -p "(version 1)" ls',
@@ -1001,6 +1009,16 @@ def script_cases():
         os.makedirs(os.path.join(d, 'mainpkg'))
         with open(os.path.join(d, 'mainpkg', '__main__.py'), 'w', encoding='utf-8') as f:
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
+        # card deede5e4 (mutation round 2): a clean directory whose name the glob `on*` shares with sub2/only.py
+        os.makedirs(os.path.join(d, 'onlypkg'))
+        with open(os.path.join(d, 'onlypkg', '__main__.py'), 'w', encoding='utf-8') as f:
+            f.write("print(1)\n")
+        # card deede5e4 r2 (Viktor 49087 R1): lnk -> phys/inner; physically lnk/.. is phys, whose twin.py is the
+        # keychain one (logically lnk/.. is d, whose twin.py prints 1)
+        os.makedirs(os.path.join(d, 'phys', 'inner'))
+        with open(os.path.join(d, 'phys', 'twin.py'), 'w', encoding='utf-8') as f:
+            f.write("import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
+        os.symlink(os.path.join(d, 'phys', 'inner'), os.path.join(d, 'lnk'))
         sub = os.path.join(d, 'sub')
         os.makedirs(sub)
         with open(os.path.join(sub, 'deep.py'), 'w', encoding='utf-8') as f:
@@ -1370,6 +1388,78 @@ def script_cases():
             ('cd sub2 && python3 only.py', d),
             ('(cd sub2; python3 only.py)', d),
             ('cd ' + d + ' && cd sub2 && python3 only.py', None),
+            # card deede5e4 (Viktor LOW L1): a directory change cd_bases does not follow, then a relative script
+            # (main read no file and allowed); a loop variable in the cd target or the script path; pushd / env -C
+            # into sub2, where twin.py is the keychain one (d's twin.py prints 1: main judged that one)
+            ('for x in sub2; do cd $x && python3 only.py; done', d),
+            ('for x in sub2; do (cd $x && python3 only.py); done', d),
+            ('cd "$(echo sub2)" && python3 only.py', d),
+            ('pushd sub2 && python3 only.py', d),
+            ('pushd sub2 >/dev/null; python3 twin.py', d),
+            ('env -C sub2 python3 twin.py', d),
+            ('cd ' + d + '/$X && python3 twin.py', None),
+            ('for f in sub2/only.py; do python3 $f; done', d),
+            ('for f in twin.py sub2/only.py; do python3 "$f"; done', d),
+            ('for f in twin.py; do :; done; for f in sub2/only.py; do python3 ${f}; done', d),
+            ('for f in sub2/*.py; do python3 $f; done', d),  # a glob list: expanded in each base
+            ('for f in $(ls sub2); do python3 sub2/$f; done', d),  # a substituted list: unread
+            # card deede5e4, mutation round 1: a row for each survivor. Past MAX_LOOP_PATHS values; the values of
+            # every list of a name, not only the last; a name once unknown stays unknown; no list (`for f; do`: "$@")
+            ('for f in ' + ' '.join(f'n{i}.py' for i in range(64)) + ' sub2/only.py; do python3 $f; done', d),
+            ('for f in sub2/only.py; do python3 $f; done; for f in twin.py; do :; done', d),
+            ('for f in $(ls sub2); do python3 sub2/$f; done; for f in nothing; do :; done', d),
+            ('for f; do python3 $f; done', d),
+            # an empty cd word (bash 3.2, bash 5 and zsh stay, measured; not followed, fail-closed), a cd word a
+            # substitution continues, a cd to a loop variable over a substitution, a glob cd, a relative cd from
+            # every value of a loop cd, a cd in a heredoc a shell reads, a loop glob after pushd
+            ('cd "" && python3 twin.py', d),
+            ('cd sub$(echo 2) && python3 only.py', d),
+            ('cd s"$(echo ub2)" && python3 only.py', d),
+            ('for x in $(echo sub2); do cd $x && python3 only.py; done', d),
+            ('cd sub? && python3 only.py', d),
+            ('for x in sub*; do (cd $x && python3 only.py); done', d),
+            ('for x in sub .; do (cd $x && cd sub2 && python3 only.py); done', d),
+            ("bash <<'E'\ncd sub2\npython3 only.py\nE", d),
+            ("bash -s <<'E'\ncd sub2 && python3 twin.py\nE", d),
+            ('pushd sub2; for f in t*.py; do python3 $f; done', d),
+            ('pushd sub2; for f in on*; do python3 $f; done', d),  # the cwd's onlypkg/__main__.py is clean: unread
+            # a loop value naming a directory runs its __main__.py (found while killing the survivors: allowed before)
+            ('for f in mainpkg; do python3 $f; done', d),
+            ('for f in mainp*; do python3 "$f"; done', d),
+            # card deede5e4: a chained value (`B=$A/..`), a quoted loop target, a plain loop value in an argument
+            # after an innocent first file (Viktor 41756 LOW 2 still holds), env's own -C after its options
+            ('A=sub2; B=$A; cd $B && python3 only.py', d),
+            ('A=sub2; B=$A/only.py; python3 $B', d),
+            ('for x in sub2; do cd "$x" && python3 only.py; done', d),
+            ('for f in read.mjs; do node -r ./ok.js $f; done', d),
+            ('env -i -u X -C sub2 python3 twin.py', d),
+            ('cd "$T" && python3 twin.py', d),  # a variable set outside the command: unread
+            # card deede5e4 r2 (Viktor 49087, his prop d20acc50). R1 (a regression of r1: main blocked it): a physical
+            # directory change, bash steps above the link's target
+            ('set -P; cd lnk/.. && python3 twin.py', d), ('cd -P lnk/.. && python3 twin.py', d),
+            # P2: a plain assignment of the loop variable's name hid the loop values (main too)
+            ('F=twin.py; for F in sub2/only.py; do python3 $F; done', d),
+            ('F=twin.py; for F in sub2/only.py; do python3 ${F}; done', d),
+            ('D=fdname; for D in sub2; do cd $D; python3 only.py; cd ..; done', d),
+            ('F=twin.py; for F in sub2/only.py; do :; done; python3 $F', d),
+            ('for F in sub2/only.py; do python3 $F; done; F=twin.py', d),
+            ('F="twin.py"; for F in sub2/only.py; do python3 "$F"; done', d),
+            # P3: a cd the gate took for followed but read wrong (main too): an option word, `--`, a redirection
+            # before the target, a quoted cd / pushd name, a brace target, a ~+ target; $PWD / ~+ in the script path
+            ('cd -P sub2 && python3 twin.py', d), ('cd -L sub2 && python3 twin.py', d),
+            ('cd -- sub2 && python3 twin.py', d), ('builtin cd -P sub2 && python3 twin.py', d),
+            ('cd 2>/dev/null sub2 && python3 twin.py', d), ("'c'd sub2 && python3 twin.py", d),
+            ('c"d" sub2 && python3 twin.py', d), ("'push'd sub2 && python3 twin.py", d),
+            ('cd {sub2,} ; python3 twin.py', d), ('cd ~+/sub2 && python3 twin.py', d),
+            ('cd sub2 && python3 $PWD/twin.py', d), ('cd sub2 && python3 ${PWD}/twin.py', d),
+            ('cd sub2 && python3 ~+/twin.py', d),
+            # (mutation round 3, in process, work/deede5e4/m3.py) a plain value assigned after the loop is read too,
+            # a made one blocks; a cd of option words only (bash: to HOME) is not followed; $PWD after an unknown cd
+            ('for F in twin.py; do :; done; F=sub2/only.py; python3 $F', d),
+            ('for F in twin.py; do :; done; F=$X; python3 $F', d),
+            ('cd -P && python3 twin.py', d), ('cd $T && python3 $PWD/twin.py', d),
+            # every word of a node call, not only those before the first file (Viktor 41756 LOW 2 under pushd)
+            ('pushd sub2 && node -r ' + d + '/ok.js read.mjs', d),
             ('python3 < measure.py', d),
             ('python3 - < measure.py', d),
             ('cat measure.py | python3', d),
@@ -2380,6 +2470,31 @@ def script_cases():
             ('python3 list.py ' + ' '.join(f'a{i}' for i in range(62)), d),  # 63 words: inside MAX_ARGS (64)
             ('python3 -c pass ' + 'a ' * 100, d),  # the walk stops at -c: the rest is not a script's words
             ('cd sub2 && cat only.py', d),  # no interpreter: reading a file is not running it
+            # card deede5e4: a loop over plain words naming harmless files, a loop that names no script, an absolute
+            # path after a directory change the gate does not follow, a known cd
+            ('for f in twin.py fdname/ok.py; do python3 $f; done', d),
+            ('for x in a b; do echo $x; done; python3 twin.py', d),
+            # mutation round 1: -C of env's command is not env's; a value reassigned from outside the command is not
+            # its old value (B is unknown, as any variable set outside: see "Not seen")
+            ('env git -C sub2 log; python3 twin.py', d),
+            ('env A=1 git -C sub2 status && python3 twin.py', d),
+            ('A=sub2; A=$T; B=$A/only.py; python3 $B', d),
+            ('pushd sub2 >/dev/null && python3 ' + d + '/twin.py', d),
+            ('cd fdname && python3 ok.py', d),
+            # card deede5e4 r2 (Viktor 49087 controls): the loop name assigned the same harmless value, an option cd
+            # into a harmless directory, an absolute script after a cd -P, $PWD after a known cd, `--` before a
+            # harmless directory
+            ('F=twin.py; for F in twin.py; do python3 $F; done', d), ('cd -P fdname && python3 ok.py', d),
+            ('cd -P sub2 && python3 ' + d + '/twin.py', d), ('cd fdname && python3 $PWD/ok.py', d),
+            ('cd -- fdname && python3 ok.py', d),
+            # card deede5e4, the replay's readings (675 fleet rows blocked by the first draft): a cd word in a heredoc
+            # no shell reads, -C of another command next to env, a chained value naming a harmless file, a for loop
+            # of python code next to a shell variable, a loop glob in python's argv after its script (data)
+            ("python3 - <<'PY'\nx = 'cd|export'\nPY\npython3 fdname/ok.py", d),
+            ('for m in sub2/*.py; do python3 fdname/ok.py $m; done', d),
+            ('git -C sub2 status; env A=1 python3 fdname/ok.py', d),
+            ('A=fdname; B=$A/ok.py; python3 $B', d),
+            ("f=fdname/ok.py; python3 - <<'PY'\nfor f in os.listdir('.'): pass\nPY\npython3 $f", d),
             ('python3 word.py < notes.py', d),
             ('node worker.mjs', d),  # agent-worker.ts shape: a non-read subcommand, `-p` only in a comment
             ('python3 -c "print(1)"', d),
