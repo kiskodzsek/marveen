@@ -3178,11 +3178,15 @@ def lexer_normalise(view, cls, a, b):
     join made it part of a word (both found by a differential fuzz against bash and zsh, card fae0712e; the old gate
     let the script run, and hits() let `security dump-keychain` through). Inside quotes and heredoc bodies it joins as
     before: they may be a payload whose own shell joins (`bash -c 'python3 m\\` + newline + `.py'`). Splitting there
-    only shows the shell's own line structure; a join never hid less."""
+    only shows the shell's own line structure; a join never hid less.
+    Nor where the backslash ends a heredoc's terminator line (class 't'; card 70a5fb2a, Viktor 43324 LELET 3): a quoted
+    delimiter may end in a backslash (`curl -d @- <<'J\\'`), its terminator line is `J\\`, and the shell takes that
+    line as the end of the body, so the next line is a command; the join glued it onto the terminator and the script
+    it ran (`./x.sh`) was not read."""
     out = []
     p = a
     while p < b:
-        if view[p] == '\\' and p + 1 < b and view[p + 1] == '\n' and cls[p] not in 'me':
+        if view[p] == '\\' and p + 1 < b and view[p + 1] == '\n' and cls[p] not in 'met':
             p += 2
             continue
         out.append(view[p])
