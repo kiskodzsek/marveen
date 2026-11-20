@@ -280,8 +280,9 @@ describe('runner wiring (source pins)', () => {
     expect(runner).toMatch(/bgShellSince\.set\(name, shell\.sinceMs\)/)
   })
   it('the runner passes the idle reading and the streak (card d23bec1d)', () => {
-    expect(runner).toMatch(/\{ readIdle: paneState === 'idle', zeroStreak: bgShellZeroStreak\.get\(name\) \?\? 0 \}/)
+    expect(runner).toMatch(/\{ readIdle: paneState === 'idle', zeroStreak: bgShellZeroStreak\.get\(name\) \?\? 0, zeroSinceMs: bgShellZeroSince\.get\(name\) \}/)
     expect(runner).toMatch(/bgShellZeroStreak\.set\(name, shell\.zeroStreak\)/)
+    expect(runner).toMatch(/else bgShellZeroSince\.set\(name, shell\.zeroSinceMs\)/)
   })
   it('the restart notice names the shells the restart cut', () => {
     expect(runner).toMatch(/bgShells > 0\s*\n?\s*\? ` FIGYELEM: \$\{bgShells\} hatter-shell meg futott/)
