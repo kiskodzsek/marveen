@@ -221,7 +221,7 @@ def judge(cmd, depth=0):
         subs = []
         cmds, heredocs = P.split_commands(cmd, subs)
     except P.Unsplittable:
-        if depth or NAME not in flat:
+        if NAME not in flat:  # at every depth (Viktor 48711 LOW 1): bash runs the first command of an open text
             return None
         return f'the command cannot be split (an open quote) and names {NAME}'
     nested = list(subs)

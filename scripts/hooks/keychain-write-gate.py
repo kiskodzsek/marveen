@@ -497,8 +497,7 @@ def judge(cmd, depth=0):
         subs = []
         cmds, heredocs = split_commands(cmd, subs)
     except Unsplittable:
-        if depth:
-            return None
+        # at every depth (Viktor 48711 LOW 1): bash runs the first command of a text the splitter cannot split
         return '?', 'the command cannot be split (an open quote) and names a keychain write subcommand'
     nested = list(subs)
     env = {}

@@ -175,10 +175,17 @@ BLOCK = [
     "sh -c 'printf \"%s\\\\\" x && s3curity delete-generic-password -s y && echo \"b\"'",
     'echo "a\\\\" ; s3curity delete-generic-password -s y ; echo "b"',
     'echo "q\\"\\\\" ; s3curity delete-generic-password -s y',  # an escaped quote, then an escaped backslash
+    # Viktor 48711 LOW 1: a text the splitter cannot split is fail-closed at every depth; bash runs its first command
+    "bash -c 's3curity add-generic-password -a x -s y -w z\necho \"x'",  # U1: an open quote after a newline
+    'bash -c "s3curity add-generic-password -a x -s y -w z; echo \\$\'a\\\\\'b\'"',  # U4: ANSI-C quote
+    # Viktor 48711 INFO 1: rows that pin the escape step (M06) and the escaped backslash (M02)
+    'bash -c \'echo "a\\"" ; s3curity add-generic-password -a x -s y -w z\'',  # Q03
+    'bash -c "echo \\"q\\\\\\\\\\\\\\"\\" ; s3curity add-generic-password -a x -s y -w z"',  # P16
 ]
 
 ALLOW = [
     # card c6b9ff2f: a string ending in an escaped backslash is closed where bash closes it; text in it is data
+    'echo "a\\\\\\" ; s3curity add-generic-password -a x -s y -w z ; echo b"',  # P03 (Viktor 48711 INFO 1): one string
     'echo "C:\\\\" ; echo "s3curity add-generic-password is the write subcommand"',
     "bash -c 'echo \"dir\\\\\" ; ls'",
     # the throwaway keychain, named by an absolute path to an existing file outside the keychain directories

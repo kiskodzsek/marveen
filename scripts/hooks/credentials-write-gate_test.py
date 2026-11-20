@@ -127,6 +127,8 @@ BLOCK = [
     # card c6b9ff2f: an escaped backslash before a closing double quote ends the string (the shared splitter)
     f"bash -c 'echo \"a\\\\\" ; cp a ~/.claude/{C} ; echo \"b\"'",
     f'echo "a\\\\" ; cp a ~/.claude/{C} ; echo "b"',
+    # Viktor 48711 LOW 1 (U6): an open quote after a newline inside bash -c is fail-closed at every depth
+    f"bash -c 'cp a ~/.claude/{C}\necho \"x'",
 ]
 
 # every row must pass
