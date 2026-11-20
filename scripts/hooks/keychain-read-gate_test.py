@@ -1019,6 +1019,10 @@ def script_cases():
         w('made', 'x=$(echo ' + S + '); $x dump-keychain\n')
         w('made.md', '$S dump-keychain\n')
         w('madebang.py', '#!/usr/bin/env bash\n$S find-generic-password -s x\n')
+        # card 3bcd4514 (Viktor 48033 LOW L1): a data file a shell reads as code on its stdin or from a substitution,
+        # and a shell file with the call in it for the stdin forms the gate did not collect (0<, a1<, eval)
+        w('made.json', '$S dump-keychain\n')
+        w('lit.sh', S + ' dump-keychain\n')
         cf_curl = ('curl -s -X POST localhost:3420/api/kanban/x/comments -H "Content-Type: application/json" '
                    '-H "Authorization: Bearer $(cat store/.dashboard-token)" --data-binary @- ')
         block = [
@@ -1027,6 +1031,52 @@ def script_cases():
             # source before a data file's name)
             ('bash made.sh', d), ('sh ./made', d), ('bash made.md', d), ('/bin/zsh -e made.md', d), ('source made.md', d),
             ('. ./made.md', d), ('./madebang.py', d), ('./made', d),
+            # card 3bcd4514 (Viktor 48033 LOW L1, bash and zsh ran each; gate-bash-truth 11-20): the file on a shell's
+            # stdin (a pipe, a < redirect, -s, -), in a substitution a shell or eval runs, a <( a shell or source reads,
+            # and a shell's option that takes a word (-o, +O, -eo, --rcfile) before its name
+            ('cat made.json | bash', d), ('bash < made.json', d), ('bash -c "$(< made.json)"', d),
+            ('bash -o errexit made.md', d), ('cat made.json | sh -s', d), ('< made.json bash', d), ('zsh 0<made.json', d),
+            ('head -n 5 made.json | bash', d), ('eval "$(cat made.json)"', d), ('bash -c "$(cat made.json)"', d),
+            ('source <(cat made.json)', d), ('. <(< made.json)', d), ('bash <(cat made.json)', d),
+            ('bash -eo pipefail made.md', d), ('bash +O extglob made.md', d), ('bash --rcfile x made.md', d),
+            ('cat made.json | source /dev/stdin', d), ('bash -s < made.json', d), ('bash - < made.json', d),
+            ('bash -s a1<made.json', d), ('cat < made.json | bash', d),
+            # ... and the stdin forms the gate did not collect at all (a literal call ran on main): fd 0, a digit glued
+            # to a word (no fd: the < is stdin's), eval of a cat or < substitution
+            ('bash 0<lit.sh', d), ('bash -s a1<lit.sh', d), ('eval "$(cat lit.sh)"', d), ('eval "$(< lit.sh)"', d),
+            ('eval `cat lit.sh`', d),
+            # (mutation-round rows, bash and zsh ran each) a shell word ending a line, a quoted shell word, a path to
+            # the file, head / tail in a substitution, a pipe word of a filter that is no reader (sed), . /dev/fd/0, a
+            # redirect before the reader (`< x cat f`, `2>/dev/null cat f`: cat is the command), and the literal file
+            ('cat made.json | bash\necho x', d), ("cat made.json | 'bash'", d), ('eval "$(cat ./made.json)"', d),
+            ('eval "$(head made.json)"', d), ('eval "$(tail made.json)"', d), ('sed -n p made.json | bash', d),
+            ('cat made.json | . /dev/fd/0', d), ('< stat.py cat made.json | bash', d),
+            ('eval "$(2>/dev/null cat made.json)"', d), ('eval "$(< stat.py cat made.json)"', d),
+            ('eval "$(head -n 1 lit.sh)"', d), ('eval "$(tail -n 1 lit.sh)"', d),
+            # head / tail piped straight into an interpreter that reads its stdin as code (-E is no -e)
+            ('tail -n 1 lit.sh | python3', d), ('head lit.sh | node', d), ('tail -1 out.txt | python3 -E', d),
+            ('head -n 1 lit.sh | bash -s', d), ('/usr/bin/head lit.sh | bash', d), ('eval `head lit.sh`', d),
+            ('/usr/bin/tail -n 1 lit.sh | python3', d), ('eval "$(/usr/bin/head lit.sh)"', d),
+            # --init-file, more options than the walk reads (fail-closed), -c not last in its cluster, a path to cat,
+            # a backtick substitution, a quoted pipe word; eval quoted or escaped (the gate's interpreter forms)
+            ('bash --init-file x made.md', d), ('bash' + ' -x' * 17 + ' made.md', d), ('bash -cx "$(cat made.json)"', d),
+            # (mutation rd-over-off) past the walk's options a shell the file-name rule does not know ($SHELL,
+            # bash5) reading its stdin: only the reader's own fail-closed branch sees it
+            ('cat made.json | $SHELL' + ' -x' * 17, d), ('cat made.json | bash5' + ' -x' * 17, d),
+            # (mutation rd-end-paren) the reader's command ends at a substitution's or a subshell's )
+            ('x=$(cat made.json | bash)', d), ('(cat made.json | bash)', d), ('echo "$(cat made.json | sh)"', d),
+            # (mutation rd-fd) a reader with an fd redirect after it (its output, not its stdin)
+            ('cat made.json | bash 2>/dev/null', d), ('cat made.json | sh 2>&1', d),
+            # (mutation rd-s) -s with the script's own arguments after it: stdin is still the script
+            ('cat made.json | bash -s x', d), ('bash -s -- a b < made.json', d), ('cat made.json | sh -xs y', d),
+            # (mutation fed-lstrip) fd 0 with a blank before the name (the file-name rule reads `0<f` glued only)
+            ('bash 0< made.json', d), ('sh -s 0< made.json', d),
+            # (found by it) a shell under a name INTERP does not list reads its stdin: the file was not collected
+            # at all, a literal call ran on main and on the branch before this row
+            ('$SHELL < made.json', d), ('$SHELL 0<made.json', d), ('bash5 -s < lit.sh', d), ('fish < lit.sh', d),
+            ('$SHELL < lit.sh', d),
+            ('eval "$(/bin/cat made.json)"', d), ('eval `cat made.json`', d), ("sed -n p 'made.json' | bash", d),
+            ('eval "$(/bin/cat lit.sh)"', d), ('"eval" "$(cat lit.sh)"', d), ('\\eval "$(cat lit.sh)"', d),
             # card 31045f4d (A): the first non-option word is the script only after options the gate knows; node -r,
             # source, bash, ruby -r, perl -I, an unknown python flag and stdin keep the old walk (every file judged)
             ('python3 -I measure.py regiszter.jsonl', d),
@@ -2047,6 +2097,28 @@ def script_cases():
             ("python3 -I - <<'PY'\nprint(open('./made.md').read()[:9])\nPY", d),
             # ... and a shell word before ANOTHER name that only starts like it
             ("python3 -I - <<'PY'\nprint(open('./made.md').read()[:9])\nPY\nbash made.md.orig", d),
+            # card 3bcd4514: a shell with a script operand reads its stdin as data (the fleet's `bash agent-msg.sh ... -
+            # < f`), a non-shell reader of the file, and eval of a clean file
+            ('bash runner.sh stat.py < made.json', d), ('cat made.json | bash runner.sh stat.py', d), ('cat made.json', d),
+            ('python3 stat.py < made.json', d), ('cat made.json | python3 stat.py', d), ('cat < made.json', d),
+            ('bash -o errexit runner.sh stat.py', d), ('eval "$(cat stat.py)"', d),
+            # a reader of stdin, but the data file is a python script's, not fed to it
+            ('python3 made.json; bash -s < stat.py', d),
+            # a shell or eval word glued to another word is no reader (--bash, sh-, --eval, evaluate, `stat.` before a
+            # <(), a quoted '<(' is a file name, not a substitution)
+            ('cat made.json | python3 stat.py --bash', d), ('cat made.json | python3 stat.py sh-', d),
+            ('cat made.json | python3 stat.py --eval', d), ('cat made.json | python3 stat.py evaluate', d),
+            ('cat made.json; diff stat. <(cat stat.py)', d), ("source '<(cat made.json)'", d),
+            # (mutation rd-procsub-lookbehind) the same with an interpreter in the command, so the file IS collected
+            # (the row above never reaches the reader test: no interpreter, no cat collection)
+            ('cat made.json | python3 stat.py; diff stat. <(cat stat.py)', d),
+            ('cat made.json | python3 stat.py; resource <(cat stat.py)', d),
+            ('echo bash; cat stat.py', d), ('$SHELL < stat.py', d),
+            # head / tail of an output file outside a substitution or a pipe into an interpreter (the replay of 11-20:
+            # 105 fleet commands, `head -1 HANDOFF.md && bash x.sh`, `tail -1 reg.jsonl | python3 -c ...`)
+            ('head -1 out.txt && bash runner.sh stat.py', d), ('tail out.txt; python3 stat.py', d),
+            ('head -3 out.txt | cut -c1-9; python3 stat.py', d), ("tail -1 out.txt | python3 -I -c 'print(1)'", d),
+            ("tail -1 out.txt | python3 -c 'print(1)'", d), ("head out.txt | node -e '1'", d),
             # card af12091a: the K1 shapes before a harmless script, and as prose or data
             ("eval 'python3 -W \"a;b\" notes.py'", d),
             ('bash -c "python3 -W \\"a;b\\" notes.py"', d),
@@ -2519,6 +2591,26 @@ def script_cases():
             code, err = bash_in(cmd, cwd)
             if code != 0:
                 fails.append(f'script: should allow (got {code}): {cmd[:80]!r} {err[:120]}')
+        # card 3bcd4514: the stdin reading is linear. In the hook a long call blocks before it (MAX_ARGS, ARGS_WINDOW),
+        # but the token pass (_hn_fed) and the reader regex read the WHOLE command (a short call after a long text), so
+        # they are timed in process: runs of shell words with options (-o read with its word or alone, -eo, --rcfile),
+        # dots, path pieces, file names and redirects, 120-560 KB, each ending where no walk matches (` y z`); want the
+        # verdict and under 2 s each (measured 11-20: 0.5 s at most, under a parallel test run). Unbounded, the option
+        # walk was quadratic (`bash -o bash -o ...` past 120 s); past _HN_MAX_OPTS (16) options it counts as a reader.
+        hn_stdin = ('import importlib.util as u,sys,time; s=u.spec_from_file_location("g",sys.argv[1]); '
+                    'm=u.module_from_spec(s); s.loader.exec_module(m); b="$S dump-"+"keychain"; c="cat made.json; "; R=['
+                    '(c+"bash -o x "*30000+"y z",0),(c+"bash -o -o -o "*20000+"y z",0),(c+"bash -o "*40000+"y z",0),'
+                    '(c+"sh -o "*40000+"y z",0),(c+"bash -x "*40000+"y z",0),(c+"bash --rcfile x "*20000+"y z",0),'
+                    '(c+". x "*40000,0),(c+"bash -eo "*40000+"y z",0),("echo "+"made.json "*40000,0),'
+                    '("< x "*40000+"bash z",0),(c+"bash"+" -x"*16+" y",0),(c+"bash"+" -x"*17+" y",1),'
+                    '(c+"bash"+" -o x"*16+" y",0),(c+"bash"+" -x"*40000,1),(c+"/sh"*40000,1),'
+                    '("cat made.json "*40000+"| bash",1),(c+"bash -c"+" \\"$(x)\\""*40000,1)]\n'
+                    'for c,w in R:\n t=time.monotonic(); g=m._hn_shell_file("/d/made.json",b,c,()); '
+                    'd=time.monotonic()-t\n if g!=bool(w) or d>2: print(repr(c[:40]),g,round(d,2))')
+        p = subprocess.run([sys.executable, '-I', '-c', hn_stdin, HOOK], capture_output=True, text=True, timeout=120,
+                           env={'PATH': '/usr/bin:/bin'})
+        if p.returncode != 0 or p.stdout.strip():
+            fails.append(f'script: stdin timing (in process): {p.stdout.strip()[:300]} {p.stderr.strip()[-300:]}')
         # card 74586987: with the hook's stdout a FILE, /dev/stdout is no script of the command (it took /dev/fd/1 for
         # a regular file, could not read it, and blocked with PermissionError; found by the fleet replay)
         # write-only, as the replay worker's file was (mutation r2 d1: a read-write file let the gate read /dev/fd/1,
