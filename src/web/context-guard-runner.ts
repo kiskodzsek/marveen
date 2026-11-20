@@ -187,6 +187,12 @@ const bgAgentDeferLogged = new Set<string>()
 // Card 70dad0d7: agent name -> when the guard first saw a background shell in
 // the live footer of an otherwise idle pane (ms). Cleared when the shells are gone.
 const bgShellSince = new Map<string, number>()
+// Card d23bec1d: agent name -> idle readings of 0 shells in a row while a clock
+// runs (see BG_SHELL_CLEAR_IDLE_READINGS).
+const bgShellZeroStreak = new Map<string, number>()
+// Card d23bec1d round 2 (Viktor): agent name -> when the current run of 0
+// readings began (any pane state), see BG_SHELL_ZERO_DROP_MS.
+const bgShellZeroSince = new Map<string, number>()
 // Agents whose "background shell, restarts wait" / "wait cap passed" line is
 // already logged for the current stretch.
 const bgShellHoldLogged = new Set<string>()
@@ -204,21 +210,58 @@ const bgShellCapLogged = new Set<string>()
 export const BG_SHELL_WAIT_MAX_MS = 45 * 60_000
 
 /**
+ * Card d23bec1d: how many IDLE readings in a row must show no shell before the
+ * clock of the current stretch is dropped. Measured 2026-11-20 on the kernel
+ * pane: while a long message is typed into the input box (pane state typing or
+ * unknown) the box is taller than SHELL_FOOTER_MAX_BOX_DISTANCE, so
+ * backgroundShellCount reads 0 with "3 shells" in the footer (3 of 30 one-second
+ * captures). On Dave the same day the 45-minute cap restarted at 18:25 although a
+ * shell ran since 17:38: such a 0 had dropped the clock.
+ */
+export const BG_SHELL_CLEAR_IDLE_READINGS = 2
+
+/**
+ * Card d23bec1d round 2 (Viktor): a run of 0 readings in ANY pane state that lasts
+ * this long also drops the clock. The misread is short (a prompt being typed: 40 s
+ * on Dave at 18:25); without a bound a 0 on a busy or unknown pane kept the clock
+ * of a shell that really ended, and the next shell, started after a long busy
+ * turn, inherited a passed cap and got no wait at all. A misread longer than this
+ * restarts the clock, which only makes the restart wait longer.
+ */
+export const BG_SHELL_ZERO_DROP_MS = 5 * 60_000
+
+/**
  * Pure: whether a background shell keeps the restart back now. `sinceMs` is when
  * the current stretch of shells was first seen (undefined: none so far).
  * Returns the new `sinceMs` (undefined when no shell runs) and whether the cap
  * passed (the shells still run, the restart no longer waits).
+ *
+ * `reading` (card d23bec1d): when given, a reading of 0 drops the clock only
+ * after BG_SHELL_CLEAR_IDLE_READINGS idle readings of 0 in a row; a 0 on a pane
+ * that is not idle (typing, busy, unknown) leaves the clock and the streak as
+ * they are. A 0 never holds the restart back, so a shell that really ended costs
+ * no wait; only the cap's start survives a misread. A run of 0 readings that
+ * began BG_SHELL_ZERO_DROP_MS ago or earlier (`zeroSinceMs`) drops the clock in
+ * any pane state. Without `reading` the old rule holds (every 0 drops the clock).
  */
 export function bgShellHold(
   sinceMs: number | undefined,
   bgShells: number,
   nowMs: number,
   maxMs: number = BG_SHELL_WAIT_MAX_MS,
-): { hold: boolean; sinceMs: number | undefined; capPassed: boolean } {
-  if (bgShells <= 0) return { hold: false, sinceMs: undefined, capPassed: false }
+  reading?: { readIdle: boolean; zeroStreak: number; zeroSinceMs?: number },
+): { hold: boolean; sinceMs: number | undefined; capPassed: boolean; zeroStreak: number; zeroSinceMs?: number } {
+  if (bgShells <= 0) {
+    if (!reading || sinceMs === undefined) return { hold: false, sinceMs: undefined, capPassed: false, zeroStreak: 0 }
+    const zeroStreak = reading.readIdle ? reading.zeroStreak + 1 : reading.zeroStreak
+    const zeroSinceMs = reading.zeroSinceMs ?? nowMs
+    return zeroStreak >= BG_SHELL_CLEAR_IDLE_READINGS || nowMs - zeroSinceMs >= BG_SHELL_ZERO_DROP_MS
+      ? { hold: false, sinceMs: undefined, capPassed: false, zeroStreak: 0 }
+      : { hold: false, sinceMs, capPassed: false, zeroStreak, zeroSinceMs }
+  }
   const since = sinceMs ?? nowMs
   const capPassed = nowMs - since >= maxMs
-  return { hold: !capPassed, sinceMs: since, capPassed }
+  return { hold: !capPassed, sinceMs: since, capPassed, zeroStreak: 0 }
 }
 
 /** The pane state the guard acts on, with a held background shell read as busy.
@@ -700,16 +743,28 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   // turn, up to BG_SHELL_WAIT_MAX_MS; the saturation net still fires. Only a
   // sweep that looked at the pane moves the clock (null: not captured here).
   const bgShells = pane !== null ? backgroundShellCount(pane) : 0
+  // Card d23bec1d: a 0 counts toward dropping the clock only on an idle pane.
+  // The RAW pane state on purpose: it says whether the footer reading is
+  // trustworthy (typing and unknown read 0 under a tall input box); the guard
+  // state would call an idle pane with background agents busy, and the agent
+  // panel is already stripped by backgroundShellCount.
   const shell = pane !== null
-    ? bgShellHold(bgShellSince.get(name), bgShells, nowMs)
-    : { hold: false, sinceMs: bgShellSince.get(name), capPassed: false }
+    ? bgShellHold(bgShellSince.get(name), bgShells, nowMs, BG_SHELL_WAIT_MAX_MS,
+      { readIdle: paneState === 'idle', zeroStreak: bgShellZeroStreak.get(name) ?? 0, zeroSinceMs: bgShellZeroSince.get(name) })
+    : { hold: false, sinceMs: bgShellSince.get(name), capPassed: false, zeroStreak: bgShellZeroStreak.get(name) ?? 0,
+      zeroSinceMs: bgShellZeroSince.get(name) }
   if (pane !== null) {
     if (shell.sinceMs === undefined) {
       bgShellSince.delete(name)
+      bgShellZeroStreak.delete(name)
+      bgShellZeroSince.delete(name)
       bgShellHoldLogged.delete(name)
       bgShellCapLogged.delete(name)
     } else {
       bgShellSince.set(name, shell.sinceMs)
+      bgShellZeroStreak.set(name, shell.zeroStreak)
+      if (shell.zeroSinceMs === undefined) bgShellZeroSince.delete(name)
+      else bgShellZeroSince.set(name, shell.zeroSinceMs)
     }
   }
   if (shell.hold && agentGuardPaneState === 'idle' && !bgShellHoldLogged.has(name)) {

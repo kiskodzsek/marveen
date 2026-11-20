@@ -50,7 +50,7 @@ vi.mock('../web/agent-process.js', () => ({
   isSessionReadyForPrompt: async () => false,
 }))
 
-const { guardPaneSignals, bgShellHold, withShellHold, BG_SHELL_WAIT_MAX_MS } = await import('../web/context-guard-runner.js')
+const { guardPaneSignals, bgShellHold, withShellHold, BG_SHELL_WAIT_MAX_MS, BG_SHELL_CLEAR_IDLE_READINGS, BG_SHELL_ZERO_DROP_MS } = await import('../web/context-guard-runner.js')
 
 const here = dirname(fileURLToPath(import.meta.url))
 const runner = readFileSync(join(here, '..', 'web', 'context-guard-runner.ts'), 'utf-8')
@@ -110,19 +110,98 @@ describe('backgroundShellCount: the shell pill of the live footer', () => {
 describe('bgShellHold: wait for the shell, capped', () => {
   const NOW = 1_000_000_000
   it('no shell: no hold, the clock is cleared', () => {
-    expect(bgShellHold(undefined, 0, NOW)).toEqual({ hold: false, sinceMs: undefined, capPassed: false })
-    expect(bgShellHold(NOW - 5_000, 0, NOW)).toEqual({ hold: false, sinceMs: undefined, capPassed: false })
+    expect(bgShellHold(undefined, 0, NOW)).toEqual({ hold: false, sinceMs: undefined, capPassed: false, zeroStreak: 0 })
+    expect(bgShellHold(NOW - 5_000, 0, NOW)).toEqual({ hold: false, sinceMs: undefined, capPassed: false, zeroStreak: 0 })
   })
   it('first sight starts the clock and holds; still holds just below the cap', () => {
-    expect(bgShellHold(undefined, 1, NOW)).toEqual({ hold: true, sinceMs: NOW, capPassed: false })
-    expect(bgShellHold(NOW, 1, NOW + BG_SHELL_WAIT_MAX_MS - 1)).toEqual({ hold: true, sinceMs: NOW, capPassed: false })
+    expect(bgShellHold(undefined, 1, NOW)).toEqual({ hold: true, sinceMs: NOW, capPassed: false, zeroStreak: 0 })
+    expect(bgShellHold(NOW, 1, NOW + BG_SHELL_WAIT_MAX_MS - 1)).toEqual({ hold: true, sinceMs: NOW, capPassed: false, zeroStreak: 0 })
   })
   it('at the cap the restart no longer waits, and the cap is said', () => {
-    expect(bgShellHold(NOW, 2, NOW + BG_SHELL_WAIT_MAX_MS)).toEqual({ hold: false, sinceMs: NOW, capPassed: true })
+    expect(bgShellHold(NOW, 2, NOW + BG_SHELL_WAIT_MAX_MS)).toEqual({ hold: false, sinceMs: NOW, capPassed: true, zeroStreak: 0 })
   })
   it('the cap is a bounded wait, not an unbounded one', () => {
     expect(BG_SHELL_WAIT_MAX_MS).toBeGreaterThan(0)
     expect(BG_SHELL_WAIT_MAX_MS).toBeLessThanOrEqual(2 * 60 * 60_000)
+  })
+})
+
+// Card d23bec1d (measured 2026-11-20 on the kernel pane, 100 one-second captures
+// while 2-3 shells ran): 3 read 0 shells, all while a long message was typed
+// into the input box (2 typing, 1 unknown): the box is taller than the footer's
+// box distance. On Dave the same day such a 0 dropped the clock and the
+// 45-minute cap started again at 18:25 for a shell running since 17:38.
+// The shape below is the measured one: the ❯ row, 9 wrapped rows, the
+// separator, the footer with "3 shells" (text neutral).
+const TYPING_LONG = [
+  '⏺ Kész.',
+  '',
+  `${SEP} Kernel ─`,
+  '❯ Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore',
+  ...Array.from({ length: 9 }, (_, i) => `  magna aliqua ${i}: ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea`),
+  SEP,
+  '  ⏵⏵ bypass permissions on · 3 shells',
+].join('\n')
+
+describe('bgShellHold: a 0 read while a message is typed does not drop the clock (card d23bec1d)', () => {
+  const NOW = 1_000_000_000
+  const START = NOW - 33 * 60_000 // the clock started 33 minutes ago, as on Dave 17:52 -> 18:25
+  it('the measured typing shape reads 0 shells and is not idle', () => {
+    expect(backgroundShellCount(TYPING_LONG)).toBe(0)
+    expect(detectPaneState(TYPING_LONG)).not.toBe('idle')
+  })
+  it('a 0 on a pane that is not idle keeps the clock and the streak, and never holds', () => {
+    for (const zeroStreak of [0, 1]) {
+      expect(bgShellHold(START, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: false, zeroStreak }))
+        .toEqual({ hold: false, sinceMs: START, capPassed: false, zeroStreak, zeroSinceMs: NOW })
+    }
+  })
+  it('the cap still counts from the first sight after the misread', () => {
+    const misread = bgShellHold(START, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: false, zeroStreak: 0 })
+    const next = bgShellHold(misread.sinceMs, 1, START + BG_SHELL_WAIT_MAX_MS, BG_SHELL_WAIT_MAX_MS, { readIdle: true, zeroStreak: misread.zeroStreak })
+    expect(next).toEqual({ hold: false, sinceMs: START, capPassed: true, zeroStreak: 0 })
+  })
+  it('the old rule (every 0 drops the clock) would restart the cap: the misread then the next shell reading', () => {
+    const old = bgShellHold(START, 0, NOW)
+    expect(old.sinceMs).toBeUndefined()
+    expect(bgShellHold(old.sinceMs, 1, NOW + 1).sinceMs).toBe(NOW + 1)
+  })
+  it('one idle 0 keeps the clock; the second in a row drops it; a shell in between resets the streak', () => {
+    expect(BG_SHELL_CLEAR_IDLE_READINGS).toBe(2)
+    const one = bgShellHold(START, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: true, zeroStreak: 0 })
+    expect(one).toEqual({ hold: false, sinceMs: START, capPassed: false, zeroStreak: 1, zeroSinceMs: NOW })
+    expect(bgShellHold(START, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: true, zeroStreak: one.zeroStreak }))
+      .toEqual({ hold: false, sinceMs: undefined, capPassed: false, zeroStreak: 0 })
+    expect(bgShellHold(START, 1, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: true, zeroStreak: 1 }).zeroStreak).toBe(0)
+  })
+  // Viktor, round 1: a non-idle 0 must not keep a FINISHED stretch's clock for ever. Shell A, then a 55-minute
+  // busy (or unknown) turn with no shell, then a new shell B: B gets a fresh clock and the restart waits for it.
+  it('a long run of 0 readings on a pane that is not idle drops the clock: the next shell starts a fresh cap', () => {
+    let r = bgShellHold(undefined, 1, START)
+    let zeroSinceMs: number | undefined
+    let zeroStreak = 0
+    for (let t = START + 5 * 60_000; t <= START + 60 * 60_000; t += 5 * 60_000) {
+      r = bgShellHold(r.sinceMs, 0, t, BG_SHELL_WAIT_MAX_MS, { readIdle: false, zeroStreak, zeroSinceMs })
+      zeroStreak = r.zeroStreak
+      zeroSinceMs = r.zeroSinceMs
+    }
+    expect(r.sinceMs).toBeUndefined()
+    const b = bgShellHold(r.sinceMs, 1, START + 61 * 60_000, BG_SHELL_WAIT_MAX_MS, { readIdle: true, zeroStreak, zeroSinceMs })
+    expect(b).toEqual({ hold: true, sinceMs: START + 61 * 60_000, capPassed: false, zeroStreak: 0 })
+  })
+  it('a misread run shorter than BG_SHELL_ZERO_DROP_MS keeps the clock; at the bound it drops', () => {
+    expect(BG_SHELL_ZERO_DROP_MS).toBe(5 * 60_000)
+    const first = bgShellHold(START, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: false, zeroStreak: 0 })
+    const near = bgShellHold(first.sinceMs, 0, NOW + BG_SHELL_ZERO_DROP_MS - 1, BG_SHELL_WAIT_MAX_MS,
+      { readIdle: false, zeroStreak: first.zeroStreak, zeroSinceMs: first.zeroSinceMs })
+    expect(near.sinceMs).toBe(START)
+    const at = bgShellHold(first.sinceMs, 0, NOW + BG_SHELL_ZERO_DROP_MS, BG_SHELL_WAIT_MAX_MS,
+      { readIdle: false, zeroStreak: first.zeroStreak, zeroSinceMs: first.zeroSinceMs })
+    expect(at.sinceMs).toBeUndefined()
+  })
+  it('no clock running: a 0 stays a 0 (nothing to keep)', () => {
+    expect(bgShellHold(undefined, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: false, zeroStreak: 0 }))
+      .toEqual({ hold: false, sinceMs: undefined, capPassed: false, zeroStreak: 0 })
   })
 })
 
@@ -199,6 +278,11 @@ describe('runner wiring (source pins)', () => {
   it('the shell clock moves only on a sweep that captured the pane', () => {
     expect(runner).toMatch(/const bgShells = pane !== null \? backgroundShellCount\(pane\) : 0/)
     expect(runner).toMatch(/bgShellSince\.set\(name, shell\.sinceMs\)/)
+  })
+  it('the runner passes the idle reading and the streak (card d23bec1d)', () => {
+    expect(runner).toMatch(/\{ readIdle: paneState === 'idle', zeroStreak: bgShellZeroStreak\.get\(name\) \?\? 0, zeroSinceMs: bgShellZeroSince\.get\(name\) \}/)
+    expect(runner).toMatch(/bgShellZeroStreak\.set\(name, shell\.zeroStreak\)/)
+    expect(runner).toMatch(/else bgShellZeroSince\.set\(name, shell\.zeroSinceMs\)/)
   })
   it('the restart notice names the shells the restart cut', () => {
     expect(runner).toMatch(/bgShells > 0\s*\n?\s*\? ` FIGYELEM: \$\{bgShells\} hatter-shell meg futott/)
