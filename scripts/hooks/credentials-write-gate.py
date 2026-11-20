@@ -9,8 +9,9 @@ this gate no hook looked at it (scripts/hooks grep: 0 hits, Viktor 48495).
 An ACCIDENT guard, not a boundary: every agent runs as the same macOS user. NOT MODELLED (passes unseen):
 - a write from an interpreter: python/node/perl `open(..., 'w')`, `json.dump`, `fs.writeFileSync`, also in a
   here-document a python3/node reads (`python3 - <<EOF`), and a script file's content;
-- a directory copy that carries the file inside it (`cp -R ~/.claude/ X/`, `rsync -a A/ B/`, `ditto A B`, `tar x`,
-  `unzip`): the file name is not in the text (Viktor 48557 Q2: a follow-up, not this gate);
+- a directory copy that carries the file DEEPER than its top level, a source the gate cannot resolve (a variable
+  set outside, a glob, a relative path without the payload's cwd), `mv` or `ln` of a whole directory, `tar x`,
+  `unzip`, `cpio`, `pax`;
 - a read redirected into a file (`cat ~/.claude/.credentials.json > x`): a copy out, but a read in form;
 - a name built beyond the text: a variable set outside the command, `$(...)` output, a glob or brace that does not
   contain "cred", `xargs`/`find -exec`/`parallel` running the writer, a path from a file;
@@ -33,6 +34,10 @@ here-document body or quoted text that no shell runs is data and passes), when a
 - tee, touch, truncate, sponge (and gtee, gtouch, gtruncate): every operand; dd/gdd `of=`; sed/gsed/perl with an
   in-place `-i` (a cluster such as -pi or -ni; perl -M... is no in-place): every operand; curl `-o`/`--output`,
   wget `-O`/`--output-document`, sort/base64 `-o`;
+- a RECURSIVE copy of a directory whose top level holds `.credentials.json` (card 7357e857, Viktor 48557 Q2): cp/gcp
+  with -R, -r or -a (also in a cluster) or --recursive/--archive, rsync with -r or -a (or the long forms), ditto
+  always; the source is resolved with ~, $HOME and the variables set earlier in the text, a relative one against the
+  payload's cwd, and only an existing file counts (the file name is not in the text: `cp -R ~/.claude /x`);
 - a text that cannot be split (an open quote) while it names `.credentials.json` (fail-closed).
 Passes: every read (ls, stat, test -f, `[ -e ]`, cat/grep/head without a redirection to it, shasum, find -name),
 rm (a delete is not a placement; it is also the way to take a stale file out), chmod, a mention in a here-document
@@ -78,6 +83,14 @@ OUTPUT_OPT = {'curl': ({'-o'}, {'--output'}), 'wget': ({'-O'}, {'--output-docume
 IN_PLACE = {'sed': re.compile(r'^-[nErsuzal]*[iI]|^--in-place'), 'gsed': re.compile(r'^-[nErsuzal]*[iI]|^--in-place'),
             'perl': re.compile(r'^-[acnpsStTuUwWXl0-9]*i')}
 
+# A recursive copy (Viktor 48557 Q2): the option that makes cp/gcp/rsync descend into a directory; ditto always does.
+RECURSIVE = {'cp': re.compile(r'^-[A-Za-z]*[Rra]'), 'gcp': re.compile(r'^-[A-Za-z]*[Rra]'),
+             'rsync': re.compile(r'^-[A-Za-z]*[ra]')}
+RECURSIVE_LONG = {'--recursive', '--archive'}
+# The pre-check lets a text through without "cred" when it runs a program that can copy a whole directory.
+COPY_HINT = re.compile(r'(?<![\w.-])(?:g?cp|rsync|ditto)(?![\w.-])')
+CWD = None  # the payload's cwd (main), for a relative source of a recursive copy
+
 _P = None
 
 
@@ -106,6 +119,20 @@ def is_cred(word, env):
         # the shell's glob matches a leading dot only literally (no dotglob): `dir/*` does not name the file
         return fnmatch.fnmatchcase(NAME, base)
     return False
+
+
+def carries_cred(word, env):
+    """True when the word names an existing directory whose top level holds .credentials.json: a recursive copy of it
+    carries the file. A source the gate cannot resolve (a variable it does not know, a glob or brace, a relative path
+    without a cwd) is not judged."""
+    w = parser().expand(word, env)
+    if not w or any(ch in w for ch in '*?[{'):
+        return False
+    if not os.path.isabs(w):
+        if not CWD:
+            return False
+        w = os.path.join(CWD, w)
+    return os.path.isdir(w) and os.path.isfile(os.path.join(w, NAME))
 
 
 def operands(args, argset, long_arg=()):
@@ -153,8 +180,8 @@ def brace_words(word):
     return [m.group(1) + part + m.group(3) for part in m.group(2).split(',')]
 
 
-def judge_copy(prog, ops, tdir, env):
-    """The copy-like verdict on an operand list."""
+def judge_copy(prog, ops, tdir, env, recursive=False):
+    """The copy-like verdict on an operand list; recursive: the copy descends into a source directory."""
     if tdir is not None:
         dest, sources = tdir, ops
     elif len(ops) >= 2:
@@ -167,6 +194,8 @@ def judge_copy(prog, ops, tdir, env):
         return f'{prog} writes to {NAME}'
     if any(is_cred(s, env) for s in sources):
         return f'{prog} copies, moves or links a {NAME} (AUTH rule 2: no copy either)'
+    if recursive and any(carries_cred(s, env) for s in sources):
+        return f'{prog} copies a directory that holds a {NAME} (AUTH rule 2: no copy either; Viktor 48557 Q2)'
     return None
 
 
@@ -175,11 +204,14 @@ def judge_program(prog, rest, env):
     if prog in COPY_LIKE:
         ops, tdir = operands(rest, COPY_ARG[prog], COPY_LONG_ARG.get(prog, ()))
         wide = [x for w in ops for x in brace_words(w)]  # `cp f{.bak,}` is two operands to cp (Viktor M1)
+        recursive = prog == 'ditto' or any(
+            w in RECURSIVE_LONG or (prog in RECURSIVE and not w.startswith('--') and RECURSIVE[prog].match(w))
+            for w in rest)
         if wide != ops:
-            hit = judge_copy(prog, wide, tdir, env)
+            hit = judge_copy(prog, wide, tdir, env, recursive)
             if hit:
                 return hit
-        return judge_copy(prog, ops, tdir, env)
+        return judge_copy(prog, ops, tdir, env, recursive)
     if prog in EVERY_OPERAND_ARG:
         ops, _ = operands(rest, EVERY_OPERAND_ARG[prog])
         if any(is_cred(w, env) for w in ops):
@@ -214,7 +246,7 @@ def judge_program(prog, rest, env):
 def judge(cmd, depth=0):
     """The reason for the first write to a .credentials.json in cmd, or None."""
     flat = cmd.replace('\\\n', '').replace("'", '').replace('"', '').replace('\\', '').lower()
-    if 'cred' not in flat:
+    if 'cred' not in flat and not COPY_HINT.search(flat):
         return None
     P = parser()
     try:
@@ -307,6 +339,8 @@ def main():
     cmd = (data.get('tool_input') or {}).get('command') or ''
     if not isinstance(cmd, str):
         return 0
+    global CWD
+    CWD = data.get('cwd') if isinstance(data.get('cwd'), str) and os.path.isabs(data.get('cwd')) else None
     why = judge(cmd)
     if not why:
         return 0
@@ -322,6 +356,6 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except Exception as e:  # fail-closed; the cheap pre-check means only a text with "cred" in it can get here
+    except Exception as e:  # fail-closed; the cheap pre-check lets only a text with "cred" or a copy program through
         print(f'CREDENTIALS-WRITE-GATE error: {type(e).__name__}', file=sys.stderr)
         sys.exit(2)
