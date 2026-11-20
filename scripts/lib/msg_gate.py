@@ -125,12 +125,35 @@ Rules:
    been refused (245 placeholders, 71 times ahead of the clock); since the hook's rule 5 went live (#263, 11-13
    21:05) 144 messages, 0 hits.
 
+9. A TG MESSAGE ATTRIBUTED TO PATRIK THAT SOMEONE ELSE WROTE (Klodel 48538; hibanapló 2026-11-20, the second
+   occurrence, the first 2026-11-11): Balázs's group message (TG 6582) was given to Patrik in a work order; the
+   rule line in CLAUDE.md did not stop it. A text from PATRIKTG_FROM (default "klodel") is judged where it puts a
+   TG number next to Patrik's name ("Patrik ... TG 6582", "Patrik csoport TG 6582", "(Patrik, TG 6533/6535)":
+   "patrik" as a whole word, then up to 40 characters on the same line without . ! ?, then "TG <n>"; no other
+   person's name -- balazs, eszter -- in between, and not "nem Patrik"; a range "TG 4451-4459" checks its two
+   ends). Who wrote n comes from the Telegram plugin's sender log, <state>/inbound-senders.jsonl (and its .1):
+   chat, message id, user id.
+   A message id counts per chat, and the log starts 2026-11-11 at different heights (measured 11-20: the group
+   from id 5475, Patrik's private chat from 17545), so the same number can be two messages:
+   - "csoport" between the name and TG: the group rows (chat id < 0) with id n; "privat": the private rows.
+   - neither: every row with id n, but a foreign one counts only if it is at most 3 days old (an old private
+     message of Patrik's below 17545 may share the number with a group message).
+   Refused: the rows that count are there and none is Patrik's. A Patrik row lets it through. No row that counts:
+   sent, with a warning on stderr (agent-msg.sh shows it). Patrik's id is his private chat id
+   (store/projektek.json elo_uzenet.privat, as the private-topic-group gate reads it; MARVEEN_OWNER_PRIVATE_CHAT
+   overrides). The state dir is the main channel's (<install>/.claude/channels/telegram), not TELEGRAM_STATE_DIR
+   (a sub-agent's points to its own). Not seen: the TG number first ("TG 6582 (Patrik)"), a suffixed name
+   ("Patriknak", "Patriké"), a message the plugin did not log. No sender log or no owner id (an install without
+   the Telegram channel): sent with a warning. Either one there but unreadable: exit 4.
+
 Env (the suite uses them): MARVEEN_MSG_GATE_SECRET_SRC, MARVEEN_MSG_GATE_STRICT (comma list),
 MARVEEN_MSG_GATE_MAX_CHARS, MARVEEN_MSG_GATE_OWN_DOMAINS (comma list), MARVEEN_MSG_GATE_STOP_FROM
 (comma list), MARVEEN_MSG_GATE_SPEC_LOCK (path), MARVEEN_MSG_GATE_SPEC_FROM (comma list),
 MARVEEN_MSG_GATE_KERES_FROM (comma list), MARVEEN_MSG_GATE_LEDGER (path), MARVEEN_MSG_GATE_HIANY_FROM (comma
 list), MARVEEN_HIANY_ROOT (the install whose shared/ is read; default this repo), MARVEEN_MSG_GATE_VNI_FROM,
-MARVEEN_MSG_GATE_VNI_TO (comma lists), TIME_CLAIM_GATE_NOW (HH:MM, rule 8).
+MARVEEN_MSG_GATE_VNI_TO (comma lists), TIME_CLAIM_GATE_NOW (HH:MM, rule 8), MARVEEN_MSG_GATE_PATRIKTG_FROM (comma
+list), MARVEEN_MSG_GATE_TG_STATE (the plugin state dir), MARVEEN_MSG_GATE_PROJEKTEK (path),
+MARVEEN_OWNER_PRIVATE_CHAT (Patrik's user id), rule 9.
 """
 import json
 import os
@@ -138,6 +161,7 @@ import pathlib
 import re
 import sqlite3
 import sys
+import time
 import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -572,6 +596,121 @@ def time_reason(text):
             'futtasd a date-et közvetlenül a küldés előtt.' % (shown, now.hour, now.minute))
 
 
+# Rule 9. Matched on fold(text); the numbers after "TG" (a list with / , and a range's two ends). The words between
+# the name and "TG" may name the chat: "csoport" (a group, chat id < 0) or "privat" (a private chat, chat id > 0).
+PATRIK_ATTR = re.compile(_B + r'patrik(?![a-z0-9])([^\n.!?]{0,40}?)' + _B
+                         + r'tg\s*#?\s*(\d+(?:\s*(?:/|,|-|es)\s*\d+)*)')
+OTHER_PERSON = re.compile(_B + r'(?:balazs|eszter)(?![a-z0-9])')
+GROUP_WORD = re.compile(_B + r'csoport')
+PRIVATE_WORD = re.compile(_B + r'privat')
+NOT_PATRIK = re.compile(_B + r'nem\s+[("\']?$')
+BALAZS_USER_ID = '8366648365'  # the same constant as scripts/hooks/private-topic-group-gate.py
+RECENT_SECONDS = 3 * 86400     # an unqualified reference is judged only against a message this fresh
+DEFAULT_TG_STATE = os.path.join(HERE, '..', '..', '.claude', 'channels', 'telegram')
+DEFAULT_PROJEKTEK = os.path.join(HERE, '..', '..', 'store', 'projektek.json')
+
+
+def attributed_tgs(text):
+    """[(n, scope)] the text puts next to Patrik's name, scope 'group' | 'private' | None, without repeats."""
+    out = []
+    folded = fold(text)
+    for m in PATRIK_ATTR.finditer(folded):
+        between = m.group(1)
+        # "Balazs (nem Patrik), csoport TG ..." names the other sender: a negated name is no attribution
+        if OTHER_PERSON.search(between) or NOT_PATRIK.search(folded[max(0, m.start() - 8):m.start()]):
+            continue
+        scope = 'group' if GROUP_WORD.search(between) else 'private' if PRIVATE_WORD.search(between) else None
+        for n in re.findall(r'\d+', m.group(2)):
+            if (n, scope) not in out:
+                out.append((n, scope))
+    return out
+
+
+def patrik_user_id():
+    """Patrik's user id, or None when this install does not record it (no store/projektek.json elo_uzenet.privat)."""
+    env = os.environ.get('MARVEEN_OWNER_PRIVATE_CHAT', '').strip()
+    if env:
+        return env
+    try:
+        with open(os.environ.get('MARVEEN_MSG_GATE_PROJEKTEK', DEFAULT_PROJEKTEK), encoding='utf-8') as f:
+            elo = (json.load(f) or {}).get('elo_uzenet') or {}
+        priv = elo.get('privat')
+        priv = priv.get('chat_id') if isinstance(priv, dict) else priv
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, AttributeError) as e:
+        die("rule 9: Patrik's user id is unreadable (store/projektek.json elo_uzenet.privat): %s" % type(e).__name__)
+    return str(priv).strip() if priv is not None and str(priv).strip().isdigit() else None
+
+
+def tg_senders(wanted, now):
+    """{message_id: [(chat_id, user_id, at_seconds)]} from the plugin's sender log (the file and its .1) for the
+    wanted ids, only rows logged at or before now (the replay judges a message as it stood when it was sent);
+    None when neither file exists (an install without the Telegram channel)."""
+    base = os.path.join(os.environ.get('MARVEEN_MSG_GATE_TG_STATE', DEFAULT_TG_STATE), 'inbound-senders.jsonl')
+    found, read_any = {}, False
+    for path in (base + '.1', base):
+        try:
+            f = open(path, encoding='utf-8', errors='replace')
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            die('rule 9: the Telegram sender log is unreadable: %s (%s)' % (path, type(e).__name__))
+        read_any = True
+        with f:
+            for ln in f:
+                try:
+                    row = json.loads(ln)
+                    at = float(row.get('at')) / 1000.0
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                mid = str(row.get('message_id'))
+                if mid in wanted and at <= now:
+                    found.setdefault(mid, []).append((str(row.get('chat_id')), str(row.get('user_id')), at))
+    return found if read_any else None
+
+
+def patrik_tg_reason(text, now=None):
+    """Rule 9: (refusal reason or None, warning or None)."""
+    tgs = attributed_tgs(text)
+    if not tgs:
+        return None, None
+    now = time.time() if now is None else now
+    owner = patrik_user_id()
+    senders = tg_senders({n for n, _ in tgs}, now)
+    if owner is None or senders is None:
+        return None, ('figyelmeztetés (9. szabály): a Patrik-hivatkozást (TG %s) nem tudtam ellenőrizni: %s.'
+                      % (', '.join(n for n, _ in tgs),
+                         'nincs Patrik-azonosító (store/projektek.json)' if owner is None else 'nincs feladó-napló'))
+    wrong, unknown = [], []
+    for n, scope in tgs:
+        rows = senders.get(n, [])
+        if scope == 'group':
+            rows = [r for r in rows if r[0].startswith('-')]
+        elif scope == 'private':
+            rows = [r for r in rows if not r[0].startswith('-')]
+        if any(u == owner for _, u, _ in rows):
+            continue
+        # Unqualified: a message id counts per chat, and the private chat's log starts above the group's ids, so an
+        # old private message may share the number; only a fresh foreign message is taken as the one meant.
+        if scope is None:
+            rows = [r for r in rows if now - r[2] <= RECENT_SECONDS]
+        if not rows:
+            unknown.append(n)
+            continue
+        who = 'Balázs' if {u for _, u, _ in rows} == {BALAZS_USER_ID} else 'nem Patrik'
+        wrong.append('TG %s (%s)' % (n, who))
+    reason = warning = None
+    if wrong:
+        reason = ('Patrik-hivatkozás (9. szabály, hibanapló 11-20): %s a feladó-napló szerint nem Patrik üzenete. '
+                  'Nevezd meg a valódi feladót (pl. "Balázs csoport TG <n>"), vagy hivatkozz Patrik saját '
+                  'üzenetére.' % ', '.join(wrong))
+    if unknown:
+        warning = ('figyelmeztetés (9. szabály): TG %s Patrikhoz kötve, de a feladó-naplóban (inbound-senders.jsonl, '
+                   '11-11 óta) nincs hozzá ellenőrizhető sor.' % ', '.join(unknown))
+    return reason, warning
+
+
 def guarded(label, rule, text):
     """Run a rule that calls into a loaded file. The loaders turn an import-time exit into die(), but the calls after
     the load (lint.root/lint.lint, vni.is_material/vni.found) ran outside them: a sys.exit(0) there returned rc 0 and
@@ -662,10 +801,20 @@ def main(argv):
     if r:
         reasons.append(r)
 
+    warnings = []
+    if frm.lower() in csv_env('MARVEEN_MSG_GATE_PATRIKTG_FROM', 'klodel'):
+        r, w = patrik_tg_reason(text)
+        if r:
+            reasons.append(r)
+        if w:
+            warnings.append(w)
+
     if reasons:
         for r in reasons:
             print('  - ' + r, file=sys.stderr)
         return 3
+    for w in warnings:
+        print('  - ' + w, file=sys.stderr)
     return 0
 
 

@@ -21,6 +21,12 @@
 # 1-15 minutes ahead of the clock (the time-claim-gate's send-path rules, loaded from scripts/hooks/) is refused;
 # the hook file missing is exit 4 for every sender. The clock is pinned with TIME_CLAIM_GATE_NOW.
 #
+# Rule 9 (Klodel 48538, hibanapló 11-20): a klodel text that puts a TG number next to Patrik's name is refused when a
+# synthetic sender log ($SANDBOX/tgstate/inbound-senders.jsonl) says another user wrote it ("csoport" = group rows,
+# "privát" = private rows, none = any row, a foreign one only if at most 3 days old); a Patrik row, a negated name,
+# another person's name in between, another sender pass; no row is a pass with a warning on stderr; no log is a
+# warning, an unreadable log exit 4. Every run gets the synthetic log, so no case reads the live one.
+#
 # Run:  bash scripts/__tests__/agent-msg-send-gate.test.sh
 set -uo pipefail
 
@@ -86,12 +92,29 @@ con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, di
 con.commit()
 PY2
 
+# Synthetic sender log for rule 9: user 111 = Patrik (his private chat is 111), 8366648365 = Balázs, chat -222 the
+# group. 6582: Balázs in the group, now. 6585: Balázs, now. 6400: Balázs, 5 days ago. 6537: Patrik in the group.
+# 18717: Patrik in private. 6000: Patrik in private AND Balázs in the group (one id, two chats).
+mkdir -p "$SANDBOX/tgstate"
+python3 - "$SANDBOX/tgstate/inbound-senders.jsonl" <<'PY9'
+import json, sys, time
+now = int(time.time() * 1000); day = 86400000
+rows = [('-222', 6582, '8366648365', now), ('-222', 6585, '8366648365', now), ('-222', 6400, '8366648365', now - 5 * day),
+        ('-222', 6537, '111', now), ('111', 18717, '111', now), ('111', 6000, '111', now - 40 * day),
+        ('-222', 6000, '8366648365', now)]
+with open(sys.argv[1], 'w') as f:
+    for c, m, u, at in rows:
+        f.write(json.dumps({'at': at, 'chat_id': c, 'message_id': str(m), 'user_id': u}) + '\n')
+    f.write('not json\n')
+PY9
+
 # run <from> <to> ; the text comes from $SANDBOX/text (STDIN mode, so 20 000 characters fit)
 run() {
   : > "$SANDBOX/bodies"
   OUT="$(env PATH="$BIN:$PATH" BODIES="$SANDBOX/bodies" MARVEEN_TOKEN_FILE="$SANDBOX/token" \
              MARVEEN_MAJSZTRO_STATE=/nonexistent MARVEEN_HOMOGLYPH_BIN=/nonexistent \
-             MARVEEN_MSG_GATE_LEDGER="$SANDBOX/ledger.db" ${GATE_ENV:-} \
+             MARVEEN_MSG_GATE_LEDGER="$SANDBOX/ledger.db" MARVEEN_MSG_GATE_TG_STATE="$SANDBOX/tgstate" \
+             MARVEEN_OWNER_PRIVATE_CHAT=111 ${GATE_ENV:-} \
              /bin/bash "$HELPER" "$1" "$2" - < "$SANDBOX/text" 2>"$SANDBOX/err")"
   RC=$?
   POSTS=$(wc -l < "$SANDBOX/bodies" | tr -d ' ')
@@ -749,6 +772,62 @@ cp "$ROOT/scripts/hooks/time-claim-gate.py" "$SANDBOX/exits/hooks/time-claim-gat
 text 'Reel koncepció: anya mesél.'
 GATE_ENV="$EXITS" run majsztro dave
 ok "the real files back in the sandbox: the same message passes (the stubs, not the sandbox, made it fail)" "$([ "$RC" = "0" ] && [ "$POSTS" = "1" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+
+# --- rule 9: a TG message given to Patrik that someone else wrote (Klodel 48538) ---
+warned() { grep -q 'figyelmeztet' "$SANDBOX/err" && echo 0 || echo 1; }
+text 'FELADAT (Patrik csoport TG 6582), gazda: radar.'
+run klodel radar
+ok "r9: Patrik csoport TG 6582, Balázs wrote it: refused" "$(refused)" "rc=$RC posts=$POSTS"
+ok "r9: the refusal names TG 6582 and Balázs" "$(grep -q 'TG 6582 (Balázs)' "$SANDBOX/err" && echo 0 || echo 1)"
+text 'Patrik TG 6585: "delutan 3 a hatarido"'
+run klodel radar
+ok "r9: unqualified, a fresh Balázs message: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Patrik TG 6580-6585 alapján'
+run klodel radar
+ok "r9: a range checks its ends (6585 Balázs): refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Patrik TG 6400 szerint'
+run klodel radar
+ok "r9: unqualified, Balázs 5 days ago (an old private id may share it): sent" "$(sent)" "rc=$RC posts=$POSTS"
+ok "r9: ... with a warning on stderr" "$(warned)"
+text 'Patrik csoport TG 6400 szerint'
+run klodel radar
+ok "r9: the same id named as the group's: refused (any age)" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Patrik csoport TG 6537: csináljátok'
+run klodel dave
+ok "r9: Patrik's own group message: sent" "$(sent)" "rc=$RC posts=$POSTS"
+ok "r9: ... without a warning" "$([ "$(warned)" = 1 ] && echo 0 || echo 1)" "$(head -c 200 "$SANDBOX/err")"
+text 'Patrik TG 18717 kérése'
+run klodel dave
+ok "r9: Patrik's private message: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Patrik TG 6000 szerint'
+run klodel dave
+ok "r9: one id in two chats, one of them Patrik's: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Patrik privát TG 6582 szerint'
+run klodel dave
+ok "r9: privát narrows to private rows, none: sent with a warning" "$([ "$(sent)" = 0 ] && [ "$(warned)" = 0 ] && echo 0 || echo 1)" "rc=$RC"
+text 'KÉRŐ: Balázs (nem Patrik), csoport TG 6582.'
+run klodel dave
+ok "r9: a negated name (nem Patrik) is no attribution: sent, no warning" "$([ "$(sent)" = 0 ] && [ "$(warned)" = 1 ] && echo 0 || echo 1)" "rc=$RC"
+text 'Patrik döntése után Balázs TG 6582 kérése jön.'
+run klodel dave
+ok "r9: another person's name between: sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Patrik TG 99999 kérése'
+run klodel dave
+ok "r9: no row at all: sent with a warning" "$([ "$(sent)" = 0 ] && [ "$(warned)" = 0 ] && echo 0 || echo 1)" "rc=$RC"
+text 'Patrik csoport TG 6582 kérése'
+run dave klodel
+ok "r9: another sender (dave): sent" "$(sent)" "rc=$RC posts=$POSTS"
+text 'Patrik csoport TG 6582 kérése'
+GATE_ENV="MARVEEN_MSG_GATE_TG_STATE=$SANDBOX/no-such-dir" run klodel radar
+ok "r9: no sender log (an install without Telegram): sent with a warning" "$([ "$(sent)" = 0 ] && [ "$(warned)" = 0 ] && echo 0 || echo 1)" "rc=$RC"
+mkdir -p "$SANDBOX/tgbad"; cp "$SANDBOX/tgstate/inbound-senders.jsonl" "$SANDBOX/tgbad/"; chmod 000 "$SANDBOX/tgbad/inbound-senders.jsonl"
+GATE_ENV="MARVEEN_MSG_GATE_TG_STATE=$SANDBOX/tgbad" run klodel radar
+if [ "$(id -u)" = "0" ]; then echo "SKIP  r9: unreadable log (root reads a 000 file)"; else
+ok "r9: an unreadable sender log: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"; fi
+chmod 600 "$SANDBOX/tgbad/inbound-senders.jsonl"
+text 'Patrik TG 18717 kérése'
+GATE_ENV="MARVEEN_OWNER_PRIVATE_CHAT= MARVEEN_MSG_GATE_PROJEKTEK=$SANDBOX/no-such.json" run klodel radar
+ok "r9: no owner id: sent with a warning" "$([ "$(sent)" = 0 ] && [ "$(warned)" = 0 ] && echo 0 || echo 1)" "rc=$RC"
 
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."
