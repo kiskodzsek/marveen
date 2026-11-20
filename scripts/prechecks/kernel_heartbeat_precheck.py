@@ -65,7 +65,10 @@ DISK_MIN_GIB = 10               # the task's own threshold ("< 10 GiB"); GiB = 2
 # (last_sent_host_state_ts, epoch s); the host monitor writes one HOST_LOG line per band change. This script only
 # READS both, and skips under the limit only when the last band line moves INTO a non-ok band and the report is at
 # or after that line: a new stretch (or a warn -> crit move) has a later line and wakes. Any read or parse problem,
-# a report from the future, or a last line back to ok wakes (fail-open).
+# a report from the future, or a last line back to ok wakes (fail-open). Only a band the disk opened counts
+# (Viktor 48469 L1): the band is shared with load, swap and memory, and a band one of those holds may span a disk
+# recovery and a new low stretch with no new line. Left over, not visible in the log: a band the disk opened that
+# another reason keeps up through a full disk recovery and a new low stretch; that stretch is not re-reported.
 DISK_SENT_STATE = os.path.join(ROOT, 'agents', 'kernel', 'state', 'lemez-10gib-jelzes.json')
 HOST_LOG = os.path.join(ROOT, 'store', 'host-monitor.log')
 BAND_LINE_RX = re.compile(r'^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) [a-z]{1,8} -> band=([a-z]{1,8})(?: |$)')
@@ -161,7 +164,8 @@ def _disk_stretch_reported():
             f.seek(max(0, f.tell() - 65536))
             lines = f.read().decode('utf-8', 'replace').split('\n')
         band = [m for m in (BAND_LINE_RX.match(ln) for ln in lines) if m]
-        if not band or band[-1].group(2) == 'ok':
+        # only a band the disk opened: a load or swap band may span a disk recovery and a new low stretch (no line)
+        if not band or band[-1].group(2) == 'ok' or ' reason=free disk ' not in band[-1].string:
             return False
         start = time.mktime(time.strptime(band[-1].group(1), '%Y-%m-%d %H:%M:%S'))   # local time, as the monitor
         return sent >= start

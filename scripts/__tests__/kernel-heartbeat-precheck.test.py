@@ -371,16 +371,35 @@ class Disk(Base):
         self.assertIn('< 10 GiB', self.stretch([self.OLD, self.WARN], sent=self.at('2026-11-20 02:50:32')))
 
     def test_a_later_band_move_wakes(self):
-        # warn -> crit after the report: a new line, so a new stretch to report
+        # warn -> critical after the report: a new line, so a new stretch to report (the monitor's own word, Viktor I1)
         self.now = self.at('2026-11-20 08:30:00')
-        crit = '2026-11-20 05:00:00 warn -> band=crit free=60% disk=3GiB reason=free disk 3 GiB'
+        crit = ('2026-11-20 05:00:00 warn -> band=critical free=60% swap=23% swapgb=0 disk=3GiB load1=3.0/12cpu therm=0 '
+                'reason=free disk 3 GiB')
         self.assertIn('< 10 GiB', self.stretch([self.WARN, crit], sent=self.at('2026-11-20 03:00:35')))
+
+    def test_a_reported_critical_disk_stretch_skips(self):
+        self.now = self.at('2026-11-20 08:30:00')
+        crit = ('2026-11-20 05:00:00 warn -> band=critical free=60% swap=23% swapgb=0 disk=3GiB load1=3.0/12cpu therm=0 '
+                'reason=free disk 3 GiB')
+        self.assertEqual(self.stretch([self.WARN, crit], sent=self.at('2026-11-20 05:01:00')), 'SKIP')
+
+    def test_a_band_another_reason_opened_wakes(self):
+        # Viktor 48469 L1: a swap band was open when the disk went low; it may span a disk recovery and a new low stretch
+        self.now = self.at('2026-11-20 08:30:00')
+        swap = '2026-11-20 02:50:33 ok -> band=warn free=65% swap=81% swapgb=0 disk=12GiB load1=3.15/12cpu therm=0 reason=swap 81%'
+        self.assertIn('< 10 GiB', self.stretch([self.OLD, swap], sent=self.at('2026-11-20 03:00:35')))
+        both = swap.replace('reason=swap 81%', 'reason=swap 81%;free disk 9 GiB')
+        self.assertIn('< 10 GiB', self.stretch([self.OLD, both], sent=self.at('2026-11-20 03:00:35')))
 
     def test_last_band_line_back_to_ok_wakes(self):
         # the monitor says ok while statvfs says < 10 GiB: do not trust the old report
         self.now = self.at('2026-11-20 08:30:00')
         back = '2026-11-20 04:00:00 warn -> band=ok free=65% disk=10GiB'
         self.assertIn('< 10 GiB', self.stretch([self.WARN, back], sent=self.at('2026-11-20 03:00:35')))
+        # Viktor I2: the ok line BEFORE the report too. The monitor writes no reason on an ok line, so the disk-reason
+        # rule alone wakes here; an ok line that does carry one (a format change, a forged line) needs the ok branch
+        self.assertIn('< 10 GiB', self.stretch([self.WARN, back], sent=self.at('2026-11-20 04:30:00')))
+        self.assertIn('< 10 GiB', self.stretch([self.WARN, back + ' reason=free disk 10 GiB'], sent=self.at('2026-11-20 04:30:00')))
 
     def test_a_report_from_the_future_wakes(self):
         # a forged far-future mark must not silence every later stretch
