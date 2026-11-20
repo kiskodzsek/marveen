@@ -759,6 +759,15 @@ BLOCK += ['noglob s3curity find-generic-password -s x', 'nocorrect s3curity dump
           'repeat 1 s3curity dump-keychain', 'coproc s3curity find-internet-password -s x',
           'true; nocorrect noglob /usr/bin/s3curity export -o x.p12', 'repeat 2 nocorrect s3curity dump-keychain']
 
+# card 3bf9a741 (the 74586987 side gap; all passed main 915e2f70, measured 2026-11-20, work/3bf9a741/main.txt): xargs
+# puts the words it reads on stdin into the argv of the command it runs, here the keychain call's subcommand
+BLOCK += ['echo dump-keychain | xargs s3curity', 'echo dump-keychain | xargs -n1 s3curity',
+          'xargs s3curity <<< dump-keychain', 'echo s3curity dump-keychain | xargs env',
+          "printf '%s\\n' dump-keychain | xargs s3curity", 'echo find-generic-password -w | xargs -I{} s3curity {}',
+          'echo dump-keychain | (xargs s3curity)', 'xargs s3curity < <(echo dump-keychain)',
+          "xargs s3curity <<'E'\ndump-keychain\nE", 'echo dump-keychain | xargs -0 s3curity',
+          'echo dump-keychain | /usr/bin/xargs -P2 -- s3curity', 'echo x | xargs echo; echo dump-keychain | xargs s3curity',
+          ]
 ALLOW = [
     # card d58d5c30 round 5: the four zsh words in prose, and before a harmless command
     'echo coproc noglob nocorrect repeat 1 s3curity dump-keychain', "git commit -m 'repeat: noglob, nocorrect, coproc'",
@@ -863,6 +872,9 @@ ALLOW = [
     'echo hi | bash; echo s3curity dump-keychain', '(echo s3curity dump-keychain); echo hi | bash',
     'echo s3curity dump-keychain | source ./notes', 'echo s3curity dump-keychain | . /dev/stdin2',
     'echo s3curity dump-keychain | bash.x', 'echo s3curity dump-keychain >| bash', 'echo the s3curity team | bash',
+    # card 3bf9a741: what an xargs runs with its fed words is no keychain call (a printed name, a search, an or-list)
+    'echo dump-keychain | xargs echo s3curity', 'echo s3curity dump-keychain | xargs grep -c x',
+    'echo dump-keychain || xargs s3curity', 'echo dump-keychain | xargs', 'echo the s3curity team | xargs -n1 echo',
     # card 39d885ef: printf's output, the name printed as text
     "printf 'echo %s\\n' s3curity | bash", "printf 'echo the\\ns3curity team\\n' | cat",
     # mutation m39 (strip-fd-any-word): a 2 not glued to its > is a printed word, so by security(1)'s syntax 2 is the
@@ -1138,6 +1150,18 @@ def script_cases():
         # register), and a script that only counts its lines
         w('regiszter.jsonl', '{"ts":"11-14","cmd":"' + S + ' find-generic-password -s x -w"}\n')
         w('stat.py', "import sys\nprint(sum(1 for _ in open(sys.argv[1])))\n")
+        # card 3bf9a741 (fleet replay 2026-11-21): a script file read line by line for xargs. A harmless list of many
+        # xargs rows (data commands, a quote that a Python string leaves open at the line's end, a one-line heredoc
+        # written with \n escapes, an xargs no | stands right before below many pipelines) runs nothing; the same
+        # rows above a real `| xargs <binary>` line still read it
+        rows = (['    "echo a%d | xargs grep x",' % i for i in range(200)]
+                + ['    "echo b | xargs sed s/a/b/ | wc -l",' for _ in range(70)]
+                + ["    'echo x | xargs tmux kill-server',", "    \"xargs python3 <<'E'\\nstat.py\\nE\","]
+                + ['    "a | b | c %d",' % i for i in range(600)] + ['    "then xargs echo done",'])
+        w('xrows.py', 'ROWS = [\n' + '\n'.join(rows) + '\n]\nprint(len(ROWS))\n')
+        w('xrun.sh', '#!/bin/sh\necho dump-keychain | xargs ' + S + '\n')
+        w('xrun2.sh', '#!/bin/sh\n' + 'echo a | xargs sed s/a/b/\n' * 100 + 'echo dump-keychain | xargs ' + S + '\n')
+        w('xrun3.sh', "#!/bin/sh\nxargs " + S + " <<'E'\ndump-keychain\nE\n")  # a closed heredoc: still read
         # a UI string table (web/lang/en.js): a capitalised label and button are not a subcommand
         w('labels.js', "module.exports = {\n  'settings.module." + S + "': '" + S.capitalize() + "',\n"
                        "  'skills.btn.export': 'Export',\n};\n")
@@ -1973,6 +1997,60 @@ def script_cases():
             # a group right before the pipe is read whole
             ('(echo ./measure.py) | bash', d),
             ('{ echo ./measure.py; } | bash', d),
+            # card 3bf9a741 (all passed main 915e2f70, bash ran each; work/3bf9a741/probe2.py): xargs puts the words it
+            # reads on stdin into the argv of the interpreter it runs
+            ('echo measure.py | xargs python3', d),
+            ('echo ./measure.py | xargs -n1 python3', d),
+            ('echo measure.py | xargs -n 1 -P2 -t python3', d),
+            ('echo measure.py | xargs -L 1 -- python3 -u', d),
+            ('echo measure.py | xargs -I{} python3 {}', d),
+            ('echo measure.py | xargs -I % python3 -u %', d),
+            ('echo measure.py | xargs -J% python3 %', d),
+            ('echo read.mjs | xargs -I{} node {}', d),
+            ('echo read.mjs | xargs node', d),
+            ('echo dump.sh | xargs -n1 sh', d),
+            ('echo measure.py | xargs env python3', d),
+            ('echo measure.py | xargs nice python3', d),
+            ('echo measure.py | /usr/bin/xargs python3', d),
+            ('echo measure.py | command xargs python3', d),
+            ('echo measure.py | \\xargs python3', d),
+            ('echo measure.py | xargs "python3"', d),
+            ("printf '%s\\n' measure.py | xargs python3", d),
+            ('printf measure.py | xargs -0 python3', d),
+            ("printf 'measure\\x2epy' | xargs python3", d),
+            ('echo -n measure.py | xargs python3', d),
+            ('echo -m measure | xargs python3', d),
+            ('echo measure | xargs python3 -m', d),
+            ('(echo measure.py) | xargs python3', d),
+            ('{ echo measure.py; } | xargs python3', d),
+            ('echo measure.py | tee /dev/null | xargs python3', d),
+            ('echo x measure.py | xargs -n1 python3', d),
+            ("echo 'a; b' measure.py | xargs -n1 python3", d),
+            ('xargs python3 <<< measure.py', d),
+            ("xargs python3 <<'E'\nmeasure.py\nE", d),
+            ('xargs python3 <<-E\n\tmeasure.py\n\tE', d),
+            ("cat <<'E' | xargs python3\nmeasure.py\nE", d),
+            ('cat <<< measure.py | xargs python3', d),
+            ('xargs python3 < <(echo measure.py)', d),
+            ('xargs -a <(echo measure.py) python3', d),  # GNU -a reads the file (BSD has no -a)
+            ('cd sub && echo ../measure.py | xargs python3', d),
+            ('echo x; echo measure.py | xargs python3', d),
+            ("echo measure.py | xargs -I{} sh -c 'python3 {}'", d),
+            # an xargs no | stands right before still reads the pipe: a group, a loop, an if, a $( ), a >( )
+            ('echo measure.py | (xargs python3)', d),
+            ('echo measure.py | { xargs python3; }', d),
+            ('echo measure.py | (cd . && xargs python3)', d),
+            ('echo measure.py | while true; do xargs python3; break; done', d),
+            ('echo measure.py | if true; then xargs python3; fi', d),
+            ('echo measure.py | echo $(xargs python3)', d),
+            ('echo measure.py | tee >(xargs python3) >/dev/null', d),
+            # an unbalanced quote in a fed word is a char of the argument: it does not hide the next xargs's line
+            ('echo "x\'" | xargs grep a; echo measure.py | xargs python3', d),
+            # the xargs of plain data commands are not counted, and the one after them is still read
+            ('echo a | xargs grep x; ' * 100 + 'echo measure.py | xargs python3', d),
+            ('echo a | xargs wc -l; ' * 70 + 'echo measure.py | xargs -I{} python3 {}', d),
+            # a script file read line by line: a real `| xargs <binary>` line, alone and below 100 counted xargs
+            ('bash xrun.sh', d), ('sh ./xrun2.sh', d), ('bash xrun3.sh', d),
             ('true; { echo ./measure.py; } | bash', d),
             ('( (echo ./measure.py) ) | bash', d),
             ('(echo ./measure.py) | (cat) | bash', d),
@@ -2771,6 +2849,22 @@ def script_cases():
             ('echo hi | bash ./measure.py.txt', d),
             ('(echo ./measure.py); echo hi | bash', d),  # the group ends an earlier command, not this pipeline
             ('{ echo ./measure.py; }; echo hi | bash', d),
+            # card 3bf9a741: a fed word is data where the line written out reads it as data, and no file of its own
+            ('echo measure.py | xargs grep -c find', d),
+            ('echo measure.py | xargs wc -l', d),
+            ('echo measure.py | xargs cat', d),
+            ('echo measure.py | xargs python3 stat.py', d),
+            ('echo measure.py | xargs -I{} python3 stat.py {}', d),
+            ('echo stat.py | xargs python3', d),
+            ('echo measure.py | xargs echo python3', d),
+            ('echo measure.py | xargs', d),
+            ('xargs -n1 echo <<< measure.py', d),
+            ('echo measure.py || xargs python3', d),
+            ('echo measure.py >| xargs python3', d),
+            ("git commit -m 'echo measure.py | xargs python3'", d),
+            ('echo measure.py | xargs -n1 basename | xargs ls', d),
+            ('echo "x\'" | xargs grep a', d),
+            ('python3 xrows.py', d), ('python3 -I xrows.py', d),  # a harmless list of many xargs rows
             ('echo ./measure.py >| bash', d),  # noclobber redirection, no pipe
             ('echo ./measure.py || bash', d),  # an or-list, no pipe
             ('echo ./measure.py | bashful', d),
@@ -3475,6 +3569,15 @@ def script_cases():
             ('(x)|bash ' * 10000, 2), ('echo a ' + '| bash ' * 20000, 0), ('(' * 5000 + 'a' + ')|bash' * 5000, 0),
             ('true;' + ' ' * 50000 + '} | bash' * 5000, 0), ('{ a; }|bash;' * 10000, 0), ('echo ' + 'a ' * 20000 + '| bash', 0),
             ('echo ' + ' '.join('a%d' % i for i in range(5000)) + ' | bash', 2),
+            # card 3bf9a741: past XARGS_MAX xargs that run no plain data command, XARGS_MAX_WORDS fed words of one,
+            # XARGS_MAX_CHARS of lines, or XARGS_SCAN_MAX xargs of any kind it blocks (xargs-unread), fast; inside
+            # them, many pipelines before one xargs stay fast; an xargs of a plain data command (XARGS_DATA) is not
+            # counted (a script file listing 70 `xargs grep` rows blocked when every xargs counted)
+            ('echo a | xargs sed s/a/b/; ' * 65, 2), ('echo ' + ' '.join('a%d' % i for i in range(600)) + ' | xargs python3', 2),
+            ('echo a | xargs sed s/a/b/; ' * 64, 0), ('a | b; ' * 10000 + 'xargs grep x <<< y', 0),
+            ('echo ' + ' '.join('a%d' % i for i in range(500)) + ' | xargs -n1 sed ' + 'x ' * 400, 2), ('(' * 5000 + 'xargs grep x' + ')' * 5000, 0),
+            ('echo a | xargs grep x; ' * 200, 0), ('echo a | xargs /usr/bin/wc -l; ' * 100 + 'echo a | xargs sed s/a/b/; ' * 64, 0),
+            ('echo a | xargs grep x; ' * 4097, 2),
         ]
         for cmd, want in payload_redos:
             t = _t.monotonic()
