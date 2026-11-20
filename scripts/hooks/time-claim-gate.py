@@ -61,6 +61,11 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     (src/web/now-token.ts), or run `date`.
   - Rule 6, the daily log only (retro R1): the heading time at the start of the "content" value ("## HH:MM") must
     be the {{NOW}} token, not a typed time of today (past or future); a heading that names another day passes.
+  - Telegram reply / edit_message (Klodel 48360, hibanapló 2026-11-20 02:20): the "text" field, ONLY rule 1
+    (placeholder). A placeholder time went out to the group (TG 6577) because the main agent's matcher named only
+    Write|Edit|MultiEdit|Bash. Rule 2 is off here for the reason it is off on the message path: a future time in a
+    chat line is mostly a plan or a deadline ("23:00 után"). The text is judged as written (no JSON unescaping), and
+    the block text does not offer {{NOW}}: nothing replaces it in a Telegram message.
   - Bash payloads are judged as the reader sees them: a literal backslash-n or backslash-t is a line break or a
     tab, and a backslash-u escape (four hex digits) its character: json.dumps writes the e-acute of "mérve" as such
     an escape, and a literal backslash-n right before "lefutott" hid the marker behind the letter n.
@@ -123,11 +128,15 @@ SLACK_MIN = 0
 MAX_DATA_FILE = 64 * 1024
 DEADLINE_WINDOW = 40
 MAX_TIMES_PER_LINE = 20
+# Klodel 48360: the Telegram send tools whose "text" is judged (placeholder rule only).
+TELEGRAM_TEXT_TOOLS = ('mcp__plugin_telegram_telegram__reply', 'mcp__plugin_telegram_telegram__edit_message')
 
 # Seconds are optional and judged by their HH:MM ("mérve 08:48:10"); a trailing colon that is not followed by a
 # digit ends the time ("08:48: kész", Kernel 39004), so neither form slips past the gate any more.
 TIME_RX = re.compile(r'(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?(?!\d)(?!:\d)')
-PLACEHOLDER_RX = re.compile(r'(?<![\d:])(?:[01]?\d|2[0-3]):(?:[0-5][xX]|[xX]{2})(?!\w)')
+# Viktor 48385 LOW: an underscore after the placeholder does not end the match early: MarkdownV2 italic/underline
+# ("_10:xx_", "__10:xx__") is the real format on the Telegram path, and \w counts "_" as a word character.
+PLACEHOLDER_RX = re.compile(r'(?<![\d:])(?:[01]?\d|2[0-3]):(?:[0-5][xX]|[xX]{2})(?![^\W_])')
 # Not preceded or followed by ':' so the range "10:05-11:30" is not read as the date 05-11.
 DATE_RX = re.compile(r'(?<![\d:])(?:(\d{4})-)?(\d{2})-(\d{2})(?![\d:])')
 MARKER_RX = re.compile(
@@ -421,6 +430,10 @@ def judged_texts(tool_name, ti, cwd):
             if body is not None:
                 out.append(('@file ', _json_text(body), frozenset(), po, hd, card, sp))
         return out
+    if tool_name in TELEGRAM_TEXT_TOOLS:
+        # Klodel 48360: the chat text, placeholder rule only, as written (a chat message is not a JSON payload).
+        text = ti.get('text')
+        return [('text ', text, frozenset(), True, False, False, False)] if isinstance(text, str) else []
     return []
 
 
@@ -453,6 +466,12 @@ def verdict(payload):
                 else 'kézzel írt naplófejléc-idő / typed daily-log heading time' if kind == 'heading-typed'
                 else f'jövőbeli mért idő / future measured time (now {now:%H:%M})')
         parts.append(f'{label}line {n}: "{tok}" = {what}')
+    if payload.get('tool_name') in TELEGRAM_TEXT_TOOLS:
+        # Klodel 48360: no {{NOW}} advice here, nothing replaces it in a Telegram message.
+        return ('IDO-KAPU / TIME-CLAIM-GATE: ' + '; '.join(parts) + '. '
+                'Futtasd a `date`-et, és a MÉRT időt írd be, vagy hagyd ki az időt; Telegramban a {{NOW}} nem '
+                'cserélődik. Run `date` and write the measured time, or leave the time out; Telegram does not '
+                'replace {{NOW}}.')
     return ('IDO-KAPU / TIME-CLAIM-GATE: ' + '; '.join(parts) + '. '
             'Futtasd a `date`-et, és a MÉRT időt írd be (nem becsültet, nem 19:3x-et). '
             'Run `date` and write the measured time. Üzenetben, lezárás-resultban és napi naplóban írd: {{NOW}} '
