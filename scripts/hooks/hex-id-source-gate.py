@@ -64,7 +64,7 @@ PAYLOAD_RX = re.compile(r'(?:(?:(?<![<0-9(])|(?<=(?<!\S)0))<(?![<(&])|@)\s*["\']
 WORD = r'(?:"[^"\s$`]+"|\'[^\'\s]+\'|[^\s;|&<>()\'"`]+)'
 UPLOAD_RX = re.compile(r'(?<!\S)(?:-T|--upload-file)(?:\s+|=)?' + WORD)
 CD_RX = re.compile(r'(?:^|[;&|\n({]|\bthen|\bdo)\s*cd\s+(' + WORD + ')')
-SUBST_CAT_RX = re.compile(r'(?:\$\(|`)\s*cat((?:\s+' + WORD + ')+)\s*(?:\)|`)')
+SUBST_CAT_RX = re.compile(r'(?:\$\(|`)\s*cat((?:\s+' + WORD + r')+)\s*(?:\)|`)')
 CAT_RX = re.compile(r'(?<![\w.-])cat((?:\s+' + WORD + ')+)')
 WRAPPER_ARGS_RX = re.compile(r'(?:send-stamped|send-and-close)\.sh((?:\s+' + WORD + ')+)')
 SECRET_PATH_RX = re.compile(r'token|secret|credential|passw|\.env\b|\.pem\b|\.key\b|id_rsa|id_ed25519', re.I)
