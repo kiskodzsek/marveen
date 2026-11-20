@@ -9,8 +9,9 @@ REACTION only, not the text of a reply.
 What blocks (exit 2, one message naming the signals and the TG number of Patrik's line, never his text), for a
 reply or an edit into one of the owner's chats (store/projektek.json elo_uzenet "privat" / "csoport", or
 MARVEEN_OWNER_CHATS; the same lookup as react-emoji-gate.py):
-  1. the text laughs: a FACE emoji (the ranges in FACES: U+1F600-1F64F, 1F910-1F92F, 1F970-1F97A, 1FAE0-1FAE8,
-     1F638-1F640) or 🐷, compared after NFC with variation selectors, zero-width and bidi marks and skin tones
+  1. the text laughs: a FACE emoji (the ranges in FACES: U+1F600-1F644, the three monkeys 1F648-1F64A,
+     1F910-1F92F, 1F970-1F97A, 1FAE0-1FAE8, 1F638-1F640) or 🐷; the gesture emoji 1F645-1F647 and 1F64B-1F64F (🙏,
+     🙌, 🙋) are not laughs (Viktor 48627 INFO 2: a frustrated Patrik's "köszi 🙏" was refused), compared after NFC with variation selectors, zero-width and bidi marks and skin tones
      dropped; or a laughing word on its own: lol, haha, hehe, xd, :D, ;) (accents and case ignored). Content emoji
      (🎙 📖 🎁 ✨ 🤍 🌙) and status marks pass: Klodel 48590 on the replay (9 days, 33 replies with a signal under a
      full allowlist, 17 blocked, 13 of them content emoji in post drafts, not laughs);
@@ -19,7 +20,8 @@ MARVEEN_OWNER_CHATS; the same lookup as react-emoji-gate.py):
      <state>/inbound-evidence.jsonl (text, at) joined with <state>/inbound-senders.jsonl (user id) on chat and
      message id, whose text (accents and case ignored) holds a word of FRUSTRATION (stems, from the start of a
      word) or of the extension file store/frusztracio-szavak.txt (one plain stem per line, # comments; plain
-     text, not a regex). <state> is TELEGRAM_STATE_DIR, else <install>/.claude/channels/telegram.
+     text, not a regex; an unreadable or non-UTF-8 file is skipped, the built-in stems still count, Viktor 48627
+     A25). <state> is TELEGRAM_STATE_DIR, else <install>/.claude/channels/telegram.
 Without a frustrated line in the window the text is not judged (a joke is fine on a calm day; CLAUDE.md "Légkör").
 frustrated_line() is also patrik-reply-volume-gate.py's rule 3 condition (Klodel 48590): one definition of "upset".
 Anything unreadable (payload, logs, owner id) passes: the gate must not block an unrelated reply. NOT MODELLED: a
@@ -41,15 +43,16 @@ STORE = os.path.join(ROOT, 'store')
 MOOD_WINDOW_S = 60 * 60
 
 # Laughing emoji (Klodel 48590): the face ranges and the pig; every other emoji passes.
-FACES = ((0x1F600, 0x1F64F), (0x1F910, 0x1F92F), (0x1F970, 0x1F97A), (0x1FAE0, 0x1FAE8), (0x1F638, 0x1F640))
+FACES = ((0x1F600, 0x1F644), (0x1F648, 0x1F64A), (0x1F910, 0x1F92F), (0x1F970, 0x1F97A), (0x1FAE0, 0x1FAE8), (0x1F638, 0x1F640))
 PIG = 0x1F437
 DROP = dict.fromkeys([0xFE0E, 0xFE0F, 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0x200E, 0x200F,
                       *range(0x202A, 0x202F), *range(0x2066, 0x206A), *range(0x1F3FB, 0x1F400)])
 LAUGH_WORD = re.compile(r'(?<![a-z0-9])(?:l+o+l+|ha(?:ha)+h?|he(?:he)+|x+d+)(?![a-z0-9])'
                         r'|(?:^|(?<=\s))(?::-?d+|;-?\)+|;-?d+)(?=$|[\s.,!?])')
 # Stems, matched from the start of a word in the folded text (Klodel 48551's list). "szar" leaves out the words
-# that only start with it: származ-, száraz, szarv-, szárny-, szárd-, szárít-.
-FRUSTRATION = [r'szanalmas', r'hulladek', r'behany', r'idiot', r'fasz', r'szar(?!maz|az|v|ny|d|it|u)', r'basztat',
+# that only start with it: származ-, száraz, szarv-, szárny-, szárd-, szárít-. "baszt" (Viktor 48627 LOW 1, his
+# prop1.diff): "basztat" missed the imperative "ne basztass".
+FRUSTRATION = [r'szanalmas', r'hulladek', r'behany', r'idiot', r'fasz', r'szar(?!maz|az|v|ny|d|it|u)', r'baszt',
                r'spammel', r'hasztalan', r'ostobasag']
 
 
@@ -115,8 +118,8 @@ def frustration_rx():
                 ln = fold(ln.split('#', 1)[0]).strip()
                 if ln:
                     stems.append(re.escape(ln))
-    except OSError:
-        pass
+    except (OSError, ValueError):  # a non-UTF-8 file (UnicodeDecodeError): skip it, keep the built-in stems
+        stems = list(FRUSTRATION)
     return re.compile(r'(?<![a-z0-9])(?:' + '|'.join(stems) + ')')
 
 
