@@ -5,7 +5,8 @@
                                           its 5-hour pct >= 100, or >= 80 not yet reported for that window,
                                           or the prompt's review time passed and not yet reported,
                                           or an own seat's (OWN_SEATS) while the sampler reads it
-  kernel_heartbeat_precheck.py disk       kernel-lemez-10gib  (cron */30): free space < 10 GiB
+  kernel_heartbeat_precheck.py disk       kernel-lemez-10gib  (cron */30): free space < 10 GiB, and that low-disk
+                                          stretch not yet reported
   kernel_heartbeat_precheck.py gitconfig  kernel-gitconfig-or (cron 17 * * * *): ~/.gitconfig vs the guard baseline
 
 Why: the three tasks woke the model 96 + 48 + 24 = 168 times a day, and every wake from 19:30 to 21:30 on
@@ -58,6 +59,19 @@ PROMPT_KEY = 'prompt-review'
 OWN_SEATS = ('own:dave',)       # own-seat agents the task watches too (card 6db4cc15, Klodel 43760)
 DISK_PATH = ROOT
 DISK_MIN_GIB = 10               # the task's own threshold ("< 10 GiB"); GiB = 2**30 bytes, as df -k / host-monitor
+# The disk task's own rule is "under 10 GiB AND not yet reported since the last report": while one low-disk stretch
+# lasts, every round after the first one stays quiet (2026-11-20: free 9 GiB from 02:50 on, reported once at 03:00,
+# then a silent model wake every 30 minutes). The round records its report in DISK_SENT_STATE
+# (last_sent_host_state_ts, epoch s); the host monitor writes one HOST_LOG line per band change. This script only
+# READS both, and skips under the limit only when the last band line moves INTO a non-ok band and the report is at
+# or after that line: a new stretch (or a warn -> crit move) has a later line and wakes. Any read or parse problem,
+# a report from the future, or a last line back to ok wakes (fail-open). Only a band the disk opened counts
+# (Viktor 48469 L1): the band is shared with load, swap and memory, and a band one of those holds may span a disk
+# recovery and a new low stretch with no new line. Left over, not visible in the log: a band the disk opened that
+# another reason keeps up through a full disk recovery and a new low stretch; that stretch is not re-reported.
+DISK_SENT_STATE = os.path.join(ROOT, 'agents', 'kernel', 'state', 'lemez-10gib-jelzes.json')
+HOST_LOG = os.path.join(ROOT, 'store', 'host-monitor.log')
+BAND_LINE_RX = re.compile(r'^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) [a-z]{1,8} -> band=([a-z]{1,8})(?: |$)')
 GUARD_STATE = os.path.join(ROOT, 'agents', 'kernel', 'state', 'gitconfig-guard.json')
 GITCONFIG = os.path.expanduser('~/.gitconfig')
 STATUS_RX = re.compile(r'[a-z_]{1,16}')
@@ -138,10 +152,33 @@ def quota():
     return ' '.join(out) if out else 'SKIP'
 
 
+def _disk_stretch_reported():
+    """True only when the low-disk stretch going on now was already reported (see DISK_SENT_STATE); else False."""
+    try:
+        with open(DISK_SENT_STATE, encoding='utf-8') as f:
+            sent = json.load(f).get('last_sent_host_state_ts')
+        if not _finite(sent) or sent > _now() + QUOTA_MAX_FUTURE_S:
+            return False
+        with open(HOST_LOG, 'rb') as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            lines = f.read().decode('utf-8', 'replace').split('\n')
+        band = [m for m in (BAND_LINE_RX.match(ln) for ln in lines) if m]
+        # only a band the disk opened: a load or swap band may span a disk recovery and a new low stretch (no line)
+        if not band or band[-1].group(2) == 'ok' or ' reason=free disk ' not in band[-1].string:
+            return False
+        start = time.mktime(time.strptime(band[-1].group(1), '%Y-%m-%d %H:%M:%S'))   # local time, as the monitor
+        return sent >= start
+    except Exception:
+        return False
+
+
 def disk():
     st = os.statvfs(DISK_PATH)
     free_gib = st.f_bavail * st.f_frsize / 2**30
     if not (free_gib >= DISK_MIN_GIB):
+        if _disk_stretch_reported():
+            return 'SKIP'
         return f'PRECHECK: free {free_gib:.2f} GiB (< {DISK_MIN_GIB:g} GiB).'
     return 'SKIP'
 
