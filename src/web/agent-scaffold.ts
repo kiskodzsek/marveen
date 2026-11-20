@@ -821,6 +821,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsKeychainWriteGate(name)) injectKeychainWriteGate(existing)
   if (agentGetsCredentialsWriteGate(name)) injectCredentialsWriteGate(existing)
   if (agentGetsHexIdSourceGate(name)) injectHexIdSourceGate(existing)
+  if (agentGetsCommitChainGuard(name)) injectCommitChainGuard(existing)
   if (agentGetsRevocationNote(name)) injectRevocationNote(existing)
   if (agentGetsProdTreeWriteGate(name)) injectProdTreeWriteGate(existing)
   if (agentGetsTmuxKillGate(name)) injectTmuxKillGate(existing)
@@ -1836,6 +1837,52 @@ export function ensureHexIdSourceGate(name: string): boolean {
   if (hookEntriesSettled(settings, 'PreToolUse', 'hex-id-source-gate.py', injectHexIdSourceGate)) return false
   if (isUnsafeHookCommand(command)) return false
   injectHexIdSourceGate(settings)
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  return true
+}
+
+// Card b3ae9523 (retro 2026-11-20, Klodel 48876; logic Viktor 48985 HASH-OK): the commit chain guard. A `git commit`
+// (or a live-swap --apply, a real Codex run) that would still run when a test or gate earlier in the SAME command
+// fails is stopped before the command runs: the joiner must be '&&' all the way, a piped check needs pipefail.
+// Hibanapló 2026-11-16 (Kernel 04:12, Dave 11:07): a commit past a red test behind ';'. Until now only Kernel's own
+// settings carried it. A hygiene guard, not a security gate (the script header lists what it does not model). Every
+// sub-agent; the main agent does not commit.
+export function agentGetsCommitChainGuard(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+export function injectCommitChainGuard(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'commit-chain-guard.py'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  const entry = {
+    matcher: 'Bash',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  // One canonical entry: a prior one under another matcher or with a stale command (Kernel's own copy under
+  // agents/kernel/tools/hooks included) is replaced, so the guard runs once per call.
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('commit-chain-guard.py')),
+    entry,
+  ]
+}
+
+// Idempotent migration for the running fleet (same shape as ensureHexIdSourceGate). Returns true if written; a
+// settings file that is not there is not created (a never-spawned agent gets the hook on its first spawn).
+export function ensureCommitChainGuard(name: string): boolean {
+  if (!agentGetsCommitChainGuard(name)) return false
+  const settingsPath = agentSettingsPath(name)
+  if (!existsSync(settingsPath)) return false
+  let settings: Record<string, unknown> = {}
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'commit-chain-guard.py'))
+  if (hookEntriesSettled(settings, 'PreToolUse', 'commit-chain-guard.py', injectCommitChainGuard)) return false
+  if (isUnsafeHookCommand(command)) return false
+  injectCommitChainGuard(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }

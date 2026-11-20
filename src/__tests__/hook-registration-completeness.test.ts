@@ -66,6 +66,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of keychain-read-gate.py (run: python3 -I scripts/hooks/keychain-read-gate_test.py); not itself a hook (c1921b55)',
   'hex-id-source-gate_test.py':
     'the unit test of hex-id-source-gate.py (run: python3 -I scripts/hooks/hex-id-source-gate_test.py); not itself a hook (7b2f784f)',
+  'commit-chain-guard_test.py':
+    'the unit test of commit-chain-guard.py (run: python3 -I scripts/hooks/commit-chain-guard_test.py); not itself a hook (b3ae9523)',
   'credentials-write-gate_test.py':
     'the unit test of credentials-write-gate.py (run: python3 -I scripts/hooks/credentials-write-gate_test.py); not itself a hook (a467f621)',
   'keychain-write-gate_test.py':
