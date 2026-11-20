@@ -78,6 +78,18 @@ BLOCK = [
     f'gtruncate -s 0 {C}',
     f'echo x | sponge {C}',
     f'sort -o {C} x',
+    # round 2 (Viktor 48607 L1): combined in-place options, and macOS sed -I
+    f'gsed -zi s/a/b/ {C}',
+    f'sed -si s/a/b/ {C}',
+    f'perl -spi -e s/a/b/ {C}',
+    f'perl -Tpi -e s/a/b/ {C}',
+    f"sed -I '' s/a/b/ {C}",
+    f'sed -I.bak s/a/b/ {C}',
+    # round 2 (Viktor 48607 INFO 1): the surviving mutants' rows
+    f'gsort -o ~/.claude/{C} x',
+    f'sed --in-place s/a/b/ ~/.claude/{C}',
+    'touch ~/.claude/.credentials{.json,}',
+    'tee ~/.claude/{.credentials.json,x} < y',
     f'base64 -i x -o {C}',
     f"sed -i '' 's/a/b/' ~/.claude/{C}",
     f"sed -Ei 's/a/b/' {C}",
@@ -138,6 +150,12 @@ ALLOW = [
     f'sed -n 1p {C}',
     f"perl -Mstrict -ne 'print' {C}",          # -M is no in-place (INFO 2)
     f'perl -MList::Util=max -e 1 {C}',
+    f'perl -mstrict -ne 1 {C}',                # -m, -I, -l, -e take or are no in-place (Viktor 48607)
+    f'perl -Iinc -ne 1 {C}',
+    f'perl -le 1 {C}',
+    f'sed -n -e 1p {C}',
+    f'sed -e s/i/I/ {C}',
+    f'install --mode 600 a /x/',
     'cp a b',
     'echo credit > report.txt',
     # documented gap (NOT MODELLED): an interpreter's own open(..., 'w') passes

@@ -73,9 +73,10 @@ EVERY_OPERAND_ARG = {'tee': set(), 'gtee': set(), 'touch': set('tdr'), 'gtouch':
                      'gtruncate': set('sr'), 'sponge': set()}
 OUTPUT_OPT = {'curl': ({'-o'}, {'--output'}), 'wget': ({'-O'}, {'--output-document'}), 'sort': ({'-o'}, {'--output'}),
               'gsort': ({'-o'}, {'--output'}), 'base64': ({'-o'}, {'--output'})}
-# an in-place option: sed -i / -Ei / --in-place, perl -i / -pi / -ni (not -M..., whose module name may hold an i)
-IN_PLACE = {'sed': re.compile(r'^-[nEr]*i|^--in-place'), 'gsed': re.compile(r'^-[nEr]*i|^--in-place'),
-            'perl': re.compile(r'^-[pnlaw0-9]*i')}
+# an in-place option: sed/gsed -i, -I (macOS), combined (-Ei, -zi, -si) or --in-place; perl -i combined with its
+# argument-free switches (-pi, -spi, -Tpi), not -M/-m/-I/-e/-E/-F/-x, which take a value (Viktor 48607 L1)
+IN_PLACE = {'sed': re.compile(r'^-[nErsuzal]*[iI]|^--in-place'), 'gsed': re.compile(r'^-[nErsuzal]*[iI]|^--in-place'),
+            'perl': re.compile(r'^-[acnpsStTuUwWXl0-9]*i')}
 
 _P = None
 
