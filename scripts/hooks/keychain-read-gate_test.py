@@ -619,6 +619,20 @@ BLOCK += ["echo -e '\\0163\\0145curity dump-keychain' | bash", "printf '%b' '\\0
           'eval "$(command echo s3curity dump-keychain)"', 'eval "$(print s3curity dump-keychain)"',
           "eval \"$(env A=1 printf 'x\\ns3curity dump-keychain')\"", "bash -c \"$(builtin echo -e 'x\\ns3curity dump-keychain')\""]
 
+# card 03a336e5 (Viktor 47750, agents/viktor/work/kcsubst-1119/probe.py: 16 forms passed the live gate, bash and zsh
+# ran the stub): a command name the shell makes, with a secret subcommand as a word of the same command
+BLOCK += ['$(echo s3curity) dump-keychain', '`echo s3curity` dump-keychain', '"$(echo s3curity)" dump-keychain',
+          '$(printf %s s3curity) find-generic-password -s x -w', '$(echo s3c)urity dump-keychain',
+          'x$(echo s3curity) dump-keychain', '$(echo s3c)$(echo urity) dump-keychain', '"$(echo s3cur)ity" dump-keychain',
+          'x=$(echo s3curity); $x dump-keychain', 'z=s3curity; $z find-internet-password -s x', '${Z:-s3curity} dump-keychain',
+          "$(printf '\\163\\145\\143urity') dump-keychain", 'sudo $(echo s3curity) dump-keychain',
+          'env A=1 $S -q find-generic-password -s x -w', '$S "dump-keychain"', "bash -c '$S dump-keychain'",
+          'ls; $S dump-keychain', 'true && "${S}" find-internet-password -s x', '$(echo s3curity) -v dump-keychain\n',
+          '`echo s3curity` FIND-GENERIC-PASSWORD -s x', '$(echo $(echo s3curity)) dump-keychain']
+# card 03a336e5 mutation round: a tab is a blank after the name too; a later line starts at its newline (the gate's
+# reading of find's `\s-exec` there; bash would run `-exec` as a command, so this row pins the fail-closed side)
+BLOCK += ['$S\tdump-keychain', 'true\n-exec $S dump-keychain']
+
 ALLOW = [
     # card c7234bed (L1): the decoded feeders into no shell, a harmless decoded call, another program's substitution
     # card c7234bed (48033 M1 rework): the two rows that blocked unread before (the old count of a quoted text's raw
@@ -641,6 +655,12 @@ ALLOW = [
     "printf '\\u0073ecurity list-keychains' | bash", "echo -e '\\0163ecurity list-keychains' | bash",
     'eval "$(command -v brew)"', "builtin printf 'hello\\n' | bash", 'eval "$(env | grep PATH)"',
     "printf '\\uD800 x\\n' | bash", "printf '\\U0011FFFF x\\n' | bash",
+    # card 03a336e5: a literal first word, another word than the three, the word glued to more, a quoted string
+    'echo $(echo s3curity) dump-keychain', 'echo "$(date)" dump-keychain', '$PY x.py export', '$S list-keychains',
+    '$EDITOR notes/dump-keychain.md', '$X dump-keychain-notes', 'grep -n "$PAT" find-generic-password.txt',
+    '"$SHELL" -n x.sh', '$S find-certificate -a', 'cd $D; grep -c dump-keychain notes.txt', '$X | grep dump-keychain',
+    # (mutation round) the word glued to more on its left; a NUL of the command is a plain char, not a mark
+    '$X my-dump-keychain', '$X a/dump-keychain', '\x00echo $S dump-keychain',
     # card aeee72df: the new payloads stay allowed when they read no secret; a pipe or a here-string into a program
     # that is not a shell is not read as a script; a 4-deep payload with nothing quoted left in it passes
     "echo '\"hello\" world' | bash", "bash <<< 'echo \"hi\"'", "bash -c ''\\''echo'\\'' hi'",
@@ -987,10 +1007,26 @@ def script_cases():
             f.write("SEC = '" + S + "'\nimport subprocess; subprocess.run([SEC, 'dump-keychain'])\n")
         # card 15896271: a run's output that quotes the blocked call (a negative test run's log)
         w('out.txt', "FAIL should block: '/usr/bin/env " + S + " dump-keychain'\n")
+        # card 03a336e5 (fleet replay 2026-11-19: a kanban dump read by a python heredoc, a PR.md, a .diff blocked): a
+        # made command name in a file counts only where a shell may run the file (_hn_shell_file)
+        # the card's own JSON as /api/kanban gives it (the replay's kb.json: the title's backticks and the \" pieces
+        # leave `$(printf %s S) find-generic-password` at a command position), and a Markdown list of the forms
+        w('kb.json', '[{"id":"03a336e5","title":"x ($(echo S) dump-K, `echo S` ...) y","description":"S = name.\\n'
+                     '- $(echo S) dump-K\\n- `echo S` dump-K\\n- \\"$(echo S)\\" dump-K\\n- $(echo se..)$(echo ..ty) dump-K\\n'
+                     '- $(printf %s S) find-generic-password -s x -w\\n\\nmore"}]\n')
+        w('pr.md', '- $(printf %s S) find-generic-password -s x -w\n- `$S dump-keychain`\n')
+        w('made.sh', '$(echo ' + S + ') dump-keychain\n')
+        w('made', 'x=$(echo ' + S + '); $x dump-keychain\n')
+        w('made.md', '$S dump-keychain\n')
+        w('madebang.py', '#!/usr/bin/env bash\n$S find-generic-password -s x\n')
         cf_curl = ('curl -s -X POST localhost:3420/api/kanban/x/comments -H "Content-Type: application/json" '
                    '-H "Authorization: Bearer $(cat store/.dashboard-token)" --data-binary @- ')
         block = [
             ('python3 measure.py', d),
+            # card 03a336e5: a made name in a file a shell runs (an .sh, no extension, a shell shebang, a shell word or
+            # source before a data file's name)
+            ('bash made.sh', d), ('sh ./made', d), ('bash made.md', d), ('/bin/zsh -e made.md', d), ('source made.md', d),
+            ('. ./made.md', d), ('./madebang.py', d), ('./made', d),
             # card 31045f4d (A): the first non-option word is the script only after options the gate knows; node -r,
             # source, bash, ruby -r, perl -I, an unknown python flag and stdin keep the old walk (every file judged)
             ('python3 -I measure.py regiszter.jsonl', d),
@@ -2004,6 +2040,13 @@ def script_cases():
         prose ='mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
         allow = [
             ('python3 list.py', d),
+            # card 03a336e5: the made-name forms quoted in data a python heredoc reads (the replay's kanban dump, a PR
+            # text); no shell runs them
+            ("python3 -I - <<'PY'\nimport json\nprint(len(json.load(open('./kb.json'))))\nPY", d),
+            ("python3 -I - <<'PY'\nprint(open('./pr.md').read()[:9])\nPY", d),
+            ("python3 -I - <<'PY'\nprint(open('./made.md').read()[:9])\nPY", d),
+            # ... and a shell word before ANOTHER name that only starts like it
+            ("python3 -I - <<'PY'\nprint(open('./made.md').read()[:9])\nPY\nbash made.md.orig", d),
             # card af12091a: the K1 shapes before a harmless script, and as prose or data
             ("eval 'python3 -W \"a;b\" notes.py'", d),
             ('bash -c "python3 -W \\"a;b\\" notes.py"', d),
@@ -3069,6 +3112,29 @@ def main():
                 fails.append(f'redos case: want {want}, got {p.returncode}: {cmd[:40]!r}...')
         except subprocess.TimeoutExpired:
             fails.append(f'redos case timed out (5 s): {cmd[:40]!r}...')
+    # card 03a336e5: the hidden-name rule is linear. Its first form (one regex, a lazy scan to the word after every
+    # head) took 2.3 s at 20 KB of `$($a ` and as long for glued backtick or quoted pieces, every start reading the same
+    # long name again; 80 KB lines with the word behind a `;`, under 1 s each now
+    # (on 9830a60b's gate the first three blocked on the watchdog at 6.2 s, the fourth took 2.1 s)
+    hn_timed = [('$($a ' * 16000 + '; echo dump-keychain', 0), ('`$a` ' * 16000 + '; echo dump-keychain', 0),
+                ('$a"x"' * 16000 + '; echo dump-keychain', 0), ('"$a dump-keychainx' * 4000 + '; echo dump-keychain', 0),
+                ('`$a` ' * 16000 + '$a dump-keychain', 2),
+                # (mutation round) a line is read once, not once per word in it: 4000 words, no name, 0.1 s; read per
+                # word it took 93 s in process
+                ('x $a; ' + 'echo dump-keychain; ' * 4000, 0)]
+    import time as _t
+    for cmd, want in hn_timed:
+        try:
+            t = _t.monotonic()
+            p = subprocess.run([sys.executable, '-I', HOOK], capture_output=True, text=True, timeout=5,
+                               input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}),
+                               env={'PATH': '/usr/bin:/bin'})
+            took = _t.monotonic() - t
+            if p.returncode != want or took > 2:
+                fails.append(f'hidden-name timing case: want {want} under 2 s, got {p.returncode} in {took:.1f} s: '
+                             f'{cmd[:40]!r}...')
+        except subprocess.TimeoutExpired:
+            fails.append(f'hidden-name timing case timed out (5 s): {cmd[:40]!r}...')
     # card 3085a683: the wrapper walk is linear (a walk per wrapper, a wrapper right after another in the same pass);
     # a walk past MAX_ARGS words blocks ('wrapper-unread'): 64 words of flags and arguments pass, 65 block
     sec = fix('s3curity') + ' dump-keychain'
@@ -3137,7 +3203,7 @@ def main():
             fails.append(f'gh-pr.mjs should pass (got {code}): {err[:160]}')
     script_fails, script_n = script_cases()
     fails += script_fails
-    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(wrap_timed) + 1 + script_n
+    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n
     for f in fails:
         print('FAIL', f)
     print(f'{total - len(fails)}/{total} passed')
