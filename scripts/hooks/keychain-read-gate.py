@@ -209,9 +209,31 @@ SCRIPT_POSITION = r'(?:^|[;(){}\n`]|' + PIPE + r'|' + AMP + r'|\$\(|\s-(?:exec|e
 BINARY = r'(?:' + WORD + r'*/)?security'
 OPTIONS = r'(?:\s+-\S+)*'
 SECRET_SUB = r'(?:find-generic-password|find-internet-password|dump-keychain|export)'
+
+
+class NeedRule:
+    """A rule pattern searched only where a literal it cannot match without is in the text (card 7ef651a9).
+
+    Why: a POSITION pattern tries its command-position alternation at every character, about 0.1 s per rule on a
+    2.5 MB command (`GIT_CONFIG_PARAMETERS=x... ` x 20000: 1.1 s of the hook's 4.4 s in five such rules, measured
+    2026-11-20), and the wrapper timing case ran on its 5 s cap. A literal search is about 0.01 s.
+    Sound only when `need` is a piece EVERY match contains: written once, outside any alternation, ?, * or {0,}, in
+    `rx`. Then a match of `rx` contains a run that `need` matches with the same flags (re.I compares per character),
+    so no `need` hit means no `rx` hit; the test checks each rule against its plain pattern on every BLOCK and ALLOW
+    case. Same `search(text)` call as a compiled pattern."""
+    def __init__(self, need, rx):
+        self.rx, self.pattern, self.flags = rx, rx.pattern, rx.flags
+        self.need = re.compile(re.escape(need), rx.flags)
+
+    def search(self, text):
+        return self.rx.search(text) if self.need.search(text) else None
+
+
 RULES = [
-    ('secret-read', re.compile(POSITION + BINARY + OPTIONS + r'\s+' + SECRET_SUB + r'(?![\w-])', re.I)),
-    ('stdin-mode', re.compile(POSITION + BINARY + r'(?:\s+-\S+)*?\s+-[a-z]*[ip][a-z]*(?=\s|$|[;&|)`\'"])', re.I)),
+    ('secret-read', NeedRule('security', re.compile(POSITION + BINARY + OPTIONS + r'\s+' + SECRET_SUB + r'(?![\w-])',
+                                                    re.I))),
+    ('stdin-mode', NeedRule('security', re.compile(POSITION + BINARY + r'(?:\s+-\S+)*?\s+-[a-z]*[ip][a-z]*'
+                                                   r'(?=\s|$|[;&|)`\'"])', re.I))),
 ]
 # git's credential paths into the login keychain (Viktor 41943 HIGH, Klodel 41948, card 04d67b39): the system git
 # config names osxkeychain as the helper, so `git credential fill` (and approve / reject, which store and erase) and
@@ -230,26 +252,29 @@ RULES = [
 HELPER_SCOPE = r'(?:\.[^\s=\'"]{1,200})?'
 INCLUDE_KEY = r'include(?:if\.[^\s=\'"]{1,300})?\.path'
 GIT_RULES = [
-    ('git-credential', re.compile(POSITION + r'credential[ \t]+(?:fill|approve|reject)(?![\w-])', re.I)),
-    ('git-credential-helper', re.compile(POSITION + r'\\?[\'"]?(?:' + WORD + r'*/)?(?:git-)?credential-osxkeychain'
-                                         r'(?![\w-])', re.I)),
+    ('git-credential', NeedRule('credential', re.compile(POSITION + r'credential[ \t]+(?:fill|approve|reject)'
+                                                         r'(?![\w-])', re.I))),
+    ('git-credential-helper', NeedRule('credential-osxkeychain', re.compile(
+        POSITION + r'\\?[\'"]?(?:' + WORD + r'*/)?(?:git-)?credential-osxkeychain(?![\w-])', re.I))),
     # choosing the helper: `git -c credential.helper=osxkeychain ...`, `git config [flags] credential.helper
     # osxkeychain`, GIT_CONFIG_PARAMETERS / GIT_CONFIG_VALUE_<n>; not the words in prose (a commit message that says
     # "the system config sets credential.helper=osxkeychain" passes: two of 19 861 replayed commands were such)
-    ('git-credential-helper', re.compile(r'(?<![\w-])-c[ \t]+[\'"]?credential' + HELPER_SCOPE + r'\.helper=[\'"]?!?'
-                                         r'[^\s\'";|&]*osxkeychain', re.I)),
-    ('git-credential-helper', re.compile(POSITION + r'config(?:[ \t]+-' + WORD + r'*)*[ \t]+[\'"]?credential'
-                                         + HELPER_SCOPE + r'\.helper[\'"]?[ \t]+[\'"]?!?[^\s\'";|&]*osxkeychain',
-                                         re.I)),
+    ('git-credential-helper', NeedRule('osxkeychain', re.compile(
+        r'(?<![\w-])-c[ \t]+[\'"]?credential' + HELPER_SCOPE + r'\.helper=[\'"]?!?[^\s\'";|&]*osxkeychain', re.I))),
+    ('git-credential-helper', NeedRule('osxkeychain', re.compile(
+        POSITION + r'config(?:[ \t]+-' + WORD + r'*)*[ \t]+[\'"]?credential' + HELPER_SCOPE
+        + r'\.helper[\'"]?[ \t]+[\'"]?!?[^\s\'";|&]*osxkeychain', re.I))),
     # (GIT_CONFIG_PARAMETERS / GIT_CONFIG_VALUE_<n> naming osxkeychain: env_value_hit below, linear)
     # card 49d58372 (Viktor 42039 MEDIUM 1): a config the command names by indirection brings the helper back, the
     # name of osxkeychain in a file the rules cannot read: `-c include.path=<file>`, `--config-env=credential.helper=
     # VAR` / `--config-env=include.path=VAR`, an include in GIT_CONFIG_PARAMETERS / GIT_CONFIG_KEY_<n> (all measured
     # on git 2.54, Apple Git-157: the helper of the named file or variable is called after the ~/.gitconfig reset)
-    ('git-config-override', re.compile(r'(?<![\w-])-c[ \t]+[\'"]?' + INCLUDE_KEY + r'=', re.I)),
-    ('git-config-override', re.compile(r'(?<![\w-])--config-env(?:=|[ \t]+)[\'"]?(?:credential' + HELPER_SCOPE
-                                       + r'\.helper|' + INCLUDE_KEY + r')=', re.I)),
-    ('git-config-override', re.compile(r'(?<![\w-])GIT_CONFIG_KEY_\d+=[\'"]?' + INCLUDE_KEY + r'(?![\w.-])', re.I)),
+    ('git-config-override', NeedRule('include', re.compile(r'(?<![\w-])-c[ \t]+[\'"]?' + INCLUDE_KEY + r'=', re.I))),
+    ('git-config-override', NeedRule('--config-env', re.compile(
+        r'(?<![\w-])--config-env(?:=|[ \t]+)[\'"]?(?:credential' + HELPER_SCOPE + r'\.helper|' + INCLUDE_KEY + r')=',
+        re.I))),
+    ('git-config-override', NeedRule('GIT_CONFIG_KEY_', re.compile(
+        r'(?<![\w-])GIT_CONFIG_KEY_\d+=[\'"]?' + INCLUDE_KEY + r'(?![\w.-])', re.I))),
 ]
 
 # card 49d58372 (Viktor 42039 MEDIUM 1): ~/.gitconfig empties the helper list (card 7e47b573), so the system

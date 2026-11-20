@@ -3070,6 +3070,52 @@ def corpus_cases(d):
     return fails, n + 1
 
 
+def prefilter_cases():
+    """card 7ef651a9: a NeedRule (literal prefilter) answers like its plain pattern on every BLOCK and ALLOW command,
+    their normalised, wrapper-bounded and quote-free texts, and case variants (re.I folds per character, the literal
+    too)."""
+    import importlib.util
+    import re
+    spec = importlib.util.spec_from_file_location('kc_gate_prefilter', HOOK)
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    rules = [(n, r) for n, r in gate.RULES + gate.GIT_RULES if isinstance(r, gate.NeedRule)]
+    fails, n = [], 0
+    if len(rules) != 9:
+        fails.append(f'prefilter: want 9 NeedRule rules, got {len(rules)}')
+    # every regex rule of the lists is behind a literal (a new one without it is a slow rule again)
+    plain_rx = [nm for nm, r in gate.RULES + gate.GIT_RULES if isinstance(r, re.Pattern)]
+    if plain_rx:
+        fails.append(f'prefilter: regex rules without a literal: {plain_rx}')
+    sec = fix('s3curity')
+    extra = [sec.upper() + ' dump-keychain', 'ſ' + sec[1:] + ' dump-keychain',
+             sec.title() + ' -i', fix('git -c CR3DENTIAL.helper=OSXKEYCHAIN fetch'), 'git -c INCLUDE.PATH=/x fetch',
+             'GIT_CONFIG_KEY_0=Include.Path git fetch', 'git --CONFIG-ENV=include.path=V fetch',
+             fix('CR3DENTIAL FILL'), fix('git-cr3dential-OsxKeychain get'),
+             # the literal far into a long text (a prefilter that read only a head of it passed these)
+             'x' * 5000 + '; ' + sec + ' dump-keychain', 'a=b ' * 2000 + fix('git -c cr3dential.helper=osxkeychain x')]
+    extra += [fix('GIT -C . CR3DENTIAL FILL'), fix('sudo -u a git -c x=y cr3dential Approve')]  # hits on the bounds only
+    texts = []
+    for cmd in list(map(fix, BLOCK + ALLOW)) + extra:
+        t = gate.normalise(cmd)
+        b = gate.wrapper_bounds(t, gate.WRAP_RX)  # the text hits_in() also judges, with the wrapped calls' bounds
+        texts += [cmd, t, re.sub(r'[\'"\\]', '', t)] + ([b, re.sub(r'[\'"\\]', '', b)] if b and b != t else [])
+    for name, r in rules:
+        if not r.need.search(r.pattern):
+            fails.append(f'prefilter {name}: the literal {r.need.pattern!r} is not in its own pattern')
+        for t in texts:
+            n += 1
+            if bool(r.search(t)) != bool(r.rx.search(t)):
+                fails.append(f'prefilter {name} ({r.need.pattern!r}) differs from its pattern on {t[:60]!r}')
+    # the case variants are hits of a plain pattern (so the comparison above saw a prefilter on a hit)
+    for cmd in extra:
+        n += 1
+        t = gate.normalise(cmd)
+        if not any(r.rx.search(x) for _, r in rules for x in (t, gate.wrapper_bounds(t, gate.WRAP_RX) or t)):
+            fails.append(f'prefilter: case variant is no hit of any rule: {cmd!r}')
+    return fails, n
+
+
 def main():
     fails = []
     for cmd in map(fix, BLOCK):
@@ -3203,7 +3249,9 @@ def main():
             fails.append(f'gh-pr.mjs should pass (got {code}): {err[:160]}')
     script_fails, script_n = script_cases()
     fails += script_fails
-    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n
+    pre_fails, pre_n = prefilter_cases()
+    fails += pre_fails
+    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n + pre_n
     for f in fails:
         print('FAIL', f)
     print(f'{total - len(fails)}/{total} passed')
