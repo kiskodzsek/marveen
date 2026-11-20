@@ -288,6 +288,56 @@ CASES += [
 ]
 
 
+# Viktor, bekötési kör (Kernel 48918), an independent probe on c07619c5 (work/hx3-1120/indep-hexgate.txt): one
+# over-block (P09) and nine reading forms that let an unseen hex through. All values are made up.
+TYPO40 = '9b1e92392916aa00bb11cc22dd33ee44ff556677'
+SUBDIR = os.path.join(TMP, 'sub')
+os.makedirs(SUBDIR, exist_ok=True)
+SUBDRAFT = payload(os.path.join('sub', 'm.txt'), 'fej ' + INV + '\n')
+DEEP = 200000  # json raises RecursionError on this depth; the record must be skipped, not crash the hook
+DEEP_LINE = json.dumps(own_use('mcp__x__y', {'k': 'PH'})).replace('"PH"', '[' * DEEP + '"' + INV + '"' + ']' * DEEP)
+
+
+def run_lines(cmd, lines):
+    p = os.path.join(TMP, 'deep.jsonl')
+    with open(p, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    return run('', raw=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}, 'transcript_path': p,
+                                   'cwd': TMP}))
+
+
+CASES += [
+    ('H1 a mistyped full sha, then the measured one: its prefix passes (P09)', lambda: run(MSG + '"fej 9b1e9239"', [
+        own_use('Bash', {'command': 'git show ' + TYPO40}), tr_err('fatal: bad object ' + TYPO40),
+        own_use('Bash', {'command': 'git rev-parse HEAD'}), tool_result(COMMIT + '\n')]), 0),
+    ('H2 the mistyped full sha itself stays blocked', lambda: run(MSG + '"fej ' + TYPO40 + '"', [
+        own_use('Bash', {'command': 'git show ' + TYPO40}), tr_err('fatal: bad object ' + TYPO40),
+        own_use('Bash', {'command': 'git rev-parse HEAD'}), tool_result(COMMIT + '\n')]), 2),
+    ('H3 cat of a quoted path', lambda: run(MSG + '"$(cat "' + DRAFT + '")"', BASE2), 2),
+    ('H4 quoted positional file of send-stamped.sh', lambda: run('bash tools/send-stamped.sh dave klodel "' + DRAFT +
+                                                               '"', BASE2), 2),
+    ('H5 cd into a dir, then a relative file', lambda: run('cd sub && ' + MSG + '"$(cat m.txt)"', BASE2), 2),
+    ('H6 a send after then / do / nice (no bash in front)', lambda: all_blocked(
+        [c + ' scripts/agent-msg.sh k v "fej ' + INV + '"' for c in ('if true; then', 'for i in 1; do', 'nice -n 5')],
+        BASE2), 2),
+    ('H6b each of the three alone', lambda: (lambda rs: (2 if all(r[0] == 2 for r in rs) else 0, rs[-1][1]))(
+        [run(c + ' scripts/agent-msg.sh k v "fej ' + INV + '"', BASE2) for c in ('if true; then', 'while :; do',
+                                                                              'caffeinate -i')]), 2),
+    ('H7 curl -T upload to /api/messages', lambda: run('curl -s -T ' + payload('up.json', '{"result":"fej ' + INV +
+                                                                                  '"}') +
+                                                       ' localhost:3420/api/messages/123', BASE2), 2),
+    ('H8 $(cat f) in an unquoted heredoc body', lambda: run(MSG + '- <<EOF\n$(cat ' + DRAFT + ')\nEOF', BASE2), 2),
+    ('H9 0< redirect', lambda: run(MSG + '- 0<' + DRAFT, BASE2), 2),
+    ('H10 $(cat f) in a QUOTED heredoc body is text, not a read', lambda: run(
+        MSG + "- <<'EOF'\n$(cat " + DRAFT + ")\nEOF", BASE2), 0),
+    ('H11 a record too deep for json is skipped (blocked, no exit 1)', lambda: run_lines(
+        MSG + '"fej ' + INV + '"', [DEEP_LINE]), 2),
+    ('H12 an unforeseen error is a logged fail-open', lambda: failopen_case(lambda: run('', raw=json.dumps(
+        {'tool_name': 'Bash', 'tool_input': {'command': MSG + '"ab12cd34ef" - < m2.txt'},
+         'transcript_path': os.path.join(TMP, 't.jsonl'), 'cwd': 12})), 'internal-error'), 0),
+]
+
+
 def main():
     ok = 0
     for name, fn, want in CASES:

@@ -8,25 +8,33 @@ migration sha256 from the same parallel tool block, a different value). A 9-day 
 found 15 blocks in 8278 hex-bearing sends; most were mistyped or unmeasured hashes (9b1e92392916 for 9b1e9239291f).
 
 Scope: a SEND command = agent-msg.sh, kernel-msg.sh, msg-close.sh, card-comment.sh, send-stamped.sh, send-and-close.sh,
-or a write call (POST/PUT/PATCH, a data or form flag, --json) to /api/messages or /api/kanban. Its text is the command
-plus the files it reads as message text (`< f`, `< "f"`, `@f`, `cat f |`, `"$(cat f)"`, the positional message file of
-send-stamped.sh and send-and-close.sh), outside heredoc bodies and header arguments (-H, --header), never `$(< f)`, a
-secret-looking path or a script file, at most 1 MiB. A path only mentioned in the message text is not read.
+or a write call (POST/PUT/PATCH, a data, form or upload flag, --json, -T) to /api/messages or /api/kanban. Its text is
+the command plus the files it reads as message text (`< f`, `0< f`, `< "f"`, `@f`, `cat f |`, `"$(cat "f")"`, `-T f`,
+the positional message file of send-stamped.sh and send-and-close.sh, quoted or not, and a `$(cat f)` in an UNQUOTED
+heredoc body), outside header arguments (-H, --header), never `$(< f)` (the dashboard token is read that way), a
+secret-looking path or a script file, at most 1 MiB. A relative file is looked up in cwd and in every directory the
+command cd's into. A path only mentioned in the message text is not read.
 A token counts when it has a digit AND a letter (pure digits are ids and epochs, pure letters are words) and is not a
 file name (`c1589627.txt`). It is sourced when it is the prefix or the suffix of a hex run in an earlier non-assistant
 record (so the 8-digit prefix of a measured 40/64-digit hash passes), and the agent had NOT written it itself before
-that record: a tool output that only echoes the agent's own text (a draft read back, `cat` of an own heredoc, the
-harness file-change note, this gate's own block message) is not a source. Not sources either: `api-request-blob` (the
-agent's own earlier text) and the compact summary (written by the model).
+that record, unless the record shows a run that is not a part of any run the agent wrote with it (a mistyped
+40-digit sha, then the measured one with the same prefix): a tool output that only echoes the agent's own text (a
+draft read back, `cat` of an own heredoc, the harness file-change note, this gate's own block message) is not a source.
+Not sources either: `api-request-blob` (the agent's own earlier text) and the compact summary (written by the model).
 
 Known limits (Viktor, rounds 1-2, probe rows L4 and P4): a file the agent changed with a command that does not hold
 the hex (sed -i, cp) comes back in the harness file-change note as if measured; and a LONGER run the agent builds
 from its own digits (printf '%s%s' <hex> 00) counts as a measurement. Neither happens by a typo; both need the
-agent to route its own value through a tool.
+agent to route its own value through a tool. Also not caught (Viktor, bekötési kör, independent probe G08 G12-G14):
+a payload path held in a variable (`@"$F"`); a file an EARLIER session wrote (a HANDOFF.md read back is a tool
+output here); a hex glued to a letter suffix (`5e6f7a8b9dra`, the suffix could be hex) or to `.Word` (read as a file
+extension). Not read on purpose: `$(< f)` and secret-looking paths (the gate must never open a secret).
 
 The block message names a token by its first 8 digits only: a file read by mistake must not echo a secret in full.
 
-Fail-open (exit 0) when the transcript is missing or unreadable, or the hook input is not understood: this gate guards
+Fail-open (exit 0) when the transcript is missing or unreadable, the hook input is not understood, or an error the
+code did not foresee happens (reason internal-error, never a silent exit 1; a json record too deep to decode is
+skipped, which can only block): this gate guards
 accuracy, not access, and a broken read must not stop every message of the fleet. Exit 2 + stderr = blocked.
 Every fail-open is OBSERVABLE (Viktor 48897 (a)): one content-free line (time, reason) in store/hex-gate-failopen.log,
 so a hook-payload field rename that switches the gate off fleet-wide shows up there. The line never carries the
@@ -37,22 +45,28 @@ import os
 import re
 import sys
 
-# The script is a send only in command position (segment start, after VAR=x, or the argument of a runner such as
-# bash, env, nohup, timeout), so a 'grep -n <hex> scripts/agent-msg.sh' is not one.
-SEND_SCRIPT_RX = re.compile(r'(?:^|[;&|\n(`{]|(?<![\w.-])(?:bash|sh|zsh|exec|env|nohup|command|xargs|timeout|time)\s)'
+# The script is a send only in command position (segment start, after VAR=x, after a shell keyword such as then/do,
+# or the argument of a runner such as bash, env, nohup, timeout, nice), so a 'grep -n <hex> scripts/agent-msg.sh' is
+# not one.
+SEND_SCRIPT_RX = re.compile(r'(?:^|[;&|\n(`{]|(?<![\w.-])(?:bash|sh|zsh|exec|env|nohup|command|xargs|timeout|time'
+                            r'|nice|caffeinate|stdbuf|then|do|else|elif|if|while|until)\s)'
                             r'\s*(?:(?:-[\w-]+|\w+=\S*|\d+[smh]?)\s+)*["\']?(?:[^\s;&|()`\'"]*/)?'
                             r'(agent-msg|kernel-msg|msg-close|card-comment|send-stamped|send-and-close)\.sh\b')
 API_RX = re.compile(r'/api/(messages|kanban)\b')
 API_WRITE_RX = re.compile(r'-X\s*(POST|PUT|PATCH)\b|--request\s*(POST|PUT|PATCH)\b|--data(-binary|-raw|-urlencode)?\b'
-                          r'|--json\b|--form\b|(?<!\S)-[dF]')
+                          r'|--json\b|--form\b|(?<!\S)-[dFT]|--upload-file\b')
 HEX_RX = re.compile(r'(?<![0-9A-Za-z])[0-9a-fA-F]{8,64}(?![0-9A-Za-z])')
 FILE_EXT_RX = re.compile(r'\.[A-Za-z][A-Za-z0-9]{0,7}\b')
 RUN_RX = re.compile(r'[0-9a-f]{8,}')
 HEREDOC_RX = re.compile(r'<<-?\s*([\'"]?)([A-Za-z_][A-Za-z0-9_]*)\1')
 HEADER_ARG_RX = re.compile(r'(?<!\S)(?:-H|--header)(?:\s*|=)(?:"[^"]*"|\'[^\']*\'|\S+)')
-PAYLOAD_RX = re.compile(r'(?:(?<![<0-9(])<(?![<(])|@)\s*["\']?([^\s;|&<>()\'"`]+)')
-CAT_RX = re.compile(r'(?<![\w.-])cat((?:\s+[^\s;|&<>()\'"`]+)+)')
-WRAPPER_ARGS_RX = re.compile(r'(?:send-stamped|send-and-close)\.sh((?:\s+[^\s;|&<>()\'"`]+)+)')
+PAYLOAD_RX = re.compile(r'(?:(?:(?<![<0-9(])|(?<=(?<!\S)0))<(?![<(&])|@)\s*["\']?([^\s;|&<>()\'"`]+)')
+WORD = r'(?:"[^"\s$`]+"|\'[^\'\s]+\'|[^\s;|&<>()\'"`]+)'
+UPLOAD_RX = re.compile(r'(?<!\S)(?:-T|--upload-file)(?:\s+|=)?' + WORD)
+CD_RX = re.compile(r'(?:^|[;&|\n({]|\bthen|\bdo)\s*cd\s+(' + WORD + ')')
+SUBST_CAT_RX = re.compile(r'(?:\$\(|`)\s*cat((?:\s+' + WORD + ')+)\s*(?:\)|`)')
+CAT_RX = re.compile(r'(?<![\w.-])cat((?:\s+' + WORD + ')+)')
+WRAPPER_ARGS_RX = re.compile(r'(?:send-stamped|send-and-close)\.sh((?:\s+' + WORD + ')+)')
 SECRET_PATH_RX = re.compile(r'token|secret|credential|passw|\.env\b|\.pem\b|\.key\b|id_rsa|id_ed25519', re.I)
 SCRIPT_EXT_RX = re.compile(r'\.(sh|bash|zsh|py|mjs|cjs|js|ts)$')
 GATE_TAG = 'HEX-FORRAS-KAPU'
@@ -98,50 +112,69 @@ def tokens(text):
     return out
 
 
-def strip_heredocs(cmd):
-    """The command without heredoc bodies and delimiters (their text is still in tokens(cmd), but a word in a body or
-    the delimiter itself is not a file the command reads)."""
-    lines, out, pending = cmd.split('\n'), [], []
+def split_heredocs(cmd):
+    """(the command without heredoc bodies and delimiters, the bodies of UNQUOTED heredocs). A word in a body or the
+    delimiter itself is not a file the command reads (the body text is still in tokens(cmd)); but the shell expands an
+    unquoted body, so a $(cat f) there does read f (Viktor, hx4 G09)."""
+    lines, out, pending, bodies = cmd.split('\n'), [], [], []
     for line in lines:
         if pending:
-            if line.strip() == pending[0] or (line.lstrip('\t') == pending[0]):
+            if line.strip() == pending[0][0] or (line.lstrip('\t') == pending[0][0]):
                 pending.pop(0)
+            elif not pending[0][1]:
+                bodies.append(line)
             continue
-        delims = [m.group(2) for m in HEREDOC_RX.finditer(line)]
+        pending.extend((m.group(2), m.group(1)) for m in HEREDOC_RX.finditer(line))
         out.append(HEREDOC_RX.sub(' ', line))
-        pending.extend(delims)
-    return '\n'.join(out)
+    return '\n'.join(out), '\n'.join(bodies)
 
 
-def payload_files(text):
-    """File words the command READS as message text: < f, < "f", @f, cat f... (into a pipe or $(cat f)), and the
-    unquoted positional arguments of the two message-file wrappers. A path only mentioned in the message is not one."""
+def strip_heredocs(cmd):
+    return split_heredocs(cmd)[0]
+
+
+def unquote(w):
+    return w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in '"\'' else w
+
+
+def payload_files(text, body=''):
+    """File words the command READS as message text: < f, 0< f, < "f", @f, cat f... (into a pipe or $(cat f)),
+    curl -T f, the positional arguments of the two message-file wrappers (quoted or not), and a $(cat f) in an
+    unquoted heredoc body. A path only mentioned in the message is not one."""
     out = [m.group(1) for m in PAYLOAD_RX.finditer(text)]
     for m in CAT_RX.finditer(text):
         out += [w for w in m.group(1).split() if not w.startswith('-')]
     for m in WRAPPER_ARGS_RX.finditer(text):
         out += m.group(1).split()
-    return out
+    out += [m.group(0).split(None, 1)[-1].split('=', 1)[-1] for m in UPLOAD_RX.finditer(text)]
+    for m in SUBST_CAT_RX.finditer(body):
+        out += [w for w in m.group(1).split() if not w.startswith('-')]
+    return [unquote(w) for w in out]
 
 
 def payload_text(cmd, cwd):
+    """A relative file is looked up in cwd and in every directory the command cd's into (cd sub && send < f): reading
+    one file too many can only block, never let a hex through (Viktor, hx4 G04)."""
     parts, seen = [], set()
-    text = HEADER_ARG_RX.sub(' ', strip_heredocs(cmd))
-    for w in payload_files(text):
+    stripped, body = split_heredocs(cmd)
+    text = HEADER_ARG_RX.sub(' ', stripped)
+    base = cwd or '/'
+    bases = [base] + [os.path.join(base, os.path.expanduser(unquote(m.group(1)))) for m in CD_RX.finditer(text)]
+    for w in payload_files(text, body):
         if not w or w == '-' or w.startswith('$') or SECRET_PATH_RX.search(w) or SCRIPT_EXT_RX.search(w):
             continue
-        p = os.path.expanduser(w)
-        if not os.path.isabs(p):
-            p = os.path.join(cwd or '/', p)
-        if p in seen:
-            continue
-        seen.add(p)
-        try:
-            if os.path.isfile(p) and os.path.getsize(p) <= MAX_PAYLOAD:
-                with open(p, encoding='utf-8', errors='replace') as f:
-                    parts.append(f.read())
-        except OSError:
-            continue
+        p0 = os.path.expanduser(w)
+        for p in ([p0] if os.path.isabs(p0) else [os.path.join(b, p0) for b in bases]):
+            p = os.path.normpath(p)
+            if p in seen:
+                continue
+            seen.add(p)
+            try:
+                if os.path.isfile(p) and os.path.getsize(p) <= MAX_PAYLOAD:
+                    with open(p, encoding='utf-8', errors='replace') as f:
+                        parts.append(f.read())
+            except OSError:
+                continue
     return '\n'.join(parts)
 
 
@@ -166,23 +199,25 @@ def own_parts(d):
 GATE_SPAN_RX = re.compile(re.escape(GATE_TAG.lower()) + r'.*?from there\.', re.S)
 
 
-def own_len(text, t):
-    """Length of the longest hex run in the agent's own text that holds t (0 = not written)."""
-    return max([len(r) for r in RUN_RX.findall(text) if t in r] or [0])
+def own_runs(text, t):
+    """The hex runs in the agent's own text that hold t (empty = not written)."""
+    return {r for r in RUN_RX.findall(text) if t in r}
 
 
 def sourced(transcript, toks):
     """The subset of toks that a non-assistant record showed (None = unreadable). Before the agent wrote a token,
-    any prefix/suffix match counts; AFTER it, only a LONGER hex run does (Kernel, 2nd round of Viktor 48897):
-    a tool that reveals more digits than the agent wrote measured it (git rev-parse 22e1da9c -> 40 digits), while an
-    echo of the agent's own text (a draft read back, cat of an own heredoc, the file-change note) has the same run.
-    This gate's own block message is cut out of a record, not the whole record (the shasum output next to it is a
-    real source)."""
+    any prefix/suffix match counts; AFTER it, only a run that is NOT a part of any run the agent wrote with it
+    (Kernel, 2nd round of Viktor 48897; Viktor hx4 P09): a tool that reveals digits the agent did not write measured
+    it (git rev-parse 22e1da9c -> 40 digits; a mistyped 40-digit sha, then the measured one with the same 8-digit
+    prefix), while an echo of the agent's own text (a draft read back, cat of an own heredoc, the file-change note)
+    only repeats an own run or a piece of it. This gate's own block message is cut out of a record, not the whole
+    record (the shasum output next to it is a real source). A record too deep for json (RecursionError) is skipped:
+    a skipped record can only block, never source."""
     try:
         fh = open(transcript, encoding='utf-8', errors='replace')
     except (OSError, TypeError):
         return None
-    own, src = {}, set()
+    own, src = {}, set()  # own: token -> runs the agent wrote that hold it
     with fh:
         for line in fh:
             low = line.lower()
@@ -190,7 +225,7 @@ def sourced(transcript, toks):
                 continue
             try:
                 d = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             if not isinstance(d, dict):
                 continue
@@ -198,9 +233,7 @@ def sourced(transcript, toks):
             if isinstance(msg, dict) and msg.get('role') == 'assistant':
                 text = own_parts(d)
                 for t in toks - src:
-                    n = own_len(text, t)
-                    if n > own.get(t, 0):
-                        own[t] = n
+                    own.setdefault(t, set()).update(own_runs(text, t))
                 continue
             if d.get('type') == 'api-request-blob' or d.get('isCompactSummary'):
                 continue
@@ -208,7 +241,7 @@ def sourced(transcript, toks):
                 low = GATE_SPAN_RX.sub(' ', low)
             runs = RUN_RX.findall(low)
             for t in toks - src:
-                if any((r.startswith(t) or r.endswith(t)) and len(r) > own.get(t, 0) for r in runs):
+                if any((r.startswith(t) or r.endswith(t)) and not any(r in o for o in own.get(t, ())) for r in runs):
                     src.add(t)
     return src
 
@@ -237,6 +270,15 @@ def decide(cmd, transcript, cwd):
 
 
 def main():
+    """Any error the code did not foresee is a logged fail-open (exit 0), never a silent exit 1 (Viktor, hx4 G15)."""
+    try:
+        return run()
+    except Exception:
+        note_failopen('internal-error')
+        return 0
+
+
+def run():
     try:
         data = json.load(sys.stdin)
     except Exception:
