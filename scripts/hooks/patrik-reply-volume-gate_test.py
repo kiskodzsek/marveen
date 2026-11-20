@@ -475,6 +475,26 @@ class Hook(unittest.TestCase):
         self.mark(PRIV, kind='KIESES', value='a marabel.hu nem válaszol')
         self.assertEqual(self.run_gate(GROUP, 'Kiesés.')[0], 2)
 
+    def test_outage_mark_lifts_rule_2_on_a_calm_day(self):  # Viktor 48627 INFO 1 (B13): on purpose, CLAUDE.md "Kiesés"
+        self.answered(GROUP)
+        self.assertEqual(self.run_gate(GROUP, 'Kiesés, 15 perces jelzés.')[0], 2)
+        self.mark(GROUP, kind='KIESES', value='a marabel.hu nem válaszol')
+        self.assertEqual(self.run_gate(GROUP, 'Kiesés, 15 perces jelzés.')[0], 0)
+
+    def test_rule_2_hint_names_the_outage_mark(self):
+        self.answered(GROUP)
+        rc, err = self.run_gate(GROUP, 'Még egy.')
+        self.assertEqual(rc, 2)
+        self.assertIn('KIESES', err)
+
+    def test_count_other_agents_replies_do_not_count(self):  # Viktor 48627 B08: replies_in_window is per agent
+        self.upset()
+        now = time.time()
+        for m in (10, 8, 6, 4, 2):
+            self.log_at(GROUP, 'out', now - m * 60, agent='dave')
+        self.log_at(GROUP, 'in', now)
+        self.assertEqual(self.run_gate(GROUP, 'Rendben.')[0], 0)
+
     def test_bad_payload_passes(self):
         p = subprocess.run([sys.executable, '-I', GATE], input='nem json', capture_output=True, text=True,
                            timeout=30)

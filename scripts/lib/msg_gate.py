@@ -602,10 +602,22 @@ def time_reason(text):
 # (Viktor 48596 LOW 1, his tested form).
 PATRIK_ATTR = re.compile(_B + r'patrik(?![a-z0-9])([^\n.!?]{0,40}?)' + _B
                          + r'tg\s*[:#-]?\s*(\d+(?:\s*(?:/|,|-|es|\+)\s*(?:tg\s*#?\s*)?\d+)*)')
-# Another person, by first name, nickname or surname, with any suffix ("Balázsé", "Bazsi", "Tasnádi"; Viktor 48596 LOW 2).
-OTHER_PERSON = re.compile(_B + r'(?:balazs|bazsi|tasnadi|eszter)[a-z]*')
-SENTENCE_TAIL = re.compile(r'[^\n.!?]*')
+# Another person, by first name, nickname or surname, with any suffix ("Balázsé", "Bazsi", "Tasnádi"; Viktor 48596 LOW 2);
+# not the town "Esztergom" (Viktor 48660 INFO 1: "Patrik esztergomi útja TG 6582" read as a name).
+_OTHER = r'(?:balazs|bazsi|tasnadi|eszter(?!gom))'
+OTHER_PERSON = re.compile(_B + _OTHER + r'[a-z]*')
+# After the number only a name BOUND to it names the sender (Viktor 48660 INFO 1: "Patrik TG 6582 kérte, Balázs is
+# látta" or "..., szólok Balázsnak" dropped 6582 from the check): first in brackets "(Balázs)", "(Balázs üzenete)", the
+# possessive "Balázsé",
+# "Balázstól", or the name right before a verb of sending, "Balázs írta / küldte / kérte".
+BOUND_OTHER = re.compile(r'\(\s*' + _OTHER + r'|' + _B + _OTHER + r'(?:e|tol)(?![a-z0-9])|' + _B + _OTHER
+                         + r'\s+(?:irta|kuldte|kerte|jelezte|mondta|uzente)(?![a-z0-9])')
+# Bounded (Viktor 48660 LOW 1, his prop.diff): an unbounded tail ran to the line end for every match, quadratic on a long
+# line without punctuation (240k characters: 27.9 s).
+SENTENCE_TAIL = re.compile(r'[^\n.!?]{0,300}')
 NEXT_TG = re.compile(_B + r'tg\s*[:#-]?\s*\d')
+# "Patrik nem írta a TG 6582-t, Balázs igen": Patrik is named as NOT its sender.
+NEGATED_VERB = re.compile(_B + r'nem\s+(?:irta|kuldte|kerte|jelezte|mondta|uzente)(?![a-z0-9])')
 GROUP_WORD = re.compile(_B + r'csoport')
 PRIVATE_WORD = re.compile(_B + r'privat')
 NOT_PATRIK = re.compile(_B + r'nem\s+[("\']?$')
@@ -622,13 +634,14 @@ def attributed_tgs(text):
     for m in PATRIK_ATTR.finditer(folded):
         between = m.group(1)
         # "Balazs (nem Patrik), csoport TG ..." names the other sender: a negated name is no attribution
-        if OTHER_PERSON.search(between) or NOT_PATRIK.search(folded[max(0, m.start() - 8):m.start()]):
+        if (OTHER_PERSON.search(between) or NEGATED_VERB.search(between)
+                or NOT_PATRIK.search(folded[max(0, m.start() - 8):m.start()])):
             continue
-        # "Patrik szerint a TG 6582 (Balázs) üzenet", "a TG 6582 viszont Balázsé": another person after the number, in
-        # the same sentence, names its sender -- unless a TG number of their own follows ("Patrik TG 6537, Balázs TG
-        # 6582": that name belongs to 6582, and 6537 stays checked).
+        # "Patrik szerint a TG 6582 (Balázs) üzenet", "a TG 6582 viszont Balázsé": another person bound to the number,
+        # in the same sentence, names its sender -- unless a TG number of their own follows ("Patrik TG 6537, (Balázs)
+        # TG 6582": that name belongs to 6582, and 6537 stays checked).
         tail = SENTENCE_TAIL.match(folded, m.end()).group(0)
-        if OTHER_PERSON.search(tail) and not NEXT_TG.search(tail):
+        if BOUND_OTHER.search(tail) and not NEXT_TG.search(tail):
             continue
         scope = 'group' if GROUP_WORD.search(between) else 'private' if PRIVATE_WORD.search(between) else None
         for n in re.findall(r'\d+', m.group(2)):

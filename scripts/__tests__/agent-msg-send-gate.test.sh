@@ -883,6 +883,28 @@ ok "r9b (M26): a negated quoted name: sent" "$(sent)" "rc=$RC"
 text 'Patrik TG 6537 és 6582'
 run klodel radar
 ok "r9b (M28): 'és' joins the numbers: refused" "$(refused)" "rc=$RC posts=$POSTS"
+# follow-up 2 (Viktor 48660): only a name bound to the number names its sender (INFO 1), the four mutant rows (INFO 2)
+for t in 'Patrik TG 6582 kérte, Balázs is látta' 'Patrik TG 6582: mehet, szólok Balázsnak' \
+         'Patrik TG 6537 és 6582, ezt Balázs is kérte' 'Patrik esztergomi útja TG 6582' \
+         'Patrik TG 6582, Balázs TG 6537' 'Patrik TG 6582 kérte. Balázs is látta' \
+         'Patrik TG 6582, Balázs TG: 6537' 'Patrik TG 6582, Balázs tg-csoportja'; do
+  text "$t"; run klodel radar
+  ok "r9c: a name not bound to the number leaves 6582 checked: refused ($t)" "$(refused)" "rc=$RC posts=$POSTS"
+done
+for t in 'Patrik szerint a TG 6582 Balázstól jött' 'Patrik TG 6582, Balázs írta' 'Patrik TG 6582 ( Bazsi )' \
+         'Patrik csoport TG 6582" hivatkozással FAIL-t adjon (Balázs üzenete), egy valódi menjen át'; do
+  text "$t"; run klodel radar
+  ok "r9c: a name bound to the number names the sender: sent ($t)" "$(sent)" "rc=$RC"
+done
+text 'Patrik TG 6537, (Balázs) TG 6585 kész'
+run klodel radar
+ok "r9c: a bound name with its own TG number keeps Patrik's checked (6537 Patrik): sent, no warning" "$([ "$(sent)" = 0 ] && [ "$(warned)" = 1 ] && echo 0 || echo 1)" "rc=$RC"
+python3 -c 'import sys; sys.stdout.write("Patrik TG 1 " * 20000)' > "$SANDBOX/long.txt"
+EL=$(python3 -I -c '
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location("g", sys.argv[1]); g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+t = open(sys.argv[2]).read(); t0 = time.time(); g.attributed_tgs(t); print("%.2f" % (time.time() - t0))' "$ROOT/scripts/lib/msg_gate.py" "$SANDBOX/long.txt")
+ok "r9c (LOW 1): a 240k-character line without punctuation is judged in under 2 s ($EL s)" "$(python3 -c "print(0 if $EL < 2 else 1)")"
 
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."

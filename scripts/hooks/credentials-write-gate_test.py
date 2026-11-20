@@ -120,6 +120,10 @@ BLOCK = [
     f"bash -c \"sh -c 'eval cp x ~/.claude/{C}'\"",   # three levels deep (Viktor 48557 INFO 1, C23)
     # fail-closed: an open quote while the text names the file
     f"cp a {C} 'x",
+    # round 4 (Viktor 48634 INFO 1): the surviving regex mutants' rows (R01, R11, R13)
+    f'sed -zi s/a/b/ {C}',
+    f'perl -lpi -e 1 {C}',
+    f'sed -ni s/a/b/p {C}',
 ]
 
 # every row must pass
@@ -156,6 +160,9 @@ ALLOW = [
     f'sed -n -e 1p {C}',
     f'sed -e s/i/I/ {C}',
     f'install --mode 600 a /x/',
+    f'install --suffix {C} a /x/b',            # an option's value is no destination (Viktor 48634 INFO 2, N28)
+    f'install --owner {C} a /x/b',
+    f'sed --posix -n 1p {C}',                  # a long option is no in-place cluster (Viktor 48634 INFO 1, R06)
     'cp a b',
     'echo credit > report.txt',
     # documented gap (NOT MODELLED): an interpreter's own open(..., 'w') passes

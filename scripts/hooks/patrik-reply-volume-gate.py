@@ -9,8 +9,10 @@ What blocks (exit 2), only for the MAIN agent's reply into one of the owner's ch
 elo_uzenet "privat" / "csoport", or MARVEEN_OWNER_CHATS):
   1. size: more than MAX_LINES non-empty lines or more than MAX_CHARS characters of text;
   2. volume: the agent already replied in this chat since the latest inbound message there (store/claudeclaw.db
-     conversation_log, by row id), unless the text has a line "KÉSZ-EREDMÉNY: <what>" -- a finished
-     deliverable (e.g. the images Patrik asked for) may follow the answer it was promised in.
+     conversation_log, by row id), unless a mark lets it through: KESZ-EREDMENY (a finished deliverable, e.g. the
+     images Patrik asked for, may follow the answer it was promised in), KIADAS-ELOTTE (below) or KIESES. KIESES
+     lifts this rule ON PURPOSE, on a calm day too (Viktor 48627 INFO 1): an outage report goes out at 5 minutes and
+     then every 15 (CLAUDE.md "Kiesés"), whether or not Patrik answered in between.
   3. count (Klodel 48564, hibanapló 2026-11-20: 13 replies to the team group between 09:40 and 09:58 UTC while Patrik
      was upset; rule 2 let each through, because an inbound message came between them): WHILE PATRIK IS UPSET -- a
      frustrated line of his within the last hour, the same test as patrik-mood-reply-gate.py (frustrated_line, loaded
@@ -89,7 +91,7 @@ def check(text, replies_since_inbound, escaped=False, recent=0, upset=None):
                 'Egy Patrik-üzenetre egy válasz. Kész anyag (pl. a kért képek) mehet, ha előtte jelölöd (a szövegbe '
                 'nem kerül): python3 -I scripts/reply-mark.py KESZ-EREDMENY --chat <chat_id> "<mi>"; kiadás ELŐTTI sor: '
                 'python3 -I scripts/reply-mark.py KIADAS-ELOTTE --chat <chat_id> "<Pulzus kiadás-üzenetének msg_id-je>"; '
-                'minden más a kártyára.')
+                'kiesés-jelzés: python3 -I scripts/reply-mark.py KIESES --chat <chat_id> "<mi áll>"; minden más a kártyára.')
     if upset is not None and recent >= WINDOW_MAX and not escaped:
         return (f'VÁLASZ-KAPU (Patrik TG 18129 "spammels", Klodel 48564): Patrik az elmúlt órában frusztrált volt '
                 f'(TG {upset}), és ebben a chatben az utolsó {WINDOW_S // 60} percben már {recent} válaszod ment ki '

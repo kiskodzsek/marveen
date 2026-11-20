@@ -61,6 +61,37 @@ class Laugh(unittest.TestCase):
     def test_plain_text_and_arrows_pass(self):
         self.assertEqual(mood.laugh_signals('Kész: PR #172 → main, 3 fájl. :)'), [])
 
+    def test_gestures_are_not_laughs(self):  # Viktor 48627 INFO 2: "köszi 🙏" from a frustrated Patrik's chat
+        for o in (0x1F645, 0x1F646, 0x1F647, 0x1F64B, 0x1F64C, 0x1F64D, 0x1F64E, 0x1F64F):
+            self.assertEqual(mood.laugh_signals('köszi ' + chr(o)), [], hex(o))
+
+    def test_monkeys_and_eye_roll_still_laugh(self):
+        for e in '🙈🙉🙊🙄':
+            self.assertEqual(mood.laugh_signals(e), [e], e)
+
+    def test_laugh_word_needs_its_own_start(self):  # Viktor 48627 A16: no word boundary would catch these
+        self.assertEqual(mood.laugh_signals('xlol, ahaha'), [])
+
+
+class Stems(unittest.TestCase):
+    def setUp(self):
+        self.rx = mood.frustration_rx()
+
+    def hit(self, text):
+        return bool(self.rx.search(mood.fold(text)))
+
+    def test_baszt_takes_the_imperative(self):  # Viktor 48627 LOW 1 (prop1.diff) and A30
+        for t in ('ne basztass', 'ne basztatsz', 'basztatod'):
+            self.assertTrue(self.hit(t), t)
+
+    def test_baszt_leaves_bastya(self):
+        for t in ('a bástya áll', 'bastion', 'Bazsi írta'):
+            self.assertFalse(self.hit(t), t)
+
+    def test_stem_only_from_the_start_of_a_word(self):  # Viktor 48627 A28
+        self.assertFalse(self.hit('a kepfasz nem jo'))
+        self.assertTrue(self.hit('ez faszság'))
+
 
 class Hook(unittest.TestCase):
     def setUp(self):
@@ -146,6 +177,35 @@ class Hook(unittest.TestCase):
         with open(os.path.join(self.root, 'store', 'frusztracio-szavak.txt'), 'w') as f:
             f.write('.*\n')
         self.said(PATRIK, 'köszi')
+        self.assertEqual(self.run_gate('😄')[0], 0)
+
+    def write_ext(self, data):
+        with open(os.path.join(self.root, 'store', 'frusztracio-szavak.txt'), 'wb') as f:
+            f.write(data)
+
+    def test_extension_comment_is_cut(self):  # Viktor 48627 A22: the "# ..." tail is not part of the stem
+        self.write_ext('pocsék # Patrik 11-20\n'.encode('utf-8'))
+        self.said(PATRIK, 'ez pocsék lett')
+        self.assertEqual(self.run_gate('😄')[0], 2)
+
+    def test_empty_extension_lines_add_nothing(self):  # Viktor 48627 A31: an empty stem would match every line
+        self.write_ext('\n   \n# csak komment\n\n'.encode('utf-8'))
+        self.said(PATRIK, 'köszi, jó lett')
+        self.assertEqual(self.run_gate('😄')[0], 0)
+
+    def test_non_utf8_extension_keeps_the_builtin_stems(self):  # Viktor 48627 A25
+        self.write_ext(b'katasztr\xf3fa\n')
+        self.said(PATRIK, 'idióta vagy')
+        self.assertEqual(self.run_gate('😄')[0], 2)
+
+    def test_frustration_only_in_the_rotated_log_counts(self):  # Viktor 48627 A23: the .1 files are read too
+        self.said(PATRIK, 'ez hulladék')
+        for n in ('inbound-evidence.jsonl', 'inbound-senders.jsonl'):
+            os.rename(os.path.join(self.state, n), os.path.join(self.state, n + '.1'))
+        self.assertEqual(self.run_gate('😄')[0], 2)
+
+    def test_future_timestamp_does_not_count(self):  # Viktor 48627 A02
+        self.said(PATRIK, 'idióta', minutes_ago=-10)
         self.assertEqual(self.run_gate('😄')[0], 0)
 
     def test_no_owner_id_passes(self):
