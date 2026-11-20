@@ -820,6 +820,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   if (agentGetsKeychainReadGate(name)) injectKeychainReadGate(existing)
   if (agentGetsKeychainWriteGate(name)) injectKeychainWriteGate(existing)
   if (agentGetsCredentialsWriteGate(name)) injectCredentialsWriteGate(existing)
+  if (agentGetsHexIdSourceGate(name)) injectHexIdSourceGate(existing)
   if (agentGetsRevocationNote(name)) injectRevocationNote(existing)
   if (agentGetsProdTreeWriteGate(name)) injectProdTreeWriteGate(existing)
   if (agentGetsTmuxKillGate(name)) injectTmuxKillGate(existing)
@@ -1790,6 +1791,51 @@ export function ensureCredentialsWriteGate(name: string): boolean {
   if (hookEntriesSettled(settings, 'PreToolUse', 'credentials-write-gate.py', injectCredentialsWriteGate)) return false
   if (isUnsafeHookCommand(command)) return false
   injectCredentialsWriteGate(settings)
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  return true
+}
+
+// Card 7b2f784f (retro 2026-11-20 R1, Dave (c); Viktor 48909): the hex-id source gate. A hex id (sha, blob, tree,
+// card id) in an outgoing message must have been SEEN by the sender before: in an earlier record of its own transcript
+// that it did not write itself (tool output, inbound message). Hibanapló 2026-11-12 15:00 (Kernel) and 2026-11-14
+// 20:09 (Dave): a sha256 written before the shasum ran. An ACCURACY guard, fail-open with a content-free line in
+// store/hex-gate-failopen.log when it cannot decide (the script header lists what it does not see). Every sub-agent;
+// the main agent carries the same hook in the repo-shipped project settings.
+export function agentGetsHexIdSourceGate(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+export function injectHexIdSourceGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'hex-id-source-gate.py'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  const entry = {
+    matcher: 'Bash',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  // One canonical entry: a prior one under another matcher or with a stale command is a gate that never fires.
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('hex-id-source-gate.py')),
+    entry,
+  ]
+}
+
+// Idempotent migration for the running fleet (same shape as ensureCredentialsWriteGate). Returns true if written; a
+// settings file that is not there is not created (a never-spawned agent gets the hook on its first spawn).
+export function ensureHexIdSourceGate(name: string): boolean {
+  if (!agentGetsHexIdSourceGate(name)) return false
+  const settingsPath = agentSettingsPath(name)
+  if (!existsSync(settingsPath)) return false
+  let settings: Record<string, unknown> = {}
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'hex-id-source-gate.py'))
+  if (hookEntriesSettled(settings, 'PreToolUse', 'hex-id-source-gate.py', injectHexIdSourceGate)) return false
+  if (isUnsafeHookCommand(command)) return false
+  injectHexIdSourceGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }
