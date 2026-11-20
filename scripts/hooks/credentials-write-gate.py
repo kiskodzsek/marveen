@@ -11,12 +11,14 @@ An ACCIDENT guard, not a boundary: every agent runs as the same macOS user. NOT 
   here-document a python3/node reads (`python3 - <<EOF`), and a script file's content;
 - a directory copy that carries the file DEEPER than its top level, a source the gate cannot resolve (a variable
   set outside, a glob, a relative path without the payload's cwd), `mv` or `ln` of a whole directory, `tar x`,
-  `unzip`, `cpio`, `pax`;
+  `unzip`, `cpio`, `pax`; a relative source after a `cd` in the same text (`cd T && cp -R cdir /x` resolves
+  against the payload's cwd), and `find ... -exec cp -R` (Viktor 48715 INFO 1);
 - a read redirected into a file (`cat ~/.claude/.credentials.json > x`): a copy out, but a read in form;
 - a name built beyond the text: a variable set outside the command, `$(...)` output, a glob or brace that does not
   contain "cred", `xargs`/`find -exec`/`parallel` running the writer, a path from a file;
-- writers not in the list below (scp, curl -O/--output-dir, wget without -O, a remote rsync target), wrappers and
-  options the parser does not know (sudo --user, zsh noglob, GNU abbreviated long options), names set by declare,
+- writers not in the list below (curl -O/--output-dir, wget without -O, a remote rsync target), wrappers and
+  options the parser does not know (sudo --user, zsh noglob, an abbreviated long option other than the recursive
+  ones below), names set by declare,
   local, typeset, a for loop or ${X:-...}, ANSI-C quoting (Viktor 48557 L2-L4: rare or deliberate forms);
 - a quoted `">"` word reads as a redirection (a rare false deny), and a shell reading stdin (`bash -s < f`) makes
   every echo/printf/cat text of the line a command text.
@@ -27,7 +29,7 @@ runs, the echo/printf/cat text of a text a shell reads on stdin -- the parser of
 here-document body or quoted text that no shell runs is data and passes), when a WRITE TARGET is named
 `.credentials.json` (any letter case: APFS is case-insensitive; a glob or brace that can match it counts):
 - a redirection target: `>`, `>>`, `>|`, `&>`, `N>`, `<>`;
-- cp, mv, ln, link, install, ditto, rsync (and the g-prefixed GNU names): the destination (the last operand, or
+- cp, mv, ln, link, install, ditto, rsync, scp (and the g-prefixed GNU names): the destination (the last operand, or
   `-t DIR` / `--target-directory=DIR`), and ANY `.credentials.json` source, whatever the destination (AUTH rule 2
   forbids the copy too, Viktor 48557 Q1): `cp`, `mv`, `ln -s` of the file anywhere, a backup `cp X{,.bak}`, a
   restore `cp X{.bak,}` (a one-level brace is read both ways, as the shell expands it and as one word; M1);
@@ -35,8 +37,9 @@ here-document body or quoted text that no shell runs is data and passes), when a
   in-place `-i` (a cluster such as -pi or -ni; perl -M... is no in-place): every operand; curl `-o`/`--output`,
   wget `-O`/`--output-document`, sort/base64 `-o`;
 - a RECURSIVE copy of a directory whose top level holds `.credentials.json` (card 7357e857, Viktor 48557 Q2): cp/gcp
-  with -R, -r or -a (also in a cluster) or --recursive/--archive, rsync with -r or -a (or the long forms), ditto
-  always; the source is resolved with ~, $HOME and the variables set earlier in the text, a relative one against the
+  with -R, -r or -a (also in a cluster) or --recursive/--archive, rsync with -r, -a or -d (or --recursive, --archive,
+  --dirs: -d copies a dir/ top level), scp with -r, ditto always; a long option also as a unique prefix of at least
+  three letters (`--recur`, `--arch`: getopt_long, Viktor 48715 LOW 1); the source is resolved with ~, $HOME and the variables set earlier in the text, a relative one against the
   payload's cwd, and only an existing file counts (the file name is not in the text: `cp -R ~/.claude /x`);
 - a text that cannot be split (an open quote) while it names `.credentials.json` (fail-closed).
 Passes: every read (ls, stat, test -f, `[ -e ]`, cat/grep/head without a redirection to it, shasum, find -name),
@@ -60,10 +63,10 @@ DENY_LOG = os.path.join(STATE, 'deny.log')
 PARSER_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'keychain-write-gate.py')
 NAME = '.credentials.json'
 
-COPY_LIKE = {'cp', 'gcp', 'mv', 'gmv', 'ln', 'gln', 'link', 'install', 'ginstall', 'ditto', 'rsync'}
+COPY_LIKE = {'cp', 'gcp', 'mv', 'gmv', 'ln', 'gln', 'link', 'install', 'ginstall', 'ditto', 'rsync', 'scp'}
 # Option letters that take a separate argument (BSD and GNU; `t` = GNU target directory, read as the destination).
 COPY_ARG = {'cp': set('St'), 'gcp': set('St'), 'mv': set('St'), 'gmv': set('St'), 'ln': set('St'), 'gln': set('St'),
-            'link': set(), 'install': set('BfgmoSt'), 'ginstall': set('gmoSt'), 'ditto': set(), 'rsync': set('eBfTM')}
+            'link': set(), 'install': set('BfgmoSt'), 'ginstall': set('gmoSt'), 'ditto': set(), 'rsync': set('eBfTM'), 'scp': set('cFiJloPSD')}
 COPY_LONG_ARG = {'ditto': {'--arch', '--bom'},
                  'rsync': {'--exclude', '--include', '--filter', '--rsh', '--temp-dir', '--exclude-from',
                            '--include-from', '--files-from', '--compare-dest', '--link-dest', '--copy-dest',
@@ -85,10 +88,13 @@ IN_PLACE = {'sed': re.compile(r'^-[nErsuzal]*[iI]|^--in-place'), 'gsed': re.comp
 
 # A recursive copy (Viktor 48557 Q2): the option that makes cp/gcp/rsync descend into a directory; ditto always does.
 RECURSIVE = {'cp': re.compile(r'^-[A-Za-z]*[Rra]'), 'gcp': re.compile(r'^-[A-Za-z]*[Rra]'),
-             'rsync': re.compile(r'^-[A-Za-z]*[ra]')}
+             'rsync': re.compile(r'^-[A-Za-z]*[rad]'), 'scp': re.compile(r'^-[A-Za-z]*r')}
 RECURSIVE_LONG = {'--recursive', '--archive'}
+# getopt_long takes a unique prefix (openrsync measured: --recur, --arch); rsync --dirs copies a dir/ top level.
+RECURSIVE_PREFIX = {'cp': ('--recursive', '--archive'), 'gcp': ('--recursive', '--archive'),
+                    'rsync': ('--recursive', '--archive', '--dirs')}
 # The pre-check lets a text through without "cred" when it runs a program that can copy a whole directory.
-COPY_HINT = re.compile(r'(?<![\w.-])(?:g?cp|rsync|ditto)(?![\w.-])')
+COPY_HINT = re.compile(r'(?<![\w.-])(?:g?cp|rsync|ditto|scp)(?![\w.-])')
 CWD = None  # the payload's cwd (main), for a relative source of a recursive copy
 
 _P = None
@@ -206,6 +212,8 @@ def judge_program(prog, rest, env):
         wide = [x for w in ops for x in brace_words(w)]  # `cp f{.bak,}` is two operands to cp (Viktor M1)
         recursive = prog == 'ditto' or any(
             w in RECURSIVE_LONG or (prog in RECURSIVE and not w.startswith('--') and RECURSIVE[prog].match(w))
+            or (w.startswith('--') and len(w.split('=', 1)[0]) >= 5
+                and any(l.startswith(w.split('=', 1)[0]) for l in RECURSIVE_PREFIX.get(prog, ())))
             for w in rest)
         if wide != ops:
             hit = judge_copy(prog, wide, tdir, env, recursive)
