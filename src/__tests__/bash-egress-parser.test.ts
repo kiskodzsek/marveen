@@ -33,8 +33,12 @@ import { MAIN_AGENT_ID } from '../config.js'
 // Card c97e4bdf: a size-relative time budget for the tests that catch a quadratic regression (2.7-3.6 s at idle while
 // the readings were lexed again). A fixed 2000 ms failed on a loaded machine (load 36 on 12 CPUs: 2172 and 3030 ms)
 // while the code was linear (0.55 and 0.83 s at idle). A quarter of the input runs first, then the full size; the test
-// fails only when the full run is over 2000 ms AND took more than 6 times the quarter (measured: linear 3.2-3.9,
-// also 3.6-3.9 under a uniform slowdown; a quadratic mutant 9.3-9.7), so a machine slow on both runs does not fail it. The inputs are built outside the timed part.
+// fails when the full run is over 2000 ms AND took more than 6 times the quarter (measured: linear 3.2-3.9, also
+// 3.6-3.9 under a uniform slowdown; a quadratic mutant 9.3-11.1), so a machine slow on both runs does not fail that
+// part. A ceiling stays under the hook's own budget whatever the ratio (Viktor 48788 LOW 1): the hook times out at
+// 10 s (src/web/agent-scaffold.ts) and a timeout ALLOWS, so a constant-factor regression (Viktor's mutant running
+// classify 5 times: ratio 3.4-4.5) must still fail; 8000 ms is 2.6x the loaded linear maximum measured (3030 ms). The inputs
+// are built outside the timed part.
 function expectLinearTime(label: string, build: (scale: number) => string, check: (cmd: string) => void) {
   const small = build(0.25)
   const big = build(1)
@@ -45,6 +49,7 @@ function expectLinearTime(label: string, build: (scale: number) => string, check
   check(big)
   const full = Date.now() - t0
   if (full >= 2000) expect(full / quarter, `${label}: ${full} ms, a quarter ${quarter} ms`).toBeLessThan(6)
+  expect(full, `${label}: ${full} ms, the ceiling under the 10 s hook budget`).toBeLessThan(8000)
 }
 
 // @ts-expect-error -- plain .mjs hook script, no types
