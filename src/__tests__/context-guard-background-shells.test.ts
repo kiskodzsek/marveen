@@ -50,7 +50,7 @@ vi.mock('../web/agent-process.js', () => ({
   isSessionReadyForPrompt: async () => false,
 }))
 
-const { guardPaneSignals, bgShellHold, withShellHold, BG_SHELL_WAIT_MAX_MS, BG_SHELL_CLEAR_IDLE_READINGS } = await import('../web/context-guard-runner.js')
+const { guardPaneSignals, bgShellHold, withShellHold, BG_SHELL_WAIT_MAX_MS, BG_SHELL_CLEAR_IDLE_READINGS, BG_SHELL_ZERO_DROP_MS } = await import('../web/context-guard-runner.js')
 
 const here = dirname(fileURLToPath(import.meta.url))
 const runner = readFileSync(join(here, '..', 'web', 'context-guard-runner.ts'), 'utf-8')
@@ -153,7 +153,7 @@ describe('bgShellHold: a 0 read while a message is typed does not drop the clock
   it('a 0 on a pane that is not idle keeps the clock and the streak, and never holds', () => {
     for (const zeroStreak of [0, 1]) {
       expect(bgShellHold(START, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: false, zeroStreak }))
-        .toEqual({ hold: false, sinceMs: START, capPassed: false, zeroStreak })
+        .toEqual({ hold: false, sinceMs: START, capPassed: false, zeroStreak, zeroSinceMs: NOW })
     }
   })
   it('the cap still counts from the first sight after the misread', () => {
@@ -169,10 +169,35 @@ describe('bgShellHold: a 0 read while a message is typed does not drop the clock
   it('one idle 0 keeps the clock; the second in a row drops it; a shell in between resets the streak', () => {
     expect(BG_SHELL_CLEAR_IDLE_READINGS).toBe(2)
     const one = bgShellHold(START, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: true, zeroStreak: 0 })
-    expect(one).toEqual({ hold: false, sinceMs: START, capPassed: false, zeroStreak: 1 })
+    expect(one).toEqual({ hold: false, sinceMs: START, capPassed: false, zeroStreak: 1, zeroSinceMs: NOW })
     expect(bgShellHold(START, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: true, zeroStreak: one.zeroStreak }))
       .toEqual({ hold: false, sinceMs: undefined, capPassed: false, zeroStreak: 0 })
     expect(bgShellHold(START, 1, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: true, zeroStreak: 1 }).zeroStreak).toBe(0)
+  })
+  // Viktor, round 1: a non-idle 0 must not keep a FINISHED stretch's clock for ever. Shell A, then a 55-minute
+  // busy (or unknown) turn with no shell, then a new shell B: B gets a fresh clock and the restart waits for it.
+  it('a long run of 0 readings on a pane that is not idle drops the clock: the next shell starts a fresh cap', () => {
+    let r = bgShellHold(undefined, 1, START)
+    let zeroSinceMs: number | undefined
+    let zeroStreak = 0
+    for (let t = START + 5 * 60_000; t <= START + 60 * 60_000; t += 5 * 60_000) {
+      r = bgShellHold(r.sinceMs, 0, t, BG_SHELL_WAIT_MAX_MS, { readIdle: false, zeroStreak, zeroSinceMs })
+      zeroStreak = r.zeroStreak
+      zeroSinceMs = r.zeroSinceMs
+    }
+    expect(r.sinceMs).toBeUndefined()
+    const b = bgShellHold(r.sinceMs, 1, START + 61 * 60_000, BG_SHELL_WAIT_MAX_MS, { readIdle: true, zeroStreak, zeroSinceMs })
+    expect(b).toEqual({ hold: true, sinceMs: START + 61 * 60_000, capPassed: false, zeroStreak: 0 })
+  })
+  it('a misread run shorter than BG_SHELL_ZERO_DROP_MS keeps the clock; at the bound it drops', () => {
+    expect(BG_SHELL_ZERO_DROP_MS).toBe(5 * 60_000)
+    const first = bgShellHold(START, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: false, zeroStreak: 0 })
+    const near = bgShellHold(first.sinceMs, 0, NOW + BG_SHELL_ZERO_DROP_MS - 1, BG_SHELL_WAIT_MAX_MS,
+      { readIdle: false, zeroStreak: first.zeroStreak, zeroSinceMs: first.zeroSinceMs })
+    expect(near.sinceMs).toBe(START)
+    const at = bgShellHold(first.sinceMs, 0, NOW + BG_SHELL_ZERO_DROP_MS, BG_SHELL_WAIT_MAX_MS,
+      { readIdle: false, zeroStreak: first.zeroStreak, zeroSinceMs: first.zeroSinceMs })
+    expect(at.sinceMs).toBeUndefined()
   })
   it('no clock running: a 0 stays a 0 (nothing to keep)', () => {
     expect(bgShellHold(undefined, 0, NOW, BG_SHELL_WAIT_MAX_MS, { readIdle: false, zeroStreak: 0 }))

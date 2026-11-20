@@ -190,6 +190,9 @@ const bgShellSince = new Map<string, number>()
 // Card d23bec1d: agent name -> idle readings of 0 shells in a row while a clock
 // runs (see BG_SHELL_CLEAR_IDLE_READINGS).
 const bgShellZeroStreak = new Map<string, number>()
+// Card d23bec1d round 2 (Viktor): agent name -> when the current run of 0
+// readings began (any pane state), see BG_SHELL_ZERO_DROP_MS.
+const bgShellZeroSince = new Map<string, number>()
 // Agents whose "background shell, restarts wait" / "wait cap passed" line is
 // already logged for the current stretch.
 const bgShellHoldLogged = new Set<string>()
@@ -218,6 +221,16 @@ export const BG_SHELL_WAIT_MAX_MS = 45 * 60_000
 export const BG_SHELL_CLEAR_IDLE_READINGS = 2
 
 /**
+ * Card d23bec1d round 2 (Viktor): a run of 0 readings in ANY pane state that lasts
+ * this long also drops the clock. The misread is short (a prompt being typed: 40 s
+ * on Dave at 18:25); without a bound a 0 on a busy or unknown pane kept the clock
+ * of a shell that really ended, and the next shell, started after a long busy
+ * turn, inherited a passed cap and got no wait at all. A misread longer than this
+ * restarts the clock, which only makes the restart wait longer.
+ */
+export const BG_SHELL_ZERO_DROP_MS = 5 * 60_000
+
+/**
  * Pure: whether a background shell keeps the restart back now. `sinceMs` is when
  * the current stretch of shells was first seen (undefined: none so far).
  * Returns the new `sinceMs` (undefined when no shell runs) and whether the cap
@@ -227,22 +240,24 @@ export const BG_SHELL_CLEAR_IDLE_READINGS = 2
  * after BG_SHELL_CLEAR_IDLE_READINGS idle readings of 0 in a row; a 0 on a pane
  * that is not idle (typing, busy, unknown) leaves the clock and the streak as
  * they are. A 0 never holds the restart back, so a shell that really ended costs
- * no wait; only the cap's start survives a misread. Without `reading` the old
- * rule holds (every 0 drops the clock).
+ * no wait; only the cap's start survives a misread. A run of 0 readings that
+ * began BG_SHELL_ZERO_DROP_MS ago or earlier (`zeroSinceMs`) drops the clock in
+ * any pane state. Without `reading` the old rule holds (every 0 drops the clock).
  */
 export function bgShellHold(
   sinceMs: number | undefined,
   bgShells: number,
   nowMs: number,
   maxMs: number = BG_SHELL_WAIT_MAX_MS,
-  reading?: { readIdle: boolean; zeroStreak: number },
-): { hold: boolean; sinceMs: number | undefined; capPassed: boolean; zeroStreak: number } {
+  reading?: { readIdle: boolean; zeroStreak: number; zeroSinceMs?: number },
+): { hold: boolean; sinceMs: number | undefined; capPassed: boolean; zeroStreak: number; zeroSinceMs?: number } {
   if (bgShells <= 0) {
     if (!reading || sinceMs === undefined) return { hold: false, sinceMs: undefined, capPassed: false, zeroStreak: 0 }
     const zeroStreak = reading.readIdle ? reading.zeroStreak + 1 : reading.zeroStreak
-    return zeroStreak >= BG_SHELL_CLEAR_IDLE_READINGS
+    const zeroSinceMs = reading.zeroSinceMs ?? nowMs
+    return zeroStreak >= BG_SHELL_CLEAR_IDLE_READINGS || nowMs - zeroSinceMs >= BG_SHELL_ZERO_DROP_MS
       ? { hold: false, sinceMs: undefined, capPassed: false, zeroStreak: 0 }
-      : { hold: false, sinceMs, capPassed: false, zeroStreak }
+      : { hold: false, sinceMs, capPassed: false, zeroStreak, zeroSinceMs }
   }
   const since = sinceMs ?? nowMs
   const capPassed = nowMs - since >= maxMs
@@ -735,17 +750,21 @@ async function checkAgent(name: string, nowMs: number, mode: CheckMode = 'sweep'
   // panel is already stripped by backgroundShellCount.
   const shell = pane !== null
     ? bgShellHold(bgShellSince.get(name), bgShells, nowMs, BG_SHELL_WAIT_MAX_MS,
-      { readIdle: paneState === 'idle', zeroStreak: bgShellZeroStreak.get(name) ?? 0 })
-    : { hold: false, sinceMs: bgShellSince.get(name), capPassed: false, zeroStreak: bgShellZeroStreak.get(name) ?? 0 }
+      { readIdle: paneState === 'idle', zeroStreak: bgShellZeroStreak.get(name) ?? 0, zeroSinceMs: bgShellZeroSince.get(name) })
+    : { hold: false, sinceMs: bgShellSince.get(name), capPassed: false, zeroStreak: bgShellZeroStreak.get(name) ?? 0,
+      zeroSinceMs: bgShellZeroSince.get(name) }
   if (pane !== null) {
     if (shell.sinceMs === undefined) {
       bgShellSince.delete(name)
       bgShellZeroStreak.delete(name)
+      bgShellZeroSince.delete(name)
       bgShellHoldLogged.delete(name)
       bgShellCapLogged.delete(name)
     } else {
       bgShellSince.set(name, shell.sinceMs)
       bgShellZeroStreak.set(name, shell.zeroStreak)
+      if (shell.zeroSinceMs === undefined) bgShellZeroSince.delete(name)
+      else bgShellZeroSince.set(name, shell.zeroSinceMs)
     }
   }
   if (shell.hold && agentGuardPaneState === 'idle' && !bgShellHoldLogged.has(name)) {
