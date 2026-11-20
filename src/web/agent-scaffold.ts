@@ -812,6 +812,7 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
     injectDigestProvenanceGate(existing)
   }
   if (agentGetsTelegramCopyGate(name)) injectTelegramCopyGate(existing)
+  if (agentGetsTimeClaimTelegramGate(name)) injectTimeClaimTelegramGate(existing)
   if (agentGetsDestructiveGate(name, profile)) injectDestructiveGate(existing)
   injectEgressGate(existing)
   if (agentGetsBashEgressParser(name)) injectBashEgressParser(existing)
@@ -1743,6 +1744,55 @@ export function ensureKeychainWriteGate(name: string): boolean {
   if (hookEntriesSettled(settings, 'PreToolUse', 'keychain-write-gate.py', injectKeychainWriteGate)) return false
   if (isUnsafeHookCommand(command)) return false
   injectKeychainWriteGate(settings)
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  return true
+}
+
+// Card 0faaa397 (Klodel 48360; hibanapló 2026-11-20 02:20, TG 6574/6577): the time-claim gate's placeholder rule
+// (a clock time whose minutes are a placeholder, e.g. "03:xx") also runs on the Telegram reply/edit_message text.
+// Only the placeholder rule: a future time in a Telegram message is a promise to the reader, not a claim about the
+// past. Every sub-agent; the main agent carries the same hook in the repo-shipped project settings.
+export function agentGetsTimeClaimTelegramGate(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+// Same dedupe discipline as injectTelegramCopyGate: only an entry carrying BOTH this script AND the Telegram matcher
+// is replaced. Every sub-agent already runs this script under "Write|Edit|MultiEdit|Bash" (hand-wired, a bash -c
+// existence guard); a basename-only filter would delete that entry and with it the gate on shared/*.md and on card
+// comments.
+export function injectTimeClaimTelegramGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'time-claim-gate.py'))
+  // Registration guard: a /tmp or missing path must never enter shared settings.
+  if (isUnsafeHookCommand(command)) return
+  const entry = {
+    matcher: TELEGRAM_COPY_GATE_MATCHER,
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  hooks.PreToolUse = [
+    ...prev.filter((e) => {
+      if (!JSON.stringify(e).includes('time-claim-gate.py')) return true
+      return (e as { matcher?: unknown })?.matcher !== TELEGRAM_COPY_GATE_MATCHER
+    }),
+    entry,
+  ]
+}
+
+// Idempotent migration for the running fleet (same shape as ensureKeychainWriteGate). Returns true if written; a
+// settings file that is not there is not created (a never-spawned agent gets the hook on its first spawn).
+export function ensureTimeClaimTelegramGate(name: string): boolean {
+  if (!agentGetsTimeClaimTelegramGate(name)) return false
+  const settingsPath = agentSettingsPath(name)
+  if (!existsSync(settingsPath)) return false
+  let settings: Record<string, unknown> = {}
+  try { settings = JSON.parse(readRegularFileSync(settingsPath)) } catch { return false }
+  const command = pythonHookCommand(join(PROJECT_ROOT, 'scripts', 'hooks', 'time-claim-gate.py'))
+  if (hookEntriesSettled(settings, 'PreToolUse', 'time-claim-gate.py', injectTimeClaimTelegramGate)) return false
+  if (isUnsafeHookCommand(command)) return false
+  injectTimeClaimTelegramGate(settings)
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }

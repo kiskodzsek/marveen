@@ -19,7 +19,7 @@ import { json } from './web/http-helpers.js'
 import { detectLanIp } from './web/network-info.js'
 import { AGENTS_BASE_DIR, listAgentNames, listAllAgentNames } from './web/agent-config.js'
 import { ensureRotationHeartbeatTask } from './web/claude-rotation-heartbeat.js'
-import { ensureAgentHooks, ensureProjectRootInClaudeMd, ensureAgentStalenessHook, ensureAgentProvenanceHook, ensureEgressGate, ensureBashEgressDeny, ensureBashEgressParser, ensureImageQuarantineGate, ensureKeychainReadGate, ensureKeychainWriteGate, ensureProdTreeWriteGate, ensureTmuxKillGate, ensureBigReadGate, ensureRevocationNote, ensureNoHookKillSwitch, ensureGovernanceGateCommands, ensureTelegramCopyGate, ensureQuarantineReader, watchEgressAllowlistForReaderRender, ensureDefaultScheduledTasks, agentSettingsPath, ensureAutonomySection, ensureSkillsPathTrapSection, ensureSystemDirectiveAuthSection, ensureAgentIdHeaderSection, ensureMemorySearchLabelSection, ensureFleetAuthSection, ensureEvidenceSection, ensureMcpListChannelSection, ensureMessageCloseSection } from './web/agent-scaffold.js'
+import { ensureAgentHooks, ensureProjectRootInClaudeMd, ensureAgentStalenessHook, ensureAgentProvenanceHook, ensureEgressGate, ensureBashEgressDeny, ensureBashEgressParser, ensureImageQuarantineGate, ensureKeychainReadGate, ensureKeychainWriteGate, ensureTimeClaimTelegramGate, ensureProdTreeWriteGate, ensureTmuxKillGate, ensureBigReadGate, ensureRevocationNote, ensureNoHookKillSwitch, ensureGovernanceGateCommands, ensureTelegramCopyGate, ensureQuarantineReader, watchEgressAllowlistForReaderRender, ensureDefaultScheduledTasks, agentSettingsPath, ensureAutonomySection, ensureSkillsPathTrapSection, ensureSystemDirectiveAuthSection, ensureAgentIdHeaderSection, ensureMemorySearchLabelSection, ensureFleetAuthSection, ensureEvidenceSection, ensureMcpListChannelSection, ensureMessageCloseSection } from './web/agent-scaffold.js'
 import { shouldRegisterHooks, pruneStaleHooksFromSettingsFile } from './web/hook-registration-guard.js'
 import { mainAgentConfigDirIfSeparate } from './web/agent-process.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
@@ -646,6 +646,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
       const quarantinePatched: string[] = []
       const keychainPatched: string[] = []
       const keychainWritePatched: string[] = []
+      const timeClaimTgPatched: string[] = []
       const prodTreeGatePatched: string[] = []
       const tmuxKillGatePatched: string[] = []
       const bigReadGatePatched: string[] = []
@@ -688,6 +689,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
         if (ensureImageQuarantineGate(agentName)) quarantinePatched.push(agentName)
         if (ensureKeychainReadGate(agentName)) keychainPatched.push(agentName)
         if (ensureKeychainWriteGate(agentName)) keychainWritePatched.push(agentName)
+        if (ensureTimeClaimTelegramGate(agentName)) timeClaimTgPatched.push(agentName)
         if (ensureProdTreeWriteGate(agentName)) prodTreeGatePatched.push(agentName)
         if (ensureTmuxKillGate(agentName)) tmuxKillGatePatched.push(agentName)
         if (ensureBigReadGate(agentName)) bigReadGatePatched.push(agentName)
@@ -722,6 +724,7 @@ setInterval(() => { try { sweepExpiredDesktopLock() } catch { /* never kill the 
       if (quarantinePatched.length) logger.info({ patched: quarantinePatched }, 'image-quarantine-gate hook wired onto every file-opening tool in agent settings.json (IMAGESAFETY1020)')
       if (keychainPatched.length) logger.info({ patched: keychainPatched }, 'keychain-read-gate hook wired onto Bash in agent settings.json (c1921b55)')
       if (keychainWritePatched.length) logger.info({ patched: keychainWritePatched }, 'keychain-write-gate hook wired onto Bash in agent settings.json (759161e3)')
+      if (timeClaimTgPatched.length) logger.info({ patched: timeClaimTgPatched }, 'time-claim-gate hook wired onto Telegram reply/edit_message in agent settings.json (0faaa397)')
       if (prodTreeGatePatched.length) logger.info({ patched: prodTreeGatePatched }, 'prod-tree-write-gate hook wired onto Write|Edit|MultiEdit|NotebookEdit|Bash in agent settings.json (11c4a5fe)')
       if (tmuxKillGatePatched.length) logger.info({ patched: tmuxKillGatePatched }, 'tmux-kill-gate hook wired onto Bash in agent settings.json (ad7edaec)')
       if (bigReadGatePatched.length) logger.info({ patched: bigReadGatePatched }, 'big-read-gate hook wired onto Read in agent settings.json (b073a7e3)')

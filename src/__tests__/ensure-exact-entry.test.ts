@@ -13,6 +13,7 @@ import {
   ensureImageQuarantineGate,
   ensureKeychainReadGate,
   ensureKeychainWriteGate,
+  ensureTimeClaimTelegramGate,
   ensureProdTreeWriteGate,
   ensureRevocationNote,
   ensureTelegramCopyGate,
@@ -57,6 +58,7 @@ const GATES: Array<{ marker: string; event: 'PreToolUse' | 'PostToolUse'; ensure
   { marker: 'image-quarantine-gate.mjs', event: 'PreToolUse', ensure: () => ensureImageQuarantineGate(TEST_AGENT) },
   { marker: 'keychain-read-gate.py', event: 'PreToolUse', ensure: () => ensureKeychainReadGate(TEST_AGENT) },
   { marker: 'keychain-write-gate.py', event: 'PreToolUse', ensure: () => ensureKeychainWriteGate(TEST_AGENT) },
+  { marker: 'time-claim-gate.py', event: 'PreToolUse', ensure: () => ensureTimeClaimTelegramGate(TEST_AGENT) },
   { marker: 'prod-tree-write-gate.py', event: 'PreToolUse', ensure: () => ensureProdTreeWriteGate(TEST_AGENT) },
   { marker: 'revocation-evening-note.py', event: 'PostToolUse', ensure: () => ensureRevocationNote(TEST_AGENT) },
   { marker: 'email-send-gate.mjs', event: 'PreToolUse', ensure: () => ensureGovernanceGateCommands(TEST_AGENT, GATED) },
@@ -102,8 +104,10 @@ describe.each(GATES)('$marker: the ensure accepts only the exact entry', (g) => 
     edit(g, (e) => { e.matcher = 'Read' })
     expect(g.ensure()).toBe(true)
     // The Telegram copy-gate injector keeps an entry of its script under another matcher (Viktor 42916 INFO 2):
-    // the canonical entry is added next to it. Every other gate ends with exactly the canonical entry.
-    if (g.marker === 'outgoing-copy-gate.py') expect(mine(read(), g.event, g.marker)).toContainEqual(canonical)
+    // the canonical entry is added next to it. So does the time-claim Telegram injector (card 0faaa397: every
+    // sub-agent runs the same script, hand-wired, on Write|Edit|MultiEdit|Bash). Every other gate ends with exactly
+    // the canonical entry.
+    if (g.marker === 'outgoing-copy-gate.py' || g.marker === 'time-claim-gate.py') expect(mine(read(), g.event, g.marker)).toContainEqual(canonical)
     else expect(mine(read(), g.event, g.marker)).toEqual([canonical])
     expect(g.ensure()).toBe(false)
   })

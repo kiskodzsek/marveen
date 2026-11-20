@@ -617,6 +617,65 @@ def block_text_names_only_the_token(root):
     return code == 2 and secretish not in err and '23:40' in err
 
 
+# ---- Telegram reply / edit_message (Klodel 48360, hibanapló 2026-11-20 02:20): placeholder rule only ----
+
+TG_REPLY = 'mcp__plugin_telegram_telegram__reply'
+TG_EDIT = 'mcp__plugin_telegram_telegram__edit_message'
+# Verbatim lines of the two group messages that went out with a placeholder (TG 6577 and 6574, the ledger).
+TG_6577 = ('Kint van (Pulzus mérte, 02:2x előtt 0 látogatóval): a Köszönjük és a Marabello oldalán a Google már '
+           'látja a szállítást, és hogy személyre szabott termék lévén nincs visszaküldés; az ár nem változott.')
+TG_6574 = 'Kint van (Pulzus mérte, 23:1x): a riasztó mostantól mind az 5 háttérfolyamatnál tudja, melyik hívott.'
+
+
+def tg(root, text, tool=TG_REPLY, **kw):
+    return run(root['hook'], tool, {'chat_id': '-1001', 'text': text}, **kw)
+
+
+@case
+def block_telegram_reply_placeholder_verbatim(root):
+    c1, _, e1 = tg(root, TG_6577, now='02:21')
+    c2, _, e2 = tg(root, TG_6574, now='23:20')
+    c3, _, _ = tg(root, 'első sor\nkész, 10:xx', tool=TG_EDIT)
+    c4, _, _ = tg(root, 'mérve 19:3X', tool=TG_EDIT)
+    # Viktor 48385 LOW: MarkdownV2 italic and underline, and an underscore right after the placeholder
+    md = [tg(root, t)[0] for t in ('kész _02:2x_', 'kész __02:2x__', 'mérve 02:2x_ előtt')]
+    return (c1, c2, c3, c4) == (2, 2, 2, 2) and md == [2, 2, 2] and '"02:2x"' in e1 and '"23:1x"' in e2
+
+
+@case
+def block_telegram_text_does_not_offer_now_token(root):
+    # nothing replaces {{NOW}} in a Telegram message: the block text says so instead of offering it
+    code, _, err = tg(root, TG_6577, now='02:21')
+    return code == 2 and 'Telegramban a {{NOW}} nem' in err and 'napi naplóban írd' not in err
+
+
+@case
+def allow_telegram_measured_time_plan_and_future(root):
+    # a measured time, a plan ("23:00 után") and even a future measured time pass: rule 2 is off on the chat path
+    texts = ['Kint van (Pulzus mérte, 02:20): rendben.', '23:00 után élesítünk.', 'mérve 23:59, kész',
+             'Holnap 08:00-kor indul.', 'Arány 16:9, 2x gyorsabb', '',
+             # Viktor 48385 INFO: the other rules stay off on this path: a measured time 1-15 minutes ahead (send
+             # rule), a typed daily-log heading and a "content": line (heading and card rules), and a backslash-u
+             # escape (no JSON unescaping of a chat text)
+             'mérve 02:28, kész', '"content": "## 02:20 -- Téma"', '"content":"02:28 ok"',
+             'kész 10:\\u0078\\u0078 (idézet egy logból)', 'kész 02:2xa']
+    return all(tg(root, t, now='02:21')[0] == 0 for t in texts) and all(
+        tg(root, t, tool=TG_EDIT, now='02:21')[0] == 0 for t in texts)
+
+
+@case
+def telegram_scope_is_the_text_of_reply_and_edit(root):
+    h = root['hook']
+    # a text that is not a str is out of scope, not an internal error (the error log stays empty)
+    errlog = os.path.join(os.path.dirname(h), 'tg-scope-err.log')
+    return (run(h, 'mcp__plugin_telegram_telegram__react', {'chat_id': '-1', 'emoji': 'x', 'text': '10:xx'})[0] == 0
+            and run(h, TG_REPLY, {'chat_id': '-1', 'text': 'ok', 'files': ['/tmp/10:xx.png']})[0] == 0
+            and run(h, TG_REPLY, {'chat_id': '-1', 'text': ['10:xx']}, errlog=errlog)[0] == 0
+            and run(h, TG_EDIT, {'chat_id': '-1', 'text': {'a': '10:xx'}}, errlog=errlog)[0] == 0
+            and not os.path.exists(errlog)
+            and run(h, 'mcp__plugin_discord_discord__reply', {'chat_id': '-1', 'text': '10:xx'})[0] == 0)
+
+
 def main():
     failed = []
     for fn in CASES:
