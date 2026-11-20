@@ -598,9 +598,14 @@ def time_reason(text):
 
 # Rule 9. Matched on fold(text); the numbers after "TG" (a list with / , and a range's two ends). The words between
 # the name and "TG" may name the chat: "csoport" (a group, chat id < 0) or "privat" (a private chat, chat id > 0).
+# A second number may repeat "TG" or join with + ("TG 6537 és TG 6582", "TG 6537 + 6582"), and "TG: n", "TG-n" count
+# (Viktor 48596 LOW 1, his tested form).
 PATRIK_ATTR = re.compile(_B + r'patrik(?![a-z0-9])([^\n.!?]{0,40}?)' + _B
-                         + r'tg\s*#?\s*(\d+(?:\s*(?:/|,|-|es)\s*\d+)*)')
-OTHER_PERSON = re.compile(_B + r'(?:balazs|eszter)(?![a-z0-9])')
+                         + r'tg\s*[:#-]?\s*(\d+(?:\s*(?:/|,|-|es|\+)\s*(?:tg\s*#?\s*)?\d+)*)')
+# Another person, by first name, nickname or surname, with any suffix ("Balázsé", "Bazsi", "Tasnádi"; Viktor 48596 LOW 2).
+OTHER_PERSON = re.compile(_B + r'(?:balazs|bazsi|tasnadi|eszter)[a-z]*')
+SENTENCE_TAIL = re.compile(r'[^\n.!?]*')
+NEXT_TG = re.compile(_B + r'tg\s*[:#-]?\s*\d')
 GROUP_WORD = re.compile(_B + r'csoport')
 PRIVATE_WORD = re.compile(_B + r'privat')
 NOT_PATRIK = re.compile(_B + r'nem\s+[("\']?$')
@@ -618,6 +623,12 @@ def attributed_tgs(text):
         between = m.group(1)
         # "Balazs (nem Patrik), csoport TG ..." names the other sender: a negated name is no attribution
         if OTHER_PERSON.search(between) or NOT_PATRIK.search(folded[max(0, m.start() - 8):m.start()]):
+            continue
+        # "Patrik szerint a TG 6582 (Balázs) üzenet", "a TG 6582 viszont Balázsé": another person after the number, in
+        # the same sentence, names its sender -- unless a TG number of their own follows ("Patrik TG 6537, Balázs TG
+        # 6582": that name belongs to 6582, and 6537 stays checked).
+        tail = SENTENCE_TAIL.match(folded, m.end()).group(0)
+        if OTHER_PERSON.search(tail) and not NEXT_TG.search(tail):
             continue
         scope = 'group' if GROUP_WORD.search(between) else 'private' if PRIVATE_WORD.search(between) else None
         for n in re.findall(r'\d+', m.group(2)):

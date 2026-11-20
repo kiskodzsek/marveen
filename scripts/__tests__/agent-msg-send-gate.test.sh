@@ -94,18 +94,22 @@ PY2
 
 # Synthetic sender log for rule 9: user 111 = Patrik (his private chat is 111), 8366648365 = Balázs, chat -222 the
 # group. 6582: Balázs in the group, now. 6585: Balázs, now. 6400: Balázs, 5 days ago. 6537: Patrik in the group.
-# 18717: Patrik in private. 6000: Patrik in private AND Balázs in the group (one id, two chats).
+# 18717: Patrik in private. 6000: Patrik in private AND Balázs in the group (one id, two chats). 6591: Balázs in his
+# private chat. 6592: Balázs, logged a day in the future. 6593: Balázs in the group, only in the rotated .1.
 mkdir -p "$SANDBOX/tgstate"
 python3 - "$SANDBOX/tgstate/inbound-senders.jsonl" <<'PY9'
 import json, sys, time
 now = int(time.time() * 1000); day = 86400000
 rows = [('-222', 6582, '8366648365', now), ('-222', 6585, '8366648365', now), ('-222', 6400, '8366648365', now - 5 * day),
         ('-222', 6537, '111', now), ('111', 18717, '111', now), ('111', 6000, '111', now - 40 * day),
-        ('-222', 6000, '8366648365', now)]
+        ('-222', 6000, '8366648365', now), ('8366648365', 6591, '8366648365', now),
+        ('-222', 6592, '8366648365', now + day)]
 with open(sys.argv[1], 'w') as f:
     for c, m, u, at in rows:
         f.write(json.dumps({'at': at, 'chat_id': c, 'message_id': str(m), 'user_id': u}) + '\n')
     f.write('not json\n')
+with open(sys.argv[1] + '.1', 'w') as f:
+    f.write(json.dumps({'at': now, 'chat_id': '-222', 'message_id': '6593', 'user_id': '8366648365'}) + '\n')
 PY9
 
 # run <from> <to> ; the text comes from $SANDBOX/text (STDIN mode, so 20 000 characters fit)
@@ -828,6 +832,57 @@ chmod 600 "$SANDBOX/tgbad/inbound-senders.jsonl"
 text 'Patrik TG 18717 kérése'
 GATE_ENV="MARVEEN_OWNER_PRIVATE_CHAT= MARVEEN_MSG_GATE_PROJEKTEK=$SANDBOX/no-such.json" run klodel radar
 ok "r9: no owner id: sent with a warning" "$([ "$(sent)" = 0 ] && [ "$(warned)" = 0 ] && echo 0 || echo 1)" "rc=$RC"
+
+# --- rule 9 follow-up (Viktor 48596): LOW 1 more numbers and forms, LOW 2 a name after the number, INFO 1 rows ---
+text 'Patrik TG 6537 és TG 6582 alapján'
+run klodel radar
+ok "r9b: a second TG number is checked too (6582 Balázs): refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Patrik TG 6537 + 6585 alapján'
+run klodel radar
+ok "r9b: a + joined number is checked: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Patrik TG: 6582 szerint'
+run klodel radar
+ok "r9b: 'TG: n' is an attribution: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Patrik TG-6582 szerint'
+run klodel radar
+ok "r9b: 'TG-n' is an attribution: refused" "$(refused)" "rc=$RC posts=$POSTS"
+text 'Patrik TG 6537, Balázs TG 6582: kész'
+run klodel radar
+ok "r9b: a name with its own TG number after Patrik's: sent, no warning" "$([ "$(sent)" = 0 ] && [ "$(warned)" = 1 ] && echo 0 || echo 1)" "rc=$RC"
+for t in 'Patrik szerint a TG 6582 (Balázs) üzenet jó' 'Patrik kérte; a TG 6582 viszont Balázsé' \
+         'Patrik nem írta a TG 6582-t, Balázs igen' 'Patrik válaszolt Bazsi TG 6582-es kérdésére' \
+         'Patrik és Tasnádi (TG 6582)'; do
+  text "$t"; run klodel radar
+  ok "r9b: another person named after the number or by nickname/surname: sent ($t)" "$(sent)" "rc=$RC"
+done
+text 'Patrik csoport TG 6591 kérése'
+run klodel radar
+ok "r9b (M02): csoport, the id only in a private row: sent with a warning" "$([ "$(sent)" = 0 ] && [ "$(warned)" = 0 ] && echo 0 || echo 1)" "rc=$RC"
+text "Patrik kérte, $(printf 'x%.0s' $(seq 60)) TG 6582"
+run klodel radar
+ok "r9b (M06): more than 40 characters between: no attribution, sent" "$(sent)" "rc=$RC"
+text 'Patrik kérte. TG 6582 rendben'
+run klodel radar
+ok "r9b (M07): a sentence end between: sent" "$(sent)" "rc=$RC"
+text 'Patrik TG 6592 szerint'
+run klodel radar
+ok "r9b (M09): a row logged after now does not count: sent with a warning" "$([ "$(sent)" = 0 ] && [ "$(warned)" = 0 ] && echo 0 || echo 1)" "rc=$RC"
+text 'Patrik TG 6593 szerint'
+run klodel radar
+ok "r9b (M10): a row only in the rotated .1: refused" "$(refused)" "rc=$RC posts=$POSTS"
+printf '{not json' > "$SANDBOX/projektek-bad.json"
+text 'Patrik TG 18717 kérése'
+GATE_ENV="MARVEEN_OWNER_PRIVATE_CHAT= MARVEEN_MSG_GATE_PROJEKTEK=$SANDBOX/projektek-bad.json" run klodel radar
+ok "r9b (M13): an unreadable projektek.json: exit 4, no POST" "$([ "$RC" = "4" ] && [ "$POSTS" = "0" ] && echo 0 || echo 1)" "rc=$RC posts=$POSTS"
+text 'Patrikkal egyeztetve TG 6582'
+run klodel radar
+ok "r9b (M19): 'Patrikkal' is no attribution: sent" "$(sent)" "rc=$RC"
+text 'Nem "Patrik" TG 6582'
+run klodel radar
+ok "r9b (M26): a negated quoted name: sent" "$(sent)" "rc=$RC"
+text 'Patrik TG 6537 és 6582'
+run klodel radar
+ok "r9b (M28): 'és' joins the numbers: refused" "$(refused)" "rc=$RC posts=$POSTS"
 
 # --- a plain message is untouched ---
 text "Kész: PR #172, 'idézőjel' és \"dupla\"."
