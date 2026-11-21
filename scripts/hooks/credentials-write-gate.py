@@ -311,8 +311,11 @@ def judge(cmd, depth=0):
             if p in ('echo', 'printf', 'cat'):
                 nested.append(' '.join(r))
                 nested.extend(r)
-    for body, first, last in heredocs:
-        if any(P.program(w)[0] in P.SHELLS for w in cmds[first:last]):
+    shell_line = {}  # (first, last) -> a shell runs on that line; judged once per line, not once per here-document
+    for body, first, last in heredocs:  # (card adf8df6e, Viktor: 'cat <<E; ' x 4000 took 11 s, the hook limit is 10 s)
+        if (first, last) not in shell_line:
+            shell_line[(first, last)] = any(P.program(w)[0] in P.SHELLS for w in cmds[first:last])
+        if shell_line[(first, last)]:
             nested.append(body)
     if depth < 3:
         for text in nested:

@@ -124,6 +124,10 @@ BLOCK = [
     'bash -o pipefail -c "s3curity delete-generic-password -s y"',
     'eval s3curity delete-generic-password -s y',
     "bash <<'EOF'\ns3curity delete-generic-password -s y\nEOF",
+    # card adf8df6e: the shell's here-document is judged once per line; many here-documents on the line before it,
+    # and a shell line after a line without one (a per-line, not a per-command, verdict)
+    "cat <<E; " * 50 + "bash <<'X'\n" + "E\n" * 50 + "s3curity delete-generic-password -s y\nX",
+    "cat <<'E'\nnote\nE\nbash <<'X'\ns3curity delete-generic-password -s y\nX",
     "cat <<'EOF' | sh\necho hi\ns3curity delete-generic-password -s y\nEOF",
     "zsh <<-EOF\n\ts3curity delete-generic-password -s y\n\tEOF\necho after",
     # fail-closed: an open quote with a write subcommand word in the text
@@ -229,6 +233,7 @@ ALLOW = [
     'grep -rn -iE "vault (set|add|put)|s3curity add-generic-password" scripts/x.mjs scripts/y.sh 2>/dev/null | head -5',
     "python3 - <<'EOF'\ns = 'a fix in Mastra\\'s changelog'\nprint('s3curity add-generic-password')\nEOF",
     "cat > notes.md <<'EOF'\ns3curity delete-generic-password -s y\nEOF\necho done",
+    "bash <<'X'\necho hi\nX\ncat <<'E'\ns3curity delete-generic-password -s y\nE",  # adf8df6e: the cat line runs no shell
     'git commit -m "docs: s3curity add-generic-password needs an absolute keychain path"',
     "python3 - <<'PY'\nx = \"it's\ny = 's3curity delete-generic-password'\nPY",
     'bash -c "echo ok" && grep "s3curity delete-generic-password" f',
@@ -292,6 +297,26 @@ def main():
             print(f'FAIL: reason "is under" expected: {raw!r} -> {hit}')
             fails += 1
     extra = 0
+
+    # card adf8df6e: 'cat <<E; ' x 4000 took 5.8 s (quadratic: the shell check ran over the whole line once per
+    # here-document; the hook limit is 10 s). One verdict per line: linear.
+    import time
+    for n in (4000, 8000):
+        extra += 1
+        cmd = fix('cat <<E; ' * n + 'echo s3curity add-generic-password')
+        t = time.monotonic()
+        hit = mod.judge(cmd)
+        took = time.monotonic() - t
+        if took > 2.0 or hit:
+            print(f'FAIL: timing: {n} here-documents ({len(cmd) // 1024} KB) took {took:.2f} s (limit 2 s), {hit!r}')
+            fails += 1
+    extra += 1
+    cmd = fix('cat <<E; ' * 4000 + 'bash <<X\n' + 'E\n' * 4000 + 's3curity delete-generic-password -s y\nX')
+    t = time.monotonic()
+    hit = mod.judge(cmd)
+    if time.monotonic() - t > 2.0 or not hit:
+        print(f'FAIL: timing: 4000 here-documents and a shell line must block within 2 s, {hit!r}')
+        fails += 1
 
     # Viktor 48329 P and K2, hermetic: a keychain directory of our own (FAKE) stands in for ~/Library/Keychains
     fake = os.path.join(TMP, 'FakeKeychains')
