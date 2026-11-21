@@ -2278,6 +2278,62 @@ def script_cases():
             # a group right before the pipe is read whole
             ('(echo ./measure.py) | bash', d),
             ('{ echo ./measure.py; } | bash', d),
+            # card 0196e1ee (Viktor 43793 LOW/INFO 2, each passed main 749bffd9 and bash ran the fed script,
+            # work/0196e1ee): a glob or a brace in the fed text, a path run directly, a reader PIPE_SHELL_RX did not see,
+            # a fed text that makes its words itself, and a loop / if / case / function feeding the pipe
+            ('echo ./measur?.py | bash', d),
+            ("echo './meas*.py' | bash", d),
+            ('echo ./{measure,zz}.py | bash', d),
+            ('echo ./m[e]asure.py | bash', d),
+            ('./measur?.py', d),
+            ('./meas*.py x', d),
+            ('./{measure,zz}.py', d),
+            ('echo ./measure.py | /usr/bin/env bash', d),
+            ('echo ./measure.py | env -i FOO=1 bash', d),
+            ('echo ./measure.py | b"as"h', d),
+            ("echo ./measure.py | 'ba'sh", d),
+            ('echo ./measure.py | { bash; }', d),
+            ('echo ./measure.py | ( bash )', d),
+            ('echo ./measure.py | (bash)', d),
+            ('echo ./measure.py | if true; then bash; fi', d),
+            ('echo ./measure.py | while read l; do bash $l; done', d),
+            ('echo ./measure.py | while read l; do $l; done', d),
+            ('echo ./measure.py | eval "$(cat)"', d),
+            ('echo ./measure.py | { read c; $c; }', d),
+            ('echo ./measure.py | { read c; eval $c; }', d),
+            ('echo python3 $(echo measure.py) | bash', d),
+            ('echo python3 ${F:-measure.py} | bash', d),
+            ('echo python3 `echo measure.py` | bash', d),
+            ("echo '`./measure.py`' | bash", d),
+            ('f() { echo ./measure.py; }; f | bash', d),
+            ('function f { echo ./measure.py; }; f | bash', d),
+            ('for f in ./measure.py; do echo $f; done | bash', d),
+            ('while true; do echo ./measure.py; break; done | bash', d),
+            ('if true; then echo ./measure.py; fi | bash', d),
+            # m6 word-cut-off survived: the feeder's first word ends at the | too (no blank before it)
+            ('f() { echo ./measure.py; }; f|bash', d),
+            ('for x in ./measure.py; do echo $x; done|bash', d),
+            ('case 1 in 1) echo ./measure.py;; esac | bash', d),
+            # a heredoc body a shell reads is the shell's own code: its pipes, readers and direct words are live
+            ("bash <<'EOF'\necho ./meas*.py | bash\nEOF", d),
+            ("bash <<'EOF'\necho python3 ${F:-measure.py} | bash\nEOF", d),
+            ("bash <<'EOF'\n./meas*.py\nEOF", d),
+            ("bash <<'EOF'\necho ./measure.py | { bash; }\nEOF", d),
+            # the live mark is per pipe: a quoted | from the same start must not hide the live one
+            ("echo python3 ${F:-measure.py} | bash -c 'a | bash'", d),
+            # fleet replay 2: a function call right after a heredoc's terminator line (bash ran the fed script), and
+            # what the replay-2 fix must not take: a pattern at a code position next to a data body / a process
+            # substitution, a pattern a $NAME makes that a data body also has
+            ("f() { echo ./measure.py; }; cat <<'E'\nhi\nE\nf | bash", d),
+            ("python3 - <<'PY'\n/**\nPY\npython3 -c ''; ./meas*.py", d),
+            ("python3 - <<'PY'\n./meas*.py\nPY\npython3 -c ''; X=./meas; ${X}*.py", d),
+            ("X=./meas; python3 - <<'PY'\n./meas*.py\nPY\npython3 -c ''; $X*.py", d),
+            ('diff <(cat stat.py) x; ./meas*.py', d),
+            ('case a in a) ./meas*.py;; esac', d),
+            ('$(true) ./meas*.py', d),  # a $( ) closer is no <( ): the empty word leaves the pattern the command
+            ("python3 - <<'PY'\n./meas*.py\nPY\npython3 -c ''; ./meas*.py", d),
+            ("bash <<'EOF'\n./meas*.py\nEOF\npython3 -c ''", d),
+            ("f() { echo ./measure.py; }; export -f f; bash <<'EOF'\nf | bash\nEOF", d),  # a shell body: no clamp
             # card 3bf9a741 (all passed main 915e2f70, bash ran each; work/3bf9a741/probe2.py): xargs puts the words it
             # reads on stdin into the argv of the interpreter it runs
             ('echo measure.py | xargs python3', d),
@@ -3226,6 +3282,38 @@ def script_cases():
             ('echo hi | bash ./measure.py.txt', d),
             ('(echo ./measure.py); echo hi | bash', d),  # the group ends an earlier command, not this pipeline
             ('{ echo ./measure.py; }; echo hi | bash', d),
+            # card 0196e1ee: a reader of the pipe that runs no code from it, a glob into a non-shell, a quoted direct path
+            # (the file named so does not exist), a function / loop that prints a harmless line, a substitution into a
+            # non-shell, a benign script fed to a $var reader
+            ('git ls-files | while read f; do wc -l "$f"; done', d),
+            ('echo ./measure.py | while read l; do echo "$l"; done', d),
+            ('echo hi | if true; then cat; fi', d),
+            ("echo './meas*.py' | grep py", d),
+            ("'./meas*.py'", d),
+            ('f() { echo hi; }; f | bash', d),
+            ('for f in a b; do echo $f; done | grep a', d),
+            ('echo $(date) | grep x', d),
+            ('echo ./stat.py | while read l; do $l; done', d),
+            ('echo ./stat?.py | bash', d),
+            # card 0196e1ee (fleet replay 11-21: 113 + 52 allow->block): a | or a direct word in a heredoc body or
+            # a quote is data of whatever reads it; the unread rule and the globs are for the command's own code
+            ("python3 - <<'PY'\ns = '''\n/**\n * doc\n */\n'''\nPY", d),
+            ("python3 - <<'PY'\nx = 'echo \"$(cat)\" | bash'\nPY", d),
+            ("python3 - <<'PY'\nx = 'echo ./meas*.py | bash'\nPY", d),
+            ("echo 'a $(b) | bash'", d),
+            # m6 readers-prose survived: a reader | (while read, read; eval) in a quote is prose, not a stop
+            ("git commit -m 'note: echo ./measure.py | while read f; do bash; done'", d),
+            ("printf '%s\\n' 'echo ./measure.py | read x; eval \"$x\"'", d),
+            ("cat > n.md <<'EOF'\nrun: echo ${F:-x} | bash\nEOF", d),
+            # fleet replay 2 (6 allow->block on c7f0c8c4): a payload mark that cuts the lexing of the text the
+            # direct-pattern test reads (the command's own heredoc bodies decide), a body pipeline that walked to the
+            # outer command's words, a word right after a process substitution (diff's argument)
+            ("python3 - <<'PY'\ns = '''\n/**\n * doc\n */\n'''\nPY\npython3 -c ''", d),
+            ("python3 - <<'PY'\n/**\nPY\npython3 -c 'print(1)'", d),
+            ("cd scripts; python3 - <<'PY'\nx = '\\''')|sh'\nPY", d),
+            ("cd scripts; python3 - <<'PY'\nrows = ['a\\'', ')|sh']\nPY", d),
+            ('diff <(cat stat.py) ./meas*.py', d),
+            ('cmp <(echo a) >(cat) ./meas*.py', d),
             # card 3bf9a741: a fed word is data where the line written out reads it as data, and no file of its own
             ('echo measure.py | xargs grep -c find', d),
             ('echo measure.py | xargs wc -l', d),
@@ -4050,6 +4138,9 @@ def script_cases():
             ('(x)|bash ' * 10000, 2), ('echo a ' + '| bash ' * 20000, 0), ('(' * 5000 + 'a' + ')|bash' * 5000, 0),
             ('true;' + ' ' * 50000 + '} | bash' * 5000, 0), ('{ a; }|bash;' * 10000, 0), ('echo ' + 'a ' * 20000 + '| bash', 0),
             ('echo ' + ' '.join('a%d' % i for i in range(5000)) + ' | bash', 2),
+            # card 0196e1ee: a pipeline's first word and the functions the text defines are read once (one search
+            # of the whole text per pipe and per name ran `echo 'x' | bash; ` x 20 000 into the 6 s watchdog)
+            ('; '.join('a%d | bash' % i for i in range(20000)), 2), ('f() { echo a; }; ' + 'f | bash; ' * 20000, 0),
             # card 3bf9a741: past XARGS_MAX xargs that run no plain data command, XARGS_MAX_WORDS fed words of one,
             # XARGS_MAX_CHARS of lines, or XARGS_SCAN_MAX xargs of any kind it blocks (xargs-unread), fast; inside
             # them, many pipelines before one xargs stay fast; an xargs of a plain data command (XARGS_DATA) is not
