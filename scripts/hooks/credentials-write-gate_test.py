@@ -115,6 +115,10 @@ BLOCK = [
     f'eval cp a {C}',
     f'echo "$(cp a {C})"',
     f"bash <<'EOF'\ncp a {C}\nEOF",
+    # card adf8df6e: the shell's here-document is judged once per line; many here-documents on the line before it,
+    # and a shell line after a line without one (a per-line, not a per-command, verdict)
+    "cat <<E; " * 50 + "bash <<'X'\n" + "E\n" * 50 + f"cp a {C}\nX",
+    f"cat <<'E'\nnote\nE\nbash <<'X'\ncp a {C}\nX",
     f"echo 'cp a {C}' | bash",
     f'true && (cp a {C})',
     f"bash -c \"sh -c 'eval cp x ~/.claude/{C}'\"",   # three levels deep (Viktor 48557 INFO 1, C23)
@@ -154,6 +158,7 @@ ALLOW = [
     f'rsync -a --exclude {C} src/ dst/',
     f'rsync -a --exclude={C} src/ dst/',
     f"cat > notes.md <<'EOF'\ncp a ~/.claude/{C}\necho x > {C}\nEOF",
+    f"bash <<'X'\necho hi\nX\ncat <<'E'\ncp a {C}\nE",   # card adf8df6e: a shell line before; the cat line runs no shell
     f'bash scripts/agent-msg.sh kernel klodel "never cp x > {C}"',
     f'curl -O https://example.invalid/{C}.txt',
     f'sed -n 1p {C}',
@@ -223,6 +228,26 @@ def main():
     p = subprocess.run([sys.executable, '-I', HOOK], input=payload, capture_output=True, text=True, timeout=20)
     if p.returncode != 2 or 'CREDENTIALS-WRITE-GATE error' not in p.stderr:
         print(f'FAIL: an exception in the gate must block (exit 2), rc={p.returncode} {p.stderr[-120:]!r}')
+        fails += 1
+
+    # card adf8df6e (Viktor, este-gate round 2): 'cat <<E; ' x 4000 + a name (36 KB) took 11 s, the hook limit is 10 s;
+    # the shell check ran over the whole line once per here-document. One verdict per line: linear.
+    import time
+    for n in (4000, 8000):
+        extra += 1
+        cmd = 'cat <<E; ' * n + f'jq length {C}'
+        t = time.monotonic()
+        why = mod.judge(cmd)
+        took = time.monotonic() - t
+        if took > 2.0 or why:
+            print(f'FAIL timing: {n} here-documents ({len(cmd) // 1024} KB) took {took:.2f} s (limit 2 s), verdict {why!r}')
+            fails += 1
+    extra += 1
+    cmd = 'cat <<E; ' * 4000 + f'bash <<X\n' + 'E\n' * 4000 + f'cp a {C}\nX'
+    t = time.monotonic()
+    why = mod.judge(cmd)
+    if time.monotonic() - t > 2.0 or not why:
+        print(f'FAIL timing: 4000 here-documents and a shell line must block within 2 s, verdict {why!r}')
         fails += 1
 
     # card 7357e857 (Viktor 48557 Q2): a recursive copy of a directory whose top level holds the file. Synthetic tree
