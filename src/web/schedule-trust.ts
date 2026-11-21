@@ -23,6 +23,17 @@
 //   - The runner executes no bash for an untrusted task: a command task is not
 //     run, a preCheck is not run (its stdout would land in the task body).
 //
+// Known limits (card c16cbdcd, the stored alert key and the daily summary; see alertScheduleTrust):
+//   - A new task directory whose frontmatter name copies an already alerted task, with the same content, stays
+//     quiet: the name comes from the frontmatter (Viktor I10b). The trust row has the same key (an old class).
+//   - If the alerted row cannot be deleted on an approval or a token-side write (a DB error), the next untrusted
+//     episode with the same key stays quiet (I15).
+//   - An untrusted task that fires only before TRUST_DIGEST_HOUR gets no daily summary; its single alert went
+//     out (I20). A task not seen for 8 days drops out of the summary; a task deleted from the files (not through
+//     the API DELETE, which forgets it) or turned trusted without a fire or a listing stays in it until then.
+//   - Whoever writes the DB can pre-seed a key and silence a single alert, and two dashboards at once may alert
+//     the same key twice (the same Unix user can approve outright; see the residual below).
+//
 // The legacy baseline runs once (db.ts schedule_trust_baseline). Deleting a
 // trust ROW only lowers trust; deleting the BASELINE row and restarting would
 // re-baseline every task at its current hash -- the same capability as writing
