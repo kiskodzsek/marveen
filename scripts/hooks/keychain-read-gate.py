@@ -19,6 +19,10 @@ text, a nested `xargs -I{} sh -c 'echo {} | xargs K'`) is not read for its fed w
 list | xargs`, a redirect `xargs < list`, `-a list`), a computed name (find, an ls glob, tr), a shell expansion in a
 fed word (a default param `${X:-..}`, a variable, a brace), a sh -c script reaching its words through $0 or bash -c
 through "$@", an xargs whose name is split by quotes ('xa'rgs), and a while read loop's output piped into an xargs.
+A script run through a variable's value (card 10624d73 r2, Viktor 49241; old, LOW, main too): the gate reads the
+value as written, the shell expands it, so a glob in the value (X=e*.py, X=[e]vil.py), a brace expansion at the
+use, a value split on a space (a quoted value with a space, an escaped space), an escaped semicolon in the value
+(X=notes.py\\;z), and an export whose name is split by quotes ("HO"ME=...) can run another script than the one read.
 
 What blocks (exit 2): a `security` call in command position whose subcommand reads or exports secrets:
   find-generic-password, find-internet-password, dump-keychain, export,
