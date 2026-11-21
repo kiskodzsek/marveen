@@ -17,16 +17,32 @@ nem a csend. A halasztás legfeljebb MAX_DEFER_DAYS napra szól: távolabbi dát
 (Viktor L1, df41a35c), így egy elírt vagy szándékos "fókusz 2099-12-31" nem némít el végleg egy kártyát.
 Az assignee csak ágensnév-alakú lehet (Viktor L2): a kimeneti sor a Klodel-promptba és az
 agent-msg hívásba kerül, ezért a más alakú assignee kártyái kimaradnak (stderr-re egy darabszám). Ennek a fájlnak az élő példánya az ops/idle-check.py (symlink ide).
+
+IDLEBG1121 (Klodel 49636): an idle-looking agent that waits for its own background run is still printed, but
+marked: "<agent> <n> hatter-futas <mark>" (and "dave-szabad 0 hatter-futas <mark>"). On 11-21 10:42-11:51 Dave was
+reported "dave 2" in 5 rounds while his mutation run (bg-run.py, 00c714ea-r4) was going, and every round had to be
+checked by hand. <mark> is the lowest pid of a live background runner of that agent (bg-run.py or detach.py whose
+script path, or else whose working folder, is under agents/<agent>/), else "shell-<N>" when the pane's last lines
+say "N shell(s) still running" (the Claude Code status of a finished turn: "✻ Baked for 34s · done 10:46 AM · 2
+shells still running"). Only digits reach the line, never a command line. A ps or lsof error means no mark (the old
+line), never a dropped line. The other lines are unchanged.
 """
 import collections
 import datetime
 import json
+import os
 import re
 import subprocess
 import sys
 import urllib.request
 
 API = 'http://localhost:3420'
+ROOT = '/Users/klodel/marveen'
+BG_RUNNERS = ('bg-run.py', 'detach.py')
+# Only flag options without an argument may stand before the runner script; anything else (-c, -m, -W x, -X x,
+# a lone '-' for stdin) means the runner name is not the script (Viktor 49637, independent probe).
+_PY_FLAGS = re.compile(r'-[BEIOPSbdqsuv]+|-[WX].+')  # flags (also grouped, -IB), or -W/-X with the value glued on
+_PY_RE = re.compile(r'python[0-9.]*', re.IGNORECASE)
 TOKEN_PATH = '/Users/klodel/marveen/store/.dashboard-token'
 
 # Dave a saját seatjén fut, és nem állhat (Patrik TG 2307, 2026-10-14 15:18): ha üres a panelje,
@@ -77,8 +93,14 @@ def counted(card):
         or (card.get('status') == 'planned' and card.get('priority') in ('urgent', 'high')))
 
 
-def idle_report(cards, pane_idle, last_comment, today):
-    """The output lines. `last_comment(card_id)` may raise: then the card counts (fail toward the old behaviour)."""
+def idle_report(cards, pane_idle, last_comment, today, bg_wait=None):
+    """The output lines. `last_comment(card_id)` may raise: then the card counts (fail toward the old behaviour).
+    `bg_wait(agent)`: None, or the mark of a background run the agent waits for (IDLEBG1121); asked only for an
+    agent that is printed."""
+    def mark(agent):
+        m = bg_wait(agent) if bg_wait else None
+        return f' hatter-futas {m}' if m else ''
+
     by_agent = collections.defaultdict(list)
     for c in cards:
         if counted(c):
@@ -106,10 +128,10 @@ def idle_report(cards, pane_idle, last_comment, today):
                 n += 1
         if n:
             open_agents.add(agent)
-            lines.append(f'{agent} {n}')
+            lines.append(f'{agent} {n}{mark(agent)}')
     for agent in ALWAYS_BUSY:
         if agent not in open_agents and pane_idle(agent):
-            lines.append(f'{agent}-szabad 0')
+            lines.append(f'{agent}-szabad 0{mark(agent)}')
     return lines
 
 
@@ -141,13 +163,91 @@ def pane_text_idle(pane):
     return any(l.strip() == '❯' for l in lines[-4:])
 
 
-def pane_idle(agent):
+def capture_pane(agent):
     try:
-        pane = subprocess.run(['tmux', 'capture-pane', '-p', '-t', f'agent-{agent}'],
+        return subprocess.run(['tmux', 'capture-pane', '-p', '-t', f'agent-{agent}'],
                               capture_output=True, text=True, timeout=5).stdout
     except Exception:
-        return False
-    return pane_text_idle(pane)
+        return ''
+
+
+def pane_idle(agent):
+    return pane_text_idle(capture_pane(agent))
+
+
+_SHELLS_RE = re.compile(r'(?<!\d)(\d{1,3}) shells? still running\b')
+
+
+def pane_shells_running(pane):
+    """N from "N shell(s) still running" in the pane's last BUSY_TAIL non-empty lines, else 0."""
+    tail = [l for l in (pane or '').splitlines() if l.strip()][-BUSY_TAIL:]
+    found = [int(m.group(1)) for l in tail for m in _SHELLS_RE.finditer(l)]
+    return max(found) if found else 0
+
+
+def _agent_of(path):
+    """The <agent> of a path under ROOT/agents/<agent>/, else None."""
+    rel = os.path.relpath(os.path.normpath(path), os.path.join(ROOT, 'agents')) if os.path.isabs(path) else '..'
+    name = rel.split(os.sep)[0]
+    return name if not rel.startswith('..') and os.sep in rel and _AGENT_RE.fullmatch(name) else None
+
+
+def _cwd(pid):
+    try:
+        # absolute: /usr/sbin is not on the agents' PATH (a bare 'lsof' failed there on 11-21)
+        out = subprocess.run(['/usr/sbin/lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return ''
+    return next((l[1:] for l in out.splitlines() if l.startswith('n')), '')
+
+
+def bg_runs(ps_text, cwd=_cwd):
+    """{agent: [pid, ...]} of the live background runners in `ps -A -o pid=,command=` output."""
+    runs = collections.defaultdict(list)
+    for line in ps_text.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        if not _PY_RE.fullmatch(os.path.basename(parts[1])):
+            continue  # only a runner script started by a Python interpreter, not e.g. `grep bg-run.py`
+        args = parts[2:]
+        while args and _PY_FLAGS.fullmatch(args[0]):
+            args = args[1:]
+        script = args[0] if args else ''
+        if script.startswith('-') or os.path.basename(script) not in BG_RUNNERS:
+            continue
+        pid = int(parts[0])
+        agent = _agent_of(script) if os.path.isabs(script) else _agent_of(os.path.join(cwd(pid), script))
+        if agent:
+            runs[agent].append(pid)
+    return runs
+
+
+def make_bg_wait(capture=capture_pane, ps=None, cwd=_cwd):
+    """bg_wait(agent) for idle_report: the lowest runner pid, else "shell-<N>" from the pane, else None."""
+    cache = []
+
+    def runs():
+        if not cache:
+            try:
+                text = ps() if ps else subprocess.run(['ps', '-A', '-o', 'pid=,command='], capture_output=True,
+                                                      text=True, timeout=5).stdout
+                cache.append(bg_runs(text, cwd))
+            except Exception:
+                cache.append({})
+        return cache[0]
+
+    def bg_wait(agent):
+        try:  # any error here means no mark (the old line), never a lost report
+            pids = runs().get(agent)
+            if pids:
+                return str(min(pids))
+            n = pane_shells_running(capture(agent))
+        except Exception:
+            return None
+        return f'shell-{n}' if n else None
+    return bg_wait
 
 
 def _get(path, token, timeout):
@@ -166,7 +266,7 @@ def main():
         rows = rows.get('comments', rows) if isinstance(rows, dict) else rows
         return max(rows, key=lambda r: r.get('id', 0)).get('content', '') if rows else ''
 
-    for line in idle_report(cards, pane_idle, last_comment, datetime.date.today()):
+    for line in idle_report(cards, pane_idle, last_comment, datetime.date.today(), make_bg_wait()):
         print(line)
 
 

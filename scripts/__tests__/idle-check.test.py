@@ -17,6 +17,13 @@ Pinned cases:
   9. IDLEPANE1108: a pane with a running spinner or token counter is busy even when the
      "esc to interrupt" tail is cut off and the empty "❯" box shows; a finished turn
      ("Sautéed for 35s · done", "Churned for 2m 3s") is idle (Klodel 32781)
+ 10. IDLEBG1121 (Klodel 49636): an idle agent waiting for its background run keeps its line with
+     " hatter-futas <pid>" (a bg-run.py / detach.py under agents/<agent>/, by script path or working
+     folder) or " hatter-futas shell-<N>" (the pane's "N shell(s) still running"); the pid wins;
+     no mark without either, on a ps error, or for a runner outside agents/<agent>/; only printed
+     agents are asked; the lines without a mark keep their old shape; the runner counts only as the
+     script of a python[0-9.]* interpreter after argument-free flags, and a throwing pane capture
+     means no mark, not a lost report (Viktor 49638)
 """
 import contextlib
 import datetime
@@ -173,6 +180,93 @@ class PaneTextIdle(unittest.TestCase):
     def test_no_prompt_or_empty_is_not_idle(self):
         self.assertFalse(ic.pane_text_idle(""))
         self.assertFalse(ic.pane_text_idle("valami fut, prompt nélkül\n"))
+
+PY = '/opt/homebrew/Cellar/python@3.15/3.15.0/Frameworks/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python'
+R = '/Users/klodel/marveen'
+DONE_SHELLS = "kész.\n✻ Baked for 34s · done 10:46 AM · 2 shells still running\n" + BOX
+
+
+class BackgroundWait(unittest.TestCase):
+    def test_shells_from_the_pane(self):
+        self.assertEqual(ic.pane_shells_running(DONE_SHELLS), 2)
+        self.assertEqual(ic.pane_shells_running("x\n  1 shell still running\n" + BOX), 1)
+        self.assertEqual(ic.pane_shells_running("✻ Churned for 2m 3s\n" + BOX), 0)
+        self.assertEqual(ic.pane_shells_running(""), 0)
+        old = "✻ Baked for 3s · done · 4 shells still running\n" + "sor\n" * ic.BUSY_TAIL + BOX
+        self.assertEqual(ic.pane_shells_running(old), 0)  # scrolled out of the tail: not the current state
+
+    def test_runners_by_script_path_and_by_cwd(self):
+        ps = '\n'.join([
+            f' 55973 {PY} -I {R}/agents/dave/bin/bg-run.py {R}/agents/dave/work/r4/bg.log bash x',
+            f' 66633 {PY} -I bin/bg-run.py {R}/agents/dave/work/r5/bg.log bash y',
+            f'   901 /usr/bin/python3 -I -B {R}/agents/kernel/tools/detach.py /tmp/l -- npm test',
+            f'   902 /usr/bin/python3 -I bin/bg-run.py /tmp/l sleep 9',             # cwd outside agents/
+            f'   903 /usr/bin/python3 /tmp/bg-run.py /tmp/l sleep 9',               # script outside agents/
+            f'   904 /usr/bin/grep -n bg-run.py {R}/agents/dave/x',                 # not a Python runner
+            f'   905 /usr/bin/python3 {R}/agents/../store/bg-run.py l',             # .. out of agents/
+            f'   906 /usr/bin/python3 {R}/agents/Bad Name/bg-run.py l',
+            f'   907 /usr/bin/python3 {R}/agents/viktor/work/other.py bg-run.py',  # the runner is an argument
+            'garbage line', '',
+        ])
+        cwds = {66633: f'{R}/agents/dave', 902: '/private/tmp', 904: f'{R}/agents/dave', 907: f'{R}/agents/viktor'}
+        runs = ic.bg_runs(ps, cwd=lambda pid: cwds.get(pid, ''))
+        self.assertEqual(dict(runs), {'dave': [55973, 66633], 'kernel': [901]})
+
+    def test_runner_only_as_the_script_of_a_real_interpreter(self):
+        v = f'{R}/agents/viktor/bin/bg-run.py'
+        ps = '\n'.join([
+            f' 801 /usr/bin/python3 -W {v} /tmp/evil.py',       # the runner is -W's argument (Viktor 49638)
+            f' 802 /usr/bin/python3 - {v}',                     # stdin script, the runner is an argument
+            f' 803 /usr/bin/python3 -c {v}',                    # -c code
+            f' 804 /tmp/python-not-an-interpreter {v}',         # not a Python interpreter name
+            f' 805 /usr/bin/python3 -m {v}',                    # -m module
+            f' 811 /usr/bin/python3.12 -IB {R}/agents/dave/bin/bg-run.py l x',   # grouped flags
+            f' 812 {PY} -Werror -I {R}/agents/dave/bin/bg-run.py l y',          # -W value glued on
+        ])
+        self.assertEqual(dict(ic.bg_runs(ps, cwd=lambda pid: '')), {'dave': [811, 812]})
+
+    def test_throwing_capture_is_no_mark_not_a_lost_report(self):
+        def capture(agent):
+            raise RuntimeError('tmux gone')
+        w = ic.make_bg_wait(capture=capture, ps=lambda: '', cwd=lambda pid: '')
+        self.assertIsNone(w('bella'))
+        out = ic.idle_report([card('1', 'bella')], lambda a: a == 'bella', lambda cid: '', TODAY, w)
+        self.assertEqual(out, ['bella 1'])
+
+    def test_mark_pid_wins_then_shells_then_none(self):
+        ps = f' 700 {PY} -I {R}/agents/dave/bin/bg-run.py l x\n 650 {PY} -I {R}/agents/dave/bin/bg-run.py l y\n'
+        panes = {'dave': DONE_SHELLS, 'mira': DONE_SHELLS, 'bella': BOX}
+        w = ic.make_bg_wait(capture=lambda a: panes.get(a, ''), ps=lambda: ps, cwd=lambda pid: '')
+        self.assertEqual(w('dave'), '650')
+        self.assertEqual(w('mira'), 'shell-2')
+        self.assertIsNone(w('bella'))
+
+    def test_ps_error_means_no_pid_mark(self):
+        def boom():
+            raise OSError('ps down')
+        w = ic.make_bg_wait(capture=lambda a: DONE_SHELLS if a == 'dave' else BOX, ps=boom, cwd=lambda pid: '')
+        self.assertEqual(w('dave'), 'shell-2')
+        self.assertIsNone(w('bella'))
+
+    def test_report_lines(self):
+        cards = [card('1', 'dave', status='in_progress'), card('2', 'dave'), card('3', 'bella'),
+                 card('4', 'mira')]
+        asked = []
+        marks = {'dave': '55973', 'mira': 'shell-1'}
+
+        def bg_wait(agent):
+            asked.append(agent)
+            return marks.get(agent)
+        out = ic.idle_report(cards, lambda a: a in {'dave', 'bella'}, lambda cid: '', TODAY, bg_wait)
+        self.assertEqual(out, ['bella 1', 'dave 2 hatter-futas 55973'])
+        self.assertEqual(sorted(asked), ['bella', 'dave'])  # mira is busy: never asked
+        self.assertEqual(ic.idle_report(cards, lambda a: a in {'dave', 'bella'}, lambda cid: '', TODAY),
+                         ['bella 1', 'dave 2'])  # without bg_wait: the old lines
+
+    def test_dave_free_is_marked_too(self):
+        out = ic.idle_report([], lambda a: a == 'dave', lambda cid: '', TODAY, lambda a: 'shell-3')
+        self.assertEqual(out, ['dave-szabad 0 hatter-futas shell-3'])
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=1)
