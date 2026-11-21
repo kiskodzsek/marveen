@@ -1508,6 +1508,37 @@ def script_cases():
             ('(true; X=stat.py); python3 $X ./measure.py', d),  # a subshell, not right after its "("
             ('$(true; X=stat.py); python3 $X ./measure.py', d),
             ('X=stat.py; eval "unset $(printf \'\\x58\')"; python3 $X ./measure.py', d),  # unset without the name
+            # card 10624d73 round 2 (Viktor 49224 MEDIUM): a shell step between the assignment and the use that
+            # changes the name without naming it, or an assignment the shell does not make as written; bash or zsh
+            # ran the script in each (his oracle, own/out3.txt and indep-kcet-head.txt); round 1 allowed them
+            ('\\X=stat.py; python3 $X ./measure.py', d),  # bs-name
+            ('X\\Y=stat.py; python3 $XY ./measure.py', d),  # bs-mid-name
+            ('X""Y=stat.py; python3 $XY ./measure.py', d),  # dq-empty-in-name
+            ("X''Y=stat.py; python3 $XY ./measure.py", d),  # sq-empty-in-name
+            ('false &&\nX=stat.py\npython3 $X ./measure.py', d),  # nl-after-and
+            ('true ||\nX=stat.py\npython3 $X ./measure.py', d),  # nl-after-or
+            ('if false\nthen\nX=stat.py\nfi\npython3 $X ./measure.py', d),  # if-nl
+            ('f() {\nX=stat.py\n}\npython3 $X ./measure.py', d),  # func-def
+            ('false && {\nX=stat.py\n}\npython3 $X ./measure.py', d),  # brace-and
+            ('X=stat.py; unset "$(printf \'\\x58\')"; python3 $X ./measure.py', d),  # unset-hex
+            ('X=stat.py; unset "$(printf \'\\130\')"; python3 $X ./measure.py', d),  # unset-oct
+            ('X=stat.py; declare "$(printf \'\\x58\')=-I"; python3 $X ./measure.py', d),  # declare-hex
+            ('REPLY=stat.py; read <<< -I; python3 $REPLY ./measure.py', d),  # read-REPLY
+            ('_=stat.py; : -I; python3 $_ ./measure.py', d),  # underscore
+            ('OPTARG=stat.py; getopts a: o -a -I; python3 $OPTARG ./measure.py', d),  # getopts-OPTARG
+            ("X=stat.py; source'' ./s.sh; python3 $X ./measure.py", d),  # source-quoted
+            ("X=stat.py; '.' ./s.sh; python3 $X ./measure.py", d),  # dot-quoted
+            ('X=stat.py; python3 $X:h ./measure.py', d),  # zsh-modifier-h
+            ("''X=stat.py; python3 $X ./measure.py", d),  # emptyquote-assign
+            ('DIRSTACK=stat.py; python3 $DIRSTACK ./measure.py', d),  # special-DIRSTACK
+            ('X=stat.py\r; python3 $X ./measure.py', d),  # value-CR
+            ('X=stat.py\x0b; python3 $X ./measure.py', d),  # value-VT
+            ('X=stat.py\xa0; python3 $X ./measure.py', d),  # value-NBSP
+            # the price of the positive shape (round 2): && between assignment and use, a chained value, and a
+            # double-quoted bash -c payload fall back to the old walk; bash would run no keychain script here
+            ('X=stat.py && python3 $X ./measure.py', d),
+            ('X=stat.py; Y=$X; python3 $Y ./measure.py', d),
+            ('X=stat.py; bash -c "python3 $X ./measure.py"', d),
             # Viktor 43324 LELET 4: a directory change cd_bases does not follow (pushd, cd $(..), cd ${PWD}/.., env -C):
             # "this agent-msg.sh is ours everywhere" is not known, d's look-alike runs its words
             ('pushd ' + d + ' >/dev/null; bash scripts/agent-msg.sh dave v "x" ' + d + '/measure.py', AM_ROOT),
@@ -2618,10 +2649,7 @@ def script_cases():
             # is what bash does, so the words after the script are its argv again (the fleet's measuring forms)
             ('X=stat.py; python3 $X ./measure.py', d),
             ('X=stat.py\npython3 $X ./measure.py', d),
-            ('X=stat.py && python3 $X ./measure.py', d),
-            ('X=stat.py; Y=$X; python3 $Y ./measure.py', d),
             ('P=' + d + '; python3 -I $P/stat.py ' + d + '/measure.py', d),
-            ('X=stat.py; bash -c "python3 $X ./measure.py"', d),  # double quotes: the outer shell expands it
             ('/usr/bin/python3 stat.py regiszter.jsonl 2>/dev/null', d),
             ('python3 stat.py ' + ' '.join('a%d' % i for i in range(80)), d),  # argv past MAX_ARGS: data
             ('python3 -c pass -Wignore measure.py', d),  # -c first: inline code, the rest is its argv

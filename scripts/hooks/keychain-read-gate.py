@@ -2423,6 +2423,56 @@ def expansion_trusted(text, keep=()):
             if r < n and cls[r] == 'c' and (text[r] == '|' and text[r + 1:r + 2] != '|' or
                                              text[r] == '&' and text[r + 1:r + 2] != '&'):
                 return False
+    return _trust_shape(text, lx, uses)
+
+
+# card 10624d73 r1 (Viktor): names the shell sets or refuses by itself (readonly, self-changing, set by a builtin
+# without being named: read, getopts, mapfile, the last word of a command)
+TRUST_NAMES_OFF = frozenset(('_', 'REPLY', 'OPTARG', 'OPTIND', 'MAPFILE', 'UID', 'EUID', 'PPID', 'RANDOM', 'SRANDOM',
+                             'SECONDS', 'LINENO', 'BASHPID', 'EPOCHSECONDS', 'EPOCHREALTIME', 'BASHOPTS', 'SHELLOPTS',
+                             'PWD', 'OLDPWD', 'HISTCMD', 'GROUPS', 'FUNCNAME', 'IFS', 'COLUMNS', 'LINES',
+                             'DIRSTACK', 'PIPESTATUS', 'SHLVL', 'HOSTNAME', 'HOME', 'PATH', 'CDPATH'))
+# r1 (Viktor): the raw text of an assignment-only command is plain unquoted ASCII name=value words, so the value the
+# lexer reads is the value the shell stores (no quote, escape, glob, brace, CR/VT/NBSP, expansion)
+_TRUST_ASSIGN_RAW = re.compile(r'[ \t]*[A-Za-z_]\w*=[A-Za-z0-9_./+,:@%=-]*(?:[ \t]+[A-Za-z_]\w*=[A-Za-z0-9_./+,:@%=-]*)*[ \t]*')
+
+
+def _trust_shape(text, lx, uses):
+    """Card 10624d73 r1 (Viktor): a positive shape, not a list of what may change a name. Every use sits in ONE
+    top-level command, and every top-level command before it is made of plain assignments only (no command
+    substitution, no backtick, no arithmetic), joined by ; or a newline only: then nothing ran between the assignment
+    and the use that could unset, read into or declare a name without naming it (unset of a printf-made name, read
+    into REPLY, getopts, a sourced file, if/then on lines, a function body, && at a line end). The character after a
+    use is a word end or a slash (zsh reads $X[..] and $X:h as a subscript and a modifier)."""
+    cls = lx['cls']
+    segs = lx['segments']
+    n = len(text)
+    names = {m.group(1) or m.group(2) for m in uses}
+    if names & TRUST_NAMES_OFF or any(x.startswith(('BASH', 'ZSH', 'COMP_')) for x in names):
+        return False
+    for m in uses:
+        e = m.end()
+        if e < n and text[e] not in ' \t\n/;"\'|&)':
+            return False
+    def top_seg(pos):
+        return max((g for g in segs if g['start'] <= pos < g['end']), key=lambda g: g['depth'], default=None)
+    use_segs = {id(top_seg(m.start())) for m in uses}
+    ug = top_seg(uses[0].start())
+    if len(use_segs) != 1 or ug is None or ug['depth'] != 0 or ug['frame'] != 'top':
+        return False
+    prev_end = 0
+    for g in segs:
+        if g['depth'] != 0 or g['start'] > ug['start']:
+            continue
+        gap = text[prev_end:g['start']]
+        if any(ch not in ' \t\n;' for ch in gap) or any(cls[q] != 'c' for q in range(prev_end, g['start'])
+                                                         if text[q] in ';\n'):
+            return False
+        prev_end = g['end']
+        if g is ug:
+            break
+        if not _TRUST_ASSIGN_RAW.fullmatch(text, g['start'], g['end']):
+            return False
     return True
 
 def cd_bases(text, cwd, loops=None):
@@ -3406,7 +3456,8 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
     # command as written too, not only on this text: a payload-marked text turned the quote of `bash -c 'python3 $X
     # evil.py'` into a boundary, and its $X (empty in the inner bash) looked unquoted (found by the oracle cases)
     plain = normalise(cmd)
-    trusted = expansion_trusted(norm, lnames) and (norm == plain or expansion_trusted(plain, lnames))
+    trusted = (plain == cmd and expansion_trusted(norm, lnames) and
+               (norm == plain or expansion_trusted(plain, lnames)))  # r1: normalise() changed nothing
     groups = interp_groups(text, text != norm and not trusted) + [[w] for w in extra]
     # card 70c94516 (Viktor 43662 LELET 1): normalise() takes the backslash of a $'\x65' escape (`\x` -> `x`), which
     # bash decodes in a word (`python3 $'\x65vil.py'` runs evil.py): such a command is read without it too
