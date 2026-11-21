@@ -3504,7 +3504,13 @@ def script_cases():
             for cmd, want in (('python3 ***/measure.py x', 2), ('python3 a/***/measure.py x', 2),
                               ('python3 ***/c/measure.py x', 2), ('python3 sub/***/m2.py x', 2),
                               ('python3 sub/**/m2.py x', 2),
-                              ('python3 ****/measure.py x', 0), ('python3 a***/measure.py x', 0)):
+                              ('python3 ****/measure.py x', 0), ('python3 a***/measure.py x', 0),
+                              # r4 m8 (star3-no-lookahead): a trailing *** is one level in zsh (a/b/c/*** ran
+                              # the script there, measured); read as ** its first match was the directory
+                              ('python3 a/b/c/*** x', 2), ('python3 real/d/*** x', 2),
+                              # r4 m8 (star3-nomatch-off): a ***/ member of a zsh group: zsh stops ("bad
+                              # pattern", measured), the gate walks it as ** (the lean, as for **/)
+                              ('python3 (zq|***/measure.py) x', 2)):
                 code, err = bash_in(cmd, deep)
                 if code != want:
                     fails.append(f'script: ***/ walk {cmd!r}: want rc {want}, got {code}')
