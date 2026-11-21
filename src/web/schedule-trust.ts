@@ -23,6 +23,17 @@
 //   - The runner executes no bash for an untrusted task: a command task is not
 //     run, a preCheck is not run (its stdout would land in the task body).
 //
+// Known limits (card c16cbdcd, the stored alert key and the daily summary; see alertScheduleTrust):
+//   - A new task directory whose frontmatter name copies an already alerted task, with the same content, stays
+//     quiet: the name comes from the frontmatter (Viktor I10b). The trust row has the same key (an old class).
+//   - If the alerted row cannot be deleted on an approval or a token-side write (a DB error), the next untrusted
+//     episode with the same key stays quiet (I15).
+//   - An untrusted task that fires only before TRUST_DIGEST_HOUR gets no daily summary; its single alert went
+//     out (I20). A task not seen for 8 days drops out of the summary; a task deleted from the files (not through
+//     the API DELETE, which forgets it) or turned trusted without a fire or a listing stays in it until then.
+//   - Whoever writes the DB can pre-seed a key and silence a single alert, and two dashboards at once may alert
+//     the same key twice (the same Unix user can approve outright; see the residual below).
+//
 // The legacy baseline runs once (db.ts schedule_trust_baseline). Deleting a
 // trust ROW only lowers trust; deleting the BASELINE row and restarting would
 // re-baseline every task at its current hash -- the same capability as writing
@@ -76,8 +87,10 @@ import { dirname, isAbsolute, join, normalize, relative, sep } from 'node:path'
 import {
   getScheduleTrust, setScheduleTrust, deleteScheduleTrust, baselineScheduleTrust, createSystemMessage,
   pinScheduleTrustPreChecks, repinScheduleTrustPreCheck, type ScheduleTrustRow,
+  getScheduleTrustAlert, setScheduleTrustAlert, touchScheduleTrustAlert, clearScheduleTrustAlert,
+  listScheduleTrustAlertsSeenSince, claimScheduleTrustAlertDigest,
 } from '../db.js'
-import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
+import { APP_TZ, MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { resolvePreCheckPath } from './precheck-path.js'
 import { SCHEDULE_API_PRECHECK_RX } from './schedule-api-fields.js'
 import { PRECHECK_PIN_EXPECTED } from './schedule-trust-precheck-pins.js'
@@ -1028,7 +1041,11 @@ export function isOwnerTrusted(status: ScheduleTrustStatus): boolean {
 /** The verdict for a task as stored now. Any error is 'agent' (fail-closed). */
 export function scheduleTrustOf(task: ScheduledTask): ScheduleTrustStatus {
   try {
-    return evaluateScheduleTrust(task, getScheduleTrust(task.name))
+    const verdict = evaluateScheduleTrust(task, getScheduleTrust(task.name))
+    // Viktor 49291 L1/L5: a trusted state ends the untrusted episode, so re-applying the same change later alerts
+    // again, and the daily summary no longer lists the task.
+    if (isOwnerTrusted(verdict)) forgetTrustAlertIfAny(task.name)
+    return verdict
   } catch (err) {
     logger.warn({ err, task: task.name }, 'schedule-trust: lookup failed, treating the task as agent-authored')
     return 'agent'
@@ -1061,6 +1078,7 @@ export function approveScheduledTask(task: ScheduledTask, setBy: string, now = D
   }
   if (expectShort !== undefined && combinedTrustHash(hash, content?.hash ?? null).slice(0, 16) !== expectShort) return null
   setScheduleTrust(task.name, 'approved', hash, setBy, Math.floor(now / 1000), content?.hash ?? null)
+  forgetTrustAlert(task.name)
   return hash
 }
 
@@ -1072,6 +1090,24 @@ export function clearScheduleTrust(taskName: string): void {
     // The row survives, but its hash no longer matches the edited task, so the
     // fire still gets the agent framing (and an alert) -- fail-closed anyway.
     logger.warn({ err, task: taskName }, 'schedule-trust: could not drop the trust row')
+  }
+  forgetTrustAlert(taskName)
+}
+
+/** Forgets only when there is something to forget (the GET list calls the verdict for every task). */
+function forgetTrustAlertIfAny(taskName: string): void {
+  let has = mismatchAlerted.has(taskName)
+  if (!has) {
+    try { has = getScheduleTrustAlert(taskName) !== undefined } catch { has = true }
+  }
+  if (has) forgetTrustAlert(taskName)
+}
+
+/** Card c16cbdcd: a new trust episode (approval, a token-side write) alerts afresh when it is untrusted again. */
+function forgetTrustAlert(taskName: string): void {
+  mismatchAlerted.delete(taskName)
+  try { clearScheduleTrustAlert(taskName) } catch (err) {
+    logger.warn({ err, task: taskName }, 'schedule-trust: could not drop the alerted row (the next untrusted fire may stay quiet)')
   }
 }
 
@@ -1300,14 +1336,66 @@ export function alertSafeId(v: unknown): string {
   return typeof v === 'string' && ALERT_ID_RX.test(v) ? v : '(érvénytelen név)'
 }
 
-export function alertScheduleTrust(task: ScheduledTask, status: ScheduleTrustStatus, where: string): void {
+// Card c16cbdcd (Klodel 49278): the in-process map alone forgot every alert at each dashboard restart (21
+// processes on 11-20/21, 66 alerts for the same few tasks). The key is now kept in the DB
+// (schedule_trust_alerted): one alert per task and stored hash; a changed hash alerts again; an approval or a
+// token-side write forgets it, and so does a fire or a listing that finds the task owner-trusted again (Viktor
+// 49291). The key is stored only after the alert was queued (a failed send is retried). The map stays as the fallback when the DB cannot be read (then it alerts at most
+// once per process, as before; also when only the write failed). Once a day, from TRUST_DIGEST_HOUR local time, the
+// first untrusted fire sends ONE summary of the tasks still untrusted (seen on a fire in the last 8 days, so a weekly
+// task is listed). The day is claimed in the same transaction as the send: a failed send is retried.
+export const TRUST_DIGEST_HOUR = 8
+const TRUST_OPEN_WINDOW_MS = 8 * 24 * 60 * 60_000
+const TRUST_SEEN_TOUCH_MS = 60 * 60_000
+
+function trustDigestClock(now: number): { day: string; hour: number } {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: APP_TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' })
+    .formatToParts(new Date(now))
+  const get = (t: string) => parts.find(p => p.type === t)?.value ?? ''
+  return { day: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) }
+}
+
+function maybeSendTrustDigest(now: number): void {
+  try {
+    const { day, hour } = trustDigestClock(now)
+    if (!(hour >= TRUST_DIGEST_HOUR)) return
+    const open = listScheduleTrustAlertsSeenSince(now - TRUST_OPEN_WINDOW_MS)
+    if (open.length === 0) return
+    const names = open.map(r => alertSafeId(r.task_name))
+    claimScheduleTrustAlertDigest(day, now, () => {
+      createSystemMessage(
+        MAIN_AGENT_ID,
+        `[UTEMEZES-BIZALOM] Napi összesítő (${day}): ${names.length} ütemezett feladat még nincs jóváhagyva, ` +
+        `ügynöki keretezéssel fut (az elmúlt 8 napban futott): ${names.join(', ')}. Egyenként már szóltam róluk, ` +
+        'újra csak akkor szólok, ha a tartalmuk változik. A tulajdonos a dashboardon hagyhatja jóvá őket.',
+      )
+    })
+  } catch (err) {
+    logger.warn({ err }, 'schedule-trust: the daily summary could not be sent')
+  }
+}
+
+export function alertScheduleTrust(task: ScheduledTask, status: ScheduleTrustStatus, where: string, now = Date.now()): void {
   if (isOwnerTrusted(status)) return
   const defHash = scheduleTrustHash(task)
   let content: PreCheckContent | null = null
   try { content = preCheckContent(task) } catch { /* keyed by the definition only */ }
   const key = combinedTrustHash(defHash, content?.hash ?? null)
-  if (mismatchAlerted.get(task.name) === key) return
-  mismatchAlerted.set(task.name, key)
+  let stored: { alert_key: string; seen_at: number } | undefined
+  let dbOk = true
+  try { stored = getScheduleTrustAlert(task.name) } catch (err) {
+    dbOk = false
+    logger.warn({ err, task: task.name }, 'schedule-trust: the alerted row could not be read; falling back to this process')
+  }
+  // Viktor 49291 L3: the map also counts with a readable DB, so a row that could not be written does not alert on
+  // every fire of this process.
+  if ((dbOk && stored?.alert_key === key) || mismatchAlerted.get(task.name) === key) {
+    if (dbOk && stored && now - stored.seen_at >= TRUST_SEEN_TOUCH_MS) {
+      try { touchScheduleTrustAlert(task.name, now) } catch { /* the summary may miss it once */ }
+    }
+    maybeSendTrustDigest(now)
+    return
+  }
   const name = alertSafeId(task.name)
   const agent = alertSafeId(task.agent)
   let contentOnly = false
@@ -1340,9 +1428,17 @@ export function alertScheduleTrust(task: ScheduledTask, status: ScheduleTrustSta
       `Nézd meg a ~/.claude/scheduled-tasks/${name}/ tartalmát; ha rendben van, a tulajdonos a dashboardon jóváhagyhatja. ` +
       (apiPreCheckOnly ? 'Ha nem tudsz erről a beállításról, szólj Viktornak.' : 'Ha nem a tulajdonos írta, szólj Viktornak.'),
     )
+    // Viktor 49291 L2: stored only once the alert is queued, so a failed send is retried (after a restart too).
+    mismatchAlerted.set(task.name, key)
+    if (dbOk) {
+      try { setScheduleTrustAlert(task.name, key, now) } catch (err) {
+        logger.warn({ err, task: task.name }, 'schedule-trust: the alerted row could not be written; the next process may alert again')
+      }
+    }
   } catch (err) {
     logger.warn({ err, task: name }, 'schedule-trust: alert could not be queued')
   }
+  maybeSendTrustDigest(now)
 }
 
 /** Test seam. */
