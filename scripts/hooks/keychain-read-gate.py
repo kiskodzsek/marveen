@@ -13,6 +13,12 @@ a relative script word whose directory or name comes from a value the gate does 
 `while read` loop (piped or from a file), `select`, an arithmetic `for ((..))` loop, cdable_vars, find -execdir
 with a relative script, and a variable reassigned after the cd that used it (`D=sub; cd $D; D=zz; python3 m.py`:
 the cd is read with the last value of the name; the main gate passes it too).
+What an xargs is fed (card 3bf9a741, Viktor 49280 LOW 2; old, main passes each too; the reading itself is described
+at XARGS_RX): an xargs inside a quoted shell payload (`bash -c 'echo D | xargs K'`, `sh -c "..."`, an eval '...'
+text, a nested `xargs -I{} sh -c 'echo {} | xargs K'`) is not read for its fed words; nor a file's content (`cat
+list | xargs`, a redirect `xargs < list`, `-a list`), a computed name (find, an ls glob, tr), a shell expansion in a
+fed word (a default param `${X:-..}`, a variable, a brace), a sh -c script reaching its words through $0 or bash -c
+through "$@", an xargs whose name is split by quotes ('xa'rgs), and a while read loop's output piped into an xargs.
 
 What blocks (exit 2): a `security` call in command position whose subcommand reads or exports secrets:
   find-generic-password, find-internet-password, dump-keychain, export,
@@ -1319,6 +1325,7 @@ def pipes_union(make_src, lexed=True, since=None):
     second lexer_view cost 1.25 s on a 100 000-word wrapper, past the 5 s timing cap)."""
     if since is None:
         since = _ESC_TAKEN[0]
+    _XARGS_UNREAD[0] = False  # card 3bf9a741: set by either reading below, read by the caller right after
     l1, w1 = stdin_pipelines(make_src(), lexed)
     if _ESC_SKIP[0] and _ESC_TAKEN[0] == since:
         return list(dict.fromkeys(l1)), list(dict.fromkeys(w1))
@@ -1583,7 +1590,8 @@ def stdin_pipelines(text, lexed=True):
     commands blocked on the script budget. The lexer only takes stops away, so a reading without it is main's."""
     import bisect
     pipes = [m.start() for m in PIPE_SHELL_RX.finditer(text)] if '|' in text else []
-    if not pipes:
+    xmatches = list(XARGS_RX.finditer(text)) if 'xargs' in text else []  # card 3bf9a741
+    if not pipes and not xmatches:
         return [], []
     lx = lex_or_none(text) if lexed else None
     code = [c == 'c' for c in lx['cls']] if lx is not None else None
@@ -1608,7 +1616,21 @@ def stdin_pipelines(text, lexed=True):
     memo = {}  # a position -> the start it leads to: each position is walked once (a chain of groups stays linear)
     brace = {}  # a stop -> the "}" right after it (blanks between), or None
     spans = {}
-    for p in pipes:
+    xpipes = []  # card 3bf9a741: (the xargs match, the position of the | that feeds it, or None)
+    for m in xmatches[:XARGS_SCAN_MAX + 1]:
+        s = m.start()
+        if text[s:s + 1] in _XARGS_SEP and code is not None and not code[s]:
+            continue  # a separator in a quote: prose (`git commit -m "... | xargs python3"`); ^ matches no char
+        pp = s if text[s:s + 1] == '|' else s - 1 if text[s:s + 1] == '&' and text[s - 1:s] == '|' else None
+        if pp is not None and (text[pp - 1:pp] in ('>', '|') or text[pp + 1:pp + 2] == '|'):
+            pp = None  # >| is a redirection, || no pipe: the xargs reads the shell's own stdin
+        xpipes.append((m, pp))
+    # an xargs no | stands right before still reads a pipe in a group, a loop, an if, a $( ) or a >( ) after one
+    # (`echo m.py | (cd d && xargs python3)`, `| tee >(xargs python3)`): it is fed by every pipeline before it
+    allp = ([i for i, ch in enumerate(text) if ch == '|' and (code is None or code[i]) and text[i - 1:i] not in ('>', '|')
+             and text[i + 1:i + 2] != '|'] if any(pp is None for _, pp in xpipes) else [])
+    start = {}
+    for p in pipes + [pp for _, pp in xpipes if pp is not None] + allp:
         b, path = p, []
         while True:  # the pipeline's start, moved past a group that closes right before it
             if b in memo:
@@ -1638,7 +1660,9 @@ def stdin_pipelines(text, lexed=True):
             b = o
         for x in path:
             memo[x] = b
-        spans[b] = max(spans.get(b, p), p)
+        start[p] = b
+    for p in pipes:
+        spans[start[p]] = max(spans.get(start[p], p), p)
     merged = []  # overlapping spans (a pipe inside a group that is piped again) read once, as their union
     for b, p in sorted(spans.items()):
         if merged and b <= merged[-1][1]:
@@ -1672,8 +1696,381 @@ def stdin_pipelines(text, lexed=True):
                 for ln in _printf_output(fw[f], fw[f + 1:]).split('\n'):
                     lines.append(ln)
                     words.extend(ln.split())
+    if len(xpipes) > XARGS_SCAN_MAX:
+        _XARGS_UNREAD[0] = True
+    size = 0
+    counted = 0  # the xargs that run no plain data command (XARGS_DATA): the ones read
+    read = {}  # (start, pipe) -> the words that pipeline feeds: each read once
+
+    def fed_of(b, q):
+        if (b, q) not in read:
+            s1, e1 = _fed_words(text[b:q])
+            s2, e2 = _here_fed(text, b, q, not lexed)
+            read[(b, q)] = (s1 + s2, e1 + e2)
+        return read[(b, q)]
+    for m, pp in xpipes[:XARGS_SCAN_MAX]:
+        argv, sq, ev = _xargs_cmd(text, m.end(), not lexed)
+        k, repl, each, delim = _xargs_opts(argv)
+        c0 = argv[k] if k < len(argv) else 'echo'  # no command: xargs runs echo
+        if _XARGS_PLAIN_RX.fullmatch(c0) and c0.rsplit('/', 1)[-1] in XARGS_DATA:
+            continue  # a plain data command: its words, fed or not, run nothing
+        counted += 1
+        if counted > (XARGS_MAX if lexed else XARGS_SCAN_MAX):  # a script file's xargs read line-bounded
+            _XARGS_UNREAD[0] = True
+            break
+        if pp is not None:
+            # a script file's text: from the line's start at most (the start walk crosses a Python call's parens
+            # there and took in the file up to its top: a test file of another gate blocked, replay 2026-11-21)
+            seqs, every = fed_of(start[pp] if lexed else max(start[pp], text.rfind('\n', 0, pp) + 1), pp)
+        else:
+            last = {}  # per pipeline start, its last pipe before this xargs (one reading of the longest span)
+            # a script file's text (not lexed): only the pipelines on the xargs's own line. Every pipeline of the
+            # file before it took in a log's or a review file's every word, past XARGS_MAX_WORDS: 2 such xargs in a
+            # 377 KB jsonl blocked every command that names the file (fleet replay 2026-11-21, 229 rows)
+            lo = -1 if lexed else text.rfind('\n', 0, m.start())
+            for q in allp:
+                if q >= m.start():
+                    break
+                if q > lo:
+                    last[start[q]] = q
+            seqs, every, seen = [], [], dict.fromkeys(ev)
+            for b, q in last.items():
+                sq2, ev2 = fed_of(b, q)
+                seqs.extend(sq2)
+                every.extend(ev2)
+                seen.update(dict.fromkeys(ev2))
+                if len(seen) > XARGS_MAX_WORDS + 1:  # the final words are a superset (+1: the empty word _flat drops)
+                    break
+            if len(seen) > XARGS_MAX_WORDS + 1:
+                _XARGS_UNREAD[0] = True
+                continue
+        seqs = sq + seqs  # its own here-string / heredoc / < <( ) first: that is its stdin
+        if delim:  # GNU -d: the words split there too
+            seqs = seqs + [[p for w in s for p in w.split(delim)] for s in seqs]
+            every = every + [p for w in every for p in w.split(delim)]
+        seqs = [list(t) for t in dict.fromkeys(tuple(w for w in s if w) for s in seqs) if t]
+        every = _flat(ev + every + [w for s in seqs for w in s])
+        if len(every) > XARGS_MAX_WORDS:
+            _XARGS_UNREAD[0] = True
+            continue
+        for ln in _xargs_lines(argv[k:], seqs, every, repl, each):
+            size += len(ln)
+            if size > XARGS_MAX_CHARS:
+                _XARGS_UNREAD[0] = True
+                break
+            lines.append(ln)
     # each once: a word repeated in many pipelines is one lookup, not one per pipeline (MAX_TRIES)
     return list(dict.fromkeys(lines)), list(dict.fromkeys(words))
+
+
+# card 3bf9a741 (the 74586987 side gap; measured 2026-11-20 on main 915e2f70, work/3bf9a741/main.txt): xargs adds the
+# words it reads on stdin to the argv of the command it runs, and neither the script rules nor the secret rules saw
+# them. `echo measure.py | xargs python3`, `| xargs -I{} node {}`, `printf measure.py | xargs -0 python3`, `xargs
+# python3 <<'E'` ran the script unread (37 of 49 probe rows wrong, bash ran every one), and `echo dump-keychain |
+# xargs security` made the keychain call unread. Now the command an xargs runs is read as a command line WITH the
+# words it is fed, where a shell pipeline's lines go (stdin_pipelines' lines: the secret rules and the script rules
+# read them):
+#   all at once: the command and every fed word (xargs without -n / -L / -I);
+#   one per word too, with -n, -L, -l, -I, -i, -J, --max-args, --max-lines, --replace (each word may come first);
+#   with a replace string (-I R, -i, -J R, --replace): each input line put in place of R instead (BSD xargs puts the
+#   entire line there, man xargs; Viktor 49280 MEDIUM 1: `echo security dump-keychain | xargs -I{} sh -c '{}'`), and
+#   each word too, and every word in place of a whole-argument R (BSD -J); nothing is appended then, as xargs appends
+#   nothing. The word after a shell's -c (sh, bash, zsh, dash, ksh) is always quoted in the line, so the gate reads it
+#   as the shell's code (`echo ./x.sh | xargs -I{} sh -c '{}'` runs ./x.sh; Viktor 49280 LOW 2b).
+# The fed words are no file candidates of their own: `echo measure.py | xargs grep -c x`, `| xargs python3 stat.py`
+# read measure.py as data, as the line written out would be. Each word is shell-quoted unless plain ([\w./@%+=:,-]):
+# xargs runs no shell, so a quote, a ; or a $( in a fed word is a character of the argument, and an unbalanced quote
+# must not swallow the lines after it.
+# The fed words: every word of the pipeline before the | (the commands' words, a group before it, a printf's output and
+# an echo -e's decoding, as for a shell; a feeder's name and echo's own flags left out: `echo -m x | xargs python3`
+# is `python3 -m x`), a here-string's word, a heredoc's body (to its terminator line, as bash reads it), and what a
+# process substitution's commands write (`xargs python3 < <(echo m.py)`, `xargs -a <(echo m.py) python3`), each
+# whole and split at blanks (and at a -d delimiter). Not seen, as everywhere in this gate: a file's content (`xargs
+# python3 < list`, `cat list | xargs`: only the name `list` is a fed word), a computed name (`ls *.py | xargs
+# python3`), a computed command (`xargs $(echo python3)`). Over-read on purpose: every xargs of the text, fed or not
+# (a here-string), its pipeline read to its start, every word as a possible first. Past XARGS_MAX xargs commands,
+# XARGS_MAX_WORDS fed words of one, or XARGS_MAX_CHARS of lines in all, the gate blocks (xargs-unread).
+XARGS_RX = re.compile(r'(?:^|[;(){}\n`]|' + PIPE + r'|' + AMP + r'|\$\()[ \t]*' + CHAIN
+                      + r'\\?[\'"]?(?:' + WORD + r'*/)?xargs[\'"]?(?=[ \t])')
+XARGS_MAX = 64
+# Only an xargs that runs no plain data command counts toward XARGS_MAX: an `xargs grep x` / `xargs wc -l` (a literal
+# name of XARGS_DATA, whatever path) runs no program from its words and no keychain call, and is not read at all.
+# Counting every xargs blocked running a script file that only lists many such lines (70 `xargs grep` strings in a
+# Python list, no keychain word: main allowed it; measured 2026-11-21, work/3bf9a741/risk2.txt). Past XARGS_SCAN_MAX
+# xargs of any kind the gate blocks unread, so the cheap look at each command stays bounded.
+# A script file's text (stdin_pipelines lexed=False) is read line by line for xargs: the words of its command and of
+# the pipeline that feeds it end at the line's end and start at its start (a heredoc's body still from the lines
+# after), and an xargs no | stands right before is fed by its own line's pipelines only. So each one costs one line,
+# and up to XARGS_SCAN_MAX of them are read there (XARGS_MAX_CHARS still bounds the lines in all). Not seen there: a
+# pipeline or a group that crosses lines (`echo m.py | while read; do` + newline + `xargs python3`); main reads no
+# xargs at all.
+XARGS_SCAN_MAX = 4096
+XARGS_DATA = frozenset({'echo', 'printf', 'grep', 'egrep', 'fgrep', 'true', 'false', ':', 'test', '[', 'cat', 'head',
+                        'tail', 'wc', 'ls', 'basename', 'dirname'})
+XARGS_MAX_WORDS = 512
+XARGS_MAX_CHARS = 200_000
+_XARGS_UNREAD = [False]  # set by stdin_pipelines, reset by pipes_union, read by its callers
+_XARGS_SEP = frozenset(';(){}\n`|&$')  # the chars XARGS_RX's position may start with (^ starts with none)
+_XARGS_PLAIN_RX = re.compile(r'[\w./@%+=:,-]+')
+_XARGS_REDIR_RX = re.compile(r'\d*(?:&>>?|[<>]&|<<<|<<-?|<>|>>?\|?|<)')
+_ECHO_FLAG_RX = re.compile(r'-[neE]+')
+
+
+def _shq(v):
+    return v if _XARGS_PLAIN_RX.fullmatch(v) else "'" + v.replace("'", "'\\''") + "'"
+
+
+def _fed_words(seg):
+    """Card 3bf9a741: (seqs, every) of what a pipeline segment (or a process substitution's body) writes to an xargs.
+    seqs: the words in the order xargs reads them, one list per reading of the segment, with the redirections' words
+    and without them (`cat <<'E' | xargs python3`: E is no word cat writes, and it must not stand first); each
+    command's words without the feeder's name and echo's own flags, a printf's output, an echo -e / printf decoding,
+    split at blanks. every: each of those words whole and split, and every other reading (the raw words, both
+    decodings): the words that may come first under -n / -L / -I."""
+    seqs, every = [], []
+    for cmds in (_seg_cmds(seg), _seg_cmds(seg, strip=True)):
+        seq = []
+        for cw in cmds:
+            fw = _feeder_words(cw)
+            args = fw[1:] if fw else cw
+            name = fw[0] if fw else None
+            if name == 'echo':
+                n = 0
+                while n < len(args) and _ECHO_FLAG_RX.fullmatch(args[n]):
+                    n += 1
+                args = args[n:]
+            outs = [args]
+            if name in ('printf', 'echo', 'print') and any('\\' in v for v in args):
+                outs = [[_printf_unescape(v) for v in args], [_printf_unescape(v, zero=True) for v in args], args]
+            if name == 'printf' and len(fw) > 1 + (fw[1:2] == ['--']):
+                f = 1 + (fw[1] == '--')
+                outs.insert(0, [_printf_output(fw[f], fw[f + 1:])])
+            seq += ' '.join(outs[0]).split()
+            every += [w for o in outs for v in o for w in [v] + v.split()]
+            # Viktor 49280 MEDIUM 1: BSD xargs -I / -J puts the ENTIRE input line in place of the replace string (man
+            # xargs: "with the entire line of input"), so each output line of the feeder is a fed word whole as well
+            every += [ln for o in outs for ln in ' '.join(o).split('\n')]
+        seqs.append(seq)
+    return seqs, every
+
+
+def _flat(words):
+    return [w for w in dict.fromkeys(words) if w]
+
+
+def _paren_end(text, i):
+    """The index of the ")" that closes the "(" at i (no quote is read: a longer body only reads more), or len(text)."""
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == '(':
+            depth += 1
+        elif text[j] == ')':
+            depth -= 1
+            if not depth:
+                return j
+    return len(text)
+
+
+_HERE_OP_RX = re.compile(r'<<<|<<-?')
+
+
+def _here_body(text, op, v, i, ended=False):
+    """Card 3bf9a741: the words a here-string (op <<<, its word v) or a heredoc (<< / <<-, its delimiter v, the
+    operator's command ending at or after i) feeds: the word; the body's lines, after this line up to the terminator
+    line or the text's end, as bash reads it: (seq, every), see _fed_words. ended (a script file's text, read line
+    by line): a body with no terminator line gives nothing (a Python string's `<<'E'\\n..` is no heredoc; read to the
+    file's end it took in every word below, past XARGS_MAX_WORDS)."""
+    if op == '<<<':
+        body = [v]
+    elif op in ('<<', '<<-'):
+        nl = text.find('\n', i)
+        body, closed = [], False
+        for ln in (text[nl + 1:].split('\n') if nl >= 0 else []):
+            if (ln.lstrip('\t') if op == '<<-' else ln) == v:
+                closed = True
+                break
+            body.append(ln)
+        if ended and not closed:
+            return [], []
+    else:
+        return [], []
+    return ' '.join(body).split(), [w for ln in body for w in [ln] + ln.split()]
+
+
+def _here_fed(text, a, b, line=False):
+    """Card 3bf9a741: (seqs, every) of the here-strings and heredocs in text[a:b] (`cat <<'E' | xargs python3`).
+    line: a script file's text, see _xargs_cmd and _here_body."""
+    seqs, every, i = [], [], a
+    while True:
+        m = _HERE_OP_RX.search(text, i, b)
+        if not m:
+            return seqs, every
+        j = m.end()
+        while j < len(text) and text[j] in ' \t':
+            j += 1
+        if j >= len(text) or text[j] in CMD_END:
+            i = j
+            continue
+        v, e = shell_word(text[:b] if line else text, j)
+        i = max(e, j + 1)
+        seq, ev = _here_body(text, m.group(), v, i, line)
+        seqs.append(seq)
+        every += ev
+
+
+def _xargs_cmd(full, i, line=False):
+    """Card 3bf9a741: (argv, seqs, every) of the xargs command whose words start at i, up to the end of that command
+    or ARGS_WINDOW chars: argv its options and the command it runs (no redirection); seqs and every (see _fed_words)
+    what a here-string, a heredoc or a process substitution of it gives xargs. line: a script file's text (not
+    lexed): its words end at the line's end (a Python string's quote there read on over the lines below, and their
+    `<` / `<<` as its own input: a test file of another gate blocked, replay 2026-11-21); a heredoc's body is still
+    read from the lines after it."""
+    eol = full.find('\n', i) if line else -1
+    text = full[:eol] if eol >= 0 else full
+    argv, seqs, every = [], [], []
+    end = min(len(text), i + ARGS_WINDOW)
+    while i < end:
+        ch = text[i]
+        if ch in ' \t':
+            i += 1
+            continue
+        if ch in CMD_END:
+            break
+        if text.startswith('<(', i) or text.startswith('>(', i):  # a word: /dev/fd/N (`-a <(echo m.py)`)
+            j = _paren_end(text, i + 1)
+            if ch == '<':
+                sq, ev = _fed_words(text[i + 2:j])
+                seqs += sq
+                every += ev
+            argv.append('/dev/fd/63')
+            i = j + 1
+            continue
+        r = _XARGS_REDIR_RX.match(text, i)
+        if r:
+            op = r.group().lstrip('0123456789')
+            j = r.end()
+            while j < len(text) and text[j] in ' \t':
+                j += 1
+            if text.startswith('<(', j):  # `< <(echo m.py)`
+                k = _paren_end(text, j + 1)
+                sq, ev = _fed_words(text[j + 2:k])
+                seqs += sq
+                every += ev
+                i = k + 1
+                continue
+            if j >= len(text) or text[j] in CMD_END:
+                i = j
+                continue
+            v, e = shell_word(text, j)
+            i = max(e, j + 1)
+            sq, ev = _here_body(full, op, v, i, line)
+            seqs.append(sq)
+            every += ev
+            continue
+        v, e = shell_word(text, i)
+        if e <= i:
+            i += 1
+            continue
+        argv.append(v)
+        i = e
+    return argv, seqs, every
+
+
+def _xargs_opts(argv):
+    """Card 3bf9a741: (index of the command's first word, the replace string or None, one run per word, the -d
+    delimiter or None) of an xargs argv (WRAP_ARGS' flags; BSD and GNU)."""
+    short, whole = WRAP_ARGS['xargs'][0], WRAP_ARGS['xargs'][1]
+    k, repl, each, delim = 0, None, False, None
+    while k < len(argv):
+        v = argv[k]
+        if v == '--':
+            return k + 1, repl, each, delim
+        if v.startswith('--'):
+            name, eq, val = v.partition('=')
+            if name in whole and not eq:
+                k += 1
+                val = argv[k] if k < len(argv) else ''
+            if name == '--replace':
+                repl, each = (val if eq else '{}'), True
+            elif name in ('--max-args', '--max-lines'):
+                each = True
+            elif name == '--delimiter':
+                delim, each = val, True
+            elif name == '--null':
+                each = True
+            k += 1
+            continue
+        if not v.startswith('-') or v == '-':
+            break
+        for j in range(1, len(v)):
+            c = v[j]
+            if c in short:
+                arg = v[j + 1:]
+                if not arg:
+                    k += 1
+                    arg = argv[k] if k < len(argv) else ''
+                if c in 'IJ':
+                    repl, each = arg, True
+                elif c in 'nL':
+                    each = True
+                elif c == 'd':
+                    delim, each = arg, True
+                break
+            if c == 'i':  # GNU -i[R]: --replace
+                repl, each = v[j + 1:] or '{}', True
+                break
+            if c == 'l':  # GNU -l[N]: --max-lines
+                each = True
+                break
+            if c == 'e':  # GNU -e[EOF]: its argument glued
+                break
+            if c == '0':  # NUL-separated: a word with a blank is one argument (every has it whole)
+                each = True
+        k += 1
+    return k, repl, each, delim
+
+
+def _xargs_lines(cmd, seqs, every, repl, each):
+    """Card 3bf9a741: the command lines an xargs running cmd runs (see the block above): one per reading of what it
+    is fed (seqs, all at once), and with each, one per word of every."""
+    if not cmd:  # xargs's own default, echo
+        return []
+    if repl:
+        out = [_xargs_join([x.replace(repl, w) for x in cmd]) for w in every] if each else []
+        return out + [_xargs_join([q for x in cmd for q in (seq if x == repl else [x])]) for seq in seqs]
+    out = [_xargs_join(cmd + seq) for seq in seqs] or [_xargs_join(cmd)]
+    if each:
+        out += [_xargs_join(cmd + [w]) for w in every]
+    return out
+
+
+def _xargs_join(argv):
+    """Card 3bf9a741: an argv as a command line (_shq each word); after a shell's -c flag the word is quoted even when
+    plain (Viktor 49280 LOW 2b): the gate reads a quoted -c argument as the shell's code, an unquoted one it does not."""
+    at = _xargs_shell_at(argv)
+    return ' '.join("'" + v.replace("'", "'\\''") + "'" if at is not None and i > at
+                    and SHELL_CODE_FLAG_RX.fullmatch(argv[i - 1]) else _shq(v) for i, v in enumerate(argv))
+
+
+_XARGS_SHELL_WRAPPERS = _FEEDER_WRAPPERS | {'sudo', 'doas', 'timeout', 'gtimeout'}
+_XARGS_WRAP_VALUE_RX = re.compile(r'\d[\w.]*')
+
+
+def _xargs_shell_at(argv):
+    """Viktor r2 (card 3bf9a741): the index of the shell an xargs runs, past the wrappers that keep the shell in
+    command position (`env sh -c`, `nice -n 5 bash -c`, `timeout 5 sh -c`, `sudo -n sh -c`, VAR=value); None when the
+    first other word is not a shell."""
+    wrapped = False
+    for i, w in enumerate(argv[:_FEEDER_MAX_WORDS]):
+        b = os.path.basename(w)
+        if b in SHELL_NAMES:
+            return i
+        if b in _XARGS_SHELL_WRAPPERS:
+            wrapped = True
+        elif not (wrapped and (w.startswith('-') or _XARGS_WRAP_VALUE_RX.fullmatch(w)
+                               or argv[i - 1] in _FEEDER_ARG_FLAGS) or _FEEDER_ASSIGN_RX.match(w)):
+            return None
+    return None
 
 
 def payload_texts(text, script=False, subst=False):
@@ -1774,6 +2171,8 @@ def _hits(cmd, script=False):
     if not script and '|' in cmd and '<<' in cmd:
         src = data_body_pipes_masked(cmd, lex_or_none(cmd), None)
     lines = pipes_union(lambda: normalise(src), lexed=not script)[0]  # since: normalise(src) is made inside
+    if _XARGS_UNREAD[0]:  # card 3bf9a741: an xargs past XARGS_MAX / XARGS_MAX_WORDS / XARGS_MAX_CHARS
+        found += [h for h in ['xargs-unread'] if h not in found]
     if lines:
         found += [h for h in hits_in('\n'.join(lines), script) if h not in found]
     # card c7234bed: what an echo / printf substitution prints where a reader of shell code runs it (generated_lines)
@@ -3931,6 +4330,8 @@ def script_hits(cmd, cwd):
         pipe_srcs.append(s)
         return s
     pipe_lines, pipe_words = pipes_union(_pipe_src_seen, since=esc0)
+    if _XARGS_UNREAD[0]:  # card 3bf9a741: not "read the first ones": an xargs past the bounds would slip past
+        return found + ['xargs-unread']
     text += ''.join('\n' + ln for ln in pipe_lines)
     # card 946937b7 (Viktor 45626 R1): a here-string a shell reads (`bash <<<'python3 m.py'`, `<<<'./m.sh' sh`) runs
     # its word as a command line: read like a pipeline's lines (stdin_payloads knows which <<< feeds a shell); of
