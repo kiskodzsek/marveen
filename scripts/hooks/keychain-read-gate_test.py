@@ -1195,6 +1195,7 @@ def script_cases():
         w('export.py', "import subprocess\nsubprocess.run(['" + S + "', 'export', '-o', 'x.p12'])\n")
         w('list.py', "import subprocess\nsubprocess.run(['" + S + "', 'list-keychains'])\n")
         w('notes.py', "# the gate blocks find-generic-password in a shell\nprint('ok')\n")
+        w('feedhi.sh', 'echo "$(echo hi)" | bash\n')  # card 0196e1ee m6: a harmless fed substitution in a file
         w('ok.js', "console.log('ok');\n")
         w('a b.py', "import subprocess\nSEC = '/usr/bin/" + S + "'\n"  # card 946937b7: a script name with a blank
                     "subprocess.run([SEC, 'find-generic-password', '-a', 'acct', '-s', 'svc'])\n")
@@ -2303,6 +2304,17 @@ def script_cases():
             ('echo ./measure.py | { read c; eval $c; }', d),
             ('echo python3 $(echo measure.py) | bash', d),
             ('echo python3 ${F:-measure.py} | bash', d),
+            # card 0196e1ee m6 (unread-param-off, -weak): a ${..} with an operator in the fed text is expanded by the
+            # shell that reads it, from its exported environment (main ran these: no literal names the script)
+            ("export F=measure.py; echo 'python3 ${F%x}' | bash", d),
+            ("export F=measure.py; echo 'python3 ${F/zz/q}' | bash", d),
+            ('export F=measure.py; echo python3 \\${F[0]%x} | bash', d),
+            ("export G=F F=measure.py; echo 'python3 ${!G}' | bash", d),
+            # m6 (unread-hits-off, echo-put-off, live-shell-body-off): the fed text inside eval and a shell's heredoc
+            # body; main ran these (Dave survivor-cand on the test's own feed rows in 13 contexts, 11-21)
+            ("eval 'echo python3 `echo measure.py` | bash'", d),
+            ("eval 'echo python3 $(echo measure.py) | bash'", d),
+            ("bash <<'EOF'\necho python3 `echo measure.py` | bash\nEOF", d),
             ('echo python3 `echo measure.py` | bash', d),
             ("echo '`./measure.py`' | bash", d),
             ('f() { echo ./measure.py; }; f | bash', d),
@@ -3375,6 +3387,16 @@ def script_cases():
             # card c7234bed (Viktor 48205, 2nd round): the controls (work/c7234bed/r2/truth-r2.txt)
             ('echo "$(echo hi)" | bash', d),
             ('echo "$(date)" | bash', d),
+            # card 0196e1ee m6 (unread-hits-script): a script file's body is not read for a fed substitution
+            # (KNOWN-FEED-SCRIPT); a harmless one passes. A data heredoc's pipe after a benign live one stays data
+            ('bash feedhi.sh', d),
+            ("echo ./stat.p? | bash; python3 - <<'PY'\nx = 'echo ./meas*.py | bash'\nPY", d),
+            # m6 (live-words-reset-off): the live words of one reading are not carried into the next. hits() reads an
+            # eval / bash -c text in data as a payload, where its | is live; script_hits reads the command, where the
+            # same word is data (the row above does not kill it: survivor-cand, 14 of 20 shapes do, 11-21)
+            ('git commit --dry-run -m "eval \'echo ./meas*.py | bash\'"; true', d),
+            ("python3 - <<'PY'\nx = \"bash -c 'echo ./meas*.py | bash'\"\nPY", d),
+            ('echo \'eval "echo ./meas*.py | bash"\'', d),
             ('echo "$(echo python3 measure.py)" | tee x.txt', d),
             ('echo "$(echo python3 measure.py)" | grep bash', d),
             ('echo "$(echo python3 measure.py)" | wc -l', d),
