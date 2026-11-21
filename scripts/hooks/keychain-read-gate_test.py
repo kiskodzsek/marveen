@@ -2799,6 +2799,11 @@ def script_cases():
             ('python3 (measure.py|a;b) x', d),
             ('python3 (measure.py|a&b) x', d),
             ('python3 (measure.py|a<b) x', d),
+            # card 00c714ea r3 m7 (blank-not-appended): the blank is part of the member, so these match no file and
+            # zsh runs nothing (no matches found; bash: a syntax error), measured 11-21 (bin/shell-truth.py)
+            ('python3 (meas ure.py|zq) x', d),
+            ('python3 (measure.py |zq) x', d),
+            ('python3 (zq| measure.py) x', d),
             ('python3 (15) x', d),  # a group whose member names no file (prose cut into words: `(15`, `(argv,`)
             # ... a quote or a substitution the gate took out of the word (found in the text all the same), a group
             # the text leaves open, a `=(..)` in a group: zsh -f ran nothing (bad pattern, no matches found), measured
@@ -3469,13 +3474,21 @@ def script_cases():
         with tempfile.TemporaryDirectory() as big:
             for k in range(2100):
                 os.makedirs(os.path.join(big, f'g{k // 100}', f'h{k}'))
+                os.makedirs(os.path.join(big, 'hid', f'.g{k}', 'h'))
+                os.makedirs(os.path.join(big, 'hid2', f'g{k // 100}', f'.h{k}'))
+            # m7 (Dave survivor-cand 11-21): hidden directories are not counted (glob's ** does not enter them); a
+            # ** that is not a whole component is a plain * (no walk); a ** member of a zsh group is bounded too
             for cmd, cwd, want in (('python3 **/zz_nomatch_q7.py x', big, 2), ('python3 ./**/zz_nomatch_q7.py x', big, 2),
-                                   ('python3 **/zz_nomatch_q7.py x', d, 0)):
+                                   ('python3 **/zz_nomatch_q7.py x', d, 0),
+                                   ('python3 hid/**/zz_nomatch_q7.py x', big, 0), ('python3 hid2/**/zz_nomatch_q7.py x', big, 0),
+                                   ('python3 g**/zz_nomatch_q7.py x', big, 0), ('python3 **x/zz_nomatch_q7.py x', big, 0),
+                                   ('python3 (**/zz_nomatch_q7.py|zq) x', big, 2),
+                                   ('python3 (zq|**/zz_nomatch_q7.py) x', big, 2)):
                 t = _t.monotonic()
                 code, err = bash_in(cmd, cwd)
                 took = _t.monotonic() - t
                 if code != want or took > 2:
-                    fails.append(f'script: ** walk {cmd[:30]!r}: want rc {want} under 2 s, got {code} in {took:.1f} s')
+                    fails.append(f'script: ** walk {cmd[:40]!r}: want rc {want} under 2 s, got {code} in {took:.1f} s')
         # card 3bcd4514: the stdin reading is linear. In the hook a long call blocks before it (MAX_ARGS, ARGS_WINDOW),
         # but the token pass (_hn_fed) and the reader regex read the WHOLE command (a short call after a long text), so
         # they are timed in process: runs of shell words with options (-o read with its word or alone, -eo, --rcfile),
