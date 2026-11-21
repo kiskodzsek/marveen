@@ -49,6 +49,10 @@ KNOWN-KTP-OVER, not open but leans: they block a harmless call (old unless named
   noglob-set, mixedquote-star ('*'e*.py), cdback-benign, varbrace-benign, and (new) a zsh paren in a call written
   as data (`cat <<'EOF'` or `python3 - <<'PY'` whose body holds `python3 (measure|zz).py x`) when a member matches
   a file: the "(" in the call's words makes the gate lex the call alone, as code (replay: 4 commands, gate probes).
+  New in r3 (Viktor 49709): a `**` script glob whose walk passes MAX_STAR_DIRS directories (`python3 **/stat.py` in
+  a large cwd: main passes it, this gate blocks it at once instead of on the 6 s watchdog); a whole-word group with
+  no `|` and a substitution in it (a backtick `echo zq` and `, zz` in one group, the script word): zsh reads it as
+  a glob qualifier and stops ("unknown file attribute"), the gate reads the substitution as unread.
 A variable glued to a script word (card 8a73eab1, Dave's audit 11-16; Viktor 49425): the word is read with every
 variable whose value the gate does not trust as unset and as set to "": one the text does not set, and one it sets in
 an expansion the gate does not trust. Read in bash's and zsh's forms (`evil${X}.py`, `X=; python3 evil$X.py`,
@@ -3053,6 +3057,35 @@ _LOOP_WORD_RX = re.compile(r'[A-Za-z0-9_./:+=,@%^~*?\[\]-]+')  # a glob is expan
 _GLOB_CHARS_RX = re.compile(r'[*?\[]')
 MAX_LOOP_PATHS = 64
 MAX_LEAD_GLOB = 4096  # card 00c714ea: a script-position glob matching more blocks unread (a bounded directory walk)
+MAX_STAR_DIRS = 2000  # card 00c714ea r3 (Viktor 49709 L2): a `**` walk over more directories blocks unread at once
+
+
+def star_walk_bounded(p):
+    """Card 00c714ea r3 (Viktor 49709 L2): glob's `**` walks every directory under the pattern's literal head, and the
+    MAX_LEAD_GLOB cap counts matches, not directories: `python3 **/stat.py` in a large cwd (/Users/klodel) walked
+    until the 6 s watchdog blocked it (main 0.08 s). Before the walk the directories glob would enter are counted as
+    it enters them (not hidden; a link to a directory too, as glob follows it), and past MAX_STAR_DIRS the word is
+    unread: the watchdog's decision, without the wait. A pattern with no `**` component is not walked here."""
+    parts = p.split('/')
+    if '**' not in parts:
+        return
+    k = next(i for i, s in enumerate(parts) if _GLOB_CHARS_RX.search(s))
+    todo, seen = ['/'.join(parts[:k]) or ('/' if p.startswith('/') else '.')], 0
+    while todo:
+        try:
+            with os.scandir(todo.pop()) as it:
+                for e in it:
+                    try:
+                        if e.name.startswith('.') or not e.is_dir():
+                            continue
+                    except OSError:
+                        continue
+                    seen += 1
+                    if seen > MAX_STAR_DIRS:
+                        raise PathUnread(f'a ** glob over more than {MAX_STAR_DIRS} directories: {p[-40:]}')
+                    todo.append(e.path)
+        except OSError:
+            pass
 _PWD_RX = re.compile(r'\$\{PWD\}|\$PWD(?!\w)')
 
 # card 00c714ea (Viktor 49241 follow-up, old LOW, main too): a variable's value is trusted only in a positive shape.
@@ -3228,8 +3261,9 @@ def zsh_group_globs(text, i):
     """Card 00c714ea r2: the glob patterns of the shell word at text[i:] with its zsh groups made into their members
     (`(measure|zz).py` -> measure.py, zz.py; nested, quoted and escaped members as zsh -f read them, measured 11-21),
     and a last group of one member also dropped (a qualifier: `m*.py(.)` -> m*.py); a form may be empty (the caller
-    puts the word's prefix before it). [] when zsh runs nothing: an unquoted blank in a group (`(evil.py|a b)`) or a
-    group the text leaves open (`(measure.py|zz x`: bad pattern), measured 11-21. Raises _ZshUnread for a word with a
+    puts the word's prefix before it). A blank, tab or newline in a group is a member char (`(evil.py|a b)` runs
+    evil.py; Viktor 49709 L1, measured with zsh -f and extendedglob). [] when zsh runs nothing: ; & < > in a group (a
+    parse error) or a group the text leaves open (`(measure.py|zz x`: bad pattern), measured 11-21. Raises _ZshUnread for a word with a
     substitution or a value ($(..), backticks, $X: `(zz|$(echo measure.py))` ran measure.py), a group nested past
     MAX_ZSH_GROUP_DEPTH or more than MAX_ZSH_GROUP_GLOBS forms."""
     import glob
@@ -3242,8 +3276,12 @@ def zsh_group_globs(text, i):
         while i < n:
             ch = text[i]
             if ch in _ZSH_WORD_END:
+                if depth and ch in ' \t\n':  # Viktor 49709 L1: a blank in a group is a member char: zsh -f ran
+                    items.append(ch)  # `(measure.py|a b)`, a tab, a newline, a nested group; `(measure.py |zz)`
+                    i += 1  # looks for "measure.py " (measured 11-21, Dave zblank/drive.py, drive2.py)
+                    continue
                 if depth:
-                    raise ValueError  # a blank in a group: zsh globs nothing
+                    raise ValueError  # ; & < > in a group: a parse error, zsh runs nothing (measured 11-21)
                 break
             if ch in '|)':
                 break
@@ -4541,8 +4579,9 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
             raise PathUnread(f'a relative script path after a directory change the gate does not follow: {v[:40]}')
         firsts = []
         for b in ([None] if os.path.isabs(v) else bases):
-            hits = []
-            for h in glob.iglob(v if b is None else os.path.join(glob.escape(b), v), recursive=True):
+            hits, pat = [], v if b is None else os.path.join(glob.escape(b), v)
+            star_walk_bounded(pat)  # Viktor 49709 L2: a `**` walk is bounded by directories, not only matches
+            for h in glob.iglob(pat, recursive=True):
                 hits.append(h)
                 if len(hits) > MAX_LEAD_GLOB:
                     raise PathUnread(f'a script glob naming more than {MAX_LEAD_GLOB} files: {v[:40]}')
@@ -4601,7 +4640,9 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
                 out += [f, (head + '/' if head or f.startswith('/') else '') + '.' + last]
         for p in dict.fromkeys(out):
             for b in ([None] if os.path.isabs(p) else bases):
-                if next(glob.iglob(p if b is None else os.path.join(glob.escape(b), p), recursive=True), None):
+                pat = p if b is None else os.path.join(glob.escape(b), p)
+                star_walk_bounded(pat)  # Viktor 49709 L2: a no-match `**` walked the whole tree
+                if next(glob.iglob(pat, recursive=True), None):
                     return True
         return False
 

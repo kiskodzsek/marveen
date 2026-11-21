@@ -1714,6 +1714,16 @@ def script_cases():
             ('cd hid && python3 (.hm|zz).py x', d),
             # ... a quoted or a nested member (zsh -f ran measure.py), and the call after a decoy of its cut word
             ('python3 (zz|"measure.py") x', d),
+            # card 00c714ea r3 (Viktor 49709 L1): a blank, tab or newline in a group is a member char, not "zsh runs
+            # nothing": zsh -f (and with extendedglob) ran measure.py for each (Dave zblank/drive.py, 11-21)
+            ('python3 (measure.py|a b) x', d),
+            ('python3 (measure.py|a\tb) x', d),
+            ('python3 (measure.py|a\nb) x', d),
+            ('python3 (zz|(measure.py|a b)) x', d),
+            ('python3 (a b|measure.py) x', d),
+            # ... a lean (KNOWN-KTP-OVER, r3): a whole-word group with no | and a substitution in it is a glob
+            # qualifier for zsh, which stops ("unknown file attribute"): the gate reads the substitution as unread
+            ('python3 (`echo zq`, zz) x', d),
             ('python3 (zz|(me|q)asure.py) x', d),
             ('echo "(zz)"; python3 (measure|zz).py x', d),
             # ... a quote the gate takes out, before the paren or inside the group
@@ -2785,13 +2795,15 @@ def script_cases():
             # card 00c714ea r2: a paren whose prefix matches no file runs nothing (zsh: no matches found; bash: a
             # syntax error); every paren read as unread blocked 311 fleet commands on the replay (code cut into words)
             ('python3 zq(x|y).py stat.py', d),
-            ('python3 (measure.py|a b) x', d),  # a blank in a group: zsh -f ran nothing (measured 11-21)
+            # card 00c714ea r3: ; & < in a group: a zsh parse error, nothing runs (measured 11-21, Dave zblank/drive.py)
+            ('python3 (measure.py|a;b) x', d),
+            ('python3 (measure.py|a&b) x', d),
+            ('python3 (measure.py|a<b) x', d),
             ('python3 (15) x', d),  # a group whose member names no file (prose cut into words: `(15`, `(argv,`)
             # ... a quote or a substitution the gate took out of the word (found in the text all the same), a group
             # the text leaves open, a `=(..)` in a group: zsh -f ran nothing (bad pattern, no matches found), measured
             # 11-21 (a backtick left open blocks earlier: the lexer cannot read the text)
             ('python3 ("zq.py"|zz) x', d),
-            ('python3 (`echo zq`, zz) x', d),
             ("python3 - <<'PY'\nnew=\"\"\"- the walk does not follow (`python3 -c`, `python3 -` + heredoc), the import\n\"\"\"\nPY", d),
             ('python3 (measure.py|zz', d),
             ('python3 (zz|=(echo measure.py)) x', d),
@@ -3450,6 +3462,20 @@ def script_cases():
                                 'cwd': os.path.join(d, 'sub2')}))
         if p.returncode != 2 or 'KULCSKARIKA-KAPU' not in p.stderr:
             fails.append(f'script: should block (got {p.returncode}): a ~ before a zsh group, HOME = the fixture')
+        # card 00c714ea r3 (Viktor 49709 L2): a ** walk is bounded by directories (MAX_STAR_DIRS 2000), not only by
+        # matches: a no-match `**/x.py` in a large cwd walked to the 6 s watchdog. Past the bound it blocks at once
+        # (a lean, KNOWN-KTP-OVER); under it a no-match passes. A tree of its own: d's ** rows stay as they are.
+        import time as _t
+        with tempfile.TemporaryDirectory() as big:
+            for k in range(2100):
+                os.makedirs(os.path.join(big, f'g{k // 100}', f'h{k}'))
+            for cmd, cwd, want in (('python3 **/zz_nomatch_q7.py x', big, 2), ('python3 ./**/zz_nomatch_q7.py x', big, 2),
+                                   ('python3 **/zz_nomatch_q7.py x', d, 0)):
+                t = _t.monotonic()
+                code, err = bash_in(cmd, cwd)
+                took = _t.monotonic() - t
+                if code != want or took > 2:
+                    fails.append(f'script: ** walk {cmd[:30]!r}: want rc {want} under 2 s, got {code} in {took:.1f} s')
         # card 3bcd4514: the stdin reading is linear. In the hook a long call blocks before it (MAX_ARGS, ARGS_WINDOW),
         # but the token pass (_hn_fed) and the reader regex read the WHOLE command (a short call after a long text), so
         # they are timed in process: runs of shell words with options (-o read with its word or alone, -eo, --rcfile),
