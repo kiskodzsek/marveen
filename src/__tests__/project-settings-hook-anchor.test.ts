@@ -67,6 +67,7 @@ const EXPECTED: Record<string, string[]> = {
     'keychain-read-gate.py', // c1921b55
     'keychain-write-gate.py', // 759161e3
     'credentials-write-gate.py', // a467f621
+    'este-blokk-write-gate.py', // 0260694d: the evening block only through its two scripts (Write/Edit/MultiEdit/NotebookEdit/Bash)
     'hex-id-source-gate.py', // 7b2f784f
     'time-claim-gate.py', // Klodel 38401: Write/Edit/MultiEdit of shared/*.md + Bash card comments
     'link-request-reply-gate.py', // #219, card 18b2002b: a reply to "add a linket" carries a URL (Telegram reply/edit_message)

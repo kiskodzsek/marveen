@@ -72,6 +72,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of credentials-write-gate.py (run: python3 -I scripts/hooks/credentials-write-gate_test.py); not itself a hook (a467f621)',
   'keychain-write-gate_test.py':
     'the unit test of keychain-write-gate.py (run: python3 -I scripts/hooks/keychain-write-gate_test.py); not itself a hook (759161e3)',
+  'este-blokk-write-gate_test.py':
+    'the unit test of este-blokk-write-gate.py (run: python3 -I scripts/hooks/este-blokk-write-gate_test.py); not itself a hook (0260694d)',
   'prod-tree-write-gate_test.py':
     'the unit test of prod-tree-write-gate.py (run: python3 -I scripts/hooks/prod-tree-write-gate_test.py); not itself a hook (11c4a5fe)',
   'tmux-kill-gate_test.py':
@@ -202,6 +204,8 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'a step put on the owner in his own chats needs a PATRIK-LEPES mark naming who measured that no internal route exists (Klodel 41154, Patrik TG 6049): the rule is about the MAIN agent, the one that talks to Patrik; the reply marks it takes are spent by reply-marks-spend.py, itself CHECKOUT_ONLY. Seeding it fleet-wide is a separate decision',
   'patrik-decision-reply-gate.py':
     'a decision asked of the owner in his own chats needs a PATRIK-DONTES mark naming why only he can decide and the TG or msg_id carrying it (card dd706ced, hibanapló 2026-11-16 13:54, TG 6276): like patrik-step-reply-gate.py above, the rule is about the MAIN agent, and its marks are spent by reply-marks-spend.py, itself CHECKOUT_ONLY',
+  'este-blokk-write-gate.py':
+    'store/patrik-este-blokk.json (the owner\'s evening decision block) is written only through scripts/este-blokk-add.py and este-blokk-drain.py, under a lock (card 0260694d, Klodel 49761, hibanapló 2026-11-21): the MAIN agent wrote it by hand in 80 distinct commands of the 14 days before 2026-11-21, the sub-agents in none (measured over the transcripts); the evening summary is the main agent\'s job. Seeding it fleet-wide is a separate decision',
   'patrik-capacity-reply-gate.py':
     'more paid AI capacity (account, seat, subscription, credit, options for a running-out team quota) offered to the owner in his own chats needs a BELSO-UT-MERVE mark naming the teammate msg_id that measured the existing quotas (card 13909285, retro 2026-11-20 R6, hibanapló 2026-11-16 11:15, TG 6198/6199): like patrik-decision-reply-gate.py above, the rule is about the MAIN agent, and its marks are spent by reply-marks-spend.py, itself CHECKOUT_ONLY',
   'summary-form-reply-gate.py':
