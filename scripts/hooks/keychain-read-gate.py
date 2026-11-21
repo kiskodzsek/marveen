@@ -46,7 +46,9 @@ KNOWN-KTP-VAR, a value not bound or bound otherwise: var-ifs, var-array (X=(evil
 KNOWN-KTP-OVER, not open but leans: they block a harmless call (old unless named new): every word a brace makes
   is read as a script (brace-seq, brace-empty, braceargs-benign, bracenested-alt, `python3 {l..n}easure.py
   stat.py` runs leasure.py), a zsh order qualifier (new: zshqual-om2, (On), (om): the order is not modelled),
-  noglob-set, mixedquote-star ('*'e*.py), cdback-benign, varbrace-benign.
+  noglob-set, mixedquote-star ('*'e*.py), cdback-benign, varbrace-benign, and (new) a zsh paren in a call written
+  as data (`cat <<'EOF'` or `python3 - <<'PY'` whose body holds `python3 (measure|zz).py x`) when a member matches
+  a file: the "(" in the call's words makes the gate lex the call alone, as code (replay: 4 commands, gate probes).
 A variable glued to a script word (card 8a73eab1, Dave's audit 11-16; Viktor 49425): the word is read with every
 variable whose value the gate does not trust as unset and as set to "": one the text does not set, and one it sets in
 an expansion the gate does not trust. Read in bash's and zsh's forms (`evil${X}.py`, `X=; python3 evil$X.py`,
