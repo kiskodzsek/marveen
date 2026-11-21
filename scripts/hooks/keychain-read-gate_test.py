@@ -640,8 +640,119 @@ BLOCK += ['$(echo s3curity) dump-keychain', '`echo s3curity` dump-keychain', '"$
 # card 03a336e5 mutation round: a tab is a blank after the name too; a later line starts at its newline (the gate's
 # reading of find's `\s-exec` there; bash would run `-exec` as a command, so this row pins the fail-closed side)
 BLOCK += ['$S\tdump-keychain', 'true\n-exec $S dump-keychain']
+# card d58d5c30 (Viktor 48033 LOW L2, bash and zsh ran the stub 11-20, work/d58d5c30/gbt1): the literal name with a
+# subcommand the shell makes at run time (a substitution, a backtick, a variable, a piece glued to a literal)
+BLOCK += ['s3curity $(echo dump-keychain)', 's3curity `echo dump-keychain`', 'eval s3curity "$(echo dump-keychain)"',
+          'bash -c "s3curity $(echo dump-keychain)"', 's3curity "$(echo find-generic-password)" -s x',
+          's3curity dump-$(echo keychain)', 'X=dump-keychain; s3curity $X', 'X=dump-keychain; s3curity "$X"',
+          'X=dump-keychain; s3curity ${X}', 's3curity -v $(echo dump-keychain)', 'sudo s3curity $(echo dump-keychain)',
+          "env s3curity \"$(printf 'dump-keychain')\"", '/usr/bin/s3curity $X', 'ls; s3curity\t$X']
+# ... the quoted or escaped name, a backtick opening in the word, a loop the rule does not trust (a secret word or an
+# option in the list, the variable set again, a list made at run time), a variable with no loop
+BLOCK += ['"s3curity" $(echo dump-keychain)', "'s3curity' \"$X\"", '\\s3curity `echo dump-keychain`',
+          's3curity dump-`echo keychain`', 'for s in add-trusted-cert dump-keychain; do s3curity $s -h; done',
+          'for s in a b; do s=dump-keychain; s3curity $s; done', 'for s in -i; do s3curity $s; done',
+          'for s in $(cat list); do s3curity $s -h; done', 's3curity $T -h', 'for s in a b; do read s; s3curity $s; done']
+# (mutation round) a wrapper with a flag that takes a word: only the text with the wrapped commands' bounds shows the
+# call; and the escaped name in a payload or a pipe into a shell (main allowed all, measured with hook-probe)
+BLOCK += ['sudo -u root s3curity $X', 'env -u HOME s3curity $X', 'timeout -s KILL 5 s3curity $X',
+          'sudo -g staff -u root s3curity "$(echo x)"', "echo '\\s3curity $X' | bash", "bash -c '\\s3curity $X'",
+          "bash <<< '\\s3curity $X'"]
+# (mutation round, gate-bash-truth 11-20: bash and zsh ran dump-keychain, main allowed) an ANSI-C or locale quote, the
+# positional parameters, a loop variable glued to more (the list word is only a piece of the subcommand)
+BLOCK += ["s3curity $'dump-keychain'", "s3curity $'\\x64ump-keychain'", 's3curity $"dump-keychain"',
+          'f() { s3curity "$@"; }; f dump-keychain', 's3curity $*', 's3curity $1',
+          'for s in dump; do s3curity $s-keychain; done', 'for s in dump; do s3curity ${s}-keychain; done',
+          # a word that only ends in "for" is no loop (the variable comes from elsewhere)
+          'echo before s in a b; s3curity $s', 'X=$(get) && echo $Xfor s in a; s3curity $s',
+          # (mutation round 1's survivors, gate-bash-truth 11-20: bash and zsh ran dump-keychain) an empty list keeps
+          # the inherited value; += appends to the list word
+          'for s in ; do :; done; s3curity $s', 'for s in dump; do s+=-keychain; s3curity $s; done']
+# (Viktor 48765, his rows.txt, measured with a stub in bash and zsh: a secret subcommand ran) a backtick opener with a
+# blank, a tab, a redirection or a tilde after it; a brace list; the loop variable named another way (printf -v,
+# ${s:=}, zsh ${s::=}, zsh for s (..), select, zsh foreach); xargs giving the subcommand
+BLOCK += ['s3curity ` printf dump-keychain`', 's3curity dump-` printf keychain`', 's3curity `\tprintf dump-keychain`',
+          's3curity `<tmp/f`', 's3curity `~/x`', 's3curity {dump-keychain,}', 's3curity dump-keychai{n,}',
+          's3curity {dump,}-keychain', 's3curity dump-{keychain,x}',
+          'for s in list-keychains; do :; done; printf -v s dump-keychain; s3curity $s',
+          'for s in list-keychains; do unset s; : ${s:=dump-keychain}; s3curity $s; done',
+          'for s in list-keychains; do :; done; for s (dump-keychain) s3curity $s',
+          'for s in list-keychains; do : ${s::=dump-keychain}; s3curity $s; done', 's3curity -- $(printf dump-keychain)',
+          'for s in list-keychains; do :; done; select s in dump-keychain; do s3curity $s; break; done <<< 1',
+          'for s in list-keychains; do :; done; foreach s (dump-keychain) s3curity $s; end',
+          'echo dump-keychain | xargs s3curity', 'for s in list-keychains; do :; done; s=dump-keychain s3curity $s',
+          'for s in list-keychains; do :; done; IFS=, read s <<< dump-keychain; s3curity $s',
+          'xargs -I{} s3curity {} < tmp/f', 'xargs -I% s3curity % < tmp/f', 'xargs -n1 s3curity < tmp/f',
+          # (d58d5c30 r2, gate-bash-truth: bash and zsh ran them) a literal backtick before the opener (escaped, in a
+          # comment) makes the count odd: the parity alone (Viktor's P1) let them pass, the opener's first char holds
+          'echo \\`; s3curity `printf dump-keychain`', '# a ` in a comment\ns3curity `printf dump-keychain`',
+          # (d58d5c30 r2 replay fix: the xargs call is read past the walk of its flags) flags with and without a word,
+          # a path, a quoted name; BSD -J puts the stdin word at its string too
+          'xargs -0 s3curity < tmp/f', 'xargs -n 1 s3curity < tmp/f', 'xargs -P2 -n1 /usr/bin/s3curity < tmp/f',
+          'xargs -t "s3curity" < tmp/f', 'xargs --max-args 1 s3curity < tmp/f', 'xargs -J % s3curity % < tmp/f',
+          'xargs -0 -L 1 -I {} s3curity {} < tmp/f', 'xargs -- s3curity < tmp/f',
+          # past MAX_ARGS flag words the walk stops unread: blocks
+          'xargs ' + '-0 ' * 70 + 's3curity < tmp/f',
+          # (d58d5c30 r2 mutation round 5, gate-bash-truth: bash and zsh ran dump-keychain, main allows) the opener's
+          # first char other than a letter (bt-open-set-narrow; the $C row runs in bash only), a one-letter brace
+          # range (brace-range-off), an option after the name before the stdin word (xargs-opts-off)
+          'echo \\`; s3curity `/usr/bin/printf dump-keychain`', 'C="printf dump-keychain"; echo \\`; s3curity `$C`',
+          'echo \\`; s3curity `"printf" dump-keychain`', "echo \\`; s3curity `'printf' dump-keychain`",
+          'echo \\`; s3curity `(printf dump-keychain)`', 'echo \\`; s3curity `{ printf dump-keychain; }`',
+          'echo \\`; s3curity `\\printf dump-keychain`',
+          's3curity dump-keychai{n..n}', 's3curity {d..d}ump-keychain', 's3curity dump-{k..k}eychain',
+          's3curity -q dump-keychai{n..n}',
+          'echo dump-keychain | xargs s3curity -q', 'xargs -I{} s3curity -q {} < tmp/f',
+          # (xargs-i-default) GNU xargs -i takes {} as its default string; macOS xargs does not run -i (Viktor 48765
+          # F13): a deliberate over-read, kept for a GNU xargs on PATH
+          'xargs -i s3curity {} < tmp/f',
+          # (Viktor 48860, r3; bash and zsh ran dump-keychain, his shell.txt) LOW 1: an escaped or single-quoted
+          # backtick before the real opener made its count look odd (R01, R02, R03, R10); LOW 2: a wrapper as the
+          # command xargs runs (X01, X03, X06, X07)
+          'echo \\`; s3curity ` printf dump-keychain`', 'echo \\`; s3curity `\tprintf dump-keychain`',
+          'echo \\`; s3curity `<tmp/f`', "echo '`'; s3curity `./g.sh`", "echo $'\\`'; s3curity ` printf dump-keychain`",
+          'echo x # `\necho \\`; s3curity ` printf dump-keychain`',
+          'printf dump-keychain | xargs env s3curity', 'printf dump-keychain | xargs nice s3curity',
+          'printf dump-keychain | xargs -0 env s3curity', 'printf dump-keychain | xargs nice -n 5 s3curity',
+          'printf dump-keychain | xargs env nice -n 5 command s3curity',
+          # (r3 mutation round 8) more wrappers than WRAP_PASSES (8) after xargs: not walked to the end, blocks
+          'printf dump-keychain | xargs ' + 'env ' * 9 + 's3curity',
+          # (r3, found classifying mutation round 7's plain-off survivor; bash and zsh ran dump-keychain, r3/gbt-hd3):
+          # a heredoc body's backtick is read apart from the line, quoted delimiter or not (`<<\E` reaches the rule
+          # as `<<E`)
+          "cat <<'E'\n`\nE\ns3curity ` printf dump-keychain`", 'cat <<"E"\n`\nE\ns3curity ` printf dump-keychain`',
+          'cat <<\\E\n`\nE\ns3curity ` printf dump-keychain`', "cat <<-'E'\n\t`\n\tE\ns3curity ` printf dump-keychain`",
+          'cat <<E\n\\`\nE\ns3curity ` printf dump-keychain`',
+          # a text the lexer does not read (a trailing unclosed quote; bash runs the lines before it, r3/gbt-hd4): no
+          # backtick counts as real, so the one after the name opens
+          "cat <<'E'\n`\nE\ns3curity ` printf dump-keychain`\necho \"",
+          "cat <<'E'\n`\nE\ns3curity ` printf dump-keychain`\necho '",
+          'echo "$(echo \'`\')"; s3curity ` printf dump-keychain`',
+          # (r3 replay fix, the literal start of the made word) quotes and a backslash taken off, a start a secret
+          # subcommand has, and the starts that are not sure: a $, a brace (bash expands it first)
+          's3curity d"ump"-$(echo keychain)', "s3curity d'u'mp-`echo keychain`", 's3curity \\dump-$(echo keychain)',
+          's3curity e$(echo xport)', 'X=dump; s3curity $X-$(echo keychain)', 's3curity {dump,x}-$(echo keychain)',
+          # (mutation round 9, strip-bs-off; bash and zsh made dump-keychain, r3 stub) a backslash before a non-letter
+          # (normalise takes it off a letter only)
+          's3curity dump\\-$(echo keychain)',
+          # (Viktor 49104 r4 LOW, his shell3.txt: zsh or bash made dump-keychain from a file of that name in the cwd)
+          # a glob group the literal start did not know: zsh's (..), extendedglob ^ and #, bash extglob on its own
+          # line, zsh kshglob; and K05 (zsh (#i)), which the same characters now block
+          's3curity (dump-keychai)n$(true)', 'setopt extendedglob; s3curity ^zzz$(true)',
+          'setopt extendedglob; s3curity dump-keychainn#$(true)', 'shopt -s extglob\ns3curity @(dump-keychai)n$(true)',
+          'shopt -s extglob\ns3curity +(dump-keychai)n$(true)', 'shopt -s extglob\ns3curity !(zzz)$(true)',
+          'setopt kshglob; s3curity @(dump-keychai)n$(true)', 'setopt extendedglob; s3curity (#i)DUMP-keychai(n)$(true)']
+
+# card d58d5c30 round 5 (Viktor 49221 MEDIUM; all passed main d1d4936b = the live gate, zsh ran the stub): zsh's
+# precommand modifiers before a literal call
+BLOCK += ['noglob s3curity find-generic-password -s x', 'nocorrect s3curity dump-keychain',
+          'repeat 1 s3curity dump-keychain', 'coproc s3curity find-internet-password -s x',
+          'true; nocorrect noglob /usr/bin/s3curity export -o x.p12', 'repeat 2 nocorrect s3curity dump-keychain']
 
 ALLOW = [
+    # card d58d5c30 round 5: the four zsh words in prose, and before a harmless command
+    'echo coproc noglob nocorrect repeat 1 s3curity dump-keychain', "git commit -m 'repeat: noglob, nocorrect, coproc'",
+    'noglob ls *.py', 'repeat 3 echo hi', 'nocorrect s3curity list-keychains',
     # card c7234bed (L1): the decoded feeders into no shell, a harmless decoded call, another program's substitution
     # card c7234bed (48033 M1 rework): the two rows that blocked unread before (the old count of a quoted text's raw
     # sites, and of a bash -c payload read twice; nothing secret runs in either): an echo prints its quoted text, and
@@ -669,6 +780,48 @@ ALLOW = [
     '"$SHELL" -n x.sh', '$S find-certificate -a', 'cd $D; grep -c dump-keychain notes.txt', '$X | grep dump-keychain',
     # (mutation round) the word glued to more on its left; a NUL of the command is a plain char, not a mark
     '$X my-dump-keychain', '$X a/dump-keychain', '\x00echo $S dump-keychain',
+    # card d58d5c30: a literal subcommand with a made argument after it, the name not in command position, a
+    # substitution whose call is literal
+    's3curity find-certificate -c "$NAME"', 's3curity list-keychains -d user', 'echo s3curity $(echo dump-keychain)',
+    's3curity find-identity -v -p "$P"', 'X=$(s3curity list-keychains)', 'grep s3curity "$F"',
+    # (fleet replay 11-20) a closing backtick in prose, quoted data the quote removal would make a command, and the
+    # help loops over literal non-secret subcommands (Viktor's and Kernel's)
+    'echo "`s3curity add-trusted-cert` (x)"', 'echo "x (`s3curity ...`, y)"', 'echo "`s3curity definer`, z"',
+    'grep -n "^a\\|s3curity" $F', 'for s in add-trusted-cert create-keypair; do s3curity $s -h; done',
+    'for s in a b; do s3curity "$s" -h; done', 'for s in a b; do /usr/bin/s3curity ${s} -h 2>&1 | head -3; done',
+    # (mutation round 1) `$s=` in an echo is no assignment of s
+    'for s in add-trusted-cert create-keypair; do echo $s=1; s3curity $s -h; done',
+    'for s in add-trusted-cert; do echo x$s=1; s3curity $s -h; done',
+    # (Viktor 48765) the loop over literal words read only as $s / ${s}, a quoted brace, xargs with a literal
+    # subcommand or into another program, a backtick in prose before a literal call
+    'for s in list-keychains show-keychain-info; do s3curity $s; done', 's3curity find-certificate -c "{a,b}"',
+    'for sub in add-trusted-cert create-keypair; do s3curity $sub -h; done',
+    'for s in list-keychains; do s3curity "$s"; done; echo ${s}', 'grep -rn s3curity . | xargs -n1 echo',
+    'ls | xargs s3curity list-keychains', 'echo it`s fine; s3curity list-keychains',
+    'xargs -I{} cp {} /x; s3curity list-keychains', 'echo "`s3curity ...`, and `SECURITY NOTICE` here"',
+    # (d58d5c30 r2 fleet replay, 14 rows: runs of prod-tree-write-gate_test.py, whose row is the first) the name as
+    # another program's argument or glued to more is no call xargs makes
+    'find agents -name agent-config.json | xargs grep s3curityProfile', 'git ls-files | xargs grep -l s3curity',
+    'ls | xargs -0 grep -n s3curity', 'xargs echo s3curity < tmp/f', 'xargs -I{} grep s3curity {} < tmp/f',
+    'xargs -n1 s3curity-notes < tmp/f', 'xargs -J % cp % s3curity/ < tmp/f', 'echo xargs; s3curity list-keychains',
+    # (Viktor 48860 r3: R13, R14, X09, X10) an escaped or quoted backtick before a literal call, a wrapper xargs runs
+    # with a literal subcommand or another program
+    'echo \\`; s3curity list-keychains', "echo '`'; s3curity list-keychains",
+    'printf list-keychains | xargs env s3curity list-keychains', 'ls | xargs env echo s3curity',
+    "cat <<'E'\n`\nE\ns3curity list-keychains",  # (r3) a heredoc backtick before a literal call
+    "cat <<'E'\n`\nE\ns3curity list-keychains\necho \"",  # the same in a text the lexer does not read
+    # (r3 fleet replay, 20 rows: a doc or a heredoc the lexer reads apart from the line, e.g. the Marabel
+    # architecture.md's `security definer`) no secret subcommand starts with the made word's literal start
+    "cat <<'E'\n- `s3curity definer`, `search_path`\nE", "cat <<'E'\n`s3curity add-trusted-cert`, it's here\nE",
+    "echo \"it's `s3curity definer`, z\n",
+    # (replay row, Kernel's help loop) with a loop name that is not also a sed / grep letter
+    "for sub in add-trusted-cert list-keychains; do echo \"### $sub\"; /usr/bin/s3curity $sub -h 2>&1"
+    " | grep -E '^\\s+-' | sed 's/^ *//' | cut -c1-110; done > o.txt",
+    # (mutation round 5, loop-name-lookbehind) the name glued to a digit names no variable
+    'for s in add-trusted-cert list-keychains; do s3curity $s -h; sleep 1s; done',
+    'for s in list-keychains; do s3curity $s; done; tail -n 20s.log',
+    # (second replay run) the quoted name as a quoted argument: its opening quote is no command position
+    'K=x; grep -n "s3curity" "$K" | head -30', "grep 's3curity' \"$F\"", 'grep -c "s3curity" $(ls *.py)',
     # card aeee72df: the new payloads stay allowed when they read no secret; a pipe or a here-string into a program
     # that is not a shell is not read as a script; a 4-deep payload with nothing quoted left in it passes
     "echo '\"hello\" world' | bash", "bash <<< 'echo \"hi\"'", "bash -c ''\\''echo'\\'' hi'",
@@ -3444,6 +3597,25 @@ def main():
                              f'{cmd[:40]!r}...')
         except subprocess.TimeoutExpired:
             fails.append(f'hidden-name timing case timed out (5 s): {cmd[:40]!r}...')
+    # card d58d5c30: the made-subcommand rule is linear: the loop table is one pass (a call per match read the text
+    # again each time), in process (the hook blocks such texts early on MAX_ARGS): 200-740 KB, 2 s cap each
+    # (measured 11-20: 0.07 s at most)
+    ms_timed = ('import importlib.util as u,sys,time; s=u.spec_from_file_location("g",sys.argv[1]); '
+                'm=u.module_from_spec(s); s.loader.exec_module(m); N="secu"+"rity"; R=['
+                '("for s in a b; do "+(N+" $s -h; ")*40000,0),((N+" $a; ")*40000,1),'
+                '("".join("for v%d in x; do %s $v%d; "%(i,N,i) for i in range(20000)),0),'
+                '((N+" x ")*60000+"; "+N+" $(y)",1),("`"*200000+N+" $x",1),((N+" ")*80000,0),'
+                '("for s in a b; do "+("read q; "*30000)+N+" $s",0),'
+                # r3: every call's backtick closes a span (a count from the start per call: 7.1 s at 1.15 MB; past
+                # the lexer's bounds no backtick is real, so it blocks at the first), and an odd plain count before
+                # the real opener over 1.1 MB of quoted backticks (the lexer reads it)
+                '(("echo `"+N+" ` x ; ")*50000,1),("echo \\x27`\\x27; "*100001+N+" ` printf x`",1)]\n'
+                'for c,w in R:\n t=time.monotonic(); g=m.made_subcommand(c); d=time.monotonic()-t\n'
+                ' if bool(g)!=bool(w) or d>2: print(repr(c[:40]),bool(g),round(d,2))')
+    p = subprocess.run([sys.executable, '-I', '-c', ms_timed, HOOK], capture_output=True, text=True, timeout=120,
+                       env={'PATH': '/usr/bin:/bin'})
+    if p.returncode != 0 or p.stdout.strip():
+        fails.append(f'made-subcommand timing (in process): {p.stdout.strip()[:300]} {p.stderr.strip()[-300:]}')
     # card 3085a683: the wrapper walk is linear (a walk per wrapper, a wrapper right after another in the same pass);
     # a walk past MAX_ARGS words blocks ('wrapper-unread'): 64 words of flags and arguments pass, 65 block
     sec = fix('s3curity') + ' dump-keychain'
