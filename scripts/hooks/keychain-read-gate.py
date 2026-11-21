@@ -34,13 +34,32 @@ subcommand with a made argument (`security find-certificate -c "$NAME"`) passes,
 literal list of non-secret subcommands (`for s in add-trusted-cert create-keypair; do security $s -h; done`). Not
 seen: a name with quotes inside it (`s"ec"urity $(..)`; the rule reads the text before the quote removal).
 Known limits of the made-subcommand rule (Viktor 49221, Kernel's independent probe 49215; old, LOW, not seen on
-main either): (1) a subcommand a glob makes at run time: only a $ or a backtick counts as "made", so `security
-dump-k*`, `security [d]ump-keychain`, `security dump-keych?in` pass, and the shell runs the secret subcommand when a
-file of that name is in the cwd (the same command may create it: `touch dump-keychain; security dump-k*`); brace
-expansion (`dump-{keychain,x}`) blocks. (2) The loop-variable exception and a sourced file: after `source f` or `. f`
-the gate still takes the loop variable for its literal list value (`for s in add-trusted-cert; do :; done; . ./f.sh;
-security $s`, f.sh setting s=dump-keychain); every rewrite the shell text itself shows (assignment, read, printf
--v, mapfile, declare, eval, let, +=, a function, unset with a default) blocks.
+main either): (1) a subcommand a glob makes at run time: only a $ or a backtick counts as "made" here; a glob in
+the word (`security dump-k*`, `security [d]ump-keychain`, `security dump-keych?in`, zsh `(dump-keychai)n`) is the
+glob-subcommand rule's below (card 04df07c5); brace expansion (`dump-{keychain,x}`) blocks here. (2) The
+loop-variable exception and a sourced file: after `source f` or `. f` the gate still takes the loop variable for its
+literal list value (`for s in add-trusted-cert; do :; done; . ./f.sh; security $s`, f.sh setting s=dump-keychain);
+every rewrite the shell text itself shows (assignment, read, printf -v, mapfile, declare, eval, let, +=, a function,
+unset with a default) blocks.
+Glob subcommand (card 04df07c5, Viktor 49104 INFO 1, round 2 on Viktor 49398's tested proposal): `security` in
+command position whose words, up to and including the first plain word that is not an option, hold a glob
+(unquoted ? * [..], a zsh or extglob group, zsh ^ # ~ (#..) **/) that can match a secret subcommand name or -i / -p
+blocks (`security dump-keychai?`, `security (dump-keychai)n`, `security @(dump-keychai)n`, `security -[i]`, `security
+-v zz* dump-k*`): with a file of that name in the cwd the shell passes it. The word is read as the shell reads it: a
+quoted blank, ; < > ) | is a char of a group alternative or a bracket member, a bracket's leading ! ^ and first ]
+and its [:class:] are members; a redirect and its target, a quoted or escaped option and a word that globs are
+walked past. The reading leans to a match (a bracket is any one char, a negated group any run) and stays linear:
+words cut at 4096 chars, adjacent runs counted as one and more than 4 open runs read as any name. A glob that cannot
+match one (`security list-k*`, eight stars and an x), a quoted or escaped glob char (`security 'dump-k*'`), and a
+glob after the first plain non-option word pass.
+Known limits of the glob-subcommand rule (Viktor 49398 independent probe, 99 cases; each old, main passes it too):
+KNOWN-G1 eval re-globs a quoted or escaped star (`eval security "dump-k*"`); KNOWN-G2 a bash -c payload with an
+escaped glob; KNOWN-G3 a shell function wrapping the name (glob or literal); KNOWN-G4 find -execdir with an
+unqualified name; KNOWN-G5 the command name itself globbed (`/usr/bin/sec*`); KNOWN-G6 the name split by quotes
+(`sec"ur"ity dump-k*`). Over-blocks (main passes them): KNOWN-G7 prose right after an opening quote (`echo "security
+dump-k* ..."`) and a heredoc body to cat; KNOWN-G8 an uppercase word without nocaseglob and a bracket no file name
+can match; KNOWN-G9 1 MB of nested extglob star groups (3.8 s, main the same). A `script -q` wrapper blocks: on the
+mini the wrapped call ran (Kernel's run of the probe), in a sandbox with no terminal it did not (Viktor's).
 Hidden name (card 03a336e5, Viktor 47750/47751 LOW): a simple command whose first word is not literal (a $ or a
 backtick in it: `$(echo security)`, `` `echo security` ``, `$s`, `${S:-security}`, `sec$(echo urity)`) and that has
 find-generic-password, find-internet-password or dump-keychain as a word of its own blocks, whatever the name
@@ -807,6 +826,335 @@ def made_subcommand(text):
 
 
 RULES += [('made-subcommand', FnRule(made_subcommand, raw=True))]
+
+# card 04df07c5 (Viktor 49104 INFO 1, d58d5c30 round 4 rows J12-J14): the literal name with a subcommand word that
+# globs, no substitution in it (`security dump-keychai?`, zsh `security (dump-keychai)n`, bash extglob
+# `security @(dump-keychai)n`). With a file of the secret name in the cwd (the agent can create it first, even in the
+# same command) bash and zsh ran the secret subcommand; main allowed all three (measured by Viktor, shell3.txt). The
+# made-subcommand rule looks for a $ or a backtick, so it is not the place. Here: the first word after the options is
+# read as a shell pattern (unquoted ? * [..], a zsh or extglob group (..) with its | alternatives and an @ ? * + !
+# before it, zsh's ^ negation, x# / x## repetition, a~b exclusion and (#i) flags), and it blocks when the pattern
+# can match a secret subcommand name (SECRET_SUB, case folded like the secret-read rule). The reading leans to a
+# match: a bracket is any one char, a negated group or a ^ is any run, a~b is read as a, an unknown (#..) flag is
+# any run. A quoted or backslash-escaped glob char is literal (`security 'dump-k*'` passes: security
+# gets the literal word, no such subcommand). A $ or a backtick in the word is the made-subcommand rule's, a brace
+# list too (it blocks there). Read on the texts before the quote removal (raw), as made-subcommand.
+_GLOB_SUB_RX = re.compile(POSITION + r'(?:"' + BINARY + r'"|\'' + BINARY + r"'|" + BINARY + r')' + OPTIONS
+                          + r'[ \t]+(?=[^\s;&|`])', re.I)  # Viktor r1: < > may start the next word (a redirect)
+_GLOB_WORD_END = set(' \t\n;&|<>`')
+_GLOB_SEP = ' \t\n;&<>`'  # the word end outside quotes; not |: a group's alternatives (the loop stops at it outside)
+_GLOB_MAX_DEPTH = 8
+_GLOB_MAX_WORD = 4096  # Viktor r1: a longer word is read as any name (the reading leans to a match), and stays linear
+_GLOB_MAX_WORDS = 32  # Viktor r1: words walked after the name and its options
+_GLOB_MAX_RUNS = 4  # Viktor r1: more open runs than this read as any name (no backtracking blow-up in the regex).
+# Kernel r2: 4, not 6: a word of 6 runs cost up to 0.88 ms per fullmatch round (`*?*?*?*?*?*?x`), so 40 000 such
+# words in one command took 36 s (the watchdog blocks: an over-block); 4 runs cost at most 0.074 ms
+_GLOB_REDIR_RX = re.compile(r'(?:\d+|&)?[<>]+[&|]?')
+_GLOB_TARGETS = _SECRET_SUB_NAMES + ('-i', '-p')
+
+
+def _glob_word_end(text, i):
+    """Viktor r1 (card 04df07c5): (end, cut) of the shell word at i: the first blank or command end OUTSIDE quotes. A
+    quoted blank, ;, <, > is a char of the word, and in a group or a bracket one alternative or member among others
+    (a group alternative or a bracket member with a quoted blank ran the secret subcommand). A backslash escapes. cut
+    is True past _GLOB_MAX_WORD chars (the caller reads the first _GLOB_MAX_WORD chars as the pattern and the rest
+    as any run). A | or a ) outside every group ends the word too (a pipe, the end of a subshell): without it each
+    of `security list-k*|` x 80000 scanned to the cap (9.8 s)."""
+    n, q, s, depth = len(text), '', i, 0
+    while i < n:
+        if i - s > _GLOB_MAX_WORD:
+            return i, True
+        c = text[i]
+        if q:
+            if c == q:
+                q = ''
+            elif c == '\\' and q == '"':
+                i += 1
+        elif c == '\\':
+            i += 1
+        elif c in '\'"':
+            q = c
+        elif c == '(':
+            depth += 1
+        elif c == ')' or c == '|':
+            if not depth:
+                return i, False
+            depth -= c == ')'
+        elif c in _GLOB_SEP:
+            return i, False
+        i += 1
+    return n, False
+
+
+def _glob_bracket_end(text, i, n):
+    """Viktor r1: the index of the ']' that closes the bracket at i, or -1: a leading ! or ^ and a first ] are
+    members, a [:class:] [.x.] [=x=] is read whole, a quoted or escaped char is a member (each of these ran it)."""
+    j = i + 1
+    if j < n and text[j] in '!^':
+        j += 1
+    if j < n and text[j] == ']':
+        j += 1
+    while j < n:
+        c = text[j]
+        if c == ']':
+            return j
+        if c == '\\':
+            j += 2
+            continue
+        if c in '\'"':
+            k = text.find(c, j + 1, n)
+            if k < 0:
+                return -1
+            j = k + 1
+            continue
+        if c == '[' and j + 1 < n and text[j + 1] in ':.=':
+            k = text.find(text[j + 1] + ']', j + 2, n)
+            if k >= 0:
+                j = k + 2
+                continue
+        j += 1
+    return -1
+
+
+def _glob_word(text, i):
+    """The shell word at i as (pattern pieces, globbed): each piece ('lit', s) or ('any'|'one', None) or ('grp',
+    prefix, [alternatives]) or ('rep', piece, '*'|'+'); the word ends at a blank or a command end outside quotes and
+    groups, or at a ')' with no group open. None when a $ or a backtick is in it (made-subcommand's), or a group is
+    left open. Linear: one scan to the word end (_glob_word_end, capped), groups nested deeper than _GLOB_MAX_DEPTH
+    read as any run."""
+    n, cut = _glob_word_end(text, i)
+    if cut:  # the capped prefix is the pattern, the rest any run (a 1 MB `?` word still cannot match a short name)
+        w = _glob_word(text[i:n], 0)
+        return ([('any', None)] if w is None else w[0] + [('any', None)]), True
+    out, globbed, w0 = [], False, i
+    while i < n:
+        c = text[i]
+        if c in _GLOB_WORD_END or c == ')':
+            break
+        if c in '$`':
+            return None
+        if c == '\\':
+            out.append(('lit', text[i + 1:i + 2]))
+            i += 2
+            continue
+        if c in '\'"':
+            j = text.find(c, i + 1, n)
+            j = n if j < 0 else j
+            if c == '"' and ('$' in text[i + 1:j] or '`' in text[i + 1:j]):
+                return None
+            out.append(('lit', text[i + 1:j]))
+            i = j + 1
+            continue
+        if c == '(' and text.startswith('(#', i):  # zsh glob flags: (#i) and the like change no name here
+            j = text.find(')', i, n)
+            if j < 0:
+                return None
+            if text[i + 2:j] not in ('i', 'I', 'l', 'b', 'B', 'm', 'M', 'q'):
+                return [('any', None)], True  # (#a1) approximate and the rest: the whole word can match anything
+            globbed, i = True, j + 1
+            continue
+        if c in '@?*+!' and i + 1 < n and text[i + 1] == '(' or c == '(':
+            pre = '' if c == '(' else c
+            k = i + (0 if c == '(' else 1)
+            depth, j, alts, start = 0, k, [], k + 1
+            while j < n:
+                if text[j] == '\\':
+                    j += 2
+                    continue
+                if text[j] in '\'"':  # Viktor r1: a quoted ) or | is a char of the alternative
+                    q = text.find(text[j], j + 1, n)
+                    if q < 0:
+                        return None
+                    if text[j] == '"' and ('$' in text[j + 1:q] or '`' in text[j + 1:q]):
+                        return None
+                    j = q + 1
+                    continue
+                if text[j] == '(':
+                    depth += 1
+                    if depth > _GLOB_MAX_DEPTH:
+                        return [('any', None)], True
+                elif text[j] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif text[j] == '|' and depth == 1:
+                    alts.append(text[start:j])
+                    start = j + 1
+                elif text[j] in '$`':
+                    return None
+                j += 1
+            if j >= n:
+                return None
+            alts.append(text[start:j])
+            out.append(('grp', pre, alts))
+            globbed, i = True, j + 1
+            continue
+        if text.startswith('**/', i):  # Viktor r1: zsh (and bash globstar) **/ matches zero directories too
+            out.append(('any', None))
+            globbed, i = True, i + 3
+            continue
+        if c == '*':
+            out.append(('any', None))
+        elif c == '?':
+            out.append(('one', None))
+        elif c == '[':
+            j = _glob_bracket_end(text, i, n)
+            if j < 0:
+                out.append(('lit', c))
+                i += 1
+                continue
+            out.append(('one', None))
+            i = j + 1
+            globbed = True
+            continue
+        elif c == '^':  # zsh negation: anything but the rest, so it can match any name
+            out, i = [('any', None)], n
+        elif c == '#':  # zsh: the element before it, zero or more times (## once or more)
+            prev = out.pop() if out else ('lit', '')
+            plus = text.startswith('##', i)
+            if prev[0] == 'rep':  # Kernel r2: `x###...` nested a quantifier per # ((?:(?:x)*)*: 14 # took over 2 s);
+                prev, plus = prev[1], False  # a # on a repetition is zero or more of its element (a superset: leans)
+            out.append(('rep', prev, '+' if plus else '*'))
+            globbed, i = True, i + (2 if plus else 1)
+            continue
+        elif c == '~' and i > w0:  # zsh exclusion `a~b`: what a matches less what b matches; a is enough here
+            globbed = True
+            break
+        else:
+            out.append(('lit', c))
+            i += 1
+            continue
+        globbed, i = True, i + 1
+    return out, globbed
+
+
+def _glob_regex(pieces, runs):
+    """The pieces of _glob_word as (regex text, literal only), leaning to a match. runs: a one-item list, the open
+    runs left (Viktor r1: `security ************x` took 5 s and 14 stars hit the watchdog, main 0.05 s): adjacent
+    runs are one, a `*(..)` or `!(..)` group, and a repeated group or element (`+(..)`, x#) whose inside is not
+    literal, is one open run, and
+    the caller reads the word as any name when runs[0] < 0. A bare group at the end may be a zsh qualifier (`(.)`,
+    `(N)`), so it is optional."""
+    parts, lit = [], True
+
+    def run():  # only a new run counts: merged adjacent runs are one (8 stars + x is `.*x`, no secret name)
+        if not parts or parts[-1] != '.*':
+            runs[0] -= 1
+            parts.append('.*')
+
+    for k, p in enumerate(pieces):
+        if p[0] == 'lit':
+            parts.append(re.escape(p[1]))
+        elif p[0] == 'any':
+            lit = False
+            run()
+        elif p[0] == 'one':
+            lit = False
+            parts.append('.')
+        elif p[0] == 'rep':
+            inner, ilit = _glob_regex([p[1]], runs)
+            lit = lit and ilit
+            if ilit:
+                parts.append('(?:' + inner + ')' + p[2])
+            else:
+                run()
+        else:
+            pre, alts = p[1], p[2]
+            # Viktor r1: `*(` is an extglob group in bash but a star and a qualifier (or a group) in zsh: zsh ran
+            # `dump-k*(.)`. A run covers both readings (each matches only what `.*` matches).
+            if pre in ('!', '*'):  # not `pre in '!*'`: '' is in every string (a bare group read as any run)
+                lit = False
+                run()
+                continue
+            sub, glit = [], True
+            for a in alts:
+                w = _glob_word(a, 0)
+                if w is None:
+                    sub.append('.*')
+                    runs[0] -= 1
+                    glit = False
+                else:
+                    r, rl = _glob_regex(w[0], runs)
+                    sub.append(r)
+                    glit = glit and rl
+            lit = lit and glit
+            if pre == '+' and not glit:
+                run()
+                continue
+            last = k == len(pieces) - 1
+            alt = '(?:' + '|'.join(sub) + ')'
+            if pre == '?':  # bash extglob: zero or one; zsh: any one char, then the group (a qualifier when last)
+                lit = False
+                parts.append('(?:' + alt + '?|.' + alt + ('?' if last else '') + ')')
+                continue
+            q = {'': '', '@': '', '+': '+'}[pre]
+            if not q and last:
+                q = '?'
+            parts.append(alt + q)
+    return ''.join(parts), lit
+
+
+def _glob_can_match(pieces):
+    """Viktor r1: True when the pattern can match a secret subcommand or -i / -p (too many open runs: True)."""
+    runs = [_GLOB_MAX_RUNS]
+    rx, _ = _glob_regex(pieces, runs)
+    if runs[0] < 0:
+        return True
+    rx = re.compile(rx, re.I | re.S)
+    return any(rx.fullmatch(name) for name in _GLOB_TARGETS)
+
+
+def _glob_walk(text, i):
+    """Viktor r1: from the first word after the name and its options, True when a word that globs can match a secret
+    subcommand or -i / -p; checked on each word up to and including the first plain word that is not an option. On
+    the way it passes a redirect and its target (`>/dev/null dump-k*`), a quoted or escaped option (`"-v"`, `\\-q`),
+    and a word that globs (it may be an option, `[-]v`, or vanish under nullglob or zsh (N): `zz* dump-k*`)."""
+    n = len(text)
+    for _ in range(_GLOB_MAX_WORDS):
+        while i < n and text[i] in ' \t':
+            i += 1
+        r = _GLOB_REDIR_RX.match(text, i)
+        if r:
+            i = r.end()
+            while i < n and text[i] in ' \t':
+                i += 1
+            i = _glob_word_end(text, i)[0]
+            continue
+        if i >= n or text[i] in '\n;&|)':
+            return False
+        e, cut = _glob_word_end(text, i)
+        w = _glob_word(text[i:e], 0)
+        if w is None:
+            return cut  # a capped word whose prefix leaves a group open leans to a match
+        if cut:
+            w = w[0] + [('any', None)], True
+        if w[1]:
+            if _glob_can_match(w[0]):
+                return True
+        elif not ''.join(p[1] for p in w[0] if p[0] == 'lit').startswith('-'):
+            return False
+        i = max(e, i + 1)
+    return False
+
+
+def glob_subcommand(text):
+    """The glob-subcommand rule (card 04df07c5, see above); a literal search for the name first (as NeedRule).
+    Viktor r1: an option word of the match that globs (`-[i]`, a file named -i in the cwd: the subcommands are read
+    from stdin) blocks too."""
+    if 'security' not in text.lower():
+        return None
+    for m in _GLOB_SUB_RX.finditer(text):
+        t = re.search(r'(?:\s+-\S+)+\s*$', m.group(0))
+        for o in (t.group(0).split() if t else ()):
+            ow = _glob_word(o, 0)
+            if ow is None or ow[1]:
+                return m
+        if _glob_walk(text, m.end()):
+            return m
+    return None
+
+
+RULES += [('glob-subcommand', FnRule(glob_subcommand, raw=True))]
 
 # Card 03a336e5 (Viktor 47750/47751 LOW, defense-in-depth; the class the docstring names): a command NAME the shell
 # makes at run time (`$(echo security) dump-keychain`, `` `echo security` ``, `s=security; $s ...`, `${S:-security}`,

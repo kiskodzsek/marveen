@@ -785,6 +785,28 @@ BLOCK += ['echo dump-keychain | xargs s3curity', 'echo dump-keychain | xargs -n1
           # made-subcommand rule, card d58d5c30: its subcommand comes from stdin); round 1 had it as an ALLOW row
           'echo dump-keychain || xargs s3curity',
           ]
+
+# card 04df07c5 (Viktor 49104 INFO 1, rows J12-J14; main allows them): a glob in the subcommand word, no substitution.
+# With a file of the secret name in the cwd bash and zsh run the secret subcommand (J13 in both, J14 in zsh).
+BLOCK += ['s3curity dump-keychai?', 's3curity (dump-keychai)n', 'shopt -s extglob; s3curity @(dump-keychai)n',
+          'touch dump-keychain; s3curity dump-k*', 's3curity [d]ump-keychain', 's3curity dump-keychai[mn]',
+          's3curity exp?rt -k x', 's3curity find-*-password -s x', 's3curity -v dump-keych?in', 's3curity *',
+          's3curity "dump-k"*', "s3curity 'dump-'k*", 's3curity (list-keychains|dump-keychain)', 's3curity !(x)',
+          'shopt -s extglob\ns3curity +(dump-keychai)n', 'setopt kshglob; s3curity @(dump-keychai)n',
+          '(s3curity dump-k*)', 'bash -c "s3curity dump-k*"', "ssh h 's3curity dump-k*'", 'sudo s3curity dump-k*',
+          '/usr/bin/s3curity dump-k*', '"s3curity" dump-k*',
+          'setopt extendedglob; s3curity ^zzz', 'setopt extendedglob; s3curity dump-keychainn#',
+          'setopt extendedglob; s3curity (#i)DUMP-keychai(n)', 'setopt extendedglob; s3curity dump-k*~x',
+          'setopt extendedglob; s3curity (#a1)dump-keychaim', 's3curity DUMP-K*']
+# card 04df07c5 round 2 (Viktor 49398, his oracle rows with bash/zsh truth; round 1 let each through): a quoted blank,
+# separator, ) or | inside a group alternative or a bracket member, a [:class:] member, and a glob in the option
+# position (a file named -i in the cwd: the subcommands come from stdin)
+BLOCK += ['s3curity (dump-keychain|" ")', 'shopt -s extglob\ns3curity @(dump-keychain|" ")',
+          's3curity ["; "d]ump-keychain', 's3curity [" "d]ump-keychain', 's3curity (dump-keychain|";")',
+          's3curity ["<"d]ump-keychain', 's3curity (")"|dump-keychain)', 'shopt -s extglob\ns3curity @(")"|dump-keychain)',
+          'echo dump-keychain | s3curity -[i]', 'echo dump-keychain | s3curity -?', 'echo dump-keychain | s3curity -v -[i]',
+          's3curity [[:alpha:]]ump-keychain']
+
 ALLOW = [
     # card d58d5c30 round 5: the four zsh words in prose, and before a harmless command
     'echo coproc noglob nocorrect repeat 1 s3curity dump-keychain', "git commit -m 'repeat: noglob, nocorrect, coproc'",
@@ -1096,6 +1118,23 @@ ALLOW = [
     'x >&2 s3curity dump-keychain',
     'x &>/dev/null s3curity dump-keychain',
 ]
+# card 04df07c5: a glob that cannot make a secret subcommand, a quoted or escaped glob char (security gets the literal
+# word, no such subcommand), a glob in an argument after a literal subcommand, a ~ path
+ALLOW += ["s3curity 'dump-k*'", 's3curity dump-k\\*', 's3curity "dump-keychai?"', 's3curity list-k*',
+          's3curity (list-keychains)', '(s3curity list-keychains)', 's3curity add-trusted-cert *.pem',
+          's3curity find-certificate -c "*.pem"', 's3curity verify-cert -c x?', 's3curity f[aeiou]nd-cert*',
+          's3curity ~/x', 'setopt extendedglob; s3curity list-k*~x', 'setopt extendedglob; s3curity list-keychainss#',
+          's3curity cms -D -i x.p7', 'ls dump-k*', 'echo s3curity; ls dump-keychai?']
+# card 04df07c5 round 2 (Viktor 49398): his benign oracle rows, and adjacent stars before a literal: round 1 made each
+# star a run of its own and the fullmatch backtracked (14 stars + x: 6.2 s and the watchdog blocked; main 0.05 s)
+ALLOW += ['s3curity list-k*', "s3curity 'dump-k*'", 's3curity find-certificate -c "x*"', 's3curity dump-k\\*',
+          's3curity show-keychain-info ~/x*', 'git commit --dry-run -m "fix: s3curity dump-k* now blocks" 2>/dev/null; true',
+          'grep -c "s3curity dump-k" /dev/null; true', 's3curity -h', 's3curity list-keychains -d user',
+          's3curity ' + '*' * 8 + 'x', 's3curity ' + '*' * 14 + 'x', 's3curity ' + '*' * 200 + 'x',
+          # Kernel r2: zsh # after # nested a quantifier per # ((?:(?:x)*)*: 14 # took over 2 s in process)
+          'setopt extendedglob; s3curity ' + '#' * 14 + 'x', 'setopt extendedglob; s3curity ' + '#' * 200 + 'x',
+          'setopt extendedglob; s3curity list-keychains###']
+BLOCK += ['setopt extendedglob; s3curity dump-keychainn###', 'setopt extendedglob; s3curity dump-keychai(n)###']
 
 
 def run(payload):
@@ -3882,6 +3921,22 @@ def main():
                        env={'PATH': '/usr/bin:/bin'})
     if p.returncode != 0 or p.stdout.strip():
         fails.append(f'made-subcommand timing (in process): {p.stdout.strip()[:300]} {p.stderr.strip()[-300:]}')
+    # card 04df07c5: the glob-subcommand rule is linear: each word is read up to its first blank (an unclosed group,
+    # bracket or quote is not scanned to the text's end per call), and a group nested past 8 levels reads as any run
+    # (no recursion depth): 0.3-2 MB, 2 s cap each, in process
+    gs_timed = ('import importlib.util as u,sys,time; s=u.spec_from_file_location("g",sys.argv[1]); '
+                'm=u.module_from_spec(s); s.loader.exec_module(m); N="secu"+"rity"; R=['
+                '((N+" (a ")*60000,0),((N+" [a ")*60000,0),((N+" \x27a ")*60000,0),((N+" (#a ")*60000,0),'
+                '(N+" x"+"("*1000000,1),(N+" "+"("*5000+"d"+")"*5000,1),(N+" "+"@("*3000+"a"+")"*3000,1),'
+                '((N+" list-k* ")*80000,0),((N+" list-k*|")*80000,0),(N+" "+"?"*1000000,0),'
+                '((N+" "+"*"*14+"x; ")*40000,0),((N+" "+"*?"*4+"x; ")*10000,0),((N+" "+"*?"*5+"x; ")*40000,1),'
+                '((N+" x"+"#"*3000+"y; ")*100,0)]\n'
+                'for c,w in R:\n t=time.monotonic(); g=m.glob_subcommand(c); d=time.monotonic()-t\n'
+                ' if bool(g)!=bool(w) or d>2: print(repr(c[:40]),bool(g),round(d,2))')
+    p = subprocess.run([sys.executable, '-I', '-c', gs_timed, HOOK], capture_output=True, text=True, timeout=120,
+                       env={'PATH': '/usr/bin:/bin'})
+    if p.returncode != 0 or p.stdout.strip():
+        fails.append(f'glob-subcommand timing (in process): {p.stdout.strip()[:300]} {p.stderr.strip()[-300:]}')
     # card 3085a683: the wrapper walk is linear (a walk per wrapper, a wrapper right after another in the same pass);
     # a walk past MAX_ARGS words blocks ('wrapper-unread'): 64 words of flags and arguments pass, 65 block
     sec = fix('s3curity') + ' dump-keychain'
