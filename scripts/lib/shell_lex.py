@@ -186,6 +186,19 @@ def _lex_once(text, split, bash32=False, cache=None, stop=False, charge=None):
         quoted = False
         while p < n and s[p] not in META:
             ch = s[p]
+            if ch == '$' and p + 1 < n and s[p + 1] in '"\'':
+                # card 70a5fb2a (Viktor): bash 3.2 ends the body at the delimiter's value, measured: $'J' at J,
+                # $'J\x41' at JA (ANSI-C), $"J" at J; the $ is not part of it
+                if s[p + 1] == '"':
+                    p += 1
+                    continue
+                quoted = True
+                e = p + 2
+                while e < n and s[e] != "'":
+                    e += 2 if s[e] == '\\' and e + 1 < n else 1
+                delim += ansi_c(s[p + 2:min(e, n)])
+                p = e + 1 if e < n else e
+                continue
             if ch == "'":
                 quoted = True
                 e = p + 1

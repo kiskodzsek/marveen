@@ -1793,6 +1793,10 @@ def _hits(cmd, script=False):
             alt = lexer_normalise(cmd, lx['cls'], 0, len(cmd))
             if alt != normalise(cmd):
                 found += [h for h in hits_in(alt, script) if h not in found]
+        else:  # card 70a5fb2a (Viktor): the old path joins every one; the text with none joined is judged too
+            alt = normalise(re.sub(r'\\+\n', '\n', cmd))
+            if alt != normalise(cmd):
+                found += [h for h in hits_in(alt, script) if h not in found]
     return found
 
 
@@ -3599,11 +3603,15 @@ def lexer_normalise(view, cls, a, b):
     join made it part of a word (both found by a differential fuzz against bash and zsh, card fae0712e; the old gate
     let the script run, and hits() let `security dump-keychain` through). Inside quotes and heredoc bodies it joins as
     before: they may be a payload whose own shell joins (`bash -c 'python3 m\\` + newline + `.py'`). Splitting there
-    only shows the shell's own line structure; a join never hid less."""
+    only shows the shell's own line structure; a join never hid less.
+    Nor where the backslash ends a heredoc's terminator line (class 't'; card 70a5fb2a, Viktor 43324 LELET 3): a quoted
+    delimiter may end in a backslash (`curl -d @- <<'J\\'`), its terminator line is `J\\`, and the shell takes that
+    line as the end of the body, so the next line is a command; the join glued it onto the terminator and the script
+    it ran (`./x.sh`) was not read."""
     out = []
     p = a
     while p < b:
-        if view[p] == '\\' and p + 1 < b and view[p + 1] == '\n' and cls[p] not in 'me':
+        if view[p] == '\\' and p + 1 < b and view[p + 1] == '\n' and cls[p] not in 'met':
             p += 2
             continue
         out.append(view[p])
@@ -3884,6 +3892,10 @@ def script_hits(cmd, cwd):
     _OWN_LEXED[0] = 0
     if lx is None:  # the old path (card fae0712e: fail-closed, today's decision)
         text = normalise(blank_span(cmd, span))
+        if '\\\n' in cmd:  # card 70a5fb2a (Viktor): and the text with no backslash-newline joined (only adds)
+            split = normalise(re.sub(r'\\+\n', '\n', blank_span(cmd, span)))
+            if split != text:
+                text += '\n' + split
     else:
         # the blanking stands only where the lexer agrees: the body of the text's first heredoc, quoted delimiter
         first = lx['heredocs'][0] if lx['heredocs'] else None
