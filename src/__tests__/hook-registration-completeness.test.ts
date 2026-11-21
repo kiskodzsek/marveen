@@ -128,6 +128,8 @@ const EXEMPT: Record<string, string> = {
     'the unit test of patrik-step-reply-gate.py (run: python3 -I scripts/hooks/patrik-step-reply-gate_test.py); not itself a hook (Klodel 41154)',
   'patrik-decision-reply-gate_test.py':
     'the unit test of patrik-decision-reply-gate.py (run: python3 -I scripts/hooks/patrik-decision-reply-gate_test.py); not itself a hook (card dd706ced)',
+  'patrik-capacity-reply-gate_test.py':
+    'the unit test of patrik-capacity-reply-gate.py (run: python3 -I scripts/hooks/patrik-capacity-reply-gate_test.py); not itself a hook (card 13909285)',
   'patrik-reply-volume-gate_test.py':
     'the unit test of patrik-reply-volume-gate.py (run: python3 -I scripts/hooks/patrik-reply-volume-gate_test.py); not itself a hook (card 9df14a4c)',
   'patrik-mood-reply-gate_test.py':
@@ -200,6 +202,8 @@ const CHECKOUT_ONLY: Record<string, string> = {
     'a step put on the owner in his own chats needs a PATRIK-LEPES mark naming who measured that no internal route exists (Klodel 41154, Patrik TG 6049): the rule is about the MAIN agent, the one that talks to Patrik; the reply marks it takes are spent by reply-marks-spend.py, itself CHECKOUT_ONLY. Seeding it fleet-wide is a separate decision',
   'patrik-decision-reply-gate.py':
     'a decision asked of the owner in his own chats needs a PATRIK-DONTES mark naming why only he can decide and the TG or msg_id carrying it (card dd706ced, hibanapló 2026-11-16 13:54, TG 6276): like patrik-step-reply-gate.py above, the rule is about the MAIN agent, and its marks are spent by reply-marks-spend.py, itself CHECKOUT_ONLY',
+  'patrik-capacity-reply-gate.py':
+    'more paid AI capacity (account, seat, subscription, credit, options for a running-out team quota) offered to the owner in his own chats needs a BELSO-UT-MERVE mark naming the teammate msg_id that measured the existing quotas (card 13909285, retro 2026-11-20 R6, hibanapló 2026-11-16 11:15, TG 6198/6199): like patrik-decision-reply-gate.py above, the rule is about the MAIN agent, and its marks are spent by reply-marks-spend.py, itself CHECKOUT_ONLY',
   'summary-form-reply-gate.py':
     'the MAIN agent\'s summaries to the owner (retro 2026-11-13 R9, card dddca664; Patrik TG 4735): the evening decision summary and the daily result list are written and sent by the main agent only, like patrik-reply-volume-gate.py below; the gate itself passes every other agent',
   'patrik-mood-reply-gate.py':
