@@ -1162,6 +1162,11 @@ def script_cases():
         os.makedirs(os.path.join(d, 'evilmod'), exist_ok=True)
         w(os.path.join('evilmod', '__main__.py'), "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         w('runner.sh', 'python3 "$1"\n')  # runs its first argument: `source runner.sh m.py` runs m.py
+        # card b138f11b: script names holding a quoted "$(" or paren (bash and zsh run them as written)
+        for name in ('$(true)m.py', ')m.py', '(m.py'):
+            w(name, "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
+        w('$(true)runner.sh', 'python3 "$1"\n')
+        w('(ok.py', 'print(1)\n')
         w('word.py', "print('the " + S + " team writes find-generic-password docs')\n")
         # card 31045f4d (Klodel 43233, Viktor 43235): a data file whose text names the blocked call (the error
         # register), and a script that only counts its lines
@@ -2285,6 +2290,21 @@ def script_cases():
             ("python3 $(true ')' $(true '('))measure.py", d),
             ("source $(true ')' ) dump.sh", d),
             ('python3 $(true \')\' "x")measure.py', d),
+            # card b138f11b (measured 2026-11-16 on 3545748a: allow, the call ended at the quoted ")"; blocked since
+            # 946937b7, unpinned until now): a quoted "$(" or paren is part of the script's name, not a substitution
+            # or a call end (bash and zsh -f ran the named file, or runner.sh's measure.py, in each)
+            ("python3 '$(true)'m.py", d),
+            ("python3 '$(true)m.py'", d),
+            ("source '$(true)'runner.sh measure.py", d),
+            ("bash '$(true)'runner.sh measure.py", d),
+            ("python3 ')'m.py", d),
+            ('python3 ")"m.py', d),
+            ('python3 \\)m.py', d),
+            ("python3 '('m.py", d),
+            ("(python3 ')'m.py)", d),
+            ('python3 $(true \\()measure.py', d),
+            ("python3 -W ')' measure.py", d),  # a quoted paren as an option's argument
+            ("python3 -X ')' measure.py", d),
             # was an allow row (generated mutant 032): bash runs ")measure.py" here, but the gate reads a substitution as
             # printing nothing (it cannot know echo from true), and `python3 $(true ")")measure.py` runs measure.py
             ('python3 $(echo ")")measure.py', d),
@@ -2660,6 +2680,9 @@ def script_cases():
             ('X=stat.py\npython3 $X ./measure.py', d),
             ('P=' + d + '; python3 -I $P/stat.py ' + d + '/measure.py', d),
             ('/usr/bin/python3 stat.py regiszter.jsonl 2>/dev/null', d),
+            # card b138f11b: the quoted paren name is read, not blocked on sight
+            ("python3 '('ok.py", d),
+            ('python3 \\(ok.py', d),
             ('python3 stat.py ' + ' '.join('a%d' % i for i in range(80)), d),  # argv past MAX_ARGS: data
             ('python3 -c pass -Wignore measure.py', d),  # -c first: inline code, the rest is its argv
             # card 217f551b: the backtick that CLOSES the substitution the call stands in still ends its words
