@@ -19,10 +19,12 @@ text, a nested `xargs -I{} sh -c 'echo {} | xargs K'`) is not read for its fed w
 list | xargs`, a redirect `xargs < list`, `-a list`), a computed name (find, an ls glob, tr), a shell expansion in a
 fed word (a default param `${X:-..}`, a variable, a brace), a sh -c script reaching its words through $0 or bash -c
 through "$@", an xargs whose name is split by quotes ('xa'rgs), and a while read loop's output piped into an xargs.
-A script run through a variable's value (card 10624d73 r2, Viktor 49241; old, LOW, main too): the gate reads the
-value as written, the shell expands it, so a glob in the value (X=e*.py, X=[e]vil.py), a brace expansion at the
-use, a value split on a space (a quoted value with a space, an escaped space), an escaped semicolon in the value
-(X=notes.py\\;z), and an export whose name is split by quotes ("HO"ME=...) can run another script than the one read.
+A script run through a variable's value (card 10624d73 r2, Viktor 49241; closed by card 00c714ea): a value is
+expanded only in a positive shape (value_unread_names): a glob, a blank or a brace in it at an unquoted use, an
+escape or an inner quote, or a name the text assigns split by quotes ("HO"ME=...) blocks the script word unread;
+a script word's brace expansion and glob are made as the shell makes them (brace_forms, resolve_lead_glob; a
+text the lexer cannot read counts its script word as code: fail-closed). Still not seen: a value set outside the
+command or by a substitution (`X=$(..)`), as everywhere below.
 A variable glued to a script word (card 8a73eab1, Dave's audit 11-16; Viktor 49425): the word is read with every
 variable whose value the gate does not trust as unset and as set to "": one the text does not set, and one it sets in
 an expansion the gate does not trust. Read in bash's and zsh's forms (`evil${X}.py`, `X=; python3 evil$X.py`,
@@ -3026,7 +3028,187 @@ _LOOP_RX = re.compile(r'(?<![\w$-])for[ \t]+([A-Za-z_]\w*)(?:[ \t]+in[ \t]+([^;\
 _LOOP_WORD_RX = re.compile(r'[A-Za-z0-9_./:+=,@%^~*?\[\]-]+')  # a glob is expanded where the value is looked up
 _GLOB_CHARS_RX = re.compile(r'[*?\[]')
 MAX_LOOP_PATHS = 64
+MAX_LEAD_GLOB = 4096  # card 00c714ea: a script-position glob matching more blocks unread (a bounded directory walk)
 _PWD_RX = re.compile(r'\$\{PWD\}|\$PWD(?!\w)')
+
+# card 00c714ea (Viktor 49241 follow-up, old LOW, main too): a variable's value is trusted only in a positive shape.
+# expand() reads NAME=value with a regex, the shell reads the word: `X=e*.py` / `X=[e]vil.py` (a glob at the use),
+# `X='evil.py notes.py'` / `X=\ ` (split at the use), `X=notes.py\;z` (an escaped ;) and `export "HO"ME=evil.py` (a
+# name split by quotes) ran another script than the one read. Such a name (an unquoted backslash in its assignment
+# word; a blank, a glob or a brace in its value and an unquoted use; a quote or a backslash inside the name where the
+# text assigns it) blocks unread (PathUnread) where it stands in a script position (ScriptGroup.lead) of the text
+# read with it unexpanded; the expanded reading stays as it was. A value the gate does not read at all ($(..), a
+# backtick, a ; in quotes) keeps the old reading (a variable set outside the command). And a script position's own
+# brace expansion and glob are made as the shell makes them (brace_forms, resolve_lead_glob in script_paths).
+_ASSIGN_SITE_RX = re.compile(r'(?<![\w$])([A-Za-z_]\w*)=')
+_VALUE_PLAIN_RX = re.compile(r'''(['"]?)(?:[A-Za-z0-9_./+,:@%=~-]|\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*)*\1''')
+_WORD_STOP = frozenset(' \t\n;|&<>()')
+
+
+def _assign_word(text, i):
+    """The assignment value's shell word that starts at i (to an unquoted blank or operator; a backslash escapes)."""
+    j, q, n = i, None, len(text)
+    while j < n:
+        ch = text[j]
+        if q:
+            if ch == q:
+                q = None
+            elif ch == '\\' and q == '"':
+                j += 1
+        elif ch in '\'"':
+            q = ch
+        elif ch == '\\':
+            j += 1
+        elif ch in _WORD_STOP:
+            break
+        j += 1
+    return text[i:j]
+
+
+_VALUE_SPLIT_CHARS_RX = re.compile(r'[\s*?\[{]')
+
+
+def _assign_value(w):
+    """(an unquoted backslash in the word, the word's value with its quotes and escapes removed)."""
+    out, q, esc, j = [], None, False, 0
+    while j < len(w):
+        ch = w[j]
+        if q == "'":
+            if ch == "'":
+                q = None
+            else:
+                out.append(ch)
+        elif q == '"':
+            if ch == '"':
+                q = None
+            elif ch == '\\' and j + 1 < len(w) and w[j + 1] in '$`"\\\n':
+                j += 1
+                out.append(w[j])
+            else:
+                out.append(ch)
+        elif ch in '\'"':
+            q = ch
+        elif ch == '\\':
+            esc = True
+            j += 1
+            out.append(w[j] if j < len(w) else '')
+        else:
+            out.append(ch)
+        j += 1
+    return esc, ''.join(out)
+
+
+def value_unread_names(text):
+    """Card 00c714ea: the names whose value the shell may read otherwise than expand() (see the block above). A value
+    that is plain but for a blank, a glob or a brace (quoted around, no escape) changes only at an unquoted use (split,
+    globbed, brace-expanded): that name counts only when the lexer finds such a use (or cannot read the text)."""
+    if '=' not in text:
+        return frozenset()
+    lx = lex_or_none(text)  # None: every site and every use counts (fail-closed)
+
+    def code(p):
+        return lx is None or lx['cls'][p] == 'c'
+    bad, split = set(), set()
+    for m in _ASSIGN_SITE_RX.finditer(text):
+        if not code(m.start()):
+            continue  # `echo "P=$P"`, a quoted heredoc body: no assignment of this shell
+        w = _assign_word(text, m.end())
+        if ('$(' in w or '`' in w or w.endswith('$') or _PARAM_OP_RX.search(w)
+                or _VALUE_PLAIN_RX.fullmatch(w)):
+            continue  # `X=$(..)`, `X=${Y:-..}`: a value not read, as one set outside the command
+        esc, val = _assign_value(w)
+        if esc:
+            bad.add(m.group(1))  # an unquoted backslash: the shell drops it, expand() keeps it
+        elif _VALUE_SPLIT_CHARS_RX.search(val):
+            split.add(m.group(1))
+        # else (a ; or a | in quotes ...): ASSIGN_RX does not read such a value at all, as one set outside
+    split -= bad
+    if lx is None:
+        # the lexer cannot read this text (a payload-marked reading, prose): every site counted, a python heredoc's
+        # `S=sys.argv[1]` made the shell's plain `S=/x` bad (1 fleet command, measured). Then a name with a plain
+        # site too does not count: the expanded reading still globs and brace-expands the script position
+        plain = {m.group(1) for m in _ASSIGN_SITE_RX.finditer(text)
+                 if _VALUE_PLAIN_RX.fullmatch(_assign_word(text, m.end()))}
+        bad -= plain
+        split -= plain
+    for m in VAR_RX.finditer(text) if split else ():
+        name = m.group(1) or m.group(2)
+        if name in split and code(m.start()):
+            bad.add(name)
+    for m in _SPLIT_NAME_RX.finditer(text):  # `export "HO"ME=x`, `H\OME=x`: a name split by a quote or a backslash
+        name = re.sub(r'[\'"\\]', '', m.group(1))
+        if re.fullmatch(r'[A-Za-z_]\w*', name) and (lx is None or lx['cls'][m.start(1)] in 'cqde'):
+            bad.add(name)
+    return frozenset(bad)
+
+
+_PARAM_OP_RX = re.compile(r'\$\{[^}]*[^\w}]')
+_SPLIT_NAME_RX = re.compile(r'''(?:^|(?<=[\s;&|(]))((?:[A-Za-z_]|['"\\])[\w'"\\]*['"\\][\w'"\\]*)=''')
+
+
+class ScriptGroup(list):
+    """Card 00c714ea: an interpreter call's candidate words, with lead: the words in its script position (the first
+    word the call may run, and its forms). Only those are brace-expanded and globbed, and only those block on a name
+    value_unread_names() returns: every word globbed blocked 210 fleet commands (script-too-many, a glob naming more
+    than MAX_LOOP_PATHS files: `node x.mjs "src/*.ts"`), measured."""
+
+    def __init__(self, words=(), lead=frozenset(), expand=False):
+        super().__init__(words)
+        self.lead = lead
+        self.expand = expand  # the lead word as written has a glob or a brace outside quotes (unquoted_pattern)
+
+
+def unquoted_pattern(raw):
+    """Card 00c714ea: a glob char or a { outside quotes and not escaped in the word as written: only then does the shell
+    glob or brace-expand it (a quoted `'./*/node_modules/*'`, `glob.glob('x/*')` in prose: no; measured, 4 fleet
+    commands blocked on them)."""
+    q, j = None, 0
+    while j < len(raw):
+        ch = raw[j]
+        if q:
+            if ch == q:
+                q = None
+            elif ch == '\\' and q == '"':
+                j += 1
+        elif ch in '\'"':
+            q = ch
+        elif ch == '\\':
+            j += 1
+        elif ch in '*?[{':
+            return True
+        j += 1
+    return False
+
+
+_BRACE_ALT_RX = re.compile(r'(?<!\$)\{([^{}\s]*,[^{}\s]*|[A-Za-z]\.\.[A-Za-z]|-?\d+\.\.-?\d+)\}')
+
+
+def brace_forms(word):
+    """Card 00c714ea: the words a shell's brace expansion makes of word (`{evil.py,$X}`, `{e..e}vil.py`), the word
+    itself first; more than MAX_LOOP_PATHS raises PathUnread."""
+    if '{' not in word:
+        return [word]
+    out, todo = [], [word]
+    while todo:
+        w = todo.pop()
+        m = _BRACE_ALT_RX.search(w)
+        if not m:
+            out.append(w)
+            continue
+        body = m.group(1)
+        if ',' in body:
+            alts = body.split(',')
+        else:
+            a, b = body.split('..')
+            if a.lstrip('-').isdigit():
+                lo, hi = int(a), int(b)
+                alts = [str(k) for k in range(min(lo, hi), max(lo, hi) + 1)[:MAX_LOOP_PATHS + 1]]
+            else:
+                alts = [chr(k) for k in range(min(ord(a), ord(b)), max(ord(a), ord(b)) + 1)]
+        todo += [w[:m.start()] + x + w[m.end():] for x in alts]
+        if len(out) + len(todo) > MAX_LOOP_PATHS:
+            raise PathUnread(f'a brace expansion making more than {MAX_LOOP_PATHS} words: {word[:40]}')
+    return list(dict.fromkeys([word] + out))
 
 
 def loop_lists(text):
@@ -3934,7 +4116,7 @@ def interp_groups(text, expanded=False):
                                         f'{len(all_words)} szó, MAX_ARGS {MAX_ARGS}' if over else ''))
             continue
         words = [strip_quotes(w) for w in all_words[:MAX_ARGS]]
-        group = []
+        group = ScriptGroup()
         stopped = False
         subst_seen = False
         i = 0
@@ -3994,6 +4176,11 @@ def interp_groups(text, expanded=False):
             if has_subst(all_words[i]):
                 subst_seen = True
             if not w.startswith('-') and w:
+                if not group.lead:  # card 00c714ea: the script position (the first word the call may run)
+                    group.lead = frozenset([w] + forms)
+                    # only a call in code: one inside a quoted text (`python3 -c "x = 'bash ' * 3"`) is read as
+                    # its own text by the payload pass, where the shell would glob (1 fleet command, measured)
+                    group.expand = unquoted_pattern(all_words[i]) and (cls is None or cls[m.end() - 1] == 'c')
                 group.append(w)
                 group += [f for f in forms if f and f != w and not f.startswith('-')]
                 # the script: the words after it are its arguments (see DATA_ARGV_RX). Only a plain word: an unset
@@ -4025,6 +4212,17 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
     # read ok.py only): loop_word_paths reads every loop value AND every plain value assigned to the name
     lnames = frozenset(loop_lists(_blank_data_heredocs(norm))) if 'for' in norm else frozenset()
     text = expand(norm, lnames)
+    # card 00c714ea: a name whose value the shell reads otherwise than expand() blocks in a script position; the
+    # reading above stays as it was (only a block is added: keeping such a name unexpanded there let 5 fleet commands
+    # through that the expanded reading blocked, measured)
+    vbad = value_unread_names(norm) - lnames
+    if vbad:
+        for g in interp_groups(expand(norm, lnames | vbad), True):
+            for c in getattr(g, 'lead', ()):
+                # a name inside a substitution is no part of the script word (`bash $(sh -c "$C")` in prose)
+                if ({v.group(1) or v.group(2) for v in VAR_RX.finditer(without_substs(c))} & vbad
+                        or ('HOME' in vbad and c.startswith('~'))):
+                    raise PathUnread(f'a script word from a value the shell splits, globs or unescapes: {c[:40]}')
     # card 10624d73: an expansion the shell makes as read (expansion_trusted) keeps the argv-data reading; on the
     # command as written too, not only on this text: a payload-marked text turned the quote of `bash -c 'python3 $X
     # evil.py'` into a boundary, and its $X (empty in the inner bash) looked unquoted (found by the oracle cases)
@@ -4069,13 +4267,15 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
             joined = merged_span(t[at:at + ARGS_WINDOW].split()[:MAX_ARGS + 1], 0, quoted=True)[0].rstrip(';&|<>')
             if joined != raw:
                 raws.append(joined)
-        group = []
+        group = ScriptGroup()
         for raw in raws:
             # a ")" may close the substitution the path stands in (`$(./x"y".sh)`): read with and without it
             k = redir_at(raw)  # G1: `./"x".sh;true`, `./"x".sh>log`: the word ends at the operator
             group += [f for r in dict.fromkeys([raw, raw.rstrip(')')] + ([raw[:k]] if k else []))
                       for f in word_forms([r], 0, in_data) if f]
-        groups.append(list(dict.fromkeys(group)))
+        group = list(dict.fromkeys(group))
+        groups.append(ScriptGroup(group, lead=frozenset(group),  # card 00c714ea: a path run directly is the script
+                                  expand=any(unquoted_pattern(r) for r in raws)))
     # a `for x in os.listdir(d):` of a python heredoc is not the shell's loop (loop_lists of a blanked body)
     loops = loop_lists(_blank_data_heredocs(text)) if 'for' in text else {}
     for m in ASSIGN_CHAIN_RX.finditer(text):
@@ -4173,6 +4373,43 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
             found = found or r
         return found
 
+    def resolve_lead_glob(v):
+        """Card 00c714ea: a glob in the script position runs its FIRST match (the others are its arguments): in each
+        base the first match in byte order and in case-folded order (bash sorts by the locale); none matched, the
+        word as written. Reading every match blocked 26 fleet commands (script-too-many, past MAX_LOOP_PATHS)."""
+        import glob
+        if bases.unknown and not os.path.isabs(v):
+            raise PathUnread(f'a relative script path after a directory change the gate does not follow: {v[:40]}')
+        firsts = []
+        for b in ([None] if os.path.isabs(v) else bases):
+            hits = []
+            for h in glob.iglob(v if b is None else os.path.join(glob.escape(b), v)):
+                hits.append(h)
+                if len(hits) > MAX_LEAD_GLOB:
+                    raise PathUnread(f'a script glob naming more than {MAX_LEAD_GLOB} files: {v[:40]}')
+            if hits:
+                firsts += [min(hits), min(hits, key=lambda h: (h.casefold(), h))]
+        if not firsts:
+            return resolve(v)
+        found = False
+        for h in dict.fromkeys(firsts):
+            r = resolve(h)
+            if r is None:
+                return None
+            found = found or r
+        return found
+
+    def resolve_word(c):
+        """Card 00c714ea: a script word as the shell makes it: each word its brace expansion makes, a glob in it
+        expanded in each base (resolve_lead_glob)."""
+        found = False
+        for f in brace_forms(c):
+            r = resolve_lead_glob(f) if _GLOB_CHARS_RX.search(f) and '$' not in f else resolve(f)
+            if r is None:
+                return None
+            found = found or r
+        return found
+
     for group in groups:
         if isinstance(group, AgentMsgGroup):
             if agent_msg_everywhere(group.first, bases):
@@ -4196,8 +4433,9 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
                 group = []
         # every word, not "the words before the first file": `pushd x && node -r /abs/ok.js m.js` runs m.js too
         # (Viktor 41756 LOW 2); measured, that exception spared 33 of the replay's rows only
+        lead = getattr(group, 'lead', ()) if getattr(group, 'expand', False) else ()
         for c in group:
-            if resolve(c) is None:
+            if (resolve_word(c) if c in lead else resolve(c)) is None:
                 return [''] * (MAX_SCRIPTS + 1)
         if len(out) > MAX_SCRIPTS:
             break

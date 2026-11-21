@@ -1669,6 +1669,23 @@ def script_cases():
             ("X=stat.py; '.' ./s.sh; python3 $X ./measure.py", d),  # dot-quoted
             ('X=stat.py; python3 $X:h ./measure.py', d),  # zsh-modifier-h
             ("''X=stat.py; python3 $X ./measure.py", d),  # emptyquote-assign
+            # card 00c714ea (Viktor 49241 follow-up; old, main and 10624d73 passed each, bash ran measure.py in his
+            # oracle's twins): a value the shell reads otherwise than the gate (a glob, a blank or a brace at an
+            # unquoted use, an escape, a name split by quotes), and a script word's own brace expansion and glob
+            ('X=m*.py; python3 $X stat.py', d),  # value-glob-star
+            ('X=[m]easure.py; python3 $X stat.py', d),  # value-glob-bracket
+            ("X='measure.py stat.py'; python3 $X", d),  # value-sq-space-split
+            ('X=measure.py\\ stat.py; python3 $X', d),  # value-esc-space-split
+            ('X=\\ ; python3 $X measure.py', d),  # value-esc-space-empty
+            ('X=measure\\.py; python3 $X stat.py', d),  # value-escape
+            ('export "HO"ME=' + d + '/measure.py; python3 $HOME stat.py', d),  # home-export-split
+            ('X=stat.py; python3 {measure.py,$X}', d),  # brace-expansion
+            ('python3 {measure.py,stat.py}', d),
+            ('python3 {l..n}easure.py stat.py', d),
+            ('python3 m*.py stat.py', d),
+            ('python3 [m]easure.py stat.py', d),
+            ("bash -c 'python3 [m]easure.py stat.py'", d),  # in a payload, read as its own text
+            ('eval "python3 {measure.py,stat.py}"', d),
             ('DIRSTACK=stat.py; python3 $DIRSTACK ./measure.py', d),  # special-DIRSTACK
             ('X=stat.py\r; python3 $X ./measure.py', d),  # value-CR
             ('X=stat.py\x0b; python3 $X ./measure.py', d),  # value-VT
@@ -2803,6 +2820,15 @@ def script_cases():
             # is what bash does, so the words after the script are its argv again (the fleet's measuring forms)
             ('X=stat.py; python3 $X ./measure.py', d),
             ('X=stat.py\npython3 $X ./measure.py', d),
+            # card 00c714ea: a blank in a quoted use, a glob or a brace after the plain script, a substitution's value
+            ('Q="a b"; python3 stat.py "$Q"', d),
+            ('Q="a b"; python3 stat.py $Q', d),
+            ('python3 stat.py *.txt', d),
+            ('python3 stat.py {a,b}.jsonl', d),
+            ('S=$(mktemp -d); python3 stat.py $S', d),
+            ('X="stat.py"; python3 "$X"', d),
+            ("python3 '[m]easure.py' stat.py", d),  # a quoted glob is no glob
+            ('python3 -c "x = \'bash \' * 3"', d),  # a call inside quoted code: no glob of its own
             ('P=' + d + '; python3 -I $P/stat.py ' + d + '/measure.py', d),
             ('/usr/bin/python3 stat.py regiszter.jsonl 2>/dev/null', d),
             # card b138f11b: the quoted paren name is read, not blocked on sight
