@@ -23,6 +23,38 @@ A script run through a variable's value (card 10624d73 r2, Viktor 49241; old, LO
 value as written, the shell expands it, so a glob in the value (X=e*.py, X=[e]vil.py), a brace expansion at the
 use, a value split on a space (a quoted value with a space, an escaped space), an escaped semicolon in the value
 (X=notes.py\\;z), and an export whose name is split by quotes ("HO"ME=...) can run another script than the one read.
+A variable glued to a script word (card 8a73eab1, Dave's audit 11-16; Viktor 49425): the word is read with every
+variable whose value the gate does not trust as unset and as set to "": one the text does not set, and one it sets in
+an expansion the gate does not trust. Read in bash's and zsh's forms (`evil${X}.py`, `X=; python3 evil$X.py`,
+`ev${X:-il}.py`, `ev${X+il}.py`, zsh `evil$X[1].py`, `evil$X:r.py`, `ev$X:h.py` as ev..py, `ev$+X.py` as ev0.py /
+ev1.py, `${=X}`, `${${X}:-w}`, `${X/#/il}`, `${X:/*/il}` and `${X::=il}` as il, `ev${X:-i\\}l}.py` as evi}l.py,
+`ev${X[1]:-il}.py`, zsh's modifier chain (`ev$X:h:s/./il/.py` as evil.py, `ev$X:&il.py`); var_readings, _zsh_chain).
+A name list ${!P*} is any run: a glob in each base (the word's literal parts escaped), it blocks when a file
+matches. Blocks as unread (Viktor 49502): a zsh flag group cut at its paren (what follows it may name a dot file or
+a subdirectory), zsh :P, :a / :A after :h (the cwd), :& after :h, a modifier after a replacement, a NUL in the
+word, a brace nested past MAX_VAR_NEST levels. Over-blocks (main passes
+them): a value the text sets is read as empty too when the expansion is not trusted (`X=a; python3 evil$X.py`,
+`export X=a;`, `X=; ev${X-il}.py`, `X='$Y'; python3 evil$X.py`), a single-quoted 'evil$X.py' and evil\\$X.py, zsh
+`evil$X:h.py` (read with "" too), `${X+evil.py}` as an argv word, and bash's $_ in a word. Not read (old, main passes
+them too): KNOWN-V1 one variable unset while another in the same word is "" (two readings, not every mix); KNOWN-V2 a
+value from the environment, an earlier command or a loop (`X=ab; ev${X/ab/il}.py`, `X=xil; ev${X#x}.py`, `${X:=w}`
+in an earlier command's argv, `for f in il`), and bash's indirection ${!X} through a name the text sets; KNOWN-V3 the
+special parameters ($1, $@, $#, $?, ${?}, $!, $0) and the shell's own variables (`evil$OPTIND.py` runs evil1.py,
+$SECONDS 0); KNOWN-V4 arithmetic ($((X)), $[X]: 0); KNOWN-V5 a variable in the command word, not the script word
+(`$X python3 evil.py`, `python3$X evil.py`, `${X:-python3} evil.py`, `nice $X python3 evil.py`, `$X ./evil.sh`,
+`source$X evil.sh`); KNOWN-V6 a glob or brace with the variable (`e$X*.py`, `e${X:-v?l}.py`, `{evil$X,x}.py`) and
+IFS splitting (`X=a; IFS=a; python3 evil$X.py` runs ./evil); KNOWN-V7 a brace expansion in a default word
+(`ev${X:-{i,}l}.py`, bash); KNOWN-V8 a name list of several names, split into words by the shell (the glob reads it
+as one word); KNOWN-V9 a cut flag group in a heredoc body no shell reads as the heredoc (a cat or python body: prop2's
+block hit JS template literals `${(a + b)}` there) stays a glob, so a script that body later hands to a zsh (`zsh -c
+'./.e${(L)X}vil.py'` in a python body) is read without a dot file or a subdirectory after the paren.
+Viktor 49582 (round 3; old, zsh only, main passes each too): KNOWN-V10 (mixed) two variables in one word, each with a
+two-valued modifier chain (`ev$X:h:s/./il/$Y:h:s/q/q/.py`): the first-or-last mode is one per word, so the mix of one
+replacement and one dot is not read; KNOWN-V11 (escaped) an escaped & in a :s replacement (`ev$X:h:s/./il\\&/.py`, zsh
+runs evil&.py): the backslash is taken off before the chain, so the literal-& value is not read; KNOWN-V12 (sub-flag)
+a subscript flag in an array index (`evil$X[(r)a].py`, `ev${X[(r)a]:-il}.py`): the word ends at the paren, the index
+is not read. A script the command itself makes earlier (`cp x.py evil.py; python3 evil.py`): the gate reads the
+files that exist when the hook runs, not the ones the command writes before it runs them.
 
 What blocks (exit 2): a `security` call in command position whose subcommand reads or exports secrets:
   find-generic-password, find-internet-password, dump-keychain, export,
@@ -3439,6 +3471,183 @@ def has_subst(w):
     return '`' in w or '$(' in w
 
 
+# Card 8a73eab1 (Dave's audit 11-16): a variable glued to the script name is empty when unset or set to "" (`python3
+# evil${X}.py`, `python3 evil$X.py`, `X=; python3 evil$X.py` run evil.py; main read the name as written and allowed).
+# Only a NAME: $1, $@, $# and the other special parameters are not read (see the Known limits in the docstring).
+_VAR_USE_RX = re.compile(r'\$(?:\{|[=~^]*[A-Za-z_]|[+#][A-Za-z_])')  # Viktor r1: any ${ (zsh ${(L)X}, ${=X},
+# ${${X}}, ${:-w}); Kernel r2: zsh $+X (0 unset, 1 set) and $#X (0)
+_PLAIN_VAR_RX = re.compile(r'\$[=~^]*[A-Za-z_]\w*')  # Viktor r1: zsh $=X, $~X, $^X
+# Viktor r1: zsh reads a subscript and modifiers glued to a plain name as part of it (`evil$X[1].py`, `evil$X:r.py`
+# run evil.py in zsh; bash reads [1] and :r as text): a second reading, never fewer. Kernel r2 (measured in zsh 5.9
+# -f and with the fleet's setopt): on an empty value :a :A :c :e :l :q :Q :r :t :u and :s/l/r/ give "" (any
+# delimiter but a word char or a blank, g before it; with no closing delimiter it runs to the word's end, as in zsh),
+# :h gives "." (`ev$X:h.py` runs ev..py: a third reading), :P gives the cwd (blocks: _zsh_plain); $+X gives 0 or 1,
+# $#X 0 (`ev$+X.py` runs ev0.py / ev1.py)
+# Kernel r3 (Viktor 49502 LELET 3): the whole chain, :& and :g& (a repeated substitution) and a backslash-escaped
+# delimiter in :s too; _zsh_chain gives its values
+_ZSH_MOD = r'(?:[aAcehlPqQrtu&]|g&|g?s([^\w\s\\])(?:\\.|(?!\3)[^\s\\])*\3(?:\\.|(?!\3)[^\s\\])*\3?)'
+_ZSH_PLAIN_VAR_RX = re.compile(r'\$([=~^]*|[+#])[A-Za-z_]\w*(?:\[[^\]\s]*\])?((?::' + _ZSH_MOD + r')*)')
+_ZSH_MOD_TOKEN_RX = re.compile(r':(?:([aAcehlPqQrtu&]|g&)|g?s([^\w\s\\])(?:\\.|(?!\2)[^\s\\])*\2'
+                               r'((?:\\.|(?!\2)[^\s\\])*)\2?)')
+# Viktor r1: ${!PREFIX*} / ${!PREFIX@} expand to the NAMES of the shell's variables (`ev${!HOM*}il.py` runs
+# evHOMEil.py), not to an empty value; and a zsh flag group ${(L)X}: the call's words end at ( and ), so it arrives
+# cut (`evil${(L`). The name list is a glob: any run (GLOB_MARK; resolve() globs it per base, the word's literal
+# parts escaped), so `meas${!HOM*}ure.py` blocks when a measure.py-like file is there (a variable's name holds no dot
+# and no slash). Kernel r3 (Viktor 49502 LELET 1): the cut group blocks (TooManyArgs, as in prop2): what follows the
+# paren is lost, so the name may go on into a dot file or a subdirectory a glob does not see. Except in a heredoc
+# body no shell reads (the direct path scan reads every body: prop2's block hit a JS template literal `${(a + b)}`
+# in a heredoc to cat in the replay): there it stays a glob (KNOWN-V9). A NUL in the word as written blocks (LELET
+# 4: a glob would read it as any run); the mark is var_readings' alone (_GLOB_MARKED)
+_NAME_LIST_RX = re.compile(r'\$\{![A-Za-z_]\w*[*@]\}|\$\{\([^)]*$')
+_CUT_GROUP_RX = re.compile(r'\$\{\([^)]*$')
+GLOB_MARK = '\x00'
+_GLOB_MARKED = set()  # the forms word_forms made with the mark (resolve() globs these only)
+# ${NAME}, ${NAME:-w} / ${NAME-w} / = / + / ?, ${#NAME}, ${!NAME}, and the other modifiers (${NAME#p}, ${NAME/a/b},
+# ${NAME:0:1}, zsh ${NAME:h}): innermost first, a word holding no brace (so a nested ${Y} inside w is read on the
+# round before). The (?!\w) ends the name where it ends: without it `${A` + 1 MB of letters gave the name back one
+# char at a time and rescanned the rest each time (quadratic, measured: past 120 s)
+# Viktor r1: zsh flags and an empty name too: ${(L)X}, ${=X}, ${~X}, ${^X}, and ${:-w} (zsh: w; what an inner
+# ${X} leaves of `${${X}:-evil}`; bash: a bad substitution, nothing runs, so the extra reading costs nothing)
+# Kernel r2: zsh ${+X} (0 or 1), and the modifier text kept (group 6) for the alt reading (_empty_param)
+# Kernel r3 (Viktor 49502 LELET 2): a subscript after the name (`ev${X[1]:-il}.py`, `${X[@]:-il}` run evil.py)
+_BRACE_VAR_RX = re.compile(r'\$\{((?:\([^(){}]*\))?[=~^]*[#!+]?)((?:[A-Za-z_]\w*)?)(?!\w)(?:\[[^\[\]{}]*\])?'
+                           r'(?:(:?)([-=+?])([^{}]*)|([^{}]*))\}')
+# Kernel r2: the same with a quoted or escaped brace in the word (`ev${X:-i\}l}.py`, `ev${X:-i'}'l}.py` run
+# evi}l.py in bash and zsh; the plain form ends at the first brace). A reading of its own: an unbalanced quote in the
+# word (`${X:-it's}`) does not match here and keeps the plain form's reading
+_BRACE_WORD_Q = r'(?:\\.|' + r"'[^']*'" + r'|"(?:\\.|[^"\\])*"|' + r"""[^{}\\'"])*"""
+_BRACE_VAR_Q_RX = re.compile(r'\$\{((?:\([^(){}]*\))?[=~^]*[#!+]?)((?:[A-Za-z_]\w*)?)(?!\w)(?:\[[^\[\]{}]*\])?'
+                             r'(?:(:?)([-=+?])(' + _BRACE_WORD_Q + r')|(' + _BRACE_WORD_Q + r'))\}')
+# Kernel r2 (measured in zsh 5.9): on an empty value a pattern substitution whose pattern matches "" gives its
+# replacement (`ev${X/#/il}.py`, `${X/%/il}`, `${X//*/il}`, `${X/*/il}` run evil.py), and ${X::=w} gives w
+_ZSH_SUBST_RX = re.compile(r'/[/#%]?(?:\\.|[^/\\])*/(.*)', re.S)
+MAX_VAR_NEST = 8
+
+
+def _zsh_chain(mods):
+    """Kernel r3 (Viktor 49502 LELET 3; measured in zsh 5.9, -f and with the fleet's setopt): the values zsh gives a
+    modifier chain (`:h:a`, `:s/a/b/:P`, `:&`) on an empty or unset value, in order. "" stays "" under every modifier
+    but :h ("."); "." stays "." under :c :h :l :q :Q :t :u, becomes "" under :e :r, and under a substitution "." or
+    its replacement. Not read, TooManyArgs (the call blocks): :P and :a / :A on "." (the cwd's absolute path), :& on
+    "." (its pattern is the previous one), and any modifier after a replacement. The chain ends at the first text
+    that is no modifier (`$X:x.py` is ":x.py" in zsh). At most two values; a linear walk."""
+    vals = ['']
+    pos = 0
+    while pos < len(mods):
+        m = _ZSH_MOD_TOKEN_RX.match(mods, pos)
+        if not m:
+            break
+        pos = m.end()
+        op = m.group(1)
+        nxt = []
+        for v in vals:
+            if v not in ('', '.'):
+                raise TooManyArgs('zsh módosító egy csere után a szkript nevében: nem olvasható')
+            if op == 'P' or (v == '.' and op in ('a', 'A')):
+                raise TooManyArgs('zsh :P vagy :h:a módosító egy változón a szkript nevében: a cwd, nem olvasható')
+            if op is None:  # :s / :gs: "" has nothing to replace; "." is kept or replaced
+                rep = re.sub(r'\\(.)', r'\1', m.group(3))
+                nxt += [v] + ([rep, rep.replace('&', '.')] if v == '.' else [])
+            elif op in ('&', 'g&'):
+                if v == '.':
+                    raise TooManyArgs('zsh :& módosító a :h után a szkript nevében: nem olvasható')
+                nxt.append(v)
+            elif op == 'h':
+                nxt.append('.')
+            elif op in ('e', 'r'):
+                nxt.append('')
+            else:
+                nxt.append(v)
+        vals = list(dict.fromkeys(nxt))
+    return vals
+
+
+def _empty_param(m, set_empty, alt=0):
+    """The value of one ${...} when NAME is unset (set_empty False) or set to "" (True). alt (Kernel r2/r3): zsh's
+    reading where bash's and zsh's differ on an empty value: a pattern substitution (also zsh's ${X:/p/r}) gives its
+    replacement, ${X::=w} gives w, a modifier chain its zsh value (_zsh_chain: alt 1 the first, alt 2 the last);
+    without alt they give ""."""
+    pre, colon, op, word = m.group(1)[-1:], m.group(3), m.group(4), m.group(5)
+    if pre == '#':
+        return '0'  # the length of an empty value
+    if pre == '+':
+        return '1' if set_empty else '0'  # zsh: is NAME set
+    if op is None:
+        rest = m.group(6) or ''
+        if pre == '!':
+            return ''  # indirection through an empty name
+        if rest.startswith('::='):
+            return rest[3:] if alt else ''
+        sub = _ZSH_SUBST_RX.match(rest[1:] if rest.startswith(':/') else rest)
+        if sub:
+            return sub.group(1) if alt else ''
+        if rest.startswith(':'):
+            vals = _zsh_chain(rest)  # raises on :P and :h:a, alt or not
+            return (vals[0] if alt == 1 else vals[-1]) if alt else ''
+        return ''  # a modifier of "" (bash, and zsh without alt)
+    if pre == '!' or op == '?':
+        return ''  # indirection through an empty name, or ${X?msg} (an error: nothing runs)
+    takes_word = bool(colon) or not set_empty  # ':' treats "" as unset; without it only an unset name is
+    if op in '-=':
+        return word if takes_word else ''
+    return '' if takes_word else word  # '+': the word only for a set name
+
+
+def _zsh_plain(m, set_empty, mode):
+    """Kernel r2/r3: zsh's value of one plain $NAME with its subscript and modifier chain, NAME unset or set to "".
+    mode 0: "" for the chain (read with "" too), 1 / 2: the first / last value _zsh_chain gives."""
+    pre, mods = m.group(1), m.group(2)
+    if pre == '+':
+        return '1' if set_empty else '0'
+    if pre == '#':
+        return '0'
+    vals = _zsh_chain(mods) if mods else ['']  # raises on :P and :h:a in every mode
+    return '' if mode == 0 else (vals[0] if mode == 1 else vals[-1])
+
+
+def var_readings(w, cut_glob=False):
+    """Card 8a73eab1: w as the shell reads it when every variable in it is unset, and when every one is set to "":
+    $NAME and ${NAME} are empty, ${NAME:-w} gives w, ${NAME+w} gives w only for the set-to-"" reading, and so on;
+    and (Viktor r1, Kernel r2/r3) zsh's readings: a plain name's subscript and modifier chain, $+X, $#X, a pattern
+    substitution's replacement, ${X::=w}, :h as ".", a subscript in a brace, and a quoted or escaped brace in a
+    default word. [] when no variable is in w. A name list ${!P*} is any run (GLOB_MARK, a glob for resolve()). Not
+    read, TooManyArgs (the call blocks; a linear walk per level, no unbounded loop): a brace nested past
+    MAX_VAR_NEST levels, a zsh :P or :h:a, a NUL in w, and a zsh flag group cut at its paren, except where the
+    caller says cut_glob (a heredoc body no shell reads: a glob there, KNOWN-V9). The caller adds the readings to
+    the word's forms: never fewer."""
+    if GLOB_MARK in w:
+        raise TooManyArgs('NUL karakter a szkript nevében: nem olvasható')
+    if not _VAR_USE_RX.search(w):
+        return []
+    if not cut_glob and _CUT_GROUP_RX.search(w):
+        raise TooManyArgs('kettévágott zsh-jelzőcsoport (${() a szkript nevében: a folytatása nem olvasható')
+    if _NAME_LIST_RX.search(w):
+        w = _NAME_LIST_RX.sub(GLOB_MARK, w)  # a glob (see _NAME_LIST_RX)
+    # the extra passes only where they can give another reading (each pass is a linear walk per level)
+    brace_rxs = (_BRACE_VAR_RX, _BRACE_VAR_Q_RX) if ('\\' in w or "'" in w or '"' in w) else (_BRACE_VAR_RX,)
+    # an alt reading only changes a brace; the last value (2) differs from the first (1) only after a substitution
+    two = (1, 2) if (':s' in w or ':gs' in w) else (1,)
+    alts = (0,) + two if ('${' in w and (':' in w or '/' in w)) else (0,)
+    modes = (0,) + two if ':' in w else (0,)
+    out = []
+    for set_empty in (False, True):
+        for brx in brace_rxs:
+            for alt in alts:
+                s = w
+                for _ in range(MAX_VAR_NEST + 1):
+                    prev, s = s, brx.sub(lambda m: _empty_param(m, set_empty, alt), s)
+                    if s == prev:
+                        break
+                else:
+                    if brx.search(s):
+                        raise TooManyArgs(
+                            f'egy változó-kifejezés {MAX_VAR_NEST} szintnél mélyebben egymásba ágyazva')
+                out.append(_PLAIN_VAR_RX.sub('', s))
+                for mode in modes:
+                    out.append(_ZSH_PLAIN_VAR_RX.sub(lambda m: _zsh_plain(m, set_empty, mode), s))
+    return list(dict.fromkeys(out))
+
+
 def merged_span(all_words, i, quoted=False):
     """The call's words are split at blanks, so a substitution with a blank in it (`$(echo $(true))m.py`) is in
     pieces: join the pieces from i while a backtick or a "(" is still open (at most MAX_ARGS pieces).
@@ -3465,15 +3674,18 @@ def merged_word(all_words, i):
 
 
 def needs_forms(raw):
-    """A word bash reads otherwise than strip_quotes does: a substitution, or a quote / backslash anywhere in it."""
-    return has_subst(raw) or '\\' in raw or bool(QUOTE_RX.search(raw[1:-1] if len(raw) > 1 else ''))
+    """A word bash reads otherwise than strip_quotes does: a substitution, a variable (card 8a73eab1), or a quote /
+    backslash anywhere in it."""
+    return (has_subst(raw) or '\\' in raw or bool(_VAR_USE_RX.search(raw))
+            or bool(QUOTE_RX.search(raw[1:-1] if len(raw) > 1 else '')))
 
 
-def word_forms(all_words, i):
+def word_forms(all_words, i, cut_glob=False):
     """Card 70c94516 (Viktor 43662 LELET 1): the other names bash may run for word i, besides strip_quotes' form:
     the whole-word quote removal (`"ev"il.py`), and with a substitution in it (pieces joined) the word without the
     substitutions, before and after the quote removal (`"$(true)"evil.py`, `evil"$(true)".py`). Distinct, in order;
-    "" when a substitution may leave nothing. The caller adds them to the strip_quotes form: never fewer words."""
+    "" when a substitution may leave nothing. The caller adds them to the strip_quotes form: never fewer words.
+    cut_glob: var_readings' (a word of a heredoc body no shell reads)."""
     raw = merged_word(all_words, i) if has_subst(all_words[i]) else all_words[i]
     forms = [shell_unquote(raw)]
     if has_subst(raw):
@@ -3482,6 +3694,15 @@ def word_forms(all_words, i):
             lexed = without_substs_lexed(r)
             if lexed is not None:
                 forms.append(shell_unquote(lexed))
+    # card 8a73eab1: every variable left in the word (expand() replaced the ones the text sets to a plain value) may
+    # be empty: `evil${X}.py`, `"ev"il$X.py`, `evil${X:-}.py`, `$(true)evil$X.py`
+    for v in var_readings(raw, cut_glob):
+        if v != raw:
+            forms.append(shell_unquote(v))
+            if has_subst(v):
+                forms.append(shell_unquote(without_substs(v)))
+    if GLOB_MARK in raw or any(GLOB_MARK in f for f in forms[1:]):
+        _GLOB_MARKED.update(f for f in forms if GLOB_MARK in f)  # Kernel r3: the marks var_readings made
     return list(dict.fromkeys(forms))
 
 # Only digits: a {fd} before the operator is cut off as a word of its own, so both readings are judged. zsh and bash
@@ -3811,6 +4032,10 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
     trusted = (plain == cmd and expansion_trusted(norm, lnames) and
                (norm == plain or expansion_trusted(plain, lnames)))  # r1: normalise() changed nothing
     groups = interp_groups(text, text != norm and not trusted) + [[w] for w in extra]
+    if text != norm and not trusted:
+        # card 8a73eab1: an expansion the shell may not make (`echo X=a; python3 evil$X.py`: $X is empty, evil.py
+        # runs) is read without it too, so the variable-empty readings of word_forms see the $X
+        groups += interp_groups(norm, True)
     # card 70c94516 (Viktor 43662 LELET 1): normalise() takes the backslash of a $'\x65' escape (`\x` -> `x`), which
     # bash decodes in a word (`python3 $'\x65vil.py'` runs evil.py): such a command is read without it too
     word_texts = [text]
@@ -3829,7 +4054,10 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
                 raise TooManyArgs(f'cat: {len(cat_words)} szó, MAX_ARGS {MAX_ARGS}')
             groups += [[strip_quotes(w)] for w in cat_words if not w.startswith('-')]
     groups += [[m.group(1)] for m in DIRECT_RX.finditer(text)]
+    # Kernel r3: a heredoc body no shell reads (blanked here) keeps the cut zsh flag group's glob reading (KNOWN-V9)
+    data_texts = {id(t): _blank_data_heredocs(t) if '${(' in t else t for t in word_texts}
     for t, m in ((t, m) for t in word_texts for m in DIRECT_WORD_RX.finditer(t)):
+        in_data = data_texts[id(t)][m.start(1)] != t[m.start(1)]
         raw = m.group(1).rstrip(';&|<>')
         if len(raw) > ARGS_WINDOW:  # without_substs is a loop per nesting level: an unbounded word is not read
             raise TooManyArgs(f'egy útvonal-szó hosszabb {ARGS_WINDOW} karakternél')
@@ -3846,7 +4074,7 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
             # a ")" may close the substitution the path stands in (`$(./x"y".sh)`): read with and without it
             k = redir_at(raw)  # G1: `./"x".sh;true`, `./"x".sh>log`: the word ends at the operator
             group += [f for r in dict.fromkeys([raw, raw.rstrip(')')] + ([raw[:k]] if k else []))
-                      for f in word_forms([r], 0) if f]
+                      for f in word_forms([r], 0, in_data) if f]
         groups.append(list(dict.fromkeys(group)))
     # a `for x in os.listdir(d):` of a python heredoc is not the shell's loop (loop_lists of a blanked body)
     loops = loop_lists(_blank_data_heredocs(text)) if 'for' in text else {}
@@ -3864,6 +4092,12 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
         """Add the existing regular files word c names; True if there was one. None: past MAX_TRIES. Raises
         PathUnread (deede5e4): a relative word after a directory change cd_bases does not follow, or a word with a
         loop variable over not plain words."""
+        if GLOB_MARK in c:  # card 8a73eab1: a name list (var_readings' mark): a glob per base, the rest escaped
+            if c not in _GLOB_MARKED:  # Kernel r3 (Viktor 49502 LELET 4): a NUL in the word as written
+                raise TooManyArgs('NUL karakter a szkript nevében: nem olvasható')
+            import glob
+            return resolve_glob('*'.join(glob.escape(os.path.expanduser(part) if k == 0 else part)
+                                         for k, part in enumerate(c.split(GLOB_MARK))))
         c = os.path.expanduser(c)
         if not c or c in ('-', '--'):
             return False
