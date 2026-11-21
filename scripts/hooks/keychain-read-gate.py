@@ -19,12 +19,34 @@ text, a nested `xargs -I{} sh -c 'echo {} | xargs K'`) is not read for its fed w
 list | xargs`, a redirect `xargs < list`, `-a list`), a computed name (find, an ls glob, tr), a shell expansion in a
 fed word (a default param `${X:-..}`, a variable, a brace), a sh -c script reaching its words through $0 or bash -c
 through "$@", an xargs whose name is split by quotes ('xa'rgs), and a while read loop's output piped into an xargs.
-A script run through a variable's value (card 10624d73 r2, Viktor 49241; closed by card 00c714ea): a value is
-expanded only in a positive shape (value_unread_names): a glob, a blank or a brace in it at an unquoted use, an
-escape or an inner quote, or a name the text assigns split by quotes ("HO"ME=...) blocks the script word unread;
-a script word's brace expansion and glob are made as the shell makes them (brace_forms, resolve_lead_glob; a
-text the lexer cannot read counts its script word as code: fail-closed). Still not seen: a value set outside the
-command or by a substitution (`X=$(..)`), as everywhere below.
+A script run through a variable's value (card 10624d73 r2, Viktor 49241; card 00c714ea narrows it, does NOT close
+it: the KNOWN shapes below stay open): a value is expanded only in a positive shape (value_unread_names): a glob, a
+blank or a brace in it at an unquoted use, an escape or an inner quote, or a name the text assigns split by quotes
+("HO"ME=...) blocks the script word unread. A script word's brace expansion and glob are read in the shape the gate
+models (brace_forms, resolve_lead_glob): Python's glob, [^x] read as [!x], ** recursive, the first match in byte,
+case-folded and locale order (the environment's, en_US.UTF-8, hu_HU.UTF-8); a zsh group or qualifier paren in a
+script word (`(m|x)easure.py`, `e(vil.py|x)`, `m*.py(.)`, `m*(N)`, `evil.py(.)`) blocks unread when one of its
+member forms could match a file (zsh_paren_may_match, zsh_group_globs: zsh's choice among them is not modelled); a
+text the lexer cannot read counts its script word as code (fail-closed).
+Open, LOW and old (main passes each; Viktor 49408, the names are his independent probe's cases):
+KNOWN-KTP-GLOB, a glob Python reads otherwise or not at all: posix-class and posix-alpha ([[:lower:]]vil.py),
+  dotstar-bash (bash's .* matches .), dirglob-main (a glob matching a directory, its __main__.py runs), tilde-glob
+  and tildeplus-glob (~/e*.py, ~+/e*.py), pwd-glob and pwdq-glob ($PWD/e*.py: a word with a $ is not globbed),
+  zshnum-glob (e<->.py), and a locale other than the three above.
+KNOWN-KTP-BRACE: brace-pad (e{01..02}.py), brace-step (e{1..3..2}.py), a blank in a member (brace-escblank
+  {evil.py,a\\ b}, brace-quotedblank {evil.py,"a b"}).
+KNOWN-KTP-WORD, which word is the script: bash-o (`bash -o errexit e*.sh`), node-r (`node -r ./ok.js e*.js`),
+  glob-redirin (`</dev/null e*.py`), direct-glob and direct-brace (`./e*.sh`, `./{evil,x}.sh` run directly: read
+  as written).
+KNOWN-KTP-VAR, a value not bound or bound otherwise: var-ifs, var-array (X=(evil.py)), array-index, var-append
+  (X+=), zshsplit-var ($=X), zshglobsubst-var ($~X), var-ansic ($'..'), var-patsub (${X/a/b}), var-plusalt
+  (${X:+..}), var-assigndefault (${X:=..}), var-escsemi, read-var, positional-glob (`set -- e*.py; python3 $1`),
+  a zsh paren after an unexpanded value or substitution (`$X(easure.py|z)`, `$PWD/e(vil.py|x)`, `$(echo
+  m)(easure.py|z)`), and a value set outside the command or by a substitution (`X=$(..)`), as everywhere below.
+KNOWN-KTP-OVER, not open but leans: they block a harmless call (old unless named new): every word a brace makes
+  is read as a script (brace-seq, brace-empty, braceargs-benign, bracenested-alt, `python3 {l..n}easure.py
+  stat.py` runs leasure.py), a zsh order qualifier (new: zshqual-om2, (On), (om): the order is not modelled),
+  noglob-set, mixedquote-star ('*'e*.py), cdback-benign, varbrace-benign.
 A variable glued to a script word (card 8a73eab1, Dave's audit 11-16; Viktor 49425): the word is read with every
 variable whose value the gate does not trust as unset and as set to "": one the text does not set, and one it sets in
 an expansion the gate does not trust. Read in bash's and zsh's forms (`evil${X}.py`, `X=; python3 evil$X.py`,
@@ -3176,11 +3198,145 @@ def unquoted_pattern(raw):
             j += 1
         elif ch in '*?[{':
             return True
+        elif ch == '(' and (j == 0 or raw[j - 1] not in '$<>='):
+            return True  # Viktor r1: a zsh group `(m|x)easure.py` or qualifier `m*.py(.)` ran measure.py
         j += 1
     return False
 
 
 _BRACE_ALT_RX = re.compile(r'(?<!\$)\{([^{}\s]*,[^{}\s]*|[A-Za-z]\.\.[A-Za-z]|-?\d+\.\.-?\d+)\}')
+
+
+# Viktor r1 / card 00c714ea r2: a zsh group or qualifier paren in a script word. The call's words end at ) and |, so it
+# arrives cut: `(measure`, `m*.py(.`, `m*(N`, `e(vil.py` (zsh -f with the fleet Bash tool's setopts ran evil.py for
+# `e(vil.py|x)`, measured 11-21). Every paren: a `$(`, `<(` or `=(` one leaves its prefix's `$`, `<` or `=` in each
+# pattern, which no file name matches (zsh_paren_may_match; a lookbehind for them survived mutation as equivalent)
+_ZSH_GLOB_PAREN_RX = re.compile(r'\(')
+_ZSH_WORD_END = set(' \t\n;&<>')
+MAX_ZSH_GROUP_GLOBS = 64
+MAX_ZSH_GROUP_DEPTH = 32
+
+
+class _ZshUnread(Exception):
+    """A zsh group the reader below does not follow (a substitution or a value in it, too many forms or too deep): the
+    caller falls back to the prefix."""
+
+
+def zsh_group_globs(text, i):
+    """Card 00c714ea r2: the glob patterns of the shell word at text[i:] with its zsh groups made into their members
+    (`(measure|zz).py` -> measure.py, zz.py; nested, quoted and escaped members as zsh -f read them, measured 11-21),
+    and a last group of one member also dropped (a qualifier: `m*.py(.)` -> m*.py); a form may be empty (the caller
+    puts the word's prefix before it). [] when zsh runs nothing: an unquoted blank in a group (`(evil.py|a b)`) or a
+    group the text leaves open (`(measure.py|zz x`: bad pattern), measured 11-21. Raises _ZshUnread for a word with a
+    substitution or a value ($(..), backticks, $X: `(zz|$(echo measure.py))` ran measure.py), a group nested past
+    MAX_ZSH_GROUP_DEPTH or more than MAX_ZSH_GROUP_GLOBS forms."""
+    import glob
+    n, subst = len(text), [False]
+
+    def seq(i, depth):
+        if depth > MAX_ZSH_GROUP_DEPTH:
+            raise _ZshUnread  # a deeper nest (RecursionError at 30 000) falls back to the prefix
+        items = []
+        while i < n:
+            ch = text[i]
+            if ch in _ZSH_WORD_END:
+                if depth:
+                    raise ValueError  # a blank in a group: zsh globs nothing
+                break
+            if ch in '|)':
+                break
+            if ch == '`' or ch == '$':  # a substitution or a value: its span is skipped, the word is not read
+                subst[0] = True
+                if ch == '`' or text[i + 1:i + 2] == '(':
+                    j = text.find('`', i + 1) if ch == '`' else _close_paren(text, i + 1)
+                    if j < 0:
+                        raise ValueError  # left open: zsh runs nothing
+                    i = j + 1
+                else:
+                    i += 1
+                continue
+            if ch == '(':  # `<(..)` and `=(..)` in a group: zsh ran nothing, measured 11-21
+                alts, i = [], i + 1
+                while True:
+                    s, i = seq(i, depth + 1)
+                    alts.append(s)
+                    if i >= n:
+                        raise ValueError  # a group the text leaves open: bad pattern
+                    i += 1
+                    if text[i - 1] == ')':
+                        break
+                items.append(alts)
+                continue
+            if ch in '\'"':
+                j = text.find(ch, i + 1)
+                if j < 0:
+                    raise ValueError
+                if ch == '"' and ('$' in text[i + 1:j] or '`' in text[i + 1:j]):
+                    subst[0] = True
+                items.append(glob.escape(text[i + 1:j]))
+                i = j + 1
+                continue
+            if ch == '\\':
+                items.append(glob.escape(text[i + 1:i + 2]))
+                i += 2
+                continue
+            items.append(ch)
+            i += 1
+        return items, i
+
+    def forms(items):
+        out = ['']
+        for it in items:
+            if isinstance(it, str):
+                out = [o + it for o in out]
+            else:
+                out = [o + f for o in out for alt in it for f in forms(alt)]
+            if len(out) > MAX_ZSH_GROUP_GLOBS:
+                raise _ZshUnread
+        return out
+
+    try:
+        items, _ = seq(i, 0)
+    except ValueError:
+        return []
+    if subst[0]:
+        raise _ZshUnread
+    pats = forms(items)
+    if items and isinstance(items[-1], list) and len(items[-1]) == 1:
+        pats += forms(items[:-1])
+    return pats
+
+
+def _close_paren(text, i):
+    """The index of the ) that closes the ( at text[i], counting nested parens (quotes not followed); -1: none."""
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == '(':
+            depth += 1
+        elif text[j] == ')':
+            depth -= 1
+            if not depth:
+                return j
+    return -1
+
+
+def _locale_firsts(hits):
+    """Viktor r1 (card 00c714ea): the first match in a locale's order. bash and zsh sort a glob by LC_COLLATE:
+    `_a.py` comes before `-a.py` under en_NZ/en_US.UTF-8, where byte and case-folded order put -a.py first, and
+    hu_HU.UTF-8 puts cz before cs (measured: Python's strxfrm gives zsh's order in each). The hook may not get the
+    shell's LANG, so the environment's locale, en_US.UTF-8 and hu_HU.UTF-8 each; other locales are not modelled."""
+    import locale
+    old, out = locale.setlocale(locale.LC_COLLATE), []
+    try:
+        for loc in ('', 'en_US.UTF-8', 'hu_HU.UTF-8'):
+            try:
+                locale.setlocale(locale.LC_COLLATE, loc)
+            except locale.Error:
+                continue
+            out.append(min(hits, key=lambda h: (locale.strxfrm(h), h)))
+    finally:
+        locale.setlocale(locale.LC_COLLATE, old)
+    return out
 
 
 def brace_forms(word):
@@ -4378,17 +4534,18 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
         base the first match in byte order and in case-folded order (bash sorts by the locale); none matched, the
         word as written. Reading every match blocked 26 fleet commands (script-too-many, past MAX_LOOP_PATHS)."""
         import glob
+        v = v.replace('[^', '[!')  # Viktor r1: bash and zsh read [^x] as [!x]; fnmatch reads ^ as a member
         if bases.unknown and not os.path.isabs(v):
             raise PathUnread(f'a relative script path after a directory change the gate does not follow: {v[:40]}')
         firsts = []
         for b in ([None] if os.path.isabs(v) else bases):
             hits = []
-            for h in glob.iglob(v if b is None else os.path.join(glob.escape(b), v)):
+            for h in glob.iglob(v if b is None else os.path.join(glob.escape(b), v), recursive=True):
                 hits.append(h)
                 if len(hits) > MAX_LEAD_GLOB:
                     raise PathUnread(f'a script glob naming more than {MAX_LEAD_GLOB} files: {v[:40]}')
             if hits:
-                firsts += [min(hits), min(hits, key=lambda h: (h.casefold(), h))]
+                firsts += [min(hits), min(hits, key=lambda h: (h.casefold(), h))] + _locale_firsts(hits)
         if not firsts:
             return resolve(v)
         found = False
@@ -4399,9 +4556,58 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
             found = found or r
         return found
 
+    def zsh_paren_may_match(c):
+        """Card 00c714ea r2: True when a zsh group or qualifier paren in script word c could hand a file to the
+        interpreter. The word arrives cut at ) and |, so it is looked up in the command text and its groups are made
+        into their members (zsh_group_globs, every occurrence: a decoy before the call cannot hide it); a text it does
+        not follow, or a word it does not find there, falls back to what precedes the paren plus `*`. Any of those
+        patterns matching a file or directory in a base (hidden ones too: the last component is also tried with a
+        leading dot, as `(.evil|x).py` and `*(D)` match; include_hidden is 3.11+, the hook may run on 3.9) blocks the
+        word unread: zsh's choice among them is not modelled. None matching, zsh runs nothing ("no matches found") and
+        bash stops on the paren. A `$` before the paren: the value is not expanded here, the patterns keep the `$`
+        and match no file (KNOWN-KTP-VAR). Why: every
+        paren read as unread blocked 311 fleet commands on the replay, and the prefix alone 97 (words cut from python,
+        JS and prose: `(15`, `(argv,`, `/${p}`), none of which zsh could run."""
+        import glob
+        m = _ZSH_GLOB_PAREN_RX.search(c)
+        if not m:
+            return False
+        pats, seen = [], 0
+        # the paren part (to its first blank, at most 32 chars) after the prefix the gate made: `"m"(easure.py|x)`
+        # arrives as m(easure.py, a backtick span joined to the next one as `/usr/bin/sqlite3(rows, ..`, and a quote or
+        # a substitution the gate took out may stand between its chars (`("measure.py"|zz)`, "(`python3 -c`," ->
+        # `(,`: replay rows 11-14, 11-20)
+        lead = c[:m.start()]
+        skip = r'''(?:['"]|`[^`]*`|\$\([^()]*\))*'''
+        needle = re.compile(skip.join(re.escape(ch) for ch in re.split(r'\s', c[m.start():], maxsplit=1)[0][:32]))
+        try:
+            for t in dict.fromkeys((cmd, norm)):
+                for f in needle.finditer(t):
+                    seen += 1
+                    if seen > MAX_ZSH_GROUP_GLOBS:
+                        raise _ZshUnread
+                    pats += [lead + g for g in zsh_group_globs(t, f.start()) if lead + g]
+        except _ZshUnread:
+            seen = 0
+        if not seen:  # the prefix: any name that starts the way the word does
+            pats = [re.sub(r'\\(.)', lambda e: glob.escape(e.group(1)), c[:m.start()]) + '*']
+        out = []
+        for p in pats:  # a relative pattern after a cd the gate does not follow: resolve_word's reading raises
+            p = os.path.expanduser(p).replace('[^', '[!')
+            for f in brace_forms(p):
+                head, _, last = f.rpartition('/')
+                out += [f, (head + '/' if head or f.startswith('/') else '') + '.' + last]
+        for p in dict.fromkeys(out):
+            for b in ([None] if os.path.isabs(p) else bases):
+                if next(glob.iglob(p if b is None else os.path.join(glob.escape(b), p), recursive=True), None):
+                    return True
+        return False
+
     def resolve_word(c):
         """Card 00c714ea: a script word as the shell makes it: each word its brace expansion makes, a glob in it
         expanded in each base (resolve_lead_glob)."""
+        if zsh_paren_may_match(c):
+            raise PathUnread(f'a zsh glob group or qualifier in a script word: {c[:40]}')
         found = False
         for f in brace_forms(c):
             r = resolve_lead_glob(f) if _GLOB_CHARS_RX.search(f) and '$' not in f else resolve(f)
