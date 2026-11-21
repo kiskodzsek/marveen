@@ -1079,6 +1079,25 @@ export function initDatabase(dbPathOverride?: string): void {
       task_count INTEGER NOT NULL
     )
   `)
+  // Card c16cbdcd (Klodel 49278, measured 11-21 02:10: 66 [UTEMEZES-BIZALOM] alerts in 24 h for the same few
+  // tasks, one per dashboard process; 21 processes that day): the "already alerted" key of an untrusted task
+  // outlives a dashboard restart. alert_key = the combined definition + preCheck content hash the alert was
+  // sent for; seen_at = the last fire that found the task still untrusted (the daily summary's "open" list).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schedule_trust_alerted (
+      task_name TEXT PRIMARY KEY,
+      alert_key TEXT NOT NULL,
+      alerted_at INTEGER NOT NULL,
+      seen_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schedule_trust_alert_digest (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      day TEXT NOT NULL,
+      at INTEGER NOT NULL
+    )
+  `)
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS background_tasks (
@@ -4590,6 +4609,52 @@ export function baselineScheduleTrust(entries: Array<{ name: string; hash: strin
     for (const e of entries) n += ins.run(e.name, e.hash, now).changes
     db.prepare('INSERT INTO schedule_trust_baseline (id, at, task_count) VALUES (1, ?, ?)').run(now, n)
     return n
+  })()
+}
+
+export interface ScheduleTrustAlertRow {
+  task_name: string
+  alert_key: string
+  alerted_at: number
+  seen_at: number
+}
+
+/** Card c16cbdcd: the key the last [UTEMEZES-BIZALOM] alert of this task was sent for, if any. */
+export function getScheduleTrustAlert(taskName: string): ScheduleTrustAlertRow | undefined {
+  return db.prepare('SELECT task_name, alert_key, alerted_at, seen_at FROM schedule_trust_alerted WHERE task_name = ?')
+    .get(taskName) as ScheduleTrustAlertRow | undefined
+}
+
+export function setScheduleTrustAlert(taskName: string, alertKey: string, now: number): void {
+  db.prepare(`
+    INSERT INTO schedule_trust_alerted (task_name, alert_key, alerted_at, seen_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(task_name) DO UPDATE SET alert_key = excluded.alert_key, alerted_at = excluded.alerted_at, seen_at = excluded.seen_at
+  `).run(taskName, alertKey, now, now)
+}
+
+export function touchScheduleTrustAlert(taskName: string, now: number): void {
+  db.prepare('UPDATE schedule_trust_alerted SET seen_at = ? WHERE task_name = ?').run(now, taskName)
+}
+
+export function clearScheduleTrustAlert(taskName: string): boolean {
+  return db.prepare('DELETE FROM schedule_trust_alerted WHERE task_name = ?').run(taskName).changes > 0
+}
+
+export function listScheduleTrustAlertsSeenSince(since: number): ScheduleTrustAlertRow[] {
+  return db.prepare('SELECT task_name, alert_key, alerted_at, seen_at FROM schedule_trust_alerted WHERE seen_at >= ? ORDER BY task_name')
+    .all(since) as ScheduleTrustAlertRow[]
+}
+
+/** Claims the daily summary for `day` (one row): true once per day, false when that day is already claimed. */
+export function claimScheduleTrustAlertDigest(day: string, now: number): boolean {
+  return db.transaction((): boolean => {
+    const row = db.prepare('SELECT day FROM schedule_trust_alert_digest WHERE id = 1').get() as { day: string } | undefined
+    if (row?.day === day) return false
+    db.prepare(`
+      INSERT INTO schedule_trust_alert_digest (id, day, at) VALUES (1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET day = excluded.day, at = excluded.at
+    `).run(day, now)
+    return true
   })()
 }
 
