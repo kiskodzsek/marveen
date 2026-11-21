@@ -82,11 +82,60 @@ class CapacityOffer(unittest.TestCase):
     def test_offer_needs_its_own_sentence(self):
         self.assertIsNone(gate.capacity_offer('A heti keret 70 %. Külön téma: a javaslatom a poszthoz kész.'))
 
+    def test_shortage_is_not_a_negation(self):
+        # Viktor 49735 M1 (N1-N4): "nem lesz elég / nem bírja / nem fog kitartani" is the TG 6198 situation itself.
+        for text in ('A csapat heti kerete nem lesz elég a hétre; két lehetőség árral az esti blokkban.',
+                     'A heti keret nem elég, javaslom, hogy bővítsünk.',
+                     'A Claude-keret nem fog kitartani, javaslom a bővítést.',
+                     'Nem lesz elég a heti keret, javaslom a bővítést.'):
+            self.assertIsNotNone(gate.capacity_offer(text), text)
+
+    def test_price_shapes_and_vocabulary(self):
+        # Viktor 49735 L1 (E1-E4) and L2 (W1-W3).
+        for text in ('Harmadik Claude-fiók javaslat, 180 €/hó.', 'A heti keret elfogy; Claude Max havi 180 EUR.',
+                     'A heti keret elfogy; Claude Max 180 euró havonta.', 'Javasolnék egy harmadik Claude-fiókot.',
+                     'Javaslom a ChatGPT Plus előfizetést Májsztrónak.', 'Vegyünk OpenAI API kreditet?'):
+            self.assertIsNotNone(gate.capacity_offer(text), text)
+        # A provider-less "harmadik / további fiók" is not AI capacity (Marabel, Metricool accounts).
+        for text in ('Javaslom, hogy a teszthez nyissunk egy harmadik fiókot a Marabelen.',
+                     'Javaslom a további fiókot a Metricoolban.'):
+            self.assertIsNone(gate.capacity_offer(text), text)
+
+    def test_negated_offer_passes(self):
+        # A negated OFFER next to a live capacity phrase (the negation windows before and after the offer).
+        for text in ('Nem javaslom a harmadik Claude-fiókot.', 'A heti keret elfogy, de nem javaslom a bővítést.',
+                     'A heti keret elfogy, bővítést nem javaslok.'):
+            self.assertIsNone(gate.capacity_offer(text), text)
+
+    def test_far_negation_does_not_negate(self):
+        # Only the last 4 words before a phrase count: a "nem" further back in the clause is about something else.
+        self.assertIsNotNone(gate.capacity_offer('Nem tudtam még megnézni a mai heti keret állását és javaslom a bővítést.'))
+
+    def test_balazs_overlap_and_bare_price_word(self):
+        # A sentence to Balázs that also names Patrik is checked; "harmadik seat" alone is not its own offer;
+        # a bare "árral" is an offer.
+        self.assertIsNotNone(gate.capacity_offer('Balázs és Patrik: a heti keret elfogy, javaslom a bővítést.'))
+        self.assertIsNone(gate.capacity_offer('Most a harmadik seat fut a flottán.'))
+        self.assertIsNotNone(gate.capacity_offer('A heti keret elfogy, a két út árral a kártyán.'))
+
+    def test_long_digit_run_is_linear(self):
+        # Viktor 49735 L4: an unbounded digit run before the currency was quadratic (64 000 "1 " = 64 s).
+        t0 = time.monotonic()
+        gate.capacity_offer('A heti keret elfogy ' + '1 ' * 64000)
+        self.assertLess(time.monotonic() - t0, 2.0)
+
+    def test_msg_id_length(self):
+        for v in ('kernel 415: Dave helye 7d 10 %', 'kernel 41500000: Dave helye 7d 10 %'):
+            self.assertIn('nincs benne a mérés msg_id-je', gate.value_problem(v, {'kernel', 'main'}, 'main'), v)
+
     def test_row_is_measurement(self):
         self.assertTrue(gate.row_is_measurement('Dave helye 7d 10 %, a flotta 71 %.'))
         self.assertTrue(gate.row_is_measurement('own:dave seven_day 95 %, nullázás 11-23.'))
         self.assertFalse(gate.row_is_measurement('A flotta tokenje nem másolható, külön fiók kell.'))
         self.assertFalse(gate.row_is_measurement('A keret elfogy. Holnap 40 % lesz a terhelés.'))
+        # Viktor 49735 L3 (R1, R6): a disk or build limit is not a quota measurement.
+        self.assertFalse(gate.row_is_measurement('Mérve: szabad hely 12 %.'))
+        self.assertFalse(gate.row_is_measurement('A Vercel limit a hónapban 35 %-on áll.'))
 
 
 class Hook(unittest.TestCase):
@@ -106,7 +155,8 @@ class Hook(unittest.TestCase):
                     (41501, 'dave', 'main', 'A flotta tokenje nem másolható, külön fiók kell.', now - 600),
                     (41502, 'kernel', 'main', 'Mérve: Dave helye 7d 10 %.', now - 8 * 86400),
                     (41503, 'main', 'main', 'A heti keret 71 %.', now - 60),
-                    (41504, 'szigma', 'pulzus', 'A flotta 7d 80 %.', now - 60)):
+                    (41504, 'szigma', 'pulzus', 'A flotta 7d 80 %.', now - 60),
+                    (41505, 'main', 'dave', 'Dave, kérlek mérd meg újra: múlt héten a kereted 10 % volt.', now - 60)):
             con.execute("INSERT INTO agent_messages VALUES (?, ?, ?, ?, 'done', ?)", row)
         con.commit()
         con.close()
@@ -123,9 +173,9 @@ class Hook(unittest.TestCase):
     def mark(self, chat=GROUP, value=GOOD, agent='main', kind='BELSO-UT-MERVE'):
         reply_marks.add(kind, chat, agent, value)
 
-    def run_gate(self, chat, text, agent='main', tool=TOOL, call=None, raw=None, owner_env=True):
+    def run_gate(self, chat, text, agent='main', tool=TOOL, call=None, raw=None, owner_env=True, db=None):
         env = dict(os.environ, MAIN_AGENT_ID='main', MARVEEN_AGENT_ID=agent, MARVEEN_OWNER_CHATS=f'{PRIV},{GROUP}',
-                   REPLY_MARKS_PATH=self.marks, MARVEEN_AGENTS_DIR=self.agents, LEDGER_DB_PATH=self.db,
+                   REPLY_MARKS_PATH=self.marks, MARVEEN_AGENTS_DIR=self.agents, LEDGER_DB_PATH=db or self.db,
                    CLAUDE_PROJECT_DIR=self.tmp)
         if not owner_env:
             env.pop('MARVEEN_OWNER_CHATS')
@@ -162,6 +212,32 @@ class Hook(unittest.TestCase):
             rc, err = self.run_gate(GROUP, TG6198)
             self.assertEqual(rc, 2, value)
             self.assertIn(why, err, value)
+
+    def test_neg_own_message_to_the_teammate_is_not_its_measurement(self):
+        # Viktor 49735 L3a (R2b): the writer's own row TO Dave carries a percentage, but Dave did not send it.
+        self.mark(value='dave 41505: Dave kerete 10 %')
+        rc, err = self.run_gate(GROUP, TG6198)
+        self.assertEqual(rc, 2)
+        self.assertIn('KÜLDÖTT', err)
+
+    def test_neg_unreadable_queue_blocks(self):
+        # Viktor 49735 L5 (M13): the msg_id cannot be checked = no measurement, not a pass.
+        self.mark()
+        rc, err = self.run_gate(GROUP, TG6198, db=os.path.join(self.tmp, 'missing', 'claudeclaw.db'))
+        self.assertEqual(rc, 2)
+        self.assertIn('nem olvasható', err)
+
+    def test_neg_reply_marks_error_blocks(self):
+        # Viktor 49735 L5 (M18): an error while reading the mark = no mark (blocks), in process with a failing take().
+        import io
+        from unittest import mock
+        payload = json.dumps({'tool_name': TOOL, 'tool_input': {'chat_id': GROUP, 'text': TG6198}})
+        def boom(*a, **k):
+            raise RuntimeError('ledger broken')
+        with mock.patch.dict(os.environ, {'MARVEEN_OWNER_CHATS': f'{PRIV},{GROUP}', 'MAIN_AGENT_ID': 'main'}), \
+                mock.patch.object(reply_marks, 'take', boom), mock.patch('sys.stdin', io.StringIO(payload)), \
+                mock.patch('sys.stderr', io.StringIO()):
+            self.assertEqual(gate.main(), 2)
 
     def test_mark_of_another_agent_or_chat_does_not_count(self):
         self.mark(agent='dave')
