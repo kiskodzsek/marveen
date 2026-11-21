@@ -3483,7 +3483,11 @@ def script_cases():
                                    ('python3 hid/**/zz_nomatch_q7.py x', big, 0), ('python3 hid2/**/zz_nomatch_q7.py x', big, 0),
                                    ('python3 g**/zz_nomatch_q7.py x', big, 0), ('python3 **x/zz_nomatch_q7.py x', big, 0),
                                    ('python3 (**/zz_nomatch_q7.py|zq) x', big, 2),
-                                   ('python3 (zq|**/zz_nomatch_q7.py) x', big, 2)):
+                                   ('python3 (zq|**/zz_nomatch_q7.py) x', big, 2),
+                                   # r5 (Viktor 49863 M1): a loop value's ** walk is bounded the same way
+                                   ('for f in **/zz_nomatch_q7.py; do python3 "$f"; done', big, 2),
+                                   ('for f in ***/zz_nomatch_q7.py; do python3 "$f"; done', big, 2),
+                                   ('for f in **/zz_nomatch_q7.py; do python3 "$f"; done', d, 0)):
                 t = _t.monotonic()
                 code, err = bash_in(cmd, cwd)
                 took = _t.monotonic() - t
@@ -3499,6 +3503,9 @@ def script_cases():
                 os.makedirs(os.path.join(deep, os.path.dirname(rel)), exist_ok=True)
                 with open(os.path.join(deep, rel), 'w', encoding='utf-8') as f:
                     f.write(measure_src)
+            os.makedirs(os.path.join(deep, 'a', 'b', 'z'))  # r5: a benign file deep down (loop-benign-star2)
+            with open(os.path.join(deep, 'a', 'b', 'z', 'zz.py'), 'w', encoding='utf-8') as f:
+                f.write("print('ok')\n")
             os.makedirs(os.path.join(deep, 'sub'))
             os.symlink('../real', os.path.join(deep, 'sub', 'lnk'))
             for cmd, want in (('python3 ***/measure.py x', 2), ('python3 a/***/measure.py x', 2),
@@ -3510,7 +3517,18 @@ def script_cases():
                               ('python3 a/b/c/*** x', 2), ('python3 real/d/*** x', 2),
                               # r4 m8 (star3-nomatch-off): a ***/ member of a zsh group: zsh stops ("bad
                               # pattern", measured), the gate walks it as ** (the lean, as for **/)
-                              ('python3 (zq|***/measure.py) x', 2)):
+                              ('python3 (zq|***/measure.py) x', 2),
+                              # r5 (Viktor 49863 S09): two ***/ in one word, each read as **/ (a/b/c/measure.py)
+                              ('python3 a/***/c/***/measure.py x', 2),
+                              # r5 (Viktor 49863 M1, old, main too): a loop value with ** or ***/ is read recursively
+                              # (zsh ran a/b/c/measure.py, Viktor loop_rows.py 11-21; a plain iglob read ** as *)
+                              ('for f in **/measure.py; do python3 "$f"; done', 2),
+                              ('for f in ***/measure.py; do python3 "$f"; done', 2),
+                              ('for f in **/*.py; do python3 "$f"; done', 2),
+                              ('for f in **/measure.py; do python3 $f; done', 2),
+                              ('for f in a/b/c/[^z]easure.py; do python3 "$f"; done', 2),  # [^z] is [!z] (r1)
+                              ('for f in **/zz.py; do python3 "$f"; done', 0),  # loop-benign-star2
+                              ('for f in a/**/zz.py; do python3 "$f"; done', 0)):
                 code, err = bash_in(cmd, deep)
                 if code != want:
                     fails.append(f'script: ***/ walk {cmd!r}: want rc {want}, got {code}')

@@ -56,6 +56,10 @@ KNOWN-KTP-OVER, not open but leans: they block a harmless call (old unless named
   New in r4 (Viktor 49785 INFO): a `**` member of a zsh group (`(**/x.py|zz)`: zsh stops, "bad pattern", and bash
   has a syntax error, measured 11-21) is read as a `**` walk; a `**` over a link to a directory: Python's glob follows
   the link, zsh's `**/` does not (its `***/` does), so a script reachable only through a link blocks under `**/`.
+  New in r5 (Viktor 49863 INFO and M1): a zsh group after `***/` whose matching members are all harmless
+  (`***/(ok|zz).py`: any match blocks the group unread, as for every zsh paren); a brace whose second member is the
+  one that matches (every brace word is read as a script, above); a loop value with `**` is read recursively in
+  bash too, where without globstar it is one `*` (one more file read, never fewer).
 A variable glued to a script word (card 8a73eab1, Dave's audit 11-16; Viktor 49425): the word is read with every
 variable whose value the gate does not trust as unset and as set to "": one the text does not set, and one it sets in
 an expansion the gate does not trust. Read in bash's and zsh's forms (`evil${X}.py`, `X=; python3 evil$X.py`,
@@ -4555,14 +4559,20 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
 
     def resolve_glob(v):
         """A loop value with a glob (`for f in sub/*.py; do python3 $f`): each file it matches in each base, as bash
-        expands it there (at most MAX_LOOP_PATHS; more raises PathUnread); none: the word as written."""
+        expands it there (at most MAX_LOOP_PATHS; more raises PathUnread); none: the word as written.
+        r5 (Viktor 49863 M1, old, main too): read as resolve_lead_glob reads a glob. `for f in **/measure.py; do python3
+        "$f"; done` (and `***/`, `**/*.py`) ran a/b/c/measure.py in zsh, while a plain iglob read `**` and `***` as one
+        `*` and found nothing: `**` is read recursively (bash without globstar reads it as `*`: one more file, never
+        fewer), `***/` as `**/`, the walk bounded by MAX_STAR_DIRS, and `[^x]` as `[!x]`."""
         import glob
+        g = _STAR3_RX.sub('**', v.replace('[^', '[!'))  # the glob as the shell reads it; none matched: v as written
         if bases.unknown and not os.path.isabs(v):
             raise PathUnread(f'a relative script path after a directory change the gate does not follow: {v[:40]}')
         hits = []
-        for b in ([None] if os.path.isabs(v) else bases):
-            pat = v if b is None else os.path.join(glob.escape(b), v)
-            for h in glob.iglob(pat):
+        for b in ([None] if os.path.isabs(g) else bases):
+            pat = g if b is None else os.path.join(glob.escape(b), g)
+            star_walk_bounded(pat)
+            for h in glob.iglob(pat, recursive=True):
                 hits.append(h)
                 if len(hits) > MAX_LOOP_PATHS:
                     raise PathUnread(f'a loop glob naming more than {MAX_LOOP_PATHS} files: {v[:40]}')
