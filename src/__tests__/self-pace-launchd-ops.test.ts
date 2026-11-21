@@ -123,25 +123,15 @@ describe('the takeover switch (Klodel 6082, shared/vesz-atvetel.md)', () => {
   })
 })
 
-describe('the Dave-seat guard (Patrik TG 674, Klodel 47725, card f3a539f0)', () => {
+describe('the Dave-seat guard pin is off (card f3a539f0: the fleet seat reset 11-21, Pulzus booted it out 11-20)', () => {
   const DG = 'hu.myshp.dave-seat-guard'
   const dgPlist = join(agentsDir, `${DG}.plist`)
-  it('bootstrap of the approved plist and bootout pass; kickstart and a changed plist are refused', () => {
+  it('the once-approved plist no longer bootstraps, and bootout and kickstart are refused too', () => {
+    expect(Object.keys(LAUNCHD_APPROVED_PLIST_SHA256)).not.toContain(DG)
     writeFileSync(dgPlist, readFileSync(join(__dirname, 'fixtures', `${DG}.plist`)))
-    const ok = gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${dgPlist}` }, pulzus)
-    expect(ok.deny).toBe(false)
-    expect(ok.launchdOps[0].plist_sha256).toBe('f172845fc59e8c3a0d5fbf96150c196e4e2e10d2fc862f239b95f53410f30f21')
-    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${DG}` }, pulzus).deny).toBe(false)
+    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${dgPlist}` }, pulzus).deny).toBe(true)
+    expect(gateDecision('Bash', { command: `${L} bootout gui/${UID}/${DG}` }, pulzus).deny).toBe(true)
     expect(gateDecision('Bash', { command: `${L} kickstart gui/${UID}/${DG}` }, pulzus).deny).toBe(true)
-    writeFileSync(dgPlist, readFileSync(join(__dirname, 'fixtures', `${DG}.plist`), 'utf8').replace('<integer>600</integer>', '<integer>1</integer>'))
-    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${dgPlist}` }, pulzus).deny).toBe(true)
-    writeFileSync(dgPlist, readFileSync(join(__dirname, 'fixtures', `${DG}.plist`), 'utf8').replace('ops/dave-seat-guard/guard.py', 'ops/other.py'))
-    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${dgPlist}` }, pulzus).deny).toBe(true)
-  })
-  it('the same bootstrap from any other agent is refused', () => {
-    writeFileSync(dgPlist, readFileSync(join(__dirname, 'fixtures', `${DG}.plist`)))
-    const dave = { ...pulzus, agent: 'dave', configDirAgent: 'dave' }
-    expect(gateDecision('Bash', { command: `${L} bootstrap gui/${UID} ${dgPlist}` }, dave).deny).toBe(true)
   })
 })
 
