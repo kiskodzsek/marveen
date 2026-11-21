@@ -1237,6 +1237,10 @@ def script_cases():
         with open(os.path.join(d, 'sub2', 'twin.py'), 'w', encoding='utf-8') as f:
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         w('twin.py', 'print(1)\n')
+        # card 8a73eab1 r3 (Viktor 49502 LELET 1): a keychain file whose name holds [1] (a name list's glob blocks it,
+        # escaped), and one [1] as a character class would match (escaped: not matched)
+        w('m[1]HOMEx.py', "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
+        w('k1Zq.py', "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         os.makedirs(os.path.join(d, 'fdname'))  # bash 3.2 runs a file named {fd} in `python3 {fd}>f x.py`
         with open(os.path.join(d, 'fdname', '{fd}'), 'w', encoding='utf-8') as f:
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'find-generic-password', '-s', 'x'])\n")
@@ -1491,6 +1495,88 @@ def script_cases():
             ('source runner.sh "meas"ure.py', d),
             ('./dump$(true).sh', d),
             ('./"dump".sh', d),
+            # card 8a73eab1 (Dave's audit 11-16): a variable glued to the name is empty when unset or set to ""
+            # (main: allow); ${X:-w} gives w, ${X+w} gives w for a set-to-"" X; read with quotes and substitutions too
+            ('python3 measure${X}.py', d),
+            ('python3 measure$X.py', d),
+            ('python3 "meas"ure${X}.py', d),
+            ('X=; python3 measure$X.py', d),
+            ("X=''; python3 measure$X.py", d),
+            ('python3 measure${X:-}.py', d),
+            ('python3 meas${X:-ure}.py', d),
+            ('python3 meas${X-ure}.py', d),
+            ('X=; python3 meas${X+ure}.py', d),
+            ('python3 ${D}measure.py', d),
+            ('python3 "$D"measure.py', d),
+            ('python3 measure"${X}".py', d),
+            ('python3 meas${X:-${Y:-${Z:-ure}}}.py', d),
+            ('python3 measure${X#a}.py', d),
+            ('python3 measure${X/a/b}.py', d),
+            ('python3 measure${X:0:1}.py', d),
+            ('python3 $(true)measure$X.py', d),
+            ('python3 -I measure$X.py stat.py', d),
+            ('python3 ' + '${A:-' * 8 + 'measure' + '}' * 8 + '.py', d),
+            ('python3 ' + '${A:-' * 10 + 'stat' + '}' * 10 + '.py', d),  # nested past MAX_VAR_NEST: not read
+            ('bash dump$X.sh', d),
+            ('./dump$X.sh', d),
+            ('source dump$X.sh', d),
+            ('source $X dump.sh', d),
+            # an expansion the shell may not make: `echo X=a` sets nothing, $X is empty (expand() read it as "a")
+            ('echo X=a; python3 measure$X.py', d),
+            ('X=a true; python3 measure$X.py', d),
+            # Viktor r1 (49425): zsh's forms of a glued variable (the fleet's Bash tool is zsh): a subscript and a
+            # modifier on a plain name, a flag in a brace (cut at its paren: blocks), $= $~ and an empty name
+            ('python3 measure$X[1].py', d),
+            ('python3 measure$X:r.py', d),
+            ('python3 measure${(L)X}.py', d),
+            ('python3 measure${=X}.py', d),
+            ('python3 measure${~X}.py', d),
+            ('python3 measure$=X.py', d),
+            ('python3 measure$~X.py', d),
+            ('python3 ${${X}:-meas}ure.py', d),
+            ('python3 ${:-meas}ure.py', d),
+            ('python3 meas${!HOM*}ure.py', d),  # the names of variables: any run, a glob (Kernel r2)
+            ('./meas${!HOM*}ure.py', d),
+            # Kernel r2 (measured in zsh 5.9): :h gives ".", :a :c :s give "", a pattern substitution's replacement,
+            # ${X::=w}; :P (the cwd) is not read and blocks, whatever the name
+            ('python3 measure$X:hpy', d),
+            ('python3 measure$X:a.py', d),
+            ('python3 measure$X:c.py', d),
+            ('python3 measure$X:s/a/b/.py', d),
+            ('python3 measure$X:gs/a/b/.py', d),
+            ('python3 measure$X:s^a^b^.py', d),
+            ('python3 meas${X/#/ure}.py', d),
+            ('python3 meas${X/%/ure}.py', d),
+            ('python3 meas${X//*/ure}.py', d),
+            ('python3 meas${X::=ure}.py', d),
+            ('python3 measure${X:h}py', d),
+            ('python3 meas${X:-"ure"}.py', d),
+            ('python3 notes$X:P.py', d),
+            # Kernel r3 (Viktor 49502 LELET 1): a cut zsh flag group blocks: what follows its paren may name a dot
+            # file or a path in a subdirectory, which a glob does not see (prop2 blocked all of these)
+            ('python3 .m${(L)X}easure.py', d),  # cutgroup-dotfile
+            ('python3 "n${(L)X}.otes.py"', d),  # cutgroup-dq-dotfile (a glob n* sees only notes.py)
+            ('python3 su${(L)X}b/deep.py', d),  # cutgroup-prefix-subdir
+            ('X=; python3 su${(L)X}b/deep.py', d),  # cutgroup-set-value-subdir
+            ("python3 'm[1]'${(L)X}x.py", d),  # cutgroup-bracket-in-name
+            ("python3 'm[1]'${!HOM*}x.py", d),  # namelist-bracket-in-name: the word's literal parts glob-escaped
+            # (LELET 2) a subscript in a brace with a default word: empty, so the word
+            ('python3 meas${X[1]:-ure}.py', d),  # brace-array-index-default
+            ('python3 meas${X[@]:-ure}.py', d),  # brace-array-at-default
+            # (LELET 3) zsh's modifier chain: :a / :A after :h (the cwd), :P after :s, a substitution after :h,
+            # an escaped delimiter in :s, :&, and ${X:/p/r}
+            ('python3 notes$X:h:a.py', d),  # zmod-h-then-a (not read: blocks, whatever the name)
+            ('python3 notes$X:h:A:t.py', d),
+            ('python3 notes${X:h:a}.py', d),  # zmod-brace-h-a
+            ('python3 notes$X:s/a/b/:P.py', d),  # zmod-s-then-P
+            ('python3 notes${X:s/a/b/:P}.py', d),
+            ('python3 meas$X:h:s/./ure/.py', d),  # :h gives ".", the substitution its replacement
+            ('python3 meas$X:h:s/\\/x/ure/.py', d),  # zmod-s-escaped-delim
+            ('python3 "meas$X:&ure.py"', d),  # zmod-unlisted-amp-dq
+            ('python3 meas${X:/*/ure}.py', d),  # zsubst-colon-slash
+            # (LELET 4) a NUL in the word as written blocks (bash drops it reading a script file)
+            ('python3 .meas\x00ure.py', d),  # nul-raw-dotfile
+            ('python3 sub/\x00deep.py', d),  # nul-raw-subdir
             ("./$'\\x64'ump.sh", d),
             ('x=$(./dump"".sh)', d),
             # a quoted path inside $( ): read without the closing ) too. The lexer's view hands the body over
@@ -2756,6 +2842,30 @@ def script_cases():
             ('source "$(true)"runner.sh', d),
             ('. "$(dirname "$0")/notes.py"', d),
             ('./"no"tes.py', d),
+            # card 8a73eab1: a variable's empty readings that name no keychain-reading file, a variable in a word after
+            # the plain script (argv data), and a value the text sets for sure
+            ('python3 notes$X.py', d),
+            ('python3 no${X:-tes}.py', d),
+            ('python3 stat.py measure$X.py', d),
+            ('X=a; python3 stat.py $X', d),
+            ('X=tes; python3 no$X.py', d),
+            ('echo ${HOME}/x', d),
+            ('python3 ' + '${A:-' * 8 + 'notes' + '}' * 8 + '.py', d),
+            # Viktor r1 / Kernel r2: zsh's forms in argv data and in readings that name no keychain-reading file
+            ('python3 notes$X:h.py', d),
+            ('python3 no${X/#/tes}.py', d),
+            ('python3 notes$X[1].py', d),
+            ('python3 notes$+X.py', d),
+            ('echo ${!HOM*}', d),
+            ('python3 stat.py ${!HOM*} $X:P ${(L)X}', d),
+            ('echo measure$X:P.py', d),
+            # Kernel r2: a name list or a cut flag group is a glob: no matching file, no block (prop2 blocked a JS
+            # template literal in a heredoc to cat: 3 of the replay's pairs)
+            ('python3 no${!HOM*}tes.py', d),
+            # Kernel r3: the cut flag group blocks, except in a heredoc body no shell reads (KNOWN-V9: a glob there)
+            ("cat > out.mjs <<'EOF'\nconsole.log(`${(a + b)}`, full/lex=${(full / lex).toFixed(2)})\nEOF", d),
+            # the name list's literal parts are glob-escaped: [1] is no character class, k1Zq.py is not matched
+            ("python3 'k[1]'${!HOM*}q.py", d),
             ('echo "a b" \'c d\' $\'e\'', d),
             # an EVEN run of backslashes is escaped backslashes: the backtick after them closes the substitution, and
             # measure.py is no word of bash's call (mutation m11: counting one backslash read it as bash's $2)
@@ -3937,6 +4047,45 @@ def main():
                        env={'PATH': '/usr/bin:/bin'})
     if p.returncode != 0 or p.stdout.strip():
         fails.append(f'glob-subcommand timing (in process): {p.stdout.strip()[:300]} {p.stderr.strip()[-300:]}')
+    # card 8a73eab1: var_readings is a linear walk per nesting level, at most MAX_VAR_NEST + 1 levels (deeper:
+    # TooManyArgs); 1-2 MB words, 2 s cap each. w: 1 = TooManyArgs expected, 0 = readings returned
+    vr_timed = ('import importlib.util as u,sys,time; s=u.spec_from_file_location("g",sys.argv[1]); '
+                'm=u.module_from_spec(s); s.loader.exec_module(m); R=['
+                '("${A:-"*300000,0),("${A:-"*20+"x"+"}"*20,1),("${A}"*300000,0),("$A"*500000,0),'
+                '("${A"+"x"*1000000,0),("${A:-"+"x"*1000000+"}",0),("${"*1000000,0),("${#A}"*200000,0),'
+                '("${A:-${B}"*150000+"}"*150000,1),("${A"+"}x"*500000,0),("${A/"+"x"*1000000,0),'
+                '("${A:-\\""*300000,0),("${A:-\\\\}"*300000,0),("$A:s/"*200000,0),("$A:h"*200000,0),'
+                '("${A/#/"*200000,0),("${A:-\'"+"x"*1000000,0)]\n'
+                'for c,w in R:\n t=time.monotonic()\n try:\n  m.var_readings(c); g=0\n except m.TooManyArgs:\n  g=1\n'
+                ' d=time.monotonic()-t\n if g!=w or d>2: print(repr(c[:30]),g,round(d,2))')
+    p = subprocess.run([sys.executable, '-I', '-c', vr_timed, HOOK], capture_output=True, text=True, timeout=120,
+                       env={'PATH': '/usr/bin:/bin'})
+    if p.returncode != 0 or p.stdout.strip():
+        fails.append(f'var-readings timing (in process): {p.stdout.strip()[:300]} {p.stderr.strip()[-300:]}')
+    # Kernel r2 (Viktor 49425): zsh's values of an empty or unset variable, measured in zsh 5.9 -f and with the
+    # fleet's setopt; each must be one of var_readings' readings (after the quote removal), or TooManyArgs (None)
+    vr_vals = ('import importlib.util as u,sys; s=u.spec_from_file_location("g",sys.argv[1]); '
+               'm=u.module_from_spec(s); s.loader.exec_module(m); R=['
+               '("ev$+X.py","ev0.py"),("ev$+X.py","ev1.py"),("ev$#X.py","ev0.py"),("ev${+X}il.py","ev1il.py"),'
+               '("ev${+X}il.py","ev0il.py"),("ev${#X}il.py","ev0il.py"),("ev$X:h.py","ev..py"),'
+               '("ev$X:h:t.py","ev..py"),("ev$X:s:a:b:.py","ev.py"),("ev$X:s/a/b.py","ev"),'
+               '("ev${X:h}il.py","ev.il.py"),("ev${X/*/il}.py","evil.py"),'
+               '("ev${X/a/il}.py","ev.py"),("ev${X:-i\\\\}l}.py","evi}l.py"),("ev${X:-i\'}\'l}.py","evi}l.py"),'
+               '("ev${X:-i\\"}\\"l}.py","evi}l.py"),("ev$X:x.py","ev:x.py"),("ev$X[1].py","ev.py"),'
+               '("ev$^X.py","ev.py"),("ev${^X}il.py","evil.py"),("ev$X:P.py",None),("ev${X:P}il.py",None),'
+               '("ev${!HOM@}il.py","ev"+chr(0)+"il.py"),("evil${(L",None),'
+               # Kernel r3 (Viktor 49502): the cut group and a NUL block; a subscript in a brace; the modifier chain
+               '("ev"+chr(0)+"$X.py",None),("ev${X[1]:-il}.py","evil.py"),("ev${X[@]:-il}.py","evil.py"),'
+               '("ev$X:h:a.py",None),("ev${X:h:A}il.py",None),("ev$X:s/a/b/:P.py",None),("ev$X:h:s/./il/.py","evil.py"),'
+               '("ev$X:h:s/\\\\/x/il/.py","evil.py"),("ev$X:&il.py","evil.py"),("ev$X:h:&il.py",None),'
+               '("ev${X:/*/il}.py","evil.py"),("ev$X:h:s/./i/:t.py",None)]\n'
+               'for c,want in R:\n try:\n  got=[m.shell_unquote(r) for r in m.var_readings(c)]\n'
+               ' except m.TooManyArgs:\n  got=None\n'
+               ' if (want is None) != (got is None) or (want is not None and want not in got): print(c,want,got)')
+    p = subprocess.run([sys.executable, '-I', '-c', vr_vals, HOOK], capture_output=True, text=True, timeout=60,
+                       env={'PATH': '/usr/bin:/bin'})
+    if p.returncode != 0 or p.stdout.strip():
+        fails.append(f'var-readings zsh values (in process): {p.stdout.strip()[:300]} {p.stderr.strip()[-300:]}')
     # card 3085a683: the wrapper walk is linear (a walk per wrapper, a wrapper right after another in the same pass);
     # a walk past MAX_ARGS words blocks ('wrapper-unread'): 64 words of flags and arguments pass, 65 block
     sec = fix('s3curity') + ' dump-keychain'
