@@ -1837,6 +1837,24 @@ def script_cases():
             ('bash dump.sh', d),
             ('sh ./assign.sh', d),
             ('./dump.sh', d),
+            # card e3d2fd6e (main too): a backslash in the word or in its path start; bash and zsh took it off and ran
+            # dump.sh (bin/shell-truth.py, 11-21); in a substitution, a backtick and a { } group too
+            ('./dump\\.sh', d),
+            ('./dump\\.sh x', d),
+            ('\\./dump.sh', d),
+            ('.\\/dump.sh', d),
+            ('\\.\\/dump.sh', d),
+            ('true; \\./dump.sh', d),
+            ('echo $(./dump\\.sh)', d),
+            ('echo "$(./dump\\.sh)"', d),
+            ('echo `./dump\\.sh`', d),
+            ('x=`./dump\\.sh`', d),
+            ('{ ./dump\\.sh; }', d),
+            ('\\' + os.path.join(d, 'dump.sh'), None),  # `\/abs/x.sh` and `sub\/y.sh` ran too (work/e3d2fd6e/truth2.py)
+            ('sub\\/deep.py', d),
+            ('echo $(sub\\/deep.py)', d),
+            ('cd sub && \\../dump.sh', d),  # `\../` and `.\./` ran ../x.sh (truth2.py)
+            ('cd sub && .\\./dump.sh', d),
             ('sub/deep.py', d),
             (os.path.join(d, 'sub', 'deep.py') + ' --x', None),
             ('python3 export.py', d),
@@ -3043,6 +3061,10 @@ def script_cases():
             # data file too and blocks there; accepted, conservative)
             ('python3 "st"at.py', d),
             ("python3 $'\\x73'tat.py", d),
+            # card e3d2fd6e: a backslash word that names no keychain-reading file, and one in prose
+            ('./ok\\.js', d),
+            ('\\./ok.js', d),
+            ('grep -n "./dump\\.sh" /dev/null; true', d),
             ('python3 "no"tes.py stat.py', d),
             ('python3 -m "notes"', d),
             ('python3 -Inotes', d),

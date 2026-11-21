@@ -2893,7 +2893,13 @@ def module_files(mod):
 DIRECT_RX = re.compile(SCRIPT_POSITION + r'''['"]?((?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*)['"]?(?=\s|$|[;&|)<>])''')
 # Card 70c94516 (Viktor 43662 LELET 2): the whole path word up to a blank, when DIRECT_RX stops at a quote or a
 # substitution inside it (`./x$(true).sh`, `./"ev"il.sh` run x.sh / evil.sh); read with word_forms' rules
-DIRECT_WORD_RX = re.compile(SCRIPT_POSITION + r'''(['"]?(?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*['"`$]\S*)''')
+# card e3d2fd6e (Dave 11-16, main too): a backslash in the word (`./dump\.sh`, `\./dump.sh`, `{ ./dump\.sh; }`,
+# `$(./dump\.sh)`): bash and zsh take it off and run dump.sh (measured 11-21, bin/shell-truth.py); normalise() takes
+# off only a backslash before a letter. Such a word is read with word_forms' rules too, and so is one whose path
+# start holds the backslash (`\./dump.sh`, `.\/dump.sh`, `\.\/dump.sh`, `\/abs`, `sub\/x.sh`)
+_ESC_PATH_START = r'''(?=[.\\]*\\)(?:\\?\.){1,2}\\?/|\\/|[\w.-]+\\/'''
+DIRECT_WORD_RX = re.compile(SCRIPT_POSITION + r'''((?:['"]?(?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*['"`$\\]|'''
+                            + _ESC_PATH_START + r''')\S*)''')
 # A literal naming the binary: 'security', "/usr/bin/security", `security` (a JS template), or a shell assignment
 # SEC=security. The assignment branch walks path segments, not \S*: `=\s*['"]?(?:\S*/)?security` ran to the end of every
 # space-free run and searched back for "/" at each "=", quadratic: 100 000 "=" took 9 s, 1 MB never returned within the
