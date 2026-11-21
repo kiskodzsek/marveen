@@ -109,6 +109,28 @@ def empty_input_or_bad_usage_never_edits(state):
 
 
 @case
+def real_state_is_recorded_only_with_explicit_record(state):
+    # 2026-11-21: the schedule pipeline must not record before the edit. A copy of the script in a temp root
+    # (ROOT = its parent dir), run WITHOUT --state: no --record -> rc 0, nothing written; --record -> written.
+    import shutil
+    root = os.path.dirname(os.path.dirname(state))
+    os.makedirs(os.path.join(root, 'scripts'))
+    cp = os.path.join(root, 'scripts', 'elo-allapot-valtozas.py')
+    shutil.copy(SCRIPT, cp)
+    real = os.path.join(root, 'store', 'elo-allapot-csoport.sha256')
+
+    def go(*a):
+        return subprocess.run([sys.executable, '-I', cp, 'csoport', *a], input=text(), capture_output=True,
+                              text=True, timeout=20).returncode
+    first = go()
+    written_without = read(real) is not None
+    second = go()
+    rec = go('--record')
+    return (first == 0 and second == 0 and not written_without and rec == 0 and read(real) is not None
+            and go() == 3)
+
+
+@case
 def unreadable_state_counts_as_change(state):
     os.makedirs(os.path.dirname(state))
     with open(state, 'wb') as fh:

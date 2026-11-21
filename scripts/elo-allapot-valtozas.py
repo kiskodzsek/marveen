@@ -22,6 +22,12 @@ Exit codes and output:
 State: <repo-root>/store/elo-allapot-<mode>.sha256 (mode: csoport | privat), or --state FILE (test seam).
 A missing or unreadable state file counts as "changed" (the first run edits once).
 
+Recording guard (Klodel, 2026-11-21 01:42, the 5th case of the same trap): the schedule prompt pipes
+straight into this script; recording at that point (before edit_message) made a later, corrected text look
+"unchanged" (rc=3) and the group message stayed stale. So the REAL state file (no --state) is written ONLY with an
+explicit --record, which store/klodel-tools/elo-kor.sh rogzit passes after a successful edit. Without it a run
+compares only (as --no-record) and says so on stderr. With --state (test seam) the old default (record) stays.
+
 Known limit: the hash is recorded before the edit. If the edit_message call then fails, the next round sees "no
 change" until the content really changes. Run with --no-record to compare only, and record with a second run
 after a successful edit, if that ever matters.
@@ -73,7 +79,7 @@ def write_state(path, value):
 
 
 def main(argv):
-    args, state, record, rest = [], None, True, list(argv[1:])
+    args, state, record, explicit, rest = [], None, True, False, list(argv[1:])
     while rest:
         a = rest.pop(0)
         if a == '--state' and rest:
@@ -82,12 +88,18 @@ def main(argv):
             state = a.split('=', 1)[1]
         elif a == '--no-record':
             record = False
+        elif a == '--record':
+            explicit = True
         else:
             args.append(a)
     if len(args) != 1 or args[0] not in MODES or state == '':
-        print('usage: elo-allapot-valtozas.py csoport|privat [--state FILE] [--no-record] < text', file=sys.stderr)
+        print('usage: elo-allapot-valtozas.py csoport|privat [--state FILE] [--no-record|--record] < text', file=sys.stderr)
         return 2
     mode = args[0]
+    if state is None and not explicit and record:
+        record = False
+        print('elo-allapot-valtozas: compare only; record with: sh store/klodel-tools/elo-kor.sh rogzit <edit id>',
+              file=sys.stderr)
     state = state or os.path.join(ROOT, 'store', f'elo-allapot-{mode}.sha256')
     text = sys.stdin.read(MAX_INPUT + 1)
     if not text.strip() or len(text) > MAX_INPUT:
