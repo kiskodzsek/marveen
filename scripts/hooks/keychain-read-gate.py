@@ -13,6 +13,12 @@ a relative script word whose directory or name comes from a value the gate does 
 `while read` loop (piped or from a file), `select`, an arithmetic `for ((..))` loop, cdable_vars, find -execdir
 with a relative script, and a variable reassigned after the cd that used it (`D=sub; cd $D; D=zz; python3 m.py`:
 the cd is read with the last value of the name; the main gate passes it too).
+What an xargs is fed (card 3bf9a741, Viktor 49280 LOW 2; old, main passes each too; the reading itself is described
+at XARGS_RX): an xargs inside a quoted shell payload (`bash -c 'echo D | xargs K'`, `sh -c "..."`, an eval '...'
+text, a nested `xargs -I{} sh -c 'echo {} | xargs K'`) is not read for its fed words; nor a file's content (`cat
+list | xargs`, a redirect `xargs < list`, `-a list`), a computed name (find, an ls glob, tr), a shell expansion in a
+fed word (a default param `${X:-..}`, a variable, a brace), a sh -c script reaching its words through $0 or bash -c
+through "$@", an xargs whose name is split by quotes ('xa'rgs), and a while read loop's output piped into an xargs.
 
 What blocks (exit 2): a `security` call in command position whose subcommand reads or exports secrets:
   find-generic-password, find-internet-password, dump-keychain, export,
@@ -1766,8 +1772,11 @@ def stdin_pipelines(text, lexed=True):
 # read them):
 #   all at once: the command and every fed word (xargs without -n / -L / -I);
 #   one per word too, with -n, -L, -l, -I, -i, -J, --max-args, --max-lines, --replace (each word may come first);
-#   with a replace string (-I R, -i, -J R, --replace): each word put in place of R instead, and every word in place
-#   of a whole-argument R (BSD -J); nothing is appended then, as xargs appends nothing.
+#   with a replace string (-I R, -i, -J R, --replace): each input line put in place of R instead (BSD xargs puts the
+#   entire line there, man xargs; Viktor 49280 MEDIUM 1: `echo security dump-keychain | xargs -I{} sh -c '{}'`), and
+#   each word too, and every word in place of a whole-argument R (BSD -J); nothing is appended then, as xargs appends
+#   nothing. The word after a shell's -c (sh, bash, zsh, dash, ksh) is always quoted in the line, so the gate reads it
+#   as the shell's code (`echo ./x.sh | xargs -I{} sh -c '{}'` runs ./x.sh; Viktor 49280 LOW 2b).
 # The fed words are no file candidates of their own: `echo measure.py | xargs grep -c x`, `| xargs python3 stat.py`
 # read measure.py as data, as the line written out would be. Each word is shell-quoted unless plain ([\w./@%+=:,-]):
 # xargs runs no shell, so a quote, a ; or a $( in a fed word is a character of the argument, and an unbalanced quote
@@ -1838,6 +1847,9 @@ def _fed_words(seg):
                 outs.insert(0, [_printf_output(fw[f], fw[f + 1:])])
             seq += ' '.join(outs[0]).split()
             every += [w for o in outs for v in o for w in [v] + v.split()]
+            # Viktor 49280 MEDIUM 1: BSD xargs -I / -J puts the ENTIRE input line in place of the replace string (man
+            # xargs: "with the entire line of input"), so each output line of the feeder is a fed word whole as well
+            every += [ln for o in outs for ln in ' '.join(o).split('\n')]
         seqs.append(seq)
     return seqs, every
 
@@ -2024,14 +2036,20 @@ def _xargs_lines(cmd, seqs, every, repl, each):
     if not cmd:  # xargs's own default, echo
         return []
     if repl:
-        out = [' '.join(_shq(x.replace(repl, w)) for x in cmd) for w in every] if each else []
-        return out + [' '.join(q for x in cmd for q in ([_shq(w) for w in seq] if x == repl else [_shq(x)]))
-                      for seq in seqs]
-    head = ' '.join(_shq(x) for x in cmd)
-    out = [' '.join([head] + [_shq(w) for w in seq]) for seq in seqs] or [head]
+        out = [_xargs_join([x.replace(repl, w) for x in cmd]) for w in every] if each else []
+        return out + [_xargs_join([q for x in cmd for q in (seq if x == repl else [x])]) for seq in seqs]
+    out = [_xargs_join(cmd + seq) for seq in seqs] or [_xargs_join(cmd)]
     if each:
-        out += [head + ' ' + _shq(w) for w in every]
+        out += [_xargs_join(cmd + [w]) for w in every]
     return out
+
+
+def _xargs_join(argv):
+    """Card 3bf9a741: an argv as a command line (_shq each word); after a shell's -c flag the word is quoted even when
+    plain (Viktor 49280 LOW 2b): the gate reads a quoted -c argument as the shell's code, an unquoted one it does not."""
+    sh = bool(argv) and os.path.basename(argv[0]) in SHELL_NAMES
+    return ' '.join("'" + v.replace("'", "'\\''") + "'" if sh and i and SHELL_CODE_FLAG_RX.fullmatch(argv[i - 1])
+                    else _shq(v) for i, v in enumerate(argv))
 
 
 def payload_texts(text, script=False, subst=False):

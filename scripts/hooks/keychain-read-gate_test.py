@@ -767,6 +767,14 @@ BLOCK += ['echo dump-keychain | xargs s3curity', 'echo dump-keychain | xargs -n1
           'echo dump-keychain | (xargs s3curity)', 'xargs s3curity < <(echo dump-keychain)',
           "xargs s3curity <<'E'\ndump-keychain\nE", 'echo dump-keychain | xargs -0 s3curity',
           'echo dump-keychain | /usr/bin/xargs -P2 -- s3curity', 'echo x | xargs echo; echo dump-keychain | xargs s3curity',
+          # round 2 (Viktor 49280 MEDIUM 1; d74afad6 and main allowed the first two, bash ran the stub): BSD xargs -I
+          # puts the ENTIRE input line in place of the replace string, here a shell's code
+          "echo s3curity find-generic-password -s x | xargs -I{} sh -c '{}'",
+          'echo s3curity dump-keychain | xargs -I{} bash -c {}', "printf 's3curity dump-keychain\\n' | xargs -I@ sh -c @",
+          'echo s3curity dump-keychain | xargs -I{} bash -ec {}',
+          # rebased on 87a887b5: an xargs running the keychain CLI blocks whatever feeds it, an or-list too (main's
+          # made-subcommand rule, card d58d5c30: its subcommand comes from stdin); round 1 had it as an ALLOW row
+          'echo dump-keychain || xargs s3curity',
           ]
 ALLOW = [
     # card d58d5c30 round 5: the four zsh words in prose, and before a harmless command
@@ -872,9 +880,9 @@ ALLOW = [
     'echo hi | bash; echo s3curity dump-keychain', '(echo s3curity dump-keychain); echo hi | bash',
     'echo s3curity dump-keychain | source ./notes', 'echo s3curity dump-keychain | . /dev/stdin2',
     'echo s3curity dump-keychain | bash.x', 'echo s3curity dump-keychain >| bash', 'echo the s3curity team | bash',
-    # card 3bf9a741: what an xargs runs with its fed words is no keychain call (a printed name, a search, an or-list)
+    # card 3bf9a741: what an xargs runs with its fed words is no keychain call (a printed name, a search)
     'echo dump-keychain | xargs echo s3curity', 'echo s3curity dump-keychain | xargs grep -c x',
-    'echo dump-keychain || xargs s3curity', 'echo dump-keychain | xargs', 'echo the s3curity team | xargs -n1 echo',
+    'echo dump-keychain | xargs', 'echo the s3curity team | xargs -n1 echo',
     # card 39d885ef: printf's output, the name printed as text
     "printf 'echo %s\\n' s3curity | bash", "printf 'echo the\\ns3curity team\\n' | cat",
     # mutation m39 (strip-fd-any-word): a 2 not glued to its > is a printed word, so by security(1)'s syntax 2 is the
@@ -2036,6 +2044,11 @@ def script_cases():
             ('cd sub && echo ../measure.py | xargs python3', d),
             ('echo x; echo measure.py | xargs python3', d),
             ("echo measure.py | xargs -I{} sh -c 'python3 {}'", d),
+            # round 2 (Viktor 49280; d74afad6 allowed each): the whole input line in place of -I's string (MEDIUM 1),
+            # and a plain word after a shell's -c is the shell's code, read as such (LOW 2b, script-shc-I)
+            ("echo python3 measure.py | xargs -I{} sh -c '{}'", d),
+            ("echo ./measure.py | xargs -I{} sh -c '{}'", d),
+            ('echo ./measure.py | xargs -I{} bash -ec {}', d),
             # an xargs no | stands right before still reads the pipe: a group, a loop, an if, a $( ), a >( )
             ('echo measure.py | (xargs python3)', d),
             ('echo measure.py | { xargs python3; }', d),
@@ -2855,6 +2868,11 @@ def script_cases():
             ('echo measure.py | xargs cat', d),
             ('echo measure.py | xargs python3 stat.py', d),
             ('echo measure.py | xargs -I{} python3 stat.py {}', d),
+            # round 2: the whole input line, and the quoted word after a shell's -c, harmless
+            ("echo git status | xargs -I{} sh -c '{}'", d),
+            ("echo python3 stat.py | xargs -I{} sh -c '{}'", d),
+            ("echo measure.py | xargs -I{} sh -c 'wc -l {}'", d),
+            ("printf 'ls -l\\n' | xargs -I@ sh -c @", d),
             ('echo stat.py | xargs python3', d),
             ('echo measure.py | xargs echo python3', d),
             ('echo measure.py | xargs', d),
