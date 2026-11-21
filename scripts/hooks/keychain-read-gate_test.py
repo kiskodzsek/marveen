@@ -1241,6 +1241,18 @@ def script_cases():
         # escaped), and one [1] as a character class would match (escaped: not matched)
         w('m[1]HOMEx.py', "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         w('k1Zq.py', "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
+        # card 00c714ea r2 (Viktor 49408 LOW 1): a glob's first match in the locale's order: under en_US.UTF-8 bash
+        # and zsh put _a.py before -a.py, the byte and case-folded order put -a.py first
+        os.makedirs(os.path.join(d, 'loc'))
+        w(os.path.join('loc', '-a.py'), 'print(1)\n')
+        w(os.path.join('loc', '_a.py'), "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
+        # card 00c714ea r2: a hidden file a zsh group names (`(.hm|zz).py` ran .hm.py, zsh -f, measured 11-21)
+        os.makedirs(os.path.join(d, 'hid'))
+        w(os.path.join('hid', '.hm.py'), "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
+        # ... and hu_HU.UTF-8's order: cz before cs in bash and zsh (byte, case-folded and en_* order: cs first)
+        os.makedirs(os.path.join(d, 'loc2'))
+        w(os.path.join('loc2', 'cs.py'), 'print(1)\n')
+        w(os.path.join('loc2', 'cz.py'), "import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         os.makedirs(os.path.join(d, 'fdname'))  # bash 3.2 runs a file named {fd} in `python3 {fd}>f x.py`
         with open(os.path.join(d, 'fdname', '{fd}'), 'w', encoding='utf-8') as f:
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'find-generic-password', '-s', 'x'])\n")
@@ -1669,6 +1681,76 @@ def script_cases():
             ("X=stat.py; '.' ./s.sh; python3 $X ./measure.py", d),  # dot-quoted
             ('X=stat.py; python3 $X:h ./measure.py', d),  # zsh-modifier-h
             ("''X=stat.py; python3 $X ./measure.py", d),  # emptyquote-assign
+            # card 00c714ea (Viktor 49241 follow-up; old, main and 10624d73 passed each, bash ran measure.py in his
+            # oracle's twins): a value the shell reads otherwise than the gate (a glob, a blank or a brace at an
+            # unquoted use, an escape, a name split by quotes), and a script word's own brace expansion and glob
+            ('X=m*.py; python3 $X stat.py', d),  # value-glob-star
+            ('X=[m]easure.py; python3 $X stat.py', d),  # value-glob-bracket
+            ("X='measure.py stat.py'; python3 $X", d),  # value-sq-space-split
+            ('X=measure.py\\ stat.py; python3 $X', d),  # value-esc-space-split
+            ('X=\\ ; python3 $X measure.py', d),  # value-esc-space-empty
+            ('X=measure\\.py; python3 $X stat.py', d),  # value-escape
+            ('export "HO"ME=' + d + '/measure.py; python3 $HOME stat.py', d),  # home-export-split
+            ('X=stat.py; python3 {measure.py,$X}', d),  # brace-expansion
+            ('python3 {measure.py,stat.py}', d),
+            # a lean, not an attack (Viktor 49408 LOW 3): the shells run leasure.py and give measure.py as its argv;
+            # every word a brace makes is read as a script (KNOWN-KTP-OVER in the module header)
+            ('python3 {l..n}easure.py stat.py', d),
+            ('python3 m*.py stat.py', d),
+            # card 00c714ea r2 (Viktor 49408 LOW 1; old, main passed each, bash 3.2 / zsh -f ran measure.py): a
+            # negated bracket the shells read as [!x], a zsh group or qualifier (its words arrive cut at ) and |),
+            # a ** that matches no directory
+            ('python3 [^s]easure.py stat.py', d),
+            ('python3 m[^x]asure.py stat.py', d),
+            ('python3 (measure|zz).py stat.py', d),
+            ('python3 (m|q)easure.py stat.py', d),
+            ('python3 m*.py(.) stat.py', d),
+            ('python3 m*(N) stat.py', d),
+            ('python3 **/measure.py stat.py', d),
+            # card 00c714ea r2: a group with no glob char before it (zsh -f with the fleet Bash tool's setopts ran
+            # measure.py for `m(easure.py|x)`), a qualifier on a plain word (plain `zsh -c`), a hidden file
+            ('python3 m(easure.py|x) stat.py', d),
+            ('python3 measure.py(.) stat.py', d),
+            ('cd hid && python3 (.hm|zz).py x', d),
+            # ... a quoted or a nested member (zsh -f ran measure.py), and the call after a decoy of its cut word
+            ('python3 (zz|"measure.py") x', d),
+            # card 00c714ea r3 (Viktor 49709 L1): a blank, tab or newline in a group is a member char, not "zsh runs
+            # nothing": zsh -f (and with extendedglob) ran measure.py for each (Dave zblank/drive.py, 11-21)
+            ('python3 (measure.py|a b) x', d),
+            ('python3 (measure.py|a\tb) x', d),
+            ('python3 (measure.py|a\nb) x', d),
+            ('python3 (zz|(measure.py|a b)) x', d),
+            ('python3 (a b|measure.py) x', d),
+            # ... a lean (KNOWN-KTP-OVER, r3): a whole-word group with no | and a substitution in it is a glob
+            # qualifier for zsh, which stops ("unknown file attribute"): the gate reads the substitution as unread
+            ('python3 (`echo zq`, zz) x', d),
+            ('python3 (zz|(me|q)asure.py) x', d),
+            ('echo "(zz)"; python3 (measure|zz).py x', d),
+            # ... a quote the gate takes out, before the paren or inside the group
+            ('python3 "m"(easure.py|x) stat.py', d),
+            ('python3 ("measure.py"|zz) x', d),
+            # ... a group nested past MAX_ZSH_GROUP_DEPTH (RecursionError before the cap: fail-closed by the catch, now
+            # the prefix), and the call after 30 000 cut paren words that are no script (0.4 s / 0.8 s in the hook)
+            ('python3 (a' + '|(a' * 30000 + ' x', d),
+            ('python3 m(easure.py|x) stat.py; ' + 'echo (x; ' * 30000, d),
+            # ... (mutation round, each measured with zsh -f and the fleet setopts, or plain `zsh -c` for (D)): a
+            # qualifier that adds hidden names, a negated bracket, a brace and ** before the group, a substitution,
+            # a value or an escape in a member
+            ('python3 hid/*(D) x', d),
+            ('python3 [^z](easure.py|x) stat.py', d),
+            ('python3 m{e,e}(asure.py|x) stat.py', d),
+            ('python3 **/m(easure.py|x) stat.py', d),
+            ('python3 (zz|$(echo measure.py)) x', d),
+            ('python3 (zz|`echo measure.py`) x', d),
+            ('python3 (zz|$X) x', d),
+            ('python3 (zz|"$X") x', d),
+            ('python3 (zz|measure\\.py) x', d),
+            # ... past MAX_ZSH_GROUP_GLOBS occurrences or forms: the prefix (`*` here), fail-closed
+            ('python3 (zq|zz) x; ' + 'echo (zq; ' * 70, d),
+            ('python3 (' + '|'.join('q%d' % k for k in range(70)) + ') x', d),
+            ('python3 [m]easure.py stat.py', d),
+            ("bash -c 'python3 [m]easure.py stat.py'", d),  # in a payload, read as its own text
+            ('eval "python3 {measure.py,stat.py}"', d),
             ('DIRSTACK=stat.py; python3 $DIRSTACK ./measure.py', d),  # special-DIRSTACK
             ('X=stat.py\r; python3 $X ./measure.py', d),  # value-CR
             ('X=stat.py\x0b; python3 $X ./measure.py', d),  # value-VT
@@ -2710,6 +2792,32 @@ def script_cases():
         prose ='mérve: 2 fájl változott (' + d + '/measure.py + _test.py), (./measure.py) is'
         allow = [
             ('python3 list.py', d),
+            # card 00c714ea r2: a paren whose prefix matches no file runs nothing (zsh: no matches found; bash: a
+            # syntax error); every paren read as unread blocked 311 fleet commands on the replay (code cut into words)
+            ('python3 zq(x|y).py stat.py', d),
+            # card 00c714ea r3: ; & < in a group: a zsh parse error, nothing runs (measured 11-21, Dave zblank/drive.py)
+            ('python3 (measure.py|a;b) x', d),
+            ('python3 (measure.py|a&b) x', d),
+            ('python3 (measure.py|a<b) x', d),
+            # card 00c714ea r3 m7 (blank-not-appended): the blank is part of the member, so these match no file and
+            # zsh runs nothing (no matches found; bash: a syntax error), measured 11-21 (bin/shell-truth.py)
+            ('python3 (meas ure.py|zq) x', d),
+            ('python3 (measure.py |zq) x', d),
+            ('python3 (zq| measure.py) x', d),
+            ('python3 (15) x', d),  # a group whose member names no file (prose cut into words: `(15`, `(argv,`)
+            # ... a quote or a substitution the gate took out of the word (found in the text all the same), a group
+            # the text leaves open, a `=(..)` in a group: zsh -f ran nothing (bad pattern, no matches found), measured
+            # 11-21 (a backtick left open blocks earlier: the lexer cannot read the text)
+            ('python3 ("zq.py"|zz) x', d),
+            ("python3 - <<'PY'\nnew=\"\"\"- the walk does not follow (`python3 -c`, `python3 -` + heredoc), the import\n\"\"\"\nPY", d),
+            ('python3 (measure.py|zz', d),
+            ('python3 (zz|=(echo measure.py)) x', d),
+            ('python3 "m*.py"$(true) stat.py', d),  # a quoted glob before a substitution: no glob, no group
+            # a PR text in a python heredoc (replay 11-20): the gate joins two backtick spans into the word
+            # `/usr/bin/sqlite3(rows, ...`; its group holds blanks, and the prefix alone matched /usr/bin/sqlite3
+            ('python3 - <<\'PY\'\ns="""Measured: `/usr/bin/sqlite3` 3.54.0 rolled it back; a database that cannot be copied'
+             ' is named `(rows, journal rolled back, not read)`.\n"""\nPY', d),
+            ("python3 -I - <<'PY'\nimport os\nprint(os.path.basename(x)[1])\nPY", d),
             # card 03a336e5: the made-name forms quoted in data a python heredoc reads (the replay's kanban dump, a PR
             # text); no shell runs them
             ("python3 -I - <<'PY'\nimport json\nprint(len(json.load(open('./kb.json'))))\nPY", d),
@@ -2803,6 +2911,15 @@ def script_cases():
             # is what bash does, so the words after the script are its argv again (the fleet's measuring forms)
             ('X=stat.py; python3 $X ./measure.py', d),
             ('X=stat.py\npython3 $X ./measure.py', d),
+            # card 00c714ea: a blank in a quoted use, a glob or a brace after the plain script, a substitution's value
+            ('Q="a b"; python3 stat.py "$Q"', d),
+            ('Q="a b"; python3 stat.py $Q', d),
+            ('python3 stat.py *.txt', d),
+            ('python3 stat.py {a,b}.jsonl', d),
+            ('S=$(mktemp -d); python3 stat.py $S', d),
+            ('X="stat.py"; python3 "$X"', d),
+            ("python3 '[m]easure.py' stat.py", d),  # a quoted glob is no glob
+            ('python3 -c "x = \'bash \' * 3"', d),  # a call inside quoted code: no glob of its own
             ('P=' + d + '; python3 -I $P/stat.py ' + d + '/measure.py', d),
             ('/usr/bin/python3 stat.py regiszter.jsonl 2>/dev/null', d),
             # card b138f11b: the quoted paren name is read, not blocked on sight
@@ -3311,6 +3428,27 @@ def script_cases():
             # the _CMD_READ guard of the substitution fail-closed survived)
             ('C=\'export -- A=1; /usr/bin/printenv A\'; echo "bash $(/bin/bash -c "$C") zsh $(/bin/zsh -c "$C")"', d),
         ]
+        # card 00c714ea r2 (Viktor 49408 LOW 1, locale-order): the shells' first match of ?a.py is _a.py where the
+        # locale sorts it first; a runner without such a locale (en_US / hu_HU not installed) has no row to pin
+        import locale
+        old_coll = locale.setlocale(locale.LC_COLLATE)
+        try:
+            for loc in ('en_US.UTF-8', 'hu_HU.UTF-8'):
+                try:
+                    locale.setlocale(locale.LC_COLLATE, loc)
+                except locale.Error:
+                    continue
+                if min(['-a.py', '_a.py'], key=locale.strxfrm) == '_a.py':
+                    block += [('python3 loc/?a.py stat.py', d), ('python3 loc/*a.py stat.py', d)]
+                    break
+            try:  # hu_HU.UTF-8 alone puts cz.py first (the environment's and en_US's: cs.py)
+                locale.setlocale(locale.LC_COLLATE, 'hu_HU.UTF-8')
+                if min(['cs.py', 'cz.py'], key=locale.strxfrm) == 'cz.py':
+                    block.append(('python3 loc2/c?.py stat.py', d))
+            except locale.Error:
+                pass
+        finally:
+            locale.setlocale(locale.LC_COLLATE, old_coll)
         for cmd, cwd in block:
             code, err = bash_in(cmd, cwd)
             if code != 2 or 'KULCSKARIKA-KAPU' not in err:
@@ -3321,6 +3459,79 @@ def script_cases():
             code, err = bash_in(cmd, cwd)
             if code != 0:
                 fails.append(f'script: should allow (got {code}): {cmd[:80]!r} {err[:120]}')
+        # card 00c714ea r2: a ~ before a zsh group is the home's (expanduser): HOME is the fixture here (the hook in
+        # run() has no HOME and would take the account's home)
+        p = subprocess.run([sys.executable, '-I', HOOK], capture_output=True, text=True, timeout=20,
+                           env={'PATH': '/usr/bin:/bin', 'HOME': d}, input=json.dumps(
+                               {'tool_name': 'Bash', 'tool_input': {'command': 'python3 ~/m(easure.py|x) stat.py'},
+                                'cwd': os.path.join(d, 'sub2')}))
+        if p.returncode != 2 or 'KULCSKARIKA-KAPU' not in p.stderr:
+            fails.append(f'script: should block (got {p.returncode}): a ~ before a zsh group, HOME = the fixture')
+        # card 00c714ea r3 (Viktor 49709 L2): a ** walk is bounded by directories (MAX_STAR_DIRS 2000), not only by
+        # matches: a no-match `**/x.py` in a large cwd walked to the 6 s watchdog. Past the bound it blocks at once
+        # (a lean, KNOWN-KTP-OVER); under it a no-match passes. A tree of its own: d's ** rows stay as they are.
+        import time as _t
+        with tempfile.TemporaryDirectory() as big:
+            for k in range(2100):
+                os.makedirs(os.path.join(big, f'g{k // 100}', f'h{k}'))
+                os.makedirs(os.path.join(big, 'hid', f'.g{k}', 'h'))
+                os.makedirs(os.path.join(big, 'hid2', f'g{k // 100}', f'.h{k}'))
+            # m7 (Dave survivor-cand 11-21): hidden directories are not counted (glob's ** does not enter them); a
+            # ** that is not a whole component is a plain * (no walk); a ** member of a zsh group is bounded too
+            for cmd, cwd, want in (('python3 **/zz_nomatch_q7.py x', big, 2), ('python3 ./**/zz_nomatch_q7.py x', big, 2),
+                                   ('python3 **/zz_nomatch_q7.py x', d, 0),
+                                   ('python3 hid/**/zz_nomatch_q7.py x', big, 0), ('python3 hid2/**/zz_nomatch_q7.py x', big, 0),
+                                   ('python3 g**/zz_nomatch_q7.py x', big, 0), ('python3 **x/zz_nomatch_q7.py x', big, 0),
+                                   ('python3 (**/zz_nomatch_q7.py|zq) x', big, 2),
+                                   ('python3 (zq|**/zz_nomatch_q7.py) x', big, 2),
+                                   # r5 (Viktor 49863 M1): a loop value's ** walk is bounded the same way
+                                   ('for f in **/zz_nomatch_q7.py; do python3 "$f"; done', big, 2),
+                                   ('for f in ***/zz_nomatch_q7.py; do python3 "$f"; done', big, 2),
+                                   ('for f in **/zz_nomatch_q7.py; do python3 "$f"; done', d, 0)):
+                t = _t.monotonic()
+                code, err = bash_in(cmd, cwd)
+                took = _t.monotonic() - t
+                if code != want or took > 2:
+                    fails.append(f'script: ** walk {cmd[:40]!r}: want rc {want} under 2 s, got {code} in {took:.1f} s')
+        # card 00c714ea r4 (Viktor 49785 L1): zsh's `***/` walks like `**/` and follows links; Python's glob read it as one
+        # `*` and the gate passed it. Measured 11-21 (bin/shell-truth.py): zsh -f and extendedglob ran a/b/c/x.py for
+        # `***/x.py`, `a/***/x.py`, `***/c/x.py` and one behind a link for `sub/***/x.py`; `****/` and `a***/` matched
+        # nothing. `sub/**/m2.py` is a lean (KNOWN-KTP-OVER): zsh's `**/` does not follow the link, Python's does.
+        with tempfile.TemporaryDirectory() as deep:
+            measure_src = open(os.path.join(d, 'measure.py'), encoding='utf-8').read()
+            for rel in ('a/b/c/measure.py', 'real/d/m2.py'):
+                os.makedirs(os.path.join(deep, os.path.dirname(rel)), exist_ok=True)
+                with open(os.path.join(deep, rel), 'w', encoding='utf-8') as f:
+                    f.write(measure_src)
+            os.makedirs(os.path.join(deep, 'a', 'b', 'z'))  # r5: a benign file deep down (loop-benign-star2)
+            with open(os.path.join(deep, 'a', 'b', 'z', 'zz.py'), 'w', encoding='utf-8') as f:
+                f.write("print('ok')\n")
+            os.makedirs(os.path.join(deep, 'sub'))
+            os.symlink('../real', os.path.join(deep, 'sub', 'lnk'))
+            for cmd, want in (('python3 ***/measure.py x', 2), ('python3 a/***/measure.py x', 2),
+                              ('python3 ***/c/measure.py x', 2), ('python3 sub/***/m2.py x', 2),
+                              ('python3 sub/**/m2.py x', 2),
+                              ('python3 ****/measure.py x', 0), ('python3 a***/measure.py x', 0),
+                              # r4 m8 (star3-no-lookahead): a trailing *** is one level in zsh (a/b/c/*** ran
+                              # the script there, measured); read as ** its first match was the directory
+                              ('python3 a/b/c/*** x', 2), ('python3 real/d/*** x', 2),
+                              # r4 m8 (star3-nomatch-off): a ***/ member of a zsh group: zsh stops ("bad
+                              # pattern", measured), the gate walks it as ** (the lean, as for **/)
+                              ('python3 (zq|***/measure.py) x', 2),
+                              # r5 (Viktor 49863 S09): two ***/ in one word, each read as **/ (a/b/c/measure.py)
+                              ('python3 a/***/c/***/measure.py x', 2),
+                              # r5 (Viktor 49863 M1, old, main too): a loop value with ** or ***/ is read recursively
+                              # (zsh ran a/b/c/measure.py, Viktor loop_rows.py 11-21; a plain iglob read ** as *)
+                              ('for f in **/measure.py; do python3 "$f"; done', 2),
+                              ('for f in ***/measure.py; do python3 "$f"; done', 2),
+                              ('for f in **/*.py; do python3 "$f"; done', 2),
+                              ('for f in **/measure.py; do python3 $f; done', 2),
+                              ('for f in a/b/c/[^z]easure.py; do python3 "$f"; done', 2),  # [^z] is [!z] (r1)
+                              ('for f in **/zz.py; do python3 "$f"; done', 0),  # loop-benign-star2
+                              ('for f in a/**/zz.py; do python3 "$f"; done', 0)):
+                code, err = bash_in(cmd, deep)
+                if code != want:
+                    fails.append(f'script: ***/ walk {cmd!r}: want rc {want}, got {code}')
         # card 3bcd4514: the stdin reading is linear. In the hook a long call blocks before it (MAX_ARGS, ARGS_WINDOW),
         # but the token pass (_hn_fed) and the reader regex read the WHOLE command (a short call after a long text), so
         # they are timed in process: runs of shell words with options (-o read with its word or alone, -eo, --rcfile),
@@ -3870,7 +4081,7 @@ def script_cases():
             fails.append(f'script: 30 000 interpreter calls took {took:.1f} s (want under 2 s)')
         corpus_fails, corpus_n = corpus_cases(d)
         fails += corpus_fails
-        return fails, len(block) + len(allow) + 9 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos) + 6 + corpus_n + 1 + 1
+        return fails, len(block) + len(allow) + 9 + 3 + len(timed) + 2 + 1 + len(too_many) + 2 + 2 + 3 + 2 + 2 + 1 + 1 + len(payload_redos) + 6 + corpus_n + 1 + 1 + 1
 
 
 def corpus_cases(d):
