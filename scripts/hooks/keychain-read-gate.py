@@ -53,6 +53,9 @@ KNOWN-KTP-OVER, not open but leans: they block a harmless call (old unless named
   a large cwd: main passes it, this gate blocks it at once instead of on the 6 s watchdog); a whole-word group with
   no `|` and a substitution in it (a backtick `echo zq` and `, zz` in one group, the script word): zsh reads it as
   a glob qualifier and stops ("unknown file attribute"), the gate reads the substitution as unread.
+  New in r4 (Viktor 49785 INFO): a `**` member of a zsh group (`(**/x.py|zz)`: zsh stops, "bad pattern", and bash
+  has a syntax error, measured 11-21) is read as a `**` walk; a `**` over a link to a directory: Python's glob follows
+  the link, zsh's `**/` does not (its `***/` does), so a script reachable only through a link blocks under `**/`.
 A variable glued to a script word (card 8a73eab1, Dave's audit 11-16; Viktor 49425): the word is read with every
 variable whose value the gate does not trust as unset and as set to "": one the text does not set, and one it sets in
 an expansion the gate does not trust. Read in bash's and zsh's forms (`evil${X}.py`, `X=; python3 evil$X.py`,
@@ -3058,6 +3061,10 @@ _GLOB_CHARS_RX = re.compile(r'[*?\[]')
 MAX_LOOP_PATHS = 64
 MAX_LEAD_GLOB = 4096  # card 00c714ea: a script-position glob matching more blocks unread (a bounded directory walk)
 MAX_STAR_DIRS = 2000  # card 00c714ea r3 (Viktor 49709 L2): a `**` walk over more directories blocks unread at once
+# card 00c714ea r4 (Viktor 49785 L1): zsh's `***/` walks like `**/` and follows links (python3 ***/evil.py ran
+# a/b/c/evil.py and one behind a link, measured 11-21); Python's glob reads `***` as one `*`: the whole component is
+# read as `**` (Python's `**` follows links too, and star_walk_bounded bounds it the same way)
+_STAR3_RX = re.compile(r'(?:^|(?<=/))\*\*\*(?=/)')
 
 
 def star_walk_bounded(p):
@@ -4575,6 +4582,7 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
         word as written. Reading every match blocked 26 fleet commands (script-too-many, past MAX_LOOP_PATHS)."""
         import glob
         v = v.replace('[^', '[!')  # Viktor r1: bash and zsh read [^x] as [!x]; fnmatch reads ^ as a member
+        v = _STAR3_RX.sub('**', v)  # r4 (Viktor 49785 L1): zsh's ***/ walks like **/ and follows links
         if bases.unknown and not os.path.isabs(v):
             raise PathUnread(f'a relative script path after a directory change the gate does not follow: {v[:40]}')
         firsts = []
@@ -4634,7 +4642,7 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
             pats = [re.sub(r'\\(.)', lambda e: glob.escape(e.group(1)), c[:m.start()]) + '*']
         out = []
         for p in pats:  # a relative pattern after a cd the gate does not follow: resolve_word's reading raises
-            p = os.path.expanduser(p).replace('[^', '[!')
+            p = _STAR3_RX.sub('**', os.path.expanduser(p).replace('[^', '[!'))  # r4: zsh's ***/ (see _STAR3_RX)
             for f in brace_forms(p):
                 head, _, last = f.rpartition('/')
                 out += [f, (head + '/' if head or f.startswith('/') else '') + '.' + last]

@@ -3489,6 +3489,25 @@ def script_cases():
                 took = _t.monotonic() - t
                 if code != want or took > 2:
                     fails.append(f'script: ** walk {cmd[:40]!r}: want rc {want} under 2 s, got {code} in {took:.1f} s')
+        # card 00c714ea r4 (Viktor 49785 L1): zsh's `***/` walks like `**/` and follows links; Python's glob read it as one
+        # `*` and the gate passed it. Measured 11-21 (bin/shell-truth.py): zsh -f and extendedglob ran a/b/c/x.py for
+        # `***/x.py`, `a/***/x.py`, `***/c/x.py` and one behind a link for `sub/***/x.py`; `****/` and `a***/` matched
+        # nothing. `sub/**/m2.py` is a lean (KNOWN-KTP-OVER): zsh's `**/` does not follow the link, Python's does.
+        with tempfile.TemporaryDirectory() as deep:
+            measure_src = open(os.path.join(d, 'measure.py'), encoding='utf-8').read()
+            for rel in ('a/b/c/measure.py', 'real/d/m2.py'):
+                os.makedirs(os.path.join(deep, os.path.dirname(rel)), exist_ok=True)
+                with open(os.path.join(deep, rel), 'w', encoding='utf-8') as f:
+                    f.write(measure_src)
+            os.makedirs(os.path.join(deep, 'sub'))
+            os.symlink('../real', os.path.join(deep, 'sub', 'lnk'))
+            for cmd, want in (('python3 ***/measure.py x', 2), ('python3 a/***/measure.py x', 2),
+                              ('python3 ***/c/measure.py x', 2), ('python3 sub/***/m2.py x', 2),
+                              ('python3 sub/**/m2.py x', 2),
+                              ('python3 ****/measure.py x', 0), ('python3 a***/measure.py x', 0)):
+                code, err = bash_in(cmd, deep)
+                if code != want:
+                    fails.append(f'script: ***/ walk {cmd!r}: want rc {want}, got {code}')
         # card 3bcd4514: the stdin reading is linear. In the hook a long call blocks before it (MAX_ARGS, ARGS_WINDOW),
         # but the token pass (_hn_fed) and the reader regex read the WHOLE command (a short call after a long text), so
         # they are timed in process: runs of shell words with options (-o read with its word or alone, -eo, --rcfile),
