@@ -32,7 +32,8 @@ chats unknown: the gate passes and says so on stderr (as patrik-step-reply-gate.
 Known limits (measured, Viktor 49735 and an independent probe; left open on purpose):
 - one sentence only: an offer split into two sentences ("A heti keret holnap elfogy. Három lehetőség árral a
   kártyán."), or by a line break, passes; a paragraph-wide pairing hit 27 of 3826 real messages, nearly all false.
-- a "kb." inside the sentence ends it for this gate, so a price after it can come loose.
+- a "kb." inside the sentence ends it for this gate, so a price after it can come loose ("Kérhetünk extra usage-et,
+  ez kb. 50 USD lenne" passes).
 - "Nincs több heti keret, upgrade-eljünk Max-ra?" (the "nincs" reads as a negation of the quota) and "kellene egy
   újabb Codex-fiók" (no offer word) pass.
 - a teammate's offer quoted in „...” passes (quotes are cut, as in the sibling gates).
