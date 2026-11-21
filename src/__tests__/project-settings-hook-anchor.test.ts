@@ -75,6 +75,7 @@ const EXPECTED: Record<string, string[]> = {
     'summary-form-reply-gate.py', // retro R9 (card dddca664): the main agent's summaries to Patrik carry no ┆ line, path or code (Telegram reply)
     'patrik-step-reply-gate.py', // Klodel 41154: a step put on Patrik only with a PATRIK-LEPES mark (Telegram reply)
     'patrik-decision-reply-gate.py', // card dd706ced: a decision asked of Patrik only with a PATRIK-DONTES mark (Telegram reply)
+    'patrik-capacity-reply-gate.py', // card 13909285: more AI capacity offered to Patrik only with a BELSO-UT-MERVE mark (Telegram reply)
     // Patrik's-chat reply gates (main agent only): #141, #147, and the three that ran
     // only from the prod checkout's uncommitted settings until fix/ci-red-main-1111.
     'mea-culpa-reply-gate.py', 'render-claim-reply-gate.py',

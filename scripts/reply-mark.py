@@ -5,7 +5,7 @@
 
 KIND: PRIVAT-OK (why private) | KESZ-EREDMENY (what finished result) | KIESES (what is down: an outage report,
   patrik-reply-volume-gate.py rule 3, Klodel 48564) | BALAZS-KERES (TG <message id>) |
-BELSO-UT-MERVE (msg_id of the internal route measured) |
+BELSO-UT-MERVE (who measured the existing quotas, and that msg_id: patrik-capacity-reply-gate.py) |
 PATRIK-LEPES (who measured that there is no internal route, and that msg_id: patrik-step-reply-gate.py) |
 KIADAS-ELOTTE (Pulzus's release message msg_id: the "before" line of a release, patrik-reply-volume-gate.py) |
 PATRIK-DONTES (why only Patrik can decide - penz | titok | jog | termek-ar | eles-env-kulcs | kulso-level | adat-torles |
