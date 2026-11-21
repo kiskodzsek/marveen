@@ -44,6 +44,25 @@ afterAll(() => {
   rmSync(tmpHome, { recursive: true, force: true })
 })
 
+// An instant whose hour in the app zone is `h` on the day `d` days after 2026-11-21 (no fixed UTC offset assumed).
+const at = (h: number, d = 0): number => {
+  for (let m = 0; m < 48 * 60; m += 30) {
+    const t = Date.UTC(2026, 10, 20 + d, 0, 0) + m * 60_000
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: APP_TZ, day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(t))
+    if (Number(parts.find(p => p.type === 'hour')!.value) === h && Number(parts.find(p => p.type === 'day')!.value) === 21 + d) return t
+  }
+  throw new Error('no such hour')
+}
+// card c16cbdcd: alertScheduleTrust sends the daily summary from TRUST_DIGEST_HOUR (08:00 app time) on an untrusted
+// fire, with Date.now() unless a time is passed. A test that counts [UTEMEZES-BIZALOM] rows on the wall clock saw one
+// row more from 08:00 to midnight (measured 2026-11-21 08:15-08:16: 2 tests red on every tree with #417). Such a test
+// pins Date (only Date: the timers stay real) to an hour of its choice; the afterEach below gives the clock back.
+const pinClock = (h: number) => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(at(h))
+}
+afterEach(() => { vi.useRealTimers() })
+
 let ownerCookie = ''
 beforeEach(() => {
   db.getDb().exec("DELETE FROM auth_sessions; DELETE FROM dashboard_users; DELETE FROM sqlite_sequence WHERE name = 'dashboard_users'; DELETE FROM schedule_trust; DELETE FROM schedule_trust_baseline; DELETE FROM schedule_trust_precheck_pin; DELETE FROM schedule_trust_alerted; DELETE FROM schedule_trust_alert_digest; DELETE FROM agent_messages; DELETE FROM config_change_log WHERE key LIKE 'security.schedule_%'")
@@ -386,6 +405,7 @@ describe('PUT preCheck over the API (card 248e8f7c)', () => {
   })
 
   it('the first tick after the PUT alerts as "awaits approval", not as a file write (Viktor 48006 L1)', async () => {
+    pinClock(3) // before TRUST_DIGEST_HOUR: no daily summary (card c16cbdcd)
     const runner = await import('../web/schedule-runner.js')
     const alerts = () => (db.getDb().prepare("SELECT content FROM agent_messages WHERE content LIKE '[UTEMEZES-BIZALOM]%'").all() as Array<{ content: string }>).map(r => r.content)
     await call('POST', '/api/schedules', NEW_TASK, { owner: true })
@@ -423,6 +443,18 @@ describe('PUT preCheck over the API (card 248e8f7c)', () => {
     expect(alerts()).toHaveLength(7)
     expect(alerts()[6]).not.toContain('preCheck-et kapott')
     expect(alerts()[6]).toContain('Ha nem a tulajdonos írta, szólj Viktornak.')
+  })
+  it('from TRUST_DIGEST_HOUR the same first tick is followed by the daily summary, and nothing else (card c16cbdcd)', async () => {
+    pinClock(9)
+    const runner = await import('../web/schedule-runner.js')
+    const alerts = () => (db.getDb().prepare("SELECT content FROM agent_messages WHERE content LIKE '[UTEMEZES-BIZALOM]%' ORDER BY id").all() as Array<{ content: string }>).map(r => r.content)
+    await call('POST', '/api/schedules', NEW_TASK, { owner: true })
+    await call('PUT', '/api/schedules/napi-riport', { preCheck: SHIPPED })
+    expect(await runner.runPreCheckAsync(io.readScheduledTask('napi-riport')!)).toEqual({ skip: false })
+    expect(alerts()).toHaveLength(2)
+    expect(alerts()[0]).toContain('preCheck-et kapott (az API-n is beállítható), tulajdonosi jóváhagyásra vár')
+    expect(alerts()[1]).toContain('Napi összesítő (2026-11-21): 1 ütemezett feladat')
+    expect(alerts()[1]).toContain('napi-riport')
   })
 
   it('a token approve is refused', async () => {
@@ -530,6 +562,7 @@ describe('mismatch alert to the main agent', () => {
     expect(row.content.length).toBeLessThan(800)
   })
   it('once per stored definition, again after a further change', () => {
+    pinClock(3) // before TRUST_DIGEST_HOUR: the count is the per-task alerts only (card c16cbdcd)
     io.writeScheduledTask('t2', { prompt: 'p', schedule: '0 9 * * *', agent: MAIN_AGENT_ID })
     trust.approveScheduledTask(io.readScheduledTask('t2')!, 'test')
     io.writeScheduledTask('t2', { prompt: 'p2' })
@@ -552,15 +585,6 @@ describe('one alert per task and hash across dashboard restarts; a daily summary
   const singles = () => msgs().filter(m => !m.includes('Napi összesítő'))
   // A restart is a new process: the in-memory map is empty, the DB row stays.
   const restart = () => trust._resetScheduleTrustAlertsForTest()
-  // An instant whose hour in the app zone is `h` on the day `d` days after 2026-11-21 (no fixed UTC offset assumed).
-  const at = (h: number, d = 0): number => {
-    for (let m = 0; m < 48 * 60; m += 30) {
-      const t = Date.UTC(2026, 10, 20 + d, 0, 0) + m * 60_000
-      const parts = new Intl.DateTimeFormat('en-CA', { timeZone: APP_TZ, day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(t))
-      if (Number(parts.find(p => p.type === 'hour')!.value) === h && Number(parts.find(p => p.type === 'day')!.value) === 21 + d) return t
-    }
-    throw new Error('no such hour')
-  }
   const untrusted = (name: string, prompt = 'p') => {
     io.writeScheduledTask(name, { prompt, schedule: '0 9 * * *', agent: MAIN_AGENT_ID, type: 'command', command: 'echo hi' })
     return io.readScheduledTask(name)!
