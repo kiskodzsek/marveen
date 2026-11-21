@@ -2049,6 +2049,15 @@ def script_cases():
             ("echo python3 measure.py | xargs -I{} sh -c '{}'", d),
             ("echo ./measure.py | xargs -I{} sh -c '{}'", d),
             ('echo ./measure.py | xargs -I{} bash -ec {}', d),
+            # round 3 (Viktor, r2 own probe; main and 59057d2c allowed each): a wrapper before the shell keeps it the
+            # shell (env, nice -n, command, nohup, timeout, sudo -u, VAR=value), so its -c word is the shell's code
+            ("echo ./measure.py | xargs -I{} env sh -c '{}'", d),
+            ("echo ./measure.py | xargs -I{} nice -n 5 bash -c '{}'", d),
+            ("echo ./measure.py | xargs -I{} command sh -c '{}'", d),
+            ("echo ./measure.py | xargs -I{} nohup sh -c '{}'", d),
+            ("echo ./measure.py | xargs -I{} timeout 5 sh -c '{}'", d),
+            ("echo ./measure.py | xargs -I{} /usr/bin/env -i A=1 bash -c '{}'", d),
+            ("echo ./measure.py | xargs -I{} sudo -u root sh -c '{}'", d),
             # an xargs no | stands right before still reads the pipe: a group, a loop, an if, a $( ), a >( )
             ('echo measure.py | (xargs python3)', d),
             ('echo measure.py | { xargs python3; }', d),
@@ -2872,6 +2881,11 @@ def script_cases():
             ("echo git status | xargs -I{} sh -c '{}'", d),
             ("echo python3 stat.py | xargs -I{} sh -c '{}'", d),
             ("echo measure.py | xargs -I{} sh -c 'wc -l {}'", d),
+            # round 3: a wrapper before the shell, harmless code; and a shell word that is only an argument
+            ("echo git status | xargs -I{} env sh -c '{}'", d),
+            ("echo 1 | xargs -I{} timeout 5 sh -c 'sleep {}'", d),
+            ('echo ./measure.py | xargs -I{} echo sh -c {}', d),
+            ("echo ./measure.py | xargs -I{} env cat {}", d),
             ("printf 'ls -l\\n' | xargs -I@ sh -c @", d),
             ('echo stat.py | xargs python3', d),
             ('echo measure.py | xargs echo python3', d),

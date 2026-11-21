@@ -2047,9 +2047,30 @@ def _xargs_lines(cmd, seqs, every, repl, each):
 def _xargs_join(argv):
     """Card 3bf9a741: an argv as a command line (_shq each word); after a shell's -c flag the word is quoted even when
     plain (Viktor 49280 LOW 2b): the gate reads a quoted -c argument as the shell's code, an unquoted one it does not."""
-    sh = bool(argv) and os.path.basename(argv[0]) in SHELL_NAMES
-    return ' '.join("'" + v.replace("'", "'\\''") + "'" if sh and i and SHELL_CODE_FLAG_RX.fullmatch(argv[i - 1])
-                    else _shq(v) for i, v in enumerate(argv))
+    at = _xargs_shell_at(argv)
+    return ' '.join("'" + v.replace("'", "'\\''") + "'" if at is not None and i > at
+                    and SHELL_CODE_FLAG_RX.fullmatch(argv[i - 1]) else _shq(v) for i, v in enumerate(argv))
+
+
+_XARGS_SHELL_WRAPPERS = _FEEDER_WRAPPERS | {'sudo', 'doas', 'timeout', 'gtimeout'}
+_XARGS_WRAP_VALUE_RX = re.compile(r'\d[\w.]*')
+
+
+def _xargs_shell_at(argv):
+    """Viktor r2 (card 3bf9a741): the index of the shell an xargs runs, past the wrappers that keep the shell in
+    command position (`env sh -c`, `nice -n 5 bash -c`, `timeout 5 sh -c`, `sudo -n sh -c`, VAR=value); None when the
+    first other word is not a shell."""
+    wrapped = False
+    for i, w in enumerate(argv[:_FEEDER_MAX_WORDS]):
+        b = os.path.basename(w)
+        if b in SHELL_NAMES:
+            return i
+        if b in _XARGS_SHELL_WRAPPERS:
+            wrapped = True
+        elif not (wrapped and (w.startswith('-') or _XARGS_WRAP_VALUE_RX.fullmatch(w)
+                               or argv[i - 1] in _FEEDER_ARG_FLAGS) or _FEEDER_ASSIGN_RX.match(w)):
+            return None
+    return None
 
 
 def payload_texts(text, script=False, subst=False):
