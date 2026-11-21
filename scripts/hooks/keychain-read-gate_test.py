@@ -366,6 +366,15 @@ BLOCK = [
     "cat <<'J\\' >/dev/null\nhello\nJ\\\ns3curity find-generic-password -s probe\ncat <<Z",
     ': x \\\\\ns3curity find-generic-password -s probe\ncat <<Z',
     ': # note \\\ns3curity dump-keychain\ncat <<Z',
+    # card 6772c137 (Viktor 49233 INFO, 70a5fb2a round 2): the lexer decodes \u/\U in a $'..' delimiter (bash 3.2 does
+    # not), and zsh -f reads a $".." delimiter otherwise than bash; in each row the lexer ends the body earlier than
+    # one shell, which ran the stub in 4 of them (measured on main, r1, r2: all blocked). Pinned so a later change that
+    # blinds every heredoc body cannot open them
+    ": <<$'J\\u00e9'\nJ\u00e9\n: <<'Z'\nJ\\u00e9\ns3curity dump-keychain\nZ",
+    "cat <<$'J\\u00e9' >/dev/null\nJ\u00e9\ncat <<'Z' >/dev/null\nJ\\u00e9\ns3curity dump-keychain\nZ",
+    ": <<$'J\\U000000e9'\nJ\u00e9\n: <<'Z'\nJ\\U000000e9\ns3curity dump-keychain\nZ",
+    ': <<$"J"\nJ\n: <<\'Z\'\n$J\ns3curity dump-keychain\nZ',
+    ': <<$"J"\nJ\n: <<\'Z\'\n$"J"\ns3curity dump-keychain\nZ',
 ]
 # Viktor 41970 INFO 6: one row per WRAP_ARGS entry, so a dropped or mistyped entry fails here. A spec of its own,
 # not read from the gate: wrapper -> (short flags with a word, whole flags with the next word, positional words).
