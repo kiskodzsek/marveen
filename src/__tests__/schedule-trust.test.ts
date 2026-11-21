@@ -598,7 +598,7 @@ describe('one alert per task and hash across dashboard restarts; a daily summary
     expect(db.getScheduleTrustAlert('ka-git')).toBeUndefined()
   })
 
-  it('one summary a day from TRUST_DIGEST_HOUR, listing the tasks seen untrusted in the last 24 hours', () => {
+  it('one summary a day from TRUST_DIGEST_HOUR, listing the tasks seen untrusted in the last 8 days', () => {
     expect(trust.TRUST_DIGEST_HOUR).toBe(8)
     trust.alertScheduleTrust(untrusted('ka-a'), 'agent', 'test', at(3))
     trust.alertScheduleTrust(untrusted('ka-b'), 'agent', 'test', at(3))
@@ -612,15 +612,19 @@ describe('one alert per task and hash across dashboard restarts; a daily summary
     trust.alertScheduleTrust(io.readScheduledTask('ka-b')!, 'agent', 'test', at(15))
     expect(digests()).toHaveLength(1) // the same day: no second one, also after a restart
     expect(singles()).toHaveLength(2)
-    // the next day at 08:00: ka-a was last seen at 09:00 (23 h ago), ka-b at 15:00: both listed
+    // the next day at 08:00: ka-a was last seen at 09:00, ka-b at 15:00: both listed
     trust.alertScheduleTrust(io.readScheduledTask('ka-b')!, 'agent', 'test', at(8, 1))
     expect(digests()).toHaveLength(2)
     expect(digests()[1]).toContain('ka-a, ka-b')
-    // two days on, only ka-b keeps firing: ka-a drops out of the summary
+    // two days on ka-a (last seen 2 days ago, e.g. a weekly task) is still listed
     trust.alertScheduleTrust(io.readScheduledTask('ka-b')!, 'agent', 'test', at(9, 2))
     expect(digests()).toHaveLength(3)
-    expect(digests()[2]).toContain('1 ütemezett feladat')
-    expect(digests()[2]).not.toContain('ka-a')
+    expect(digests()[2]).toContain('ka-a, ka-b')
+    // nine days on, only ka-b keeps firing: ka-a (not seen for 8 days) drops out of the summary
+    trust.alertScheduleTrust(io.readScheduledTask('ka-b')!, 'agent', 'test', at(9, 9))
+    expect(digests()).toHaveLength(4)
+    expect(digests()[3]).toContain('1 ütemezett feladat')
+    expect(digests()[3]).not.toContain('ka-a')
     expect(singles()).toHaveLength(2)
   })
 

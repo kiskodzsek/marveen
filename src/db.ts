@@ -4645,8 +4645,11 @@ export function listScheduleTrustAlertsSeenSince(since: number): ScheduleTrustAl
     .all(since) as ScheduleTrustAlertRow[]
 }
 
-/** Claims the daily summary for `day` (one row): true once per day, false when that day is already claimed. */
-export function claimScheduleTrustAlertDigest(day: string, now: number): boolean {
+/**
+ * Claims the daily summary for `day` (one row): true once per day, false when that day is already claimed. `send`
+ * runs inside the same transaction: when it throws, the claim is rolled back and a later fire retries (Viktor 49291).
+ */
+export function claimScheduleTrustAlertDigest(day: string, now: number, send?: () => void): boolean {
   return db.transaction((): boolean => {
     const row = db.prepare('SELECT day FROM schedule_trust_alert_digest WHERE id = 1').get() as { day: string } | undefined
     if (row?.day === day) return false
@@ -4654,6 +4657,7 @@ export function claimScheduleTrustAlertDigest(day: string, now: number): boolean
       INSERT INTO schedule_trust_alert_digest (id, day, at) VALUES (1, ?, ?)
       ON CONFLICT(id) DO UPDATE SET day = excluded.day, at = excluded.at
     `).run(day, now)
+    send?.()
     return true
   })()
 }

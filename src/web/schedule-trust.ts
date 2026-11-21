@@ -1030,7 +1030,11 @@ export function isOwnerTrusted(status: ScheduleTrustStatus): boolean {
 /** The verdict for a task as stored now. Any error is 'agent' (fail-closed). */
 export function scheduleTrustOf(task: ScheduledTask): ScheduleTrustStatus {
   try {
-    return evaluateScheduleTrust(task, getScheduleTrust(task.name))
+    const verdict = evaluateScheduleTrust(task, getScheduleTrust(task.name))
+    // Viktor 49291 L1/L5: a trusted state ends the untrusted episode, so re-applying the same change later alerts
+    // again, and the daily summary no longer lists the task.
+    if (isOwnerTrusted(verdict)) forgetTrustAlertIfAny(task.name)
+    return verdict
   } catch (err) {
     logger.warn({ err, task: task.name }, 'schedule-trust: lookup failed, treating the task as agent-authored')
     return 'agent'
@@ -1077,6 +1081,15 @@ export function clearScheduleTrust(taskName: string): void {
     logger.warn({ err, task: taskName }, 'schedule-trust: could not drop the trust row')
   }
   forgetTrustAlert(taskName)
+}
+
+/** Forgets only when there is something to forget (the GET list calls the verdict for every task). */
+function forgetTrustAlertIfAny(taskName: string): void {
+  let has = mismatchAlerted.has(taskName)
+  if (!has) {
+    try { has = getScheduleTrustAlert(taskName) !== undefined } catch { has = true }
+  }
+  if (has) forgetTrustAlert(taskName)
 }
 
 /** Card c16cbdcd: a new trust episode (approval, a token-side write) alerts afresh when it is untrusted again. */
@@ -1315,11 +1328,13 @@ export function alertSafeId(v: unknown): string {
 // Card c16cbdcd (Klodel 49278): the in-process map alone forgot every alert at each dashboard restart (21
 // processes on 11-20/21, 66 alerts for the same few tasks). The key is now kept in the DB
 // (schedule_trust_alerted): one alert per task and stored hash; a changed hash alerts again; an approval or a
-// token-side write forgets it. The map stays as the fallback when the DB cannot be read (then it alerts at most
-// once per process, as before). Once a day, from TRUST_DIGEST_HOUR local time, the first untrusted fire sends ONE
-// summary of the tasks still untrusted (seen on a fire in the last 24 hours).
+// token-side write forgets it, and so does a fire or a listing that finds the task owner-trusted again (Viktor
+// 49291). The key is stored only after the alert was queued (a failed send is retried). The map stays as the fallback when the DB cannot be read (then it alerts at most
+// once per process, as before; also when only the write failed). Once a day, from TRUST_DIGEST_HOUR local time, the
+// first untrusted fire sends ONE summary of the tasks still untrusted (seen on a fire in the last 8 days, so a weekly
+// task is listed). The day is claimed in the same transaction as the send: a failed send is retried.
 export const TRUST_DIGEST_HOUR = 8
-const TRUST_OPEN_WINDOW_MS = 24 * 60 * 60_000
+const TRUST_OPEN_WINDOW_MS = 8 * 24 * 60 * 60_000
 const TRUST_SEEN_TOUCH_MS = 60 * 60_000
 
 function trustDigestClock(now: number): { day: string; hour: number } {
@@ -1335,14 +1350,15 @@ function maybeSendTrustDigest(now: number): void {
     if (!(hour >= TRUST_DIGEST_HOUR)) return
     const open = listScheduleTrustAlertsSeenSince(now - TRUST_OPEN_WINDOW_MS)
     if (open.length === 0) return
-    if (!claimScheduleTrustAlertDigest(day, now)) return
     const names = open.map(r => alertSafeId(r.task_name))
-    createSystemMessage(
-      MAIN_AGENT_ID,
-      `[UTEMEZES-BIZALOM] Napi összesítő (${day}): ${names.length} ütemezett feladat még nincs jóváhagyva, ` +
-      `ügynöki keretezéssel fut: ${names.join(', ')}. Egyenként már szóltam róluk, újra csak akkor szólok, ha a ` +
-      'tartalmuk változik. A tulajdonos a dashboardon hagyhatja jóvá őket.',
-    )
+    claimScheduleTrustAlertDigest(day, now, () => {
+      createSystemMessage(
+        MAIN_AGENT_ID,
+        `[UTEMEZES-BIZALOM] Napi összesítő (${day}): ${names.length} ütemezett feladat még nincs jóváhagyva, ` +
+        `ügynöki keretezéssel fut (az elmúlt 8 napban futott): ${names.join(', ')}. Egyenként már szóltam róluk, ` +
+        'újra csak akkor szólok, ha a tartalmuk változik. A tulajdonos a dashboardon hagyhatja jóvá őket.',
+      )
+    })
   } catch (err) {
     logger.warn({ err }, 'schedule-trust: the daily summary could not be sent')
   }
@@ -1360,18 +1376,14 @@ export function alertScheduleTrust(task: ScheduledTask, status: ScheduleTrustSta
     dbOk = false
     logger.warn({ err, task: task.name }, 'schedule-trust: the alerted row could not be read; falling back to this process')
   }
-  if (dbOk ? stored?.alert_key === key : mismatchAlerted.get(task.name) === key) {
+  // Viktor 49291 L3: the map also counts with a readable DB, so a row that could not be written does not alert on
+  // every fire of this process.
+  if ((dbOk && stored?.alert_key === key) || mismatchAlerted.get(task.name) === key) {
     if (dbOk && stored && now - stored.seen_at >= TRUST_SEEN_TOUCH_MS) {
       try { touchScheduleTrustAlert(task.name, now) } catch { /* the summary may miss it once */ }
     }
     maybeSendTrustDigest(now)
     return
-  }
-  mismatchAlerted.set(task.name, key)
-  if (dbOk) {
-    try { setScheduleTrustAlert(task.name, key, now) } catch (err) {
-      logger.warn({ err, task: task.name }, 'schedule-trust: the alerted row could not be written; the next process may alert again')
-    }
   }
   const name = alertSafeId(task.name)
   const agent = alertSafeId(task.agent)
@@ -1405,6 +1417,13 @@ export function alertScheduleTrust(task: ScheduledTask, status: ScheduleTrustSta
       `Nézd meg a ~/.claude/scheduled-tasks/${name}/ tartalmát; ha rendben van, a tulajdonos a dashboardon jóváhagyhatja. ` +
       (apiPreCheckOnly ? 'Ha nem tudsz erről a beállításról, szólj Viktornak.' : 'Ha nem a tulajdonos írta, szólj Viktornak.'),
     )
+    // Viktor 49291 L2: stored only once the alert is queued, so a failed send is retried (after a restart too).
+    mismatchAlerted.set(task.name, key)
+    if (dbOk) {
+      try { setScheduleTrustAlert(task.name, key, now) } catch (err) {
+        logger.warn({ err, task: task.name }, 'schedule-trust: the alerted row could not be written; the next process may alert again')
+      }
+    }
   } catch (err) {
     logger.warn({ err, task: name }, 'schedule-trust: alert could not be queued')
   }
