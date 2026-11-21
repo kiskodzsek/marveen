@@ -19,6 +19,10 @@ text, a nested `xargs -I{} sh -c 'echo {} | xargs K'`) is not read for its fed w
 list | xargs`, a redirect `xargs < list`, `-a list`), a computed name (find, an ls glob, tr), a shell expansion in a
 fed word (a default param `${X:-..}`, a variable, a brace), a sh -c script reaching its words through $0 or bash -c
 through "$@", an xargs whose name is split by quotes ('xa'rgs), and a while read loop's output piped into an xargs.
+A script run through a variable's value (card 10624d73 r2, Viktor 49241; old, LOW, main too): the gate reads the
+value as written, the shell expands it, so a glob in the value (X=e*.py, X=[e]vil.py), a brace expansion at the
+use, a value split on a space (a quoted value with a space, an escaped space), an escaped semicolon in the value
+(X=notes.py\\;z), and an export whose name is split by quotes ("HO"ME=...) can run another script than the one read.
 
 What blocks (exit 2): a `security` call in command position whose subcommand reads or exports secrets:
   find-generic-password, find-internet-password, dump-keychain, export,
@@ -2365,6 +2369,116 @@ def expand(text, keep=()):
                       else env.get(m.group(1) or m.group(2), m.group(0)), text)
 
 
+
+ASSIGN_WORD_RX = re.compile(r'[A-Za-z_]\w*=.*', re.S)
+# what may change a variable without naming it (a sourced file, eval of a made text) or split $X another way (IFS)
+TRUST_OFF_RX = re.compile(r'(?<![\w./-])(?:source|eval|\.)(?=[ \t])|(?<!\w)IFS(?!\w)')
+
+
+def expansion_trusted(text, keep=()):
+    """Card 10624d73 (Viktor 43324 LELET 1, its price): expand() reads any NAME=value in the text as this shell's
+    assignment, but the real $NAME may be empty (`echo X=notes.py`, a comment, `X=a cmd`, `unset X`, `false && X=a`)
+    and then `python3 $X evil.py` runs evil.py; so an expanded text keeps the old walk (every word judged, no
+    agent-msg reading). This says when the expansion is what the shell does: every name expand() replaced is set
+    exactly once (HOME: not set, or set once), by a simple command of plain assignments only at the top level
+    (lexer: depth 0, not a subshell, a substitution, a pipe, `&`, a heredoc, a comment or a quote; not after && or
+    ||, not inside if / { / a function), before its first use, every use unquoted or in double quotes, and the name
+    appears nowhere else in the text (unset, read, export -n, for NAME, ${NAME:-x}, NAME as a word ...); and no
+    source, `.`, eval (they may set it without naming it) or IFS (it splits $NAME another way). Anything the lexer
+    cannot read: not trusted. Then the measuring forms (`P=$SP/probe; python3 -I $P/x.py <hook file>`) read
+    their argv as data again, as a literal path does."""
+    uses = [m for m in VAR_RX.finditer(text) if (m.group(1) or m.group(2)) not in keep]
+    if not uses:
+        return True
+    if TRUST_OFF_RX.search(text):
+        return False
+    lx = lex_or_none(text)
+    if lx is None:
+        return False
+    cls = lx['cls']
+    segs = lx['segments']
+    n = len(text)
+    for name in {m.group(1) or m.group(2) for m in uses}:
+        mine = [m for m in uses if (m.group(1) or m.group(2)) == name]
+        if any(cls[m.start()] not in 'cd' for m in mine):
+            return False
+        sites = [m.start() for m in re.finditer(r'(?<![\w$])' + name + '=', text)]
+        if len(sites) > 1 or (not sites and name != 'HOME'):
+            return False
+        allowed = {m.start() + (2 if m.group(1) else 1) for m in mine} | set(sites)
+        if any(m.start() not in allowed for m in re.finditer(r'(?<!\w)' + name + r'(?!\w)', text)):
+            return False
+        for p in sites:
+            if cls[p] != 'c' or p > min(m.start() for m in mine):
+                return False
+            seg = max((g for g in segs if g['start'] <= p < g['end']), key=lambda g: g['depth'], default=None)
+            if seg is None or seg['depth'] != 0 or seg['frame'] != 'top':
+                return False
+            if not all(ASSIGN_WORD_RX.fullmatch(w['text']) for w in shell_lex.words(text, lx, seg)):
+                return False
+            q = seg['start'] - 1
+            while q >= 0 and text[q] in ' \t' and cls[q] == 'c':
+                q -= 1
+            if q >= 0 and cls[q] == 'c' and text[q] in '|&(':
+                return False
+            r = seg['end']
+            while r < n and text[r] in ' \t' and cls[r] == 'c':
+                r += 1
+            if r < n and cls[r] == 'c' and (text[r] == '|' and text[r + 1:r + 2] != '|' or
+                                             text[r] == '&' and text[r + 1:r + 2] != '&'):
+                return False
+    return _trust_shape(text, lx, uses)
+
+
+# card 10624d73 r1 (Viktor): names the shell sets or refuses by itself (readonly, self-changing, set by a builtin
+# without being named: read, getopts, mapfile, the last word of a command)
+TRUST_NAMES_OFF = frozenset(('_', 'REPLY', 'OPTARG', 'OPTIND', 'MAPFILE', 'UID', 'EUID', 'PPID', 'RANDOM', 'SRANDOM',
+                             'SECONDS', 'LINENO', 'BASHPID', 'EPOCHSECONDS', 'EPOCHREALTIME', 'BASHOPTS', 'SHELLOPTS',
+                             'PWD', 'OLDPWD', 'HISTCMD', 'GROUPS', 'FUNCNAME', 'IFS', 'COLUMNS', 'LINES',
+                             'DIRSTACK', 'PIPESTATUS', 'SHLVL', 'HOSTNAME', 'HOME', 'PATH', 'CDPATH'))
+# r1 (Viktor): the raw text of an assignment-only command is plain unquoted ASCII name=value words, so the value the
+# lexer reads is the value the shell stores (no quote, escape, glob, brace, CR/VT/NBSP, expansion)
+_TRUST_ASSIGN_RAW = re.compile(r'[ \t]*[A-Za-z_]\w*=[A-Za-z0-9_./+,:@%=-]*(?:[ \t]+[A-Za-z_]\w*=[A-Za-z0-9_./+,:@%=-]*)*[ \t]*')
+
+
+def _trust_shape(text, lx, uses):
+    """Card 10624d73 r1 (Viktor): a positive shape, not a list of what may change a name. Every use sits in ONE
+    top-level command, and every top-level command before it is made of plain assignments only (no command
+    substitution, no backtick, no arithmetic), joined by ; or a newline only: then nothing ran between the assignment
+    and the use that could unset, read into or declare a name without naming it (unset of a printf-made name, read
+    into REPLY, getopts, a sourced file, if/then on lines, a function body, && at a line end). The character after a
+    use is a word end or a slash (zsh reads $X[..] and $X:h as a subscript and a modifier)."""
+    cls = lx['cls']
+    segs = lx['segments']
+    n = len(text)
+    names = {m.group(1) or m.group(2) for m in uses}
+    if names & TRUST_NAMES_OFF or any(x.startswith(('BASH', 'ZSH', 'COMP_')) for x in names):
+        return False
+    for m in uses:
+        e = m.end()
+        if e < n and text[e] not in ' \t\n/;"\'|&)':
+            return False
+    def top_seg(pos):
+        return max((g for g in segs if g['start'] <= pos < g['end']), key=lambda g: g['depth'], default=None)
+    use_segs = {id(top_seg(m.start())) for m in uses}
+    ug = top_seg(uses[0].start())
+    if len(use_segs) != 1 or ug is None or ug['depth'] != 0 or ug['frame'] != 'top':
+        return False
+    prev_end = 0
+    for g in segs:
+        if g['depth'] != 0 or g['start'] > ug['start']:
+            continue
+        gap = text[prev_end:g['start']]
+        if any(ch not in ' \t\n;' for ch in gap) or any(cls[q] != 'c' for q in range(prev_end, g['start'])
+                                                         if text[q] in ';\n'):
+            return False
+        prev_end = g['end']
+        if g is ug:
+            break
+        if not _TRUST_ASSIGN_RAW.fullmatch(text, g['start'], g['end']):
+            return False
+    return True
+
 def cd_bases(text, cwd, loops=None):
     """cwd, then the directory after each cd in order (a relative cd on top of the one before).
     loops (card deede5e4, script_paths only): the for-loop lists of the text (loop_lists). With it, a cd to a word
@@ -3342,7 +3456,13 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
     # read ok.py only): loop_word_paths reads every loop value AND every plain value assigned to the name
     lnames = frozenset(loop_lists(_blank_data_heredocs(norm))) if 'for' in norm else frozenset()
     text = expand(norm, lnames)
-    groups = interp_groups(text, text != norm) + [[w] for w in extra]
+    # card 10624d73: an expansion the shell makes as read (expansion_trusted) keeps the argv-data reading; on the
+    # command as written too, not only on this text: a payload-marked text turned the quote of `bash -c 'python3 $X
+    # evil.py'` into a boundary, and its $X (empty in the inner bash) looked unquoted (found by the oracle cases)
+    plain = normalise(cmd)
+    trusted = (plain == cmd and expansion_trusted(norm, lnames) and
+               (norm == plain or expansion_trusted(plain, lnames)))  # r1: normalise() changed nothing
+    groups = interp_groups(text, text != norm and not trusted) + [[w] for w in extra]
     # card 70c94516 (Viktor 43662 LELET 1): normalise() takes the backslash of a $'\x65' escape (`\x` -> `x`), which
     # bash decodes in a word (`python3 $'\x65vil.py'` runs evil.py): such a command is read without it too
     word_texts = [text]
