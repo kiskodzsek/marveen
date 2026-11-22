@@ -25,16 +25,17 @@ variable this hook cannot resolve), the gate BLOCKS. A send whose content cannot
 be inspected defeats the point of the gate, so "I could not read it" must not
 mean "let it through". The block message says how to make it inspectable.
 
-Known limits of the inter-agent lookalike arm (Viktor 50375, independent probe e0b9f9deb31c; main lets all 18
+Known limits of the inter-agent lookalike arm (Viktor 50375, independent probe e0b9f9deb31c; main lets all 17
 through too, no regression; follow-up card 474437df; each pinned by a KNOWN-LIMIT row in
-scripts/__tests__/outgoing-copy-gate.test.py, the probe label and its word):
+scripts/__tests__/outgoing-copy-gate.test.py, the probe label and its word; the probe's backslash-newline target is
+closed here by SENDCONT1122, card 64d10325):
   hd-unclosed-short-mixed: unclosed (an unclosed heredoc in a short command);
   fakehd-quoted-short-mixed, fakehd-quoted-long-mixed, fakehd-comment-mixed: fakehd (a "<<" in quotes, in an echo
     with apostrophes or in a comment looks like an opener and the real send falls into the cut text; the long one
     with a 40 KB run as well); fakehd-arith-mixed: arith (an arithmetic <<); fakehd-herestring-mixed: herestring
     (a <<< here-string);
-  target spellings: tgt-bsnl-short-mixed: bsnl (a backslash-newline in the target URL); tgt-dotseg-short-mixed,
-    tgt-dotseg-long-mixed: dotseg (/api/./messages); KNOWN-K1-tgt-emptyvar-long-mixed: emptyvar;
+  target spellings: tgt-dotseg-short-mixed, tgt-dotseg-long-mixed: dotseg (/api/./messages);
+    KNOWN-K1-tgt-emptyvar-long-mixed: emptyvar;
     KNOWN-K2-tgt-ansic-long-mixed: ansic; KNOWN-K3-tgt-brace-long-mixed: brace (K1-K3: see the long-token arms
     below); tgt-curlglob-long-mixed: curlglob (/api/{messages}); tgt-fragment-short-mixed: fragment
     (/api/messages#x);
@@ -375,7 +376,33 @@ def _basename(tok: str) -> str:
     return tok.rsplit("/", 1)[-1]
 
 
-def _mask_subshell_markers(cmd: str) -> str:
+def _mask_legacy(cmd: str) -> str:
+    """main's mask (4c2ed11d), verbatim: newline, backtick and `$(` outside quotes -> `;`, nothing else. The "legacy"
+    reading of SENDMODES1122 runs it with shlex reading the comments (commenters="#"), as main did."""
+    out = []
+    q = None  # None | "'" | '"'
+    i, n = 0, len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if q:
+            if ch == "\\" and q == '"' and i + 1 < n:
+                out.append(cmd[i:i + 2]); i += 2; continue
+            if ch == q:
+                q = None
+            out.append(ch); i += 1; continue
+        if ch in "'\"":
+            q = ch; out.append(ch); i += 1; continue
+        if ch == "\\" and i + 1 < n:
+            out.append(cmd[i:i + 2]); i += 2; continue
+        if ch == "\n" or ch == "`":
+            out.append(";"); i += 1; continue
+        if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
+            out.append(";"); i += 2; continue
+        out.append(ch); i += 1
+    return "".join(out)
+
+
+def _mask_subshell_markers(cmd: str, mode: str = "A") -> str:
     """Idezojelen KIVULI ujsor/`$(`/backtick -> `;` szeparator, hogy a shlex
     szegmens-hatarkent lassa; idezojelen BELUL a szoveg erintetlen (tartalom).
     SENDCOMMENT1122 (card 64d10325, Viktor 50274, HIGH): an unquoted `#` at the start of a word is a comment up to
@@ -395,6 +422,8 @@ def _mask_subshell_markers(cmd: str) -> str:
     the inner one closes, the outer stays open as a P, so a comment after it is cut. `$((` is `$(` + `(` here (C, P): a blank `#` inside an
     arithmetic EXPANSION is an error on which a non-interactive bash or zsh exits, so nothing after it runs. SENDCONT1122 (B2): bash drops a backslash-newline before
     it reads words, so `true \\` + newline + `# c` is `true # c`, a comment; the mask drops it too (prev stays)."""
+    if mode in ("legacy", "blind"):
+        return _mask_legacy(cmd)
     out = []
     q = None  # None | "'" | '"'
     i, n = 0, len(cmd)
@@ -402,6 +431,7 @@ def _mask_subshell_markers(cmd: str) -> str:
     bt = False  # inside an unquoted backtick substitution: a comment there ends at the closing backtick
     nxt = {"\n": -1, "`": -1}  # cached next position of each comment end at or after i (n = none left): linear
     ctx = []  # SENDEXPR1122: open ${ (B), (( (A), $( (C), ( (P)
+    nb = 0  # SENDBCLOSE1122: the B entries on ctx, so a `}` knows in O(1) whether a `${` is open below
     while i < n:
         ch = cmd[i]
         if q:
@@ -427,6 +457,8 @@ def _mask_subshell_markers(cmd: str) -> str:
         word_start = prev in " \t\n;&|()<>`"
         prev = ch
         if ch == "`":
+            if bt:  # SENDBTCLOSE1122 (Viktor 50353 F6): after a CLOSING backtick a `#` is mid-word, not a comment
+                prev = "a"
             bt = not bt
         if ch in "<>" and i + 1 < n and cmd[i + 1] == "&":  # SENDREDIR1122: `2>&1` -- the `&` split the segment
             out.append(ch); i += 2; continue
@@ -435,19 +467,21 @@ def _mask_subshell_markers(cmd: str) -> str:
         if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
             ctx.append("C"); out.append(";"); i += 2; prev = "("; continue
         if ch == "$" and i + 1 < n and cmd[i + 1] == "{":
-            ctx.append("B")
-        elif ch == "}" and ctx and ctx[-1] == "B":
-            ctx.pop()
+            ctx.append("B"); nb += 1
+        elif ch == "}" and nb:
+            # SENDBCLOSE1122 (Viktor 50353 F5): bash ends `${...}` at its `}` whatever `(` stands inside it
+            # (`${x:+( }`), so everything above the nearest B closes with it
+            while ctx.pop() != "B":
+                pass
+            nb -= 1
         elif ch == "(":
             if word_start and i + 1 < n and cmd[i + 1] == "(":  # an arithmetic command `(( ... ))`
-                ctx.append("A"); out.append("(("); i += 2; continue
+                ctx.extend(("P", "P") if mode == "PP" else ("A",)); out.append("(("); i += 2; continue
             ctx.append("P")
         elif ch == ")" and ctx:
             if ctx[-1] == "A" and i + 1 < n and cmd[i + 1] == ")":
                 ctx.pop(); out.append("))"); i += 2; continue
-            if ctx[-1] == "A":  # SENDDPAREN1122: a lone ) -- bash reads the (( as two subshells, ((true) ) = ( (true) )
-                ctx[-1] = "P"
-            elif ctx[-1] in "CP":
+            if ctx[-1] in "CP":
                 ctx.pop()
         out.append(ch); i += 1
     return "".join(out)
@@ -497,18 +531,20 @@ def _longest_token_run(text: str) -> int:
     return max((m.end() - m.start() for m in _TOKEN_RUN.finditer(text)), default=0)
 
 
-def _segments_tokens(cmd: str, strict: bool = False, bound: bool = False):
+def _segments_tokens(cmd: str, strict: bool = False, bound: bool = False, mode: str = "A"):
     """[[token, ...], ...] szegmensenkent -- quote-tudatosan, poziciot orizve. strict: the HDSTRICT1122 cut.
     bound: raise _LongToken instead of running shlex on a token run past _LONG_TOKEN (LONGTOK1122)."""
     import shlex
     text = _strict_heredoc_cut(cmd) if strict else _loose_heredoc_cut(cmd)
-    masked = _mask_subshell_markers(text)
+    masked = _mask_subshell_markers(text, mode)
     if bound and len(masked) > _LONG_TOKEN and _longest_token_run(masked) > _LONG_TOKEN:
         raise _LongToken("token run past %d characters" % _LONG_TOKEN)
     lex = shlex.shlex(masked,
                       posix=True, punctuation_chars="();|&")
     lex.whitespace_split = True
-    lex.commenters = ""  # SENDCOMMENT1122: comments are dropped by the mask, line by line, as bash reads them
+    # SENDCOMMENT1122: comments are dropped by the mask, line by line, as bash reads them; the "legacy" reading
+    # (SENDMODES1122) is main's: shlex reads them; the "blind" one is the JS twin's main: a comment is words
+    lex.commenters = "#" if mode == "legacy" else ""
     segments, cur = [], []
     for tok in lex:
         # SEGSPLIT923: shlex(punctuation_chars) returns a RUN of operator
@@ -690,9 +726,42 @@ def wrapper_depth_hit(cmd: str) -> bool:
         h is not None and _head_is_send(h, 0) for h in heads)
 
 
+# SENDMODES1122 (card 64d10325 round 4, Viktor 50353): the comment mask decides on each `#` before it can know what
+# the text around it is: a word-start `((` is an arithmetic command or two subshells (bash learns it at the lone `)`
+# or at `))`), and main read comments its own way. Every round of this card let a new shape through that one reading
+# misses and another sees. So the send detection runs on every reading that can differ, and a send in ANY of them
+# is a send (an extra audit is the safe side): "A" (`((` is arithmetic: the round 2 mask), "PP" (a word-start `((`
+# is two subshells from its first character), "legacy" (main's mask, shlex reading the comments: this twin's main)
+# and "blind" (main's mask, a comment read as words: the JS twin's main, so both twins audit a send named in a
+# comment, as the JS twin did on main). By construction no reading of main or of round 2 is lost. PP runs only with a
+# `((` and a `#` in the command, legacy and blind only with a `#`, a backslash-newline or a `>&`/`<&` (where the
+# readings can differ at all). Past _MULTI_READING_MAX characters
+# the extra readings are replaced by the long-token literal search (a sender name anywhere: an extra audit), so a
+# large command does not pay three shlex passes against the hook timeout. The JS twin runs all readings (linear).
+_MULTI_READING_MAX = 256 * 1024
+
+
+def _send_modes(cmd: str):
+    modes = ["A"]
+    if "#" in cmd and "((" in cmd:
+        modes.append("PP")
+    if "#" in cmd or "\\\n" in cmd or ">&" in cmd or "<&" in cmd:
+        modes += ["blind", "legacy"]
+    return modes
+
+
 def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
+    modes = _send_modes(cmd)
+    if len(modes) > 1 and len(cmd) > _MULTI_READING_MAX:
+        if _LONG_TOKEN_SENDERS.search(_dequoted(cmd)):
+            return True
+        modes = modes[:1]
+    return any(_is_send_in_reading(cmd, _depth, m) for m in modes)
+
+
+def _is_send_in_reading(cmd: str, _depth: int, mode: str) -> bool:
     try:
-        segments = _segments_tokens(cmd, bound=True)
+        segments = _segments_tokens(cmd, bound=True, mode=mode)
     except _LongToken:
         return bool(_LONG_TOKEN_SENDERS.search(_dequoted(cmd)))
     except ValueError:
@@ -703,16 +772,16 @@ def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
         return bool(_FALLBACK_LITERALS.search(cmd))
     if any(_segment_is_send(toks, _depth) for toks in segments):
         return True
-    return send_only_by_strict_heredoc(cmd, _depth)
+    return send_only_by_strict_heredoc(cmd, _depth, mode)
 
 
-def send_only_by_strict_heredoc(cmd: str, _depth: int = 0) -> bool:
+def send_only_by_strict_heredoc(cmd: str, _depth: int = 0, mode: str = "A") -> bool:
     """The HDSTRICT1122 second pass alone: a send the strict heredoc cut exposes (call it after the loose pass said
     no). A parse error of the strict text falls back like the loose one (strong literals): an extra audit, not a miss."""
     if '<<' not in cmd:
         return False
     try:
-        segments = _segments_tokens(cmd, strict=True, bound=True)
+        segments = _segments_tokens(cmd, strict=True, bound=True, mode=mode)
     except _LongToken:
         return bool(_LONG_TOKEN_SENDERS.search(_dequoted(cmd)))
     except ValueError:

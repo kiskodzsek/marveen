@@ -777,9 +777,10 @@
       "expected": true
     },
     {
-      "name": "SENDCOMMENT1122: a # right after ; starts a comment, a send after it on the same line is not run",
+      "name": "SENDCOMMENT1122: a # right after ; starts a comment, a send after it on the same line is not run [SENDMODES1122: the blind reading (the JS twin's main) audits the send in the comment, an extra audit; the A reading alone: false]",
       "cmd": "true;# x; sendmail a@b.c",
-      "expected": false
+      "expected": true,
+      "expected_A": false
     },
     {
       "name": "SENDCOMMENT1122: a mid-word # with a send after ; on the same line",
@@ -797,9 +798,10 @@
       "expected": true
     },
     {
-      "name": "SENDCOMMENT1122: a # right after $( starts a comment, a send after it on the same line is not run",
+      "name": "SENDCOMMENT1122: a # right after $( starts a comment, a send after it on the same line is not run [SENDMODES1122: the blind reading (the JS twin's main) audits the send in the comment, an extra audit; the A reading alone: false]",
       "cmd": "x=$(#c; sendmail a@b.c\n)",
-      "expected": false
+      "expected": true,
+      "expected_A": false
     },
     {
       "name": "SENDCOMMENT1122: a comment at the very start with an apostrophe, a send, a second such comment (balanced quotes would hide the send)",
@@ -947,44 +949,52 @@
       "expected": false
     },
     {
-      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant P01/J01): a tab before # starts a comment, a ; inside it is no separator",
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant P01/J01): a tab before # starts a comment, a ; inside it is no separator [SENDMODES1122: the blind reading (the JS twin's main) audits the send in the comment, an extra audit; the A reading alone: false]",
       "cmd": "true\t# x; sendmail a@b.c",
-      "expected": false
+      "expected": true,
+      "expected_A": false
     },
     {
-      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant P02): a | before # starts a comment, a ; inside it is no separator",
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant P02): a | before # starts a comment, a ; inside it is no separator [SENDMODES1122: the blind reading (the JS twin's main) audits the send in the comment, an extra audit; the A reading alone: false]",
       "cmd": "true|# x; sendmail a@b.c\ncat",
-      "expected": false
+      "expected": true,
+      "expected_A": false
     },
     {
-      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant P03): a backtick before # starts a comment up to the closing backtick",
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant P03): a backtick before # starts a comment up to the closing backtick [SENDMODES1122: the blind reading (the JS twin's main) audits the send in the comment, an extra audit; the A reading alone: false]",
       "cmd": "echo `# x; sendmail a@b.c`",
-      "expected": false
+      "expected": true,
+      "expected_A": false
     },
     {
-      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K03/K23): a comment inside a subshell ( ) is a comment",
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K03/K23): a comment inside a subshell ( ) is a comment [SENDMODES1122: the blind reading (the JS twin's main) audits the send in the comment, an extra audit; the A reading alone: false]",
       "cmd": "( true # x; sendmail a@b.c\n)",
-      "expected": false
+      "expected": true,
+      "expected_A": false
     },
     {
-      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K06/K26): a $( ) inside ${...} keeps its comments",
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K06/K26): a $( ) inside ${...} keeps its comments [SENDMODES1122: the blind reading (the JS twin's main) audits the send in the comment, an extra audit; the A reading alone: false]",
       "cmd": "echo ${x:-$(true # x; sendmail a@b.c\n)}",
-      "expected": false
+      "expected": true,
+      "expected_A": false
     },
     {
-      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K08/K28): after ${x} closes a # is a comment again",
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K08/K28): after ${x} closes a # is a comment again [SENDMODES1122: the blind reading (the JS twin's main) audits the send in the comment, an extra audit; the A reading alone: false]",
       "cmd": "echo ${x} # x; sendmail a@b.c",
-      "expected": false
+      "expected": true,
+      "expected_A": false
     },
     {
-      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K09/K29): a mid-word (( is no arithmetic command",
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K09/K29): a mid-word (( is no arithmetic command [SENDMODES1122: the blind reading (the JS twin's main) audits the send in the comment, an extra audit; the A reading alone: false]",
       "cmd": "echo ${x:-a((} # x; sendmail a@b.c",
-      "expected": false
+      "expected": true,
+      "expected_A": false
     },
     {
-      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K11/K31): after (( )) closes a # is a comment again",
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K11/K31): after (( )) closes a # is a comment again [SENDMODES1122: the blind reading (the JS twin's main) audits the send in the comment, an extra audit; the A reading alone: false]",
       "cmd": "(( 1 )) # x; sendmail a@b.c",
-      "expected": false
+      "expected": true,
+      "expected_A": false
     },
     {
       "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K12/K32): a ( ) closed inside (( )) leaves the (( on top",
@@ -1030,6 +1040,82 @@
       "name": "SENDCONT1122 (Viktor 50342 T1, mutant P13): a backslash-newline inside the sender name is dropped whole",
       "cmd": "send\\\nmail a@b.c",
       "expected": true
+    },
+    {
+      "name": "SENDMODES1122 (Viktor 50353 R1 F1): ((true # it's <<E -- bash reads two subshells, the # is a comment and <<E no heredoc",
+      "cmd": "((true # it's <<E\nsendmail a@b.c ; : '\nE\n) ) ' ) ) # '",
+      "expected": true
+    },
+    {
+      "name": "SENDMODES1122 (Viktor 50353 R1 F2, zsh sends, bash does not): a case pattern ) inside $( ) inside (( ))",
+      "cmd": "(( $(case a in a) echo 1;; esac) + 1 #x )); sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDMODES1122 (Viktor 50353 R2 F3): ((true # it's + graph-mail send on the next line",
+      "cmd": "((true # it's\ngraph-mail send --to a@b.c ; : '\n) ) ' ) ) # '",
+      "expected": true
+    },
+    {
+      "name": "SENDMODES1122 (Viktor 50353 R2 F4, zsh sends): a comment inside a case inside $( ) inside (( ))",
+      "cmd": "(( $(case a in a) echo 1 # it's\n;; esac) ))\nsendmail a@b.c # '",
+      "expected": true
+    },
+    {
+      "name": "SENDMODES1122 (Viktor 50353 R2 F5): a ( inside ${x:+( } -- the } closes the ${ whatever stands above it",
+      "cmd": "(( 1 ${x:+( } )) # it's\nsendmail a@b.c # '",
+      "expected": true,
+      "expected_A": true
+    },
+    {
+      "name": "SENDMODES1122 (Viktor 50353 R2 F6): a # right after a CLOSING backtick is mid-word, the send after ; runs",
+      "cmd": "echo `echo a`#; sendmail a@b.c",
+      "expected": true,
+      "expected_A": true
+    },
+    {
+      "name": "SENDMODES1122 (Viktor 50353 R3 F7): ((true # it's -- the (( is two subshells from its first character",
+      "cmd": "((true # it's\nsendmail a@b.c ; : '\n) ) ' ) ) # '",
+      "expected": true
+    },
+    {
+      "name": "SENDMODES1122 (Viktor 50353 R3 F7, a newline between the two )",
+      "cmd": "((true # it's\nsendmail a@b.c ; : '\n)\n) ' ) ) # '",
+      "expected": true
+    },
+    {
+      "name": "SENDMODES1122 (Viktor 50353 R3 F7, python3 send.py with a path",
+      "cmd": "((true # it's\npython3 /x/send.py --to a@b.c ; : '\n) ) ' ) ) # '",
+      "expected": true
+    },
+    {
+      "name": "SENDMODES1122 (Viktor 50353 control: the F7 shape without a send",
+      "cmd": "((true # it's\necho hi ; : '\n) ) ' ) ) # '",
+      "expected": false
+    },
+    {
+      "name": "SENDMODES1122 (round 4, mutant M10/M16): the F7 shape with an empty heredoc before the send -- only the strict heredoc pass of the PP reading sees it (bash and zsh run the send)",
+      "cmd": "((true # it's\ncat <<E\nE\nsendmail a@b.c ; : '\n) ) ' ) ) # '\nE",
+      "expected": true,
+      "expected_PP": true
+    },
+    {
+      "name": "SENDMODES1122 (round 4, control: the same heredoc shape without a send)",
+      "cmd": "((true # it's\ncat <<E\nE\necho hi ; : '\n) ) ' ) ) # '\nE",
+      "expected": false,
+      "expected_PP": false
+    },
+    {
+      "name": "SENDMODES1122 (round 4, mutant M4): main read the & of >&word as a separator, no # in the command (bash: a redirect to the file sendmail) [the main readings keep it: an extra audit; the A reading alone: false]",
+      "cmd": "echo x >&sendmail a@b.c",
+      "expected": true,
+      "expected_A": false
+    },
+    {
+      "name": "SENDMODES1122 (round 4, mutant M4): the same with <& [an extra audit; the A reading alone: false]",
+      "cmd": "cat <&sendmail a@b.c",
+      "expected": true,
+      "expected_A": false
     }
   ]
 }

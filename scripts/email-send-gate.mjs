@@ -223,13 +223,36 @@ const codeStringSends = (code) => CODE_SEND.test(code) || (CODE_EXECISH.test(cod
 // line before a send was harmless here, but a send commented out (`# sendmail x`) counted as a send.
 // SENDEXPR1122 / SENDCONT1122 (Viktor 50303 B1/B2): no comment inside `${...}` or an arithmetic command `((...))` (a
 // stack of the open constructs decides), and a backslash-newline is dropped before words are read; see the python twin.
-export function maskSubshellMarkers(cmd) {
+// main's mask (4c2ed11d), verbatim: the "legacy" reading of SENDMODES1122 (see isSendInvocation).
+function maskLegacy(cmd) {
+  let out = ''
+  let q = null
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i]
+    if (q) {
+      if (ch === '\\' && q === '"' && i + 1 < cmd.length) { out += cmd[i] + cmd[i + 1]; i++; continue }
+      if (ch === q) q = null
+      out += ch
+      continue
+    }
+    if (ch === "'" || ch === '"') { q = ch; out += ch; continue }
+    if (ch === '\\' && i + 1 < cmd.length) { out += cmd[i] + cmd[i + 1]; i++; continue }
+    if (ch === '\n' || ch === '`') { out += ';'; continue }
+    if (ch === '$' && cmd[i + 1] === '(') { out += ';'; i++; continue }
+    out += ch
+  }
+  return out
+}
+
+export function maskSubshellMarkers(cmd, mode = 'A') {
+  if (mode === 'legacy') return maskLegacy(cmd)
   let out = ''
   let q = null
   let prev = '\n'
   let bt = false // inside an unquoted backtick substitution: a comment there ends at the closing backtick
   const nxt = { '\n': -1, '`': -1 } // cached next position of each comment end (length = none left): linear
   const ctx = [] // SENDEXPR1122: open ${ (B), (( (A), $( (C), ( (P)
+  let nb = 0 // SENDBCLOSE1122: the B entries on ctx (see the python twin)
   for (let i = 0; i < cmd.length; i++) {
     const ch = cmd[i]
     if (q) {
@@ -253,19 +276,25 @@ export function maskSubshellMarkers(cmd) {
     }
     const wordStart = ' \t\n;&|()<>`'.includes(prev)
     prev = ch
-    if (ch === '`') bt = !bt
+    if (ch === '`') {
+      if (bt) prev = 'a' // SENDBTCLOSE1122 (Viktor 50353 F6): after a CLOSING backtick a `#` is mid-word, not a comment
+      bt = !bt
+    }
     if ((ch === '<' || ch === '>') && cmd[i + 1] === '&') { out += ch; i++; continue } // SENDREDIR1122: `2>&1`
     if (ch === '\n' || ch === '`') { out += ';'; continue }
     if (ch === '$' && cmd[i + 1] === '(') { ctx.push('C'); out += ';'; i++; prev = '('; continue }
-    if (ch === '$' && cmd[i + 1] === '{') ctx.push('B')
-    else if (ch === '}' && top === 'B') ctx.pop()
+    if (ch === '$' && cmd[i + 1] === '{') { ctx.push('B'); nb++ }
+    else if (ch === '}' && nb) { while (ctx.pop() !== 'B'); nb-- } // SENDBCLOSE1122: `}` closes everything above its B
     else if (ch === '(') {
-      if (wordStart && cmd[i + 1] === '(') { ctx.push('A'); out += '(('; i++; continue } // an arithmetic command
+      if (wordStart && cmd[i + 1] === '(') { // an arithmetic command, or two subshells in the PP reading
+        if (mode === 'PP') ctx.push('P', 'P')
+        else ctx.push('A')
+        out += '(('; i++; continue
+      }
       ctx.push('P')
     } else if (ch === ')' && top) {
       if (top === 'A' && cmd[i + 1] === ')') { ctx.pop(); out += '))'; i++; continue }
-      if (top === 'A') ctx[ctx.length - 1] = 'P' // SENDDPAREN1122: a lone ) -- the (( was two subshells, ((true) ) = ( (true) )
-      else if (top === 'C' || top === 'P') ctx.pop()
+      if (top === 'C' || top === 'P') ctx.pop()
     }
     out += ch
   }
@@ -274,8 +303,8 @@ export function maskSubshellMarkers(cmd) {
 
 // Quote-aware tokenizer -> [[token, ...], ...] per segment. Throws on an
 // unbalanced quote (the caller falls back to the legacy content patterns).
-export function segmentsTokens(cmd, strict = false) {
-  const s = maskSubshellMarkers(strict ? strictHeredocCut(cmd) : looseHeredocCut(cmd))
+export function segmentsTokens(cmd, strict = false, mode = 'A') {
+  const s = maskSubshellMarkers(strict ? strictHeredocCut(cmd) : looseHeredocCut(cmd), mode)
   const segments = []
   let cur = []
   let tok = ''
@@ -425,10 +454,10 @@ export function buildWrapperDepthMsg() {
   )
 }
 
-function looseSendInvocation(cmd, depth = 0) {
+function looseSendInvocation(cmd, depth = 0, mode = 'A') {
   let segments
   try {
-    segments = segmentsTokens(cmd)
+    segments = segmentsTokens(cmd, false, mode)
   } catch {
     // Unparseable command: fall back to the LEGACY content patterns, so on
     // this path the gate is exactly as strict as before -- never weaker.
@@ -439,19 +468,34 @@ function looseSendInvocation(cmd, depth = 0) {
 
 // HDSTRICT1122: the strict heredoc cut alone (see STRICT_OPEN_RE). A parse error of the strict text falls back like
 // the loose pass (the legacy patterns): a deny, never a miss.
-export function sendOnlyByStrictHeredoc(cmd, depth = 0) {
+export function sendOnlyByStrictHeredoc(cmd, depth = 0, mode = 'A') {
   if (!cmd.includes('<<')) return false
   let segments
   try {
-    segments = segmentsTokens(cmd, true)
+    segments = segmentsTokens(cmd, true, mode)
   } catch {
     return SEND_PATTERNS.some((re) => re.test(cmd))
   }
   return segments.some((toks) => segmentIsSend(toks, depth))
 }
 
+// SENDMODES1122 (card 64d10325 round 4, Viktor 50353): the send detection runs on every reading that can differ,
+// and a send in ANY of them is a send -- "A" (a word-start (( is arithmetic), "PP" (it is two subshells from its first
+// character; only with a (( and a #), "legacy" (main's mask; only with a #, a backslash-newline or a >& / <&). The
+// python twin (is_send_invocation in outgoing-copy-gate.py) has the reasons and the same readings.
+export function sendModes(cmd) {
+  const modes = ['A']
+  if (cmd.includes('#') && cmd.includes('((')) modes.push('PP')
+  if (cmd.includes('#') || cmd.includes('\\\n') || cmd.includes('>&') || cmd.includes('<&')) modes.push('legacy')
+  return modes
+}
+
+export function sendInReading(cmd, depth = 0, mode = 'A') {
+  return looseSendInvocation(cmd, depth, mode) || sendOnlyByStrictHeredoc(cmd, depth, mode)
+}
+
 export function isSendInvocation(cmd, depth = 0) {
-  return looseSendInvocation(cmd, depth) || sendOnlyByStrictHeredoc(cmd, depth)
+  return sendModes(cmd).some((m) => sendInReading(cmd, depth, m))
 }
 
 export function buildHeredocStrictMsg() {

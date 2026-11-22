@@ -569,7 +569,6 @@ def main():
             ("fakehd-comment-mixed", "# <<E\n" + kl_line + "\nE"),
             ("fakehd-arith-mixed", "echo $((1<<E)) >/dev/null\n" + kl_line + "\nE"),
             ("fakehd-herestring-mixed", "cat <<<E >/dev/null\n" + kl_line + "\nE"),
-            ("tgt-bsnl-short-mixed", kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/mess\\\nages")),
             ("tgt-dotseg-short-mixed", kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/./messages")),
             ("tgt-dotseg-long-mixed", kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/./messages")),
             ("KNOWN-K1-tgt-emptyvar-long-mixed",
@@ -592,9 +591,37 @@ def main():
             code, out, err = run_hook(bash(cmd), rules_file=active, cwd=kl_dir)
             if code != 0:
                 kl_changed.append(f"{label} (exit {code})")
-        check("KNOWN-LIMIT (Known limits, card 474437df): the 18 documented inputs still pass (exit 0); a changed "
+        check("KNOWN-LIMIT (Known limits, card 474437df): the 17 documented inputs still pass (exit 0); a changed "
               "row means a limit was closed or moved", kl_changed, [])
-        check("KNOWN-LIMIT: the list has the 18 documented labels", len(known_limit_rows), 18)
+        check("KNOWN-LIMIT: the list has the 17 documented labels", len(known_limit_rows), 17)
+        # card 64d10325 (SENDCONT1122: the mask drops a backslash-newline) closed the probe's tgt-bsnl-short-mixed
+        code, out, err = run_hook(bash(kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/mess\\\nages")),
+                                  rules_file=active, cwd=kl_dir)
+        check("KNOWN-LIMIT closed: a backslash-newline inside the target URL, a lookalike body blocks", code, 2)
+        # --- SENDMODES1122 (card 64d10325 round 4): what only the python twin reads ---------------------------------
+        # The shared list (send-invocation-cases.json) binds both twins; these two python readings have no JS twin:
+        # "legacy" is this twin's main (shlex reads the comment, so a mid-word # cuts an open quote, and the parse
+        # error falls back to the literals: main said send), and past _MULTI_READING_MAX the extra readings give way
+        # to the long-token literal search (the JS twin runs every reading at any length).
+        import importlib.util as _ilu
+        _sp = _ilu.spec_from_file_location("occ_gate_modes", HOOK)
+        _g = _ilu.module_from_spec(_sp)
+        _sp.loader.exec_module(_g)
+        legacy_only = "echo a#'\nsendmail a@b.c'"
+        check("SENDMODES1122: main's reading is kept (a mid-word # cuts the quote open: main audited it)",
+              _g.is_send_invocation(legacy_only), True)
+        check("SENDMODES1122: ... and only the legacy reading sees it (A, PP, blind, legacy)",
+              [_g._is_send_in_reading(legacy_only, 0, m) for m in ("A", "PP", "blind", "legacy")],
+              [False, False, False, True])
+        pad = "echo " + "ab " * 90_000
+        check_true("SENDMODES1122: the large command is past _MULTI_READING_MAX",
+                   len(pad) > _g._MULTI_READING_MAX, str(len(pad)))
+        check("SENDMODES1122: past _MULTI_READING_MAX a send only a comment reading names is still audited",
+              _g.is_send_invocation("true # sendmail a@b.c\n" + pad), True)
+        check("SENDMODES1122: ... which the A reading alone does not see",
+              _g._is_send_in_reading("true # sendmail a@b.c\n" + pad, 0, "A"), False)
+        check("SENDMODES1122: ... and a large command with a comment and no sender name stays clean",
+              _g.is_send_invocation("true # a note\n" + pad), False)
 
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
