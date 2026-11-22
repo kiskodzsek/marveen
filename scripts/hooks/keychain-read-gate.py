@@ -36,8 +36,33 @@ KNOWN-KTP-GLOB, a glob Python reads otherwise or not at all: posix-class and pos
 KNOWN-KTP-BRACE: brace-pad (e{01..02}.py), brace-step (e{1..3..2}.py), a blank in a member (brace-escblank
   {evil.py,a\\ b}, brace-quotedblank {evil.py,"a b"}).
 KNOWN-KTP-WORD, which word is the script: bash-o (`bash -o errexit e*.sh`), node-r (`node -r ./ok.js e*.js`),
-  glob-redirin (`</dev/null e*.py`), direct-glob and direct-brace (`./e*.sh`, `./{evil,x}.sh` run directly: read
-  as written).
+  glob-redirin (`</dev/null e*.py`). (direct-glob and direct-brace: closed by card 0196e1ee.)
+What a pipe feeds a shell (card 0196e1ee, Viktor 43793 LOW/INFO 2): a glob or brace in the fed words, a reader in a
+group or compound after the | (`| { bash; }`, `| while read l; do $l; done`, `| eval "$(cat)"`, `| /usr/bin/env
+bash`, `| b"as"h`), a loop / if / case / function feeding it, an echo / printf substitution's output in place, and
+a quoted substitution or backtick, a parameter operator (${F:-..}) or a backtick right before the pipe (unread) are
+read (stdin_pipelines). The globs, the unread rule and a direct glob hold for a | or a word at a code position of the
+command itself, of a heredoc body a shell reads (`bash <<'EOF'`, `. /dev/stdin <<X`, `cat <<'X' |` .. `bash`: its own
+pipeline, not a shell word elsewhere on its line, _shell_reads_heredoc) or of an unquoted body's $( ); in a quote or
+another heredoc body (a `python3 - <<'PY'` editing a file with `| bash` or a JSDoc `/**` in it: 165 fleet commands
+blocked otherwise) the fed words are read as written, as before; a fed line's glob only as its first word or an
+interpreter's script word (Viktor 49984). Open, LOW and old (main too):
+KNOWN-FEED-PROG, a program that hands a line to a shell itself: py-os-system (os.system('echo ./e*.sh | bash') in a
+  `python3 - <<'PY'` body: the glob in its string is read as written).
+KNOWN-FEED-FILE, a file between the feeder and the shell: one the command writes and a shell then reads (`echo
+  ./x.sh > p1; bash < p1`: the file does not exist when the gate reads), and the unread rule is not applied to a
+  script file's body (a binary's bytes matched it).
+KNOWN-FEED-CD, a cd the fed text or the reader makes: on separate fed lines (`printf 'cd sub\n./x.sh\n' | bash`) or
+  in the reader's own group (reader-cd-fed: `| (cd sub && bash)`); the fed path is read from the command's cwd.
+KNOWN-FEED-READER (Viktor 49925), a reader the gate does not take for a shell, or a loop that runs the line in a way
+  it does not read: a reader word made by a quoted variable, an operator or a substitution (var-reader-q `| "$S"`,
+  var-default `| ${S:-bash}`, subst-reader `| $(echo bash)`), zsh's zsh-equals (`| =bash`), a shell behind a for,
+  case or function call (for-reader, case-reader, func-reader: `| for x in 1; do bash; done`, `| case 1 in 1) bash;;
+  esac`, `f() { bash; }; .. | f`), a shell after another command of the group or the then-branch (true-then `| {
+  true; bash; }`, if-two `| if true; then true; bash; fi`), a while-read loop that runs the line quoted or through
+  command (while-quoted `"$a"`, while-command `command $l`) or is fed a glob (while-fed-glob), a process substitution
+  (procsub-out: `> >(bash)`, `tee >(bash)`) and `| builtin eval "$(cat)"`. Another program's output (`echo "$(date)"
+  | bash`) is H1, as everywhere.
 KNOWN-KTP-VAR, a value not bound or bound otherwise: var-ifs, var-array (X=(evil.py)), array-index, var-append
   (X+=), zshsplit-var ($=X), zshglobsubst-var ($~X), var-ansic ($'..'), var-patsub (${X/a/b}), var-plusalt
   (${X:+..}), var-assigndefault (${X:=..}), var-escsemi, read-var, positional-glob (`set -- e*.py; python3 $1`),
@@ -59,7 +84,9 @@ KNOWN-KTP-OVER, not open but leans: they block a harmless call (old unless named
   New in r5 (Viktor 49863 INFO and M1): a zsh group after `***/` whose matching members are all harmless
   (`***/(ok|zz).py`: any match blocks the group unread, as for every zsh paren); a brace whose second member is the
   one that matches (every brace word is read as a script, above); a loop value with `**` is read recursively in
-  bash too, where without globstar it is one `*` (one more file read, never fewer).
+  bash too, where without globstar it is one `*` (one more file read, never fewer). Viktor 49878 INFO: a quoted or
+  escaped loop value (`for f in "a/*/*/measure.py"`, `'**/measure.py'`, `\\*`) is no glob in the shell, the gate
+  reads it as one (the one-star form on main too).
 A variable glued to a script word (card 8a73eab1, Dave's audit 11-16; Viktor 49425): the word is read with every
 variable whose value the gate does not trust as unset and as set to "": one the text does not set, and one it sets in
 an expansion the gate does not trust. Read in bash's and zsh's forms (`evil${X}.py`, `X=; python3 evil$X.py`,
@@ -1522,6 +1549,19 @@ STDIN_SOURCE = r'(?:source|\.)[ \t]+[\'"]?(?:/dev/stdin|/dev/fd/0|/proc/self/fd/
 PIPE_SHELL_RX = re.compile(r'(?<![>|])\|&?[ \t]*' + CHAIN + r'(?:[\'"]?(?:' + WORD + r'*/)?' + _SHELL_NAME
                            + r'(?!' + _ALONE + r')|' + STDIN_SOURCE + r')')
 HERE_STRING_RX = re.compile(r'<<<[ \t]*')
+# card 0196e1ee (Viktor 43793 LOW/INFO 2): readers of the pipe PIPE_SHELL_RX does not see, measured with bash (the
+# fed ./x.sh ran): a shell in a group or a compound after the | (`| { bash; }`, `| ( bash )`, `| if true; then bash;
+# fi`, `| while read l; do bash $l; done`), a path to env (`| /usr/bin/env bash`), and code the pipe's lines become:
+# `| eval "$(cat)"`, `| while read l; do $l; done`, `| { read c; $c; }`, `| { read c; eval $c; }`, a $var as the
+# command. Any of them after a | makes the pipeline's text a shell's input (stdin_pipelines); a quoted shell name
+# (`| b"as"h`) is read by its decoded word there.
+_READER_HEAD = (r'(?:[({][ \t]*|(?:if|while|until)\b[^|]*?\b(?:then|do)\b[ \t]*'
+                r'|(?:[\w./-]*/)?env\b[ \t]+(?:-\S+[ \t]+|\w+=\S*[ \t]+)*)*')
+# a $var as the command: a whole word (a binary's `|$A)` bytes, read as a script file, are none)
+_READER_CODE = (r'(?:eval(?=[ \t]|$)|\$\{?[A-Za-z_]\w*\}?(?=[ \t;&\n]|$)|' + _SHELL_NAME + r'(?!' + _ALONE + r'))')
+PIPE_READER_RX = re.compile(r'(?<![>|])\|&?[ \t]*' + _READER_HEAD + r'(?:' + _READER_CODE
+                            + r'|read\b[^|]*?[;\n][ \t]*' + _READER_CODE + r')')
+_SHELL_WORD_RX = re.compile(r'(?:[\w./-]*/)?' + _SHELL_NAME)
 PIPELINE_START = ';&\n()`'  # a | does not end the pipeline the shell reads
 
 
@@ -1587,6 +1627,7 @@ def stdin_payloads(text, pipes=True):
 # moves to the opener that matches the ")" or "}" right before the pipe; an unmatched closer reads from the text's
 # start). Linear: the pipes with the same start are read once, up to the last of them.
 _GROUP_CLOSE = {')': '(', '}': '{'}
+_BLANK_RX, _BLANKS_RX = re.compile(r'\s'), re.compile(r'\s*')  # card 0196e1ee: str.split's blanks (str.isspace)
 _BRACE_AFTER_RX = re.compile(r'[ \t]*\}')  # no newline: a newline is a stop of its own (a run of them stays linear)
 _SEG_STOP = ';&|\n(){}<>'
 
@@ -1747,6 +1788,8 @@ def pipes_union(make_src, lexed=True, since=None):
     if since is None:
         since = _ESC_TAKEN[0]
     _XARGS_UNREAD[0] = False  # card 3bf9a741: set by either reading below, read by the caller right after
+    _FEED_UNREAD[0] = False  # card 0196e1ee: the same
+    _FEED_LIVE_WORDS[0] = set()  # card 0196e1ee: the words of a pipeline fed by a | of the command itself
     l1, w1 = stdin_pipelines(make_src(), lexed)
     if _ESC_SKIP[0] and _ESC_TAKEN[0] == since:
         return list(dict.fromkeys(l1)), list(dict.fromkeys(w1))
@@ -2011,8 +2054,9 @@ def stdin_pipelines(text, lexed=True):
     commands blocked on the script budget. The lexer only takes stops away, so a reading without it is main's."""
     import bisect
     pipes = [m.start() for m in PIPE_SHELL_RX.finditer(text)] if '|' in text else []
+    readers = _pipe_readers(text) if '|' in text else []  # card 0196e1ee
     xmatches = list(XARGS_RX.finditer(text)) if 'xargs' in text else []  # card 3bf9a741
-    if not pipes and not xmatches:
+    if not pipes and not readers and not xmatches:
         return [], []
     lx = lex_or_none(text) if lexed else None
     code = [c == 'c' for c in lx['cls']] if lx is not None else None
@@ -2021,6 +2065,8 @@ def stdin_pipelines(text, lexed=True):
     # taking in the lines above (the fleet replay: the gate file named two lines up blocked as script-file). The
     # body's stops are those of the body lexed on its own (every stop, as on main, when it does not lex): a lexing
     # only takes stops away, so this reads no shorter than main.
+    outer = list(code) if code is not None else None  # card 0196e1ee: the command's own code, before the bodies
+    dstarts, dends = [], []  # card 0196e1ee: the bodies of the heredocs no shell reads (data), in order
     if code is not None:
         for h in lx['heredocs']:
             bs, be = h.get('bodyStart'), h.get('bodyEnd')
@@ -2029,13 +2075,34 @@ def stdin_pipelines(text, lexed=True):
             sub = lex_or_none(text[bs:be])
             for k in range(bs, be):
                 code[k] = sub is None or sub['cls'][k - bs] == 'c'
+            if _shell_reads_heredoc(text, h):  # card 0196e1ee: its pipelines are the shell's own (`bash <<'EOF'`)
+                outer[bs:be] = code[bs:be]
+            else:
+                if sub is not None and not h['quoted']:
+                    # Viktor 49984: an unquoted delimiter's body is expanded, and the shell runs its $( ) and
+                    # backticks then (`cat > n <<X` + `$(echo ./e*.sh | bash)`: bash ran evil.sh): those are live
+                    for x in sub['substs']:
+                        if x['kind'] in ('$(', '`'):
+                            i0, i1 = bs + x['inner'][0], min(bs + x['inner'][1], be)
+                            outer[i0:i1] = code[i0:i1]
+                dstarts.append(bs)
+                dends.append(be)
+    # card 0196e1ee: a | in a quote is prose (lexed), one in a heredoc body is the body's own (lexed above); without
+    # the lexer every one counts, as PIPE_SHELL_RX's do
+    if readers:
+        pipes = sorted(set(pipes) | {r for r in readers if code is None or code[r]})
     # card 39d885ef (Viktor 43793 LOW 1): a stop is a CODE position (not in a quote: `echo './x.sh;' | bash` printed
     # the ;), and not the & of a redirection (2>&1, &>, <&: `echo ./x.sh 2>&1 | bash` started the pipeline after it)
-    stops = [i for i, ch in enumerate(text) if ch in PIPELINE_START and (code is None or code[i])
+    # card 0196e1ee: and the newline that ends a heredoc's terminator line (class t): the pipeline after it started at
+    # the body's last line, its first word the delimiter (`f() { echo ./x.sh; }; cat <<'E'` .. `E` + `f | bash` passed
+    # the function rule; bash ran x.sh)
+    stops = [i for i, ch in enumerate(text) if ch in PIPELINE_START
+             and (code is None or code[i] or (ch == '\n' and lx['cls'][i] == 't'))
              and not (ch == '&' and ((i > 0 and text[i - 1] in '<>') or text[i + 1:i + 2] == '>'))]
     openers = None
     memo = {}  # a position -> the start it leads to: each position is walked once (a chain of groups stays linear)
     brace = {}  # a stop -> the "}" right after it (blanks between), or None
+    firsts, names = {}, None  # card 0196e1ee: a start -> its first non-blank; (blanks, names, longest name)
     spans = {}
     xpipes = []  # card 3bf9a741: (the xargs match, the position of the | that feeds it, or None)
     for m in xmatches[:XARGS_SCAN_MAX + 1]:
@@ -2071,6 +2138,23 @@ def stdin_pipelines(text, lexed=True):
                     closer = brace[s]
             if closer is None:
                 b = s + 1
+                # card 0196e1ee (Viktor 43793 LOW/INFO 2): a loop, an if, a case or a function the text defines feeds
+                # the pipe (`for f in ./x.sh; do echo $f; done | bash`, `if ..; then echo ./x.sh; fi | bash`, `case ..
+                # esac | bash`, `f() { echo ./x.sh; }; f | bash`, bash ran x.sh): its body is not between the last stop
+                # and the |, so the whole text before the | is read (over-read, never shorter)
+                # (linear: the blanks and the defined names found once, each start's blank run skipped once, and
+                # a word longer than every name never cut out: 20 000 pipes of `echo x | bash; ` ran the whole-text
+                # search per pipe into the watchdog, 5 000 nested groups a word scan per group to the text's end)
+                if names is None:
+                    fn = _defined_functions(text) | {'done', 'fi', 'esac'}
+                    names = ([m.start() for m in _BLANK_RX.finditer(text)], fn, max(map(len, fn)))
+                if b not in firsts:
+                    firsts[b] = _BLANKS_RX.match(text, b).end()
+                st = firsts[b]
+                k = bisect.bisect_left(names[0], st)
+                end = min(names[0][k] if k < len(names[0]) else len(text), p)
+                if 0 < end - st <= names[2] and text[st:end] in names[1]:
+                    b = 0
                 break
             if openers is None:
                 openers = _group_openers(text, code)
@@ -2081,41 +2165,99 @@ def stdin_pipelines(text, lexed=True):
             b = o
         for x in path:
             memo[x] = b
-        start[p] = b
+        # card 0196e1ee (fleet replay 2): a pipeline in the body of a heredoc no shell reads starts in that body: a
+        # walk to 0 there (a function name or an unmatched ")" of the body's Python, which does not lex) took in the
+        # outer command's words (`cd`, read as a script word after a cd: 1 fleet command blocked). Its pipes are no
+        # live ones (outer), so only those over-read words go
+        k = bisect.bisect_right(dstarts, p) - 1
+        start[p] = dstarts[k] if k >= 0 and p < dends[k] and b < dstarts[k] else b
+    lspans = {}  # card 0196e1ee: a start -> its last | at a code position of the command itself (see below)
     for p in pipes:
         spans[start[p]] = max(spans.get(start[p], p), p)
+        if outer is None or outer[p]:
+            lspans[start[p]] = max(lspans.get(start[p], p), p)
+    # card 0196e1ee (Viktor 43793 LOW/INFO 2): what a fed text makes by itself. Measured with bash, each ran the
+    # fed script: `echo '\x60./x.sh\x60' | bash` and `echo '$(./x.sh)' | bash` (a quoted substitution: the shell that
+    # reads the pipe runs it), `echo zzprobe ${F:-zzsub} | bash` (a parameter operator makes the word), `echo zzprobe
+    # \x60echo zzsub\x60 | bash` (a backtick is a pipeline start: one right before the span closed a substitution the
+    # feeder prints): unread. A $( at a code position is the feeder's own substitution: generated_lines reads what
+    # an echo / printf in it prints, and its output another program makes (`echo "$(date)" | bash`) is H1, accepted
+    # (Viktor 48205's controls); here its echo / printf output is also put in place (`echo zzprobe $(echo zzsub) |
+    # bash`: the line `zzprobe zzsub`). Without the lexer every $( and backtick in the span counts as quoted
+    # card 0196e1ee: the unread rule and the fed globs only for a | at a code position of the command itself. A | in
+    # a quote or in a heredoc body (lexed on its own above, so its pipelines are read: over-read words, harmless) is
+    # a pipe of whatever reads that text, mostly data (`python3 - <<'PY'` editing a file with `| bash` in it): the
+    # fleet replay blocked 52 such commands. Without the lexer every | counts (fail-closed).
     merged = []  # overlapping spans (a pipe inside a group that is piped again) read once, as their union
     for b, p in sorted(spans.items()):
+        live = b in lspans  # its words are live (over-read past the last live |: stricter, never fewer)
         if merged and b <= merged[-1][1]:
             merged[-1][1] = max(merged[-1][1], p)
+            merged[-1][2] = merged[-1][2] or live
         else:
-            merged.append([b, p])
+            merged.append([b, p, live])
+    # the operators and substitutions over the union of the live spans (the same chars; 5 000 nested groups scanned
+    # per span ran quadratic, and no `$(` or `${` spans two spans: a span ends at a |)
+    lmerged = []
+    for b, p in sorted(lspans.items()):
+        if b > 0 and text[b - 1] == '`':
+            _FEED_UNREAD[0] = True
+        if lmerged and b <= lmerged[-1][1]:
+            lmerged[-1][1] = max(lmerged[-1][1], p)
+        else:
+            lmerged.append([b, p])
+    for b, p in lmerged:
+        if _FEED_PARAM_RX.search(text, b, p) or any(
+                code is None or not code[m.start()] for m in _FEED_MADE_RX.finditer(text, b, p)):
+            _FEED_UNREAD[0] = True
     lines, words = [], []
-    for b, p in merged:
+    for b, p, live in merged:
         seg = text[b:p]
         cmds = _seg_cmds(seg)
+        # Viktor 49925 L2: the dedup through a set (a list scan per command was quadratic: a `done` feeder's span is
+        # the text from its start, 28 000 commands of nested loops took 1 s)
+        seen = {tuple(cw) for cw in cmds}
+
+        def _new(cws):
+            out = [cw for cw in cws if tuple(cw) not in seen]
+            seen.update(tuple(cw) for cw in out)
+            return out
         # card 39d885ef: the same words without the redirections: `echo s3curity 2>/dev/null dump-keychain` prints the
         # call whole (bash and zsh ran it, measured); zsh's MULTIOS sends a `>x` to the pipe too. Never fewer reads
-        cmds += [cw for cw in _seg_cmds(seg, strip=True) if cw not in cmds]
+        cmds += _new(_seg_cmds(seg, strip=True))
+        # card 0196e1ee: an echo / printf substitution at a code position, its output put in place (see above)
+        put = _FEED_ECHO_SUBST_RX.sub(lambda e: ' '.join(_feeder_words(_seg_cmds(e.group(1))[0])[1:])
+                                      if _seg_cmds(e.group(1)) else '', seg)
+        if put != seg:
+            cmds += _new(_seg_cmds(put))
         for cw in cmds:
-            lines.extend(cw)
+            # Viktor 49925 L1: a pipeline that is not live (a heredoc body no shell reads, a quote) is read as
+            # written, as on main: a glob / brace word at the command position of one of its lines goes quoted, so
+            # the direct-pattern rule (new in this card) does not glob it there (`cat > notes.md <<'X'` + `echo
+            # ./e*.sh | bash`: the line `./e*.sh` matched evil.sh). The other words stay: an interpreter's glob word
+            # (`echo python3 ./m*.py | bash` in a quote) is read as on main
+            lw = cw if live else [_quote_pattern_word(v) for v in cw]
+            lines.extend(lw)
             if len(cw) > 1:
-                lines.append(' '.join(cw[1:]))
+                lines.append(' '.join(lw[1:2] + cw[2:]))
             for v in cw:
                 words.extend(v.split())
+                if live:  # Viktor 49984 L1b: a fed line's first word, the command the shell runs (`echo 'echo
+                    # ./e*.sh' | bash` prints the glob; a word after a ; or an interpreter's: the line in `text`)
+                    _FEED_LIVE_WORDS[0].update(ln.split(None, 1)[0] for ln in v.split('\n') if ln.strip())
             fw = _feeder_words(cw)  # card c7234bed (Viktor 47808 LOW L1): after builtin / command / env ..., and print
             if fw and fw[0] in ('printf', 'echo', 'print') and any('\\' in v for v in fw[1:]):  # 39d885ef
                 for v in fw[1:]:
                     for u in dict.fromkeys((_printf_unescape(v), _printf_unescape(v, zero=True))):
                         if u != v:
                             for ln in u.split('\n'):
-                                lines.append(ln)
+                                lines.append(_quote_line(ln, live))
                                 words.extend(ln.split())
             # a bare `printf` (fw[1] missing) raised IndexError here, on main too (`cw[1]`): an 'error' block
             if fw and fw[0] == 'printf' and len(fw) > 1 and len(fw) > 1 + (fw[1] == '--'):
                 f = 1 + (fw[1] == '--')  # card 39d885ef: the arguments put into the format (printf 'x\n%s y\n' z)
                 for ln in _printf_output(fw[f], fw[f + 1:]).split('\n'):
-                    lines.append(ln)
+                    lines.append(_quote_line(ln, live))
                     words.extend(ln.split())
     if len(xpipes) > XARGS_SCAN_MAX:
         _XARGS_UNREAD[0] = True
@@ -2231,6 +2373,31 @@ XARGS_DATA = frozenset({'echo', 'printf', 'grep', 'egrep', 'fgrep', 'true', 'fal
 XARGS_MAX_WORDS = 512
 XARGS_MAX_CHARS = 200_000
 _XARGS_UNREAD = [False]  # set by stdin_pipelines, reset by pipes_union, read by its callers
+_FEED_MADE_RX = re.compile(r'\$\(|`')
+_FEED_PARAM_RX = re.compile(r'\$\{(?:[#!]|\w+(?:\[[^]]*\])?[^}\w])')
+_FEED_ECHO_SUBST_RX = re.compile(r'\$\([ \t]*((?:echo|printf|print)(?:[ \t]+[^$`()|;&<>\n]*)?)\)')
+
+
+def _pipe_readers(text):
+    """Card 0196e1ee: the | positions PIPE_READER_RX finds, and a | whose next word, decoded as the shell does
+    (quotes and backslashes taken off), is a shell (`| b"as"h`, `| 'ba''sh'`)."""
+    out = [m.start() for m in PIPE_READER_RX.finditer(text)]
+    for m in re.finditer(r'(?<![>|])\|&?[ \t]*(?=[\w./\\\'"-]*[\\\'"])', text):
+        w = shell_word(text, m.end())[0]
+        if _SHELL_WORD_RX.fullmatch(w):
+            out.append(m.start())
+    return out
+
+
+# a `function` keyword consumes only itself and its blanks, so a name right after it is found again as a `name()`
+_FUNC_DEF_RX = re.compile(r'(?<![\w.:-])(?:([\w.:-]+)[ \t]*\([ \t]*\)|function[ \t]+(?=([\w.:-]+)))')
+
+
+def _defined_functions(text):
+    """Card 0196e1ee: the names of the shell functions the text defines (`name()`, `function name`), one pass."""
+    return {a or b for a, b in _FUNC_DEF_RX.findall(text)}
+_FEED_UNREAD = [False]  # card 0196e1ee: the same for a pipeline into a shell whose fed text the gate does not read
+_FEED_LIVE_WORDS = [set()]  # card 0196e1ee: the fed words of a | at a code position of the command (set as above)
 _XARGS_SEP = frozenset(';(){}\n`|&$')  # the chars XARGS_RX's position may start with (^ starts with none)
 _XARGS_PLAIN_RX = re.compile(r'[\w./@%+=:,-]+')
 _XARGS_REDIR_RX = re.compile(r'\d*(?:&>>?|[<>]&|<<<|<<-?|<>|>>?\|?|<)')
@@ -2594,6 +2761,8 @@ def _hits(cmd, script=False):
     lines = pipes_union(lambda: normalise(src), lexed=not script)[0]  # since: normalise(src) is made inside
     if _XARGS_UNREAD[0]:  # card 3bf9a741: an xargs past XARGS_MAX / XARGS_MAX_WORDS / XARGS_MAX_CHARS
         found += [h for h in ['xargs-unread'] if h not in found]
+    if _FEED_UNREAD[0] and not script:  # card 0196e1ee: a fed text with a substitution or a backtick; not in a
+        found += [h for h in ['stdin-feed-unread'] if h not in found]  # script file's body (KNOWN-FEED-FILE)
     if lines:
         found += [h for h in hits_in('\n'.join(lines), script) if h not in found]
     # card c7234bed: what an echo / printf substitution prints where a reader of shell code runs it (generated_lines)
@@ -3220,10 +3389,11 @@ class ScriptGroup(list):
     value_unread_names() returns: every word globbed blocked 210 fleet commands (script-too-many, a glob naming more
     than MAX_LOOP_PATHS files: `node x.mjs "src/*.ts"`), measured."""
 
-    def __init__(self, words=(), lead=frozenset(), expand=False):
+    def __init__(self, words=(), lead=frozenset(), expand=False, zsh=True):
         super().__init__(words)
         self.lead = lead
         self.expand = expand  # the lead word as written has a glob or a brace outside quotes (unquoted_pattern)
+        self.zsh = zsh  # card 0196e1ee: False for a word a pipe feeds a shell (decoded text, not the command's word)
 
 
 def unquoted_pattern(raw):
@@ -4410,7 +4580,7 @@ def interp_groups(text, expanded=False):
     return groups
 
 
-def script_paths(cmd, cwd, normalised=None, extra=()):
+def script_paths(cmd, cwd, normalised=None, extra=(), live=None):
     """The script files the command runs (resolved, existing regular files), at most MAX_SCRIPTS (an eleventh file
     or more than MAX_BASES directories returns MAX_SCRIPTS + 1 entries: the caller blocks). Raises TooManyArgs.
     extra: more words to look up as files (a pipeline into a shell, card 74586987)."""
@@ -4436,7 +4606,13 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
     plain = normalise(cmd)
     trusted = (plain == cmd and expansion_trusted(norm, lnames) and
                (norm == plain or expansion_trusted(plain, lnames)))  # r1: normalise() changed nothing
-    groups = interp_groups(text, text != norm and not trusted) + [[w] for w in extra]
+    # card 0196e1ee (Viktor 43793 LOW 2): a word a pipe feeds a shell is globbed and brace-expanded by that shell (or
+    # by the feeder's own shell, unquoted), whatever its quotes were: `echo ./x.s? | bash`, `echo './x.*' | bash`,
+    # `echo ./{x,y}.sh | bash` ran x.sh. Its first match is the command, as for a script word (resolve_word)
+    groups = interp_groups(text, text != norm and not trusted) + [
+        ScriptGroup([w], lead=frozenset([w]), expand=True, zsh=False)
+        if (_GLOB_CHARS_RX.search(w) or _BRACE_ALT_RX.search(w)) and (live is None or w in live) else [w]
+        for w in extra]
     if text != norm and not trusted:
         # card 8a73eab1: an expansion the shell may not make (`echo X=a; python3 evil$X.py`: $X is empty, evil.py
         # runs) is read without it too, so the variable-empty readings of word_forms see the $X
@@ -4458,7 +4634,34 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
             if len(cat_words) > MAX_ARGS:
                 raise TooManyArgs(f'cat: {len(cat_words)} szó, MAX_ARGS {MAX_ARGS}')
             groups += [[strip_quotes(w)] for w in cat_words if not w.startswith('-')]
-    groups += [[m.group(1)] for m in DIRECT_RX.finditer(text)]
+    # card 0196e1ee (Viktor 43793 LOW 2, KNOWN-KTP-WORD direct-glob / direct-brace): a path run directly is globbed
+    # and brace-expanded too (`./x.s?`, `./x.*`, `./{evil,x}.sh` ran x.sh / evil.sh): its first match is the script.
+    # Only when no quote opens the word (`'./x.s?'` runs the file named so)
+    dcls = None  # card 0196e1ee: a direct pattern is globbed only at a code position or in a heredoc body a shell
+    # reads (a JSDoc `/**` line in a `python3 - <<'PY'` body is data: the fleet replay blocked 113 such commands on
+    # the walk from /); no lexer: all. Nor right after a process substitution's ")" (`diff <(sed ..) b/k*.py`: the
+    # word is diff's argument; the fleet replay blocked one such command); a text the lexer does not read: the
+    # command's own lexing (_direct_code_view)
+    raw_left = [_DIRECT_RAW_MAX]
+    has_quote = None  # Viktor 49925 L2: searched once per text (per match it was quadratic: 27 000 fed globs, 54 s)
+    for m in DIRECT_RX.finditer(text):
+        w = m.group(1)
+        quoted = m.start(1) > 0 and text[m.start(1) - 1] in '\'"'
+        pat = not quoted and unquoted_pattern(w)
+        if pat and has_quote is None:
+            has_quote = _QUOTED_RX.search(text) is not None
+        if pat and (has_quote or text[m.start()] == ')'):
+            if dcls is None:
+                dcls = _direct_code_view(text, cmd)
+            if dcls is False:
+                pass
+            elif dcls[0] is None:
+                pat = not _only_in_data_bodies(w, text, cmd, dcls[1], raw_left)
+            else:
+                pat = (dcls[0][m.start(1)] == 'c' or any(
+                    a is not None and b is not None and a <= m.start(1) < b for a, b in dcls[1])) and not (
+                    text[m.start()] == ')' and m.start() + 1 in dcls[2])
+        groups.append(ScriptGroup([w], lead=frozenset([w]), expand=True) if pat else [w])
     # Kernel r3: a heredoc body no shell reads (blanked here) keeps the cut zsh flag group's glob reading (KNOWN-V9)
     data_texts = {id(t): _blank_data_heredocs(t) if '${(' in t else t for t in word_texts}
     for t, m in ((t, m) for t in word_texts for m in DIRECT_WORD_RX.finditer(t)):
@@ -4664,10 +4867,11 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
                     return True
         return False
 
-    def resolve_word(c):
+    def resolve_word(c, zsh=True):
         """Card 00c714ea: a script word as the shell makes it: each word its brace expansion makes, a glob in it
-        expanded in each base (resolve_lead_glob)."""
-        if zsh_paren_may_match(c):
+        expanded in each base (resolve_lead_glob). zsh False (card 0196e1ee): a word a pipe feeds a shell is decoded
+        text, not a word of the command text the zsh paren is looked up in."""
+        if zsh and zsh_paren_may_match(c):
             raise PathUnread(f'a zsh glob group or qualifier in a script word: {c[:40]}')
         found = False
         for f in brace_forms(c):
@@ -4702,7 +4906,7 @@ def script_paths(cmd, cwd, normalised=None, extra=()):
         # (Viktor 41756 LOW 2); measured, that exception spared 33 of the replay's rows only
         lead = getattr(group, 'lead', ()) if getattr(group, 'expand', False) else ()
         for c in group:
-            if (resolve_word(c) if c in lead else resolve(c)) is None:
+            if (resolve_word(c, getattr(group, 'zsh', True)) if c in lead else resolve(c)) is None:
                 return [''] * (MAX_SCRIPTS + 1)
         if len(out) > MAX_SCRIPTS:
             break
@@ -5466,6 +5670,171 @@ def decoded_payloads(text):
     return out
 
 
+def _quote_pattern_word(v):
+    """Viktor 49925 L1 (card 0196e1ee): a glob / brace word of a pipeline that is not live, single-quoted for its
+    line, so DIRECT_RX reads it as written (a word with a ' in it stays as it is: the quote rule sees that one)."""
+    if "'" not in v and (_GLOB_CHARS_RX.search(v) or _BRACE_ALT_RX.search(v)):
+        return "'" + v + "'"
+    return v
+
+
+# Viktor 49984 L1b (card 0196e1ee): the commands whose words run nothing; a shell name among them (`grep -c sh <<'X'`)
+# does not make their heredoc a shell's (XARGS_DATA's plain readers, and tee, which only copies)
+_HD_DATA_CMDS = frozenset({'cat', 'tee', 'grep', 'egrep', 'fgrep', 'wc', 'head', 'tail', 'echo', 'printf', 'true',
+                           'false', ':'})
+_HD_NEST = frozenset('(){}`')
+_HD_MAX_NEXT = 8  # lines a pipeline that a heredoc's line leaves open (`cat <<'X' |`) is followed past its body
+
+
+def _hd_line_bounds(cmd, a, b):
+    """The line around [a, b) (the texts read here are normalised: a backslash-newline is joined already)."""
+    le = cmd.find('\n', b)
+    return cmd.rfind('\n', 0, a) + 1, len(cmd) if le < 0 else le
+
+
+def _hd_cuts(cmd, cls, a, b):
+    """(separators, pipes) at code positions in cmd[a:b]: ;, &, &&, || (not a redirection's &), and | / |&."""
+    seps, pipes, i = [], [], a
+    while i < b:
+        ch = cmd[i]
+        if cls[i] != 'c' or ch not in ';&|':
+            i += 1
+            continue
+        nxt = cmd[i + 1:i + 2]
+        if ch == ';':
+            seps.append(i)
+        elif ch == '&':
+            if cmd[i - 1:i] not in ('<', '>') and nxt != '>':
+                seps.append(i)
+                i += nxt == '&'
+        elif nxt == '|':
+            seps.append(i)
+            i += 1
+        elif cmd[i - 1:i] != '>':  # >| is a redirection
+            pipes.append(i)
+            i += nxt == '&'
+        i += 1
+    return seps, pipes
+
+
+def _hd_cmd_reads(part):
+    """One command of a heredoc's pipeline reads shell code: a shell name or `source /dev/stdin` in it, and it is
+    not one of _HD_DATA_CMDS (its name read as the shell reads it, past env / nohup / VAR=..; not read: kept)."""
+    if not GEN_HERE_READER_RX.search(part):
+        return False
+    cws = _seg_cmds(part, strip=True)
+    fw = _feeder_words(cws[0]) if len(cws) == 1 else []
+    return not (fw and fw[0] in _HD_DATA_CMDS)
+
+
+def _quote_line(ln, live):
+    """Viktor 49984 L1b: a printf / echo -e output line of a pipeline that is not live, its glob / brace words quoted
+    as _quote_pattern_word does a fed word (`printf '%s\\n' ./e{v,x}il.sh | sh` in a data heredoc printed the brace)."""
+    return ln if live else ' '.join(_quote_pattern_word(x) for x in ln.split())
+
+
+def _shell_reads_heredoc(cmd, hd):
+    """Card 0196e1ee: a shell reads this heredoc of the lexer's (its body is the shell's code, not data). Was (and is,
+    where the line is not plain): its command line has a shell word (shell_heredoc_bodies' test). Viktor 49984 L1b:
+    on a plain line (no group, substitution or backtick in it, the lexer reads it) only the heredoc's own pipeline
+    counts, between the separators around it, and in it no command of _HD_DATA_CMDS (`grep -c sh <<'X'`, `cat > n
+    <<'A'; bash <<'B'`, `cat > n <<'X'; echo hi | bash`: their body is data, bash ran none of it); a pipeline the line
+    leaves open after a | (`cat <<'X' |` + body + `X` + `bash`) goes on past the bodies, up to _HD_MAX_NEXT lines
+    (past them: read). `source /dev/stdin` and `. /dev/stdin` read it too (they were missed: the body ran unread)."""
+    import bisect
+    ls, le = _hd_line_bounds(cmd, hd['op'], hd['opEnd'])
+    lx = lex_or_none(cmd)
+    if lx is None:
+        return GEN_HERE_READER_RX.search(cmd[ls:le]) is not None
+    # once per line and per pipeline (many heredocs on one line: `cat <<A <<B ..` read the line once, not per heredoc)
+    memo = lx.setdefault('_hd_memo', {})
+    if (ls, le) not in memo:
+        line = cmd[ls:le]
+        nest = bool(_HD_NEST.intersection(line))
+        memo[(ls, le)] = (nest, GEN_HERE_READER_RX.search(line) is not None,
+                          *(([], []) if nest else _hd_cuts(cmd, lx['cls'], ls, le)))
+    nest, anywhere, seps, pipes = memo[(ls, le)]
+    if nest:
+        return anywhere
+    cls = lx['cls']
+    k = bisect.bisect_left(seps, hd['op'])
+    a = (seps[k - 1] if k else ls - 1) + 1
+    k = bisect.bisect_left(seps, hd['opEnd'])
+    b = seps[k] if k < len(seps) else le
+    cuts = pipes[bisect.bisect_left(pipes, a):bisect.bisect_left(pipes, b)]
+    going_on = b == le and cuts and not cmd[cuts[-1] + 1:le].replace('\\\n', '').strip(' \t&')
+    if not going_on:
+        if not anywhere:
+            return False
+        if ('p', a, b) not in memo:
+            memo[('p', a, b)] = any(_hd_cmd_reads(cmd[x + 1:y]) for x, y in zip([a - 1] + cuts, cuts + [b]))
+        return memo[('p', a, b)]
+    # the line ends in a | : the pipeline goes on after the last body of the line's heredocs
+    parts = [cmd[x + 1:y] for x, y in zip([a - 1] + cuts, cuts)]
+    ops = lx.get('_hd_ops')
+    if ops is None:
+        ops = lx['_hd_ops'] = [h['op'] for h in lx['heredocs']]
+    at = max(h['end'] for h in lx['heredocs'][bisect.bisect_left(ops, ls):bisect.bisect_left(ops, le)])
+    for _ in range(_HD_MAX_NEXT):
+        if at >= len(cmd):
+            break
+        nls, nle = _hd_line_bounds(cmd, at, at)
+        nxt = cmd[nls:nle]
+        if _HD_NEST.intersection(nxt) or '<<' in nxt:
+            return GEN_HERE_READER_RX.search(nxt) is not None or any(_hd_cmd_reads(p) for p in parts)
+        nseps, npipes = _hd_cuts(cmd, cls, nls, nle)
+        end = min(nseps, default=nle)
+        ncuts = [p for p in npipes if p < end]
+        if end == nle and ncuts and not cmd[ncuts[-1] + 1:nle].replace('\\\n', '').strip(' \t&'):
+            parts += [cmd[x + 1:y] for x, y in zip([nls - 1] + ncuts, ncuts)]
+            at = nle + 1
+            continue
+        parts += [cmd[x + 1:y] for x, y in zip([nls - 1] + ncuts, ncuts + [end])]
+        break
+    else:
+        return True
+    return any(_hd_cmd_reads(p) for p in parts)
+
+
+_DIRECT_RAW_MAX = 64  # card 0196e1ee: _only_in_data_bodies' scans of the command per text (past it: a pattern)
+
+
+def _direct_code_view(text, cmd):
+    """Card 0196e1ee (fleet replay 2): what script_paths' direct-pattern test reads. A text the lexer reads: (its
+    classes, the bodies of the heredocs a shell reads, the ends of its <( / >( substitutions). One it does not (a
+    payload mark in a `python3 - <<'PY'` body cut it: 2 fleet commands blocked on a JSDoc `/**`): (None, the bodies
+    of the command's own heredocs no shell reads, None). Neither lexed: False (every pattern is globbed)."""
+    lx = lex_or_none(text)
+    if lx is not None:
+        return (lx['cls'], [(h['bodyStart'], h['bodyEnd']) for h in lx['heredocs'] if _shell_reads_heredoc(text, h)],
+                {s['end'] for s in lx['substs'] if s.get('kind') in ('<(', '>(')})
+    rl = lex_or_none(cmd)
+    if rl is None:
+        return False
+    return (None, [(h['bodyStart'], h['bodyEnd']) for h in rl['heredocs'] if h.get('bodyStart') is not None
+                   and h.get('bodyEnd') is not None and not _shell_reads_heredoc(cmd, h)], None)
+
+
+def _occurrences(s, w):
+    """Every start of w in s, overlapping ones too."""
+    out, i = [], s.find(w)
+    while i >= 0:
+        out.append(i)
+        i = s.find(w, i + 1)
+    return out
+
+
+def _only_in_data_bodies(w, text, cmd, bodies, left):
+    """Card 0196e1ee: w stands in cmd, only inside those bodies, and the text has it no more often than they do (an
+    occurrence a $NAME made is none of theirs: it stays a pattern). left: scans still allowed (past them: False)."""
+    if not bodies or left[0] <= 0:
+        return False
+    left[0] -= 1
+    occ = _occurrences(cmd, w)
+    inside = [i for i in occ if any(a <= i and i + len(w) <= b for a, b in bodies)]
+    return bool(occ) and len(inside) == len(occ) and len(_occurrences(text, w)) <= len(inside)
+
+
 def shell_heredoc_bodies(cmd, lx):
     """Card 2917e6b6: the body of each heredoc (the lexer's) whose command line has a shell word in it (STDIN_SHELL_RX,
     as for a here-string: `bash <<'EOF'`, `sudo -u a sh <<EOF`; over-read, a shell elsewhere on the line counts too).
@@ -5537,8 +5906,11 @@ def script_hits(cmd, cwd):
         pipe_srcs.append(s)
         return s
     pipe_lines, pipe_words = pipes_union(_pipe_src_seen, since=esc0)
+    pipe_live = frozenset(_FEED_LIVE_WORDS[0])  # card 0196e1ee: taken now, before another reading resets it
     if _XARGS_UNREAD[0]:  # card 3bf9a741: not "read the first ones": an xargs past the bounds would slip past
         return found + ['xargs-unread']
+    if _FEED_UNREAD[0]:  # card 0196e1ee: what a fed text makes by itself is not read
+        return found + ['stdin-feed-unread']
     text += ''.join('\n' + ln for ln in pipe_lines)
     # card 946937b7 (Viktor 45626 R1): a here-string a shell reads (`bash <<<'python3 m.py'`, `<<<'./m.sh' sh`) runs
     # its word as a command line: read like a pipeline's lines (stdin_payloads knows which <<< feeds a shell); of
@@ -5575,7 +5947,7 @@ def script_hits(cmd, cwd):
     if None in bounds:
         return found + ['wrapper-unread']
     try:
-        paths = script_paths(cmd, cwd, text, pipe_words)
+        paths = script_paths(cmd, cwd, text, pipe_words, pipe_live)
         for t in dict.fromkeys(bounds[:1] + texts[1:] + bounds[1:]):
             if t == text:
                 continue
