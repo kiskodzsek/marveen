@@ -102,7 +102,10 @@ def ledger_run(cmd, rows):
             {'tool_name': 'Bash', 'tool_input': {'command': cmd}}), capture_output=True, text=True,
             env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': db}, timeout=20)
         log = os.path.join(d, 'repo-create-gate.log')
-        return p.returncode, (open(log).read() if os.path.exists(log) else '')
+        if not os.path.exists(log):
+            return p.returncode, ''
+        with open(log) as fh:
+            return p.returncode, fh.read()
 
 
 OKQ = 'PATRIK-KERTE: TG 18160 "csinálj egy privát repót sajat-rendszer néven"'
@@ -441,9 +444,13 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 def boom(*a, **k):
     raise RuntimeError('injected')
-m.verdict = boom
+def kbi(*a, **k):
+    raise KeyboardInterrupt
+m.verdict = kbi if sys.argv[2].startswith('kbi') else boom
 if sys.argv[2] == 'both':
     m.creates_repo = boom
+if sys.argv[2] == 'kbi-both':
+    m.creates_repo = kbi
 sys.exit(m.main())
 '''
 
@@ -455,7 +462,10 @@ def crash_run(payload, mode='verdict'):
                        capture_output=True, text=True, timeout=20,
                        env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
                             'HOOK_ERRLOG_PATH': log})
-    logged = open(log).read() if os.path.exists(log) else ''
+    logged = ''
+    if os.path.exists(log):
+        with open(log) as fh:
+            logged = fh.read()
     return p.returncode, p.stderr, logged
 
 
@@ -491,6 +501,48 @@ crash_expect('internal error in the fallback too: allowed, never exit 1', crash_
              'internal error, allowed')
 r = crash_run(bash_payload(CREATE))
 expect('the internal-error block message names the cause', (0 if 'belső hibára' in r[1] else 1, r[1]), 0)
+
+# Viktor 50109 (independent probe rcf). R1: "~<lone surrogate>" / "~<NUL>" made expanduser raise inside
+# referenced_files(), and the creation in an EARLIER referenced script went through (98e55fd3 and main: 0).
+with tempfile.TemporaryDirectory() as d:
+    with open(os.path.join(d, 'mk.py'), 'w') as fh:
+        fh.write(f'import os\nos.system("{CREATE}")\n')
+    expect('NEG R1 a referenced creation, then a ~<lone surrogate> reference, blocks',
+           bash('python3 mk.py; python3 ~\ud800/x.py', cwd=d), 2)
+    expect('NEG R1 a referenced creation, then a ~<NUL> reference, blocks', bash('python3 mk.py; python3 ~\x00/x.py', cwd=d), 2)
+    # (c) after a crash the fallback reads the files the command names too
+    crash_expect('NEG internal error + a creation only in a referenced script blocks',
+                 crash_run({'tool_name': 'Bash', 'tool_input': {'command': 'python3 mk.py'}, 'cwd': d}), 2,
+                 'blocked (raw creation)')
+# R2: over 256 KB the rest was searched only from 1 KB before the cut; a REST path before the cut and its gh api
+# field after it is one creation (direct-ghapi-words-field-end-1m)
+expect('NEG R2 1 MB: the REST path before the cut, the gh api field after it, blocks',
+       bash('gh api /user/repos ' + 'w ' * (512 * 1024) + '-f name=x'), 2)
+# V02: after a crash the fallback reads the WHOLE command, not the first 256 KB
+crash_expect('NEG internal error + a creation past 256 KB blocks',
+             crash_run(bash_payload('echo ' + 'w ' * (160 * 1024) + '; ' + CREATE)), 2, 'blocked (raw creation)')
+# (d) a null / non-dict tool_input of an MCP create tool carries no approval line (direct-mcp-create-input-null)
+expect('NEG an MCP create tool with a null tool_input blocks', run({'tool_name': 'mcp__github__create_repository',
+                                                                    'tool_input': None}), 2)
+expect('NEG an MCP create tool with a string tool_input blocks', run({'tool_name': 'mcp__github__create_repository',
+                                                                      'tool_input': 'x'}), 2)
+# (e) a closed stderr still blocks with exit 2, not 1 (direct-stderr-closed-create); a KeyboardInterrupt in the
+# judgment takes the crash path (kbi-cli-create)
+p = subprocess.run(['/bin/sh', '-c', 'exec "$0" -I "$1" 2>&-', sys.executable, GATE],
+                   input=json.dumps(bash_payload(CREATE)), capture_output=True, text=True, timeout=20,
+                   env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'})
+expect('NEG a creation with a closed stderr exits 2, not 1', (p.returncode, ''), 2)
+crash_expect('NEG a KeyboardInterrupt in the judgment + a raw creation blocks',
+             crash_run(bash_payload(CREATE), 'kbi'), 2, 'blocked (raw creation)')
+# a KeyboardInterrupt in the fallback too is caught like any crash there: allowed, logged, never a traceback exit
+crash_expect('a KeyboardInterrupt in the judgment and in the fallback: allowed, never exit 1',
+             crash_run(bash_payload(CREATE), 'kbi-both'), 0, 'internal error, allowed')
+# the crash path's block message with a closed stderr still exits 2
+p = subprocess.run(['/bin/sh', '-c', 'exec "$0" -I -c "$1" "$2" verdict 2>&-', sys.executable, CRASH_WRAP, GATE],
+                   input=json.dumps(bash_payload(CREATE)), capture_output=True, text=True, timeout=20,
+                   env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                        'HOOK_ERRLOG_PATH': os.devnull})
+expect('NEG internal error + a raw creation with a closed stderr exits 2, not 1', (p.returncode, ''), 2)
 
 if FAILS:
     print('\nFAILED:\n' + '\n'.join(FAILS))

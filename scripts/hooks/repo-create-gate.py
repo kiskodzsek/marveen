@@ -40,8 +40,13 @@ SCOPE OF THE MATCH (Viktor 40095 L2/L3): this stops an accidental model error, n
   never-closing quoted word.
 
 CONTRACT (hook-exit-code-invariant): exit 2 = block, exit 0 = allow, never exit 1. Malformed stdin allows. An internal
-error is recorded in store/hook-errors.log through hook_errlog; then only the linear creation regexes run on the raw
-command (an MCP call: its tool name), a hit blocks, anything else allows (fallback_creates, Viktor 50057).
+error (also a KeyboardInterrupt) is recorded in store/hook-errors.log through hook_errlog; then only the linear
+creation regexes run on the raw command and on the files it names (an MCP call: its tool name), a hit blocks, anything
+else allows (fallback_creates, Viktor 50057, 50109). A closed stderr does not change the exit code.
+  Known limits of the crash path (independent probe rcf labels): fallback-raises (a crash inside the fallback itself
+  allows, never exit 1); watchdog-env (REPO_GATE_WATCHDOG_S can only lower the 6 s watchdog, the hook limit is 10 s);
+  real-crash-approved (a reference that once crashed the gate is skipped now, so an approved creation passes, as it
+  should); deep-json (stdin nested too deep to parse is malformed stdin and allows).
 Tests: python3 -I scripts/hooks/repo-create-gate_test.py
 """
 import json
@@ -551,7 +556,12 @@ def referenced_files(cmd, cwd):
     for ref in refs:
         if ref.startswith('-'):
             continue
-        path = os.path.expanduser(ref)
+        try:
+            # "~<lone surrogate>" / "~<NUL>": pwd.getpwnam raises (UnicodeEncodeError, ValueError); one bad
+            # reference must not crash the judgment of the others (independent probe rcf, real-crash-file-create)
+            path = os.path.expanduser(ref)
+        except ValueError:
+            continue
         if not os.path.isabs(path):
             if not (isinstance(cwd, str) and os.path.isabs(cwd)):
                 continue
@@ -574,24 +584,28 @@ def verdict(payload):
         return None
     tool = payload.get('tool_name')
     ti = payload.get('tool_input')
-    if not isinstance(tool, str) or not isinstance(ti, dict):
+    if not isinstance(tool, str):
+        return None
+    if tool.startswith('mcp__') and MCP_CREATE_RX.search(tool):
+        # The string values themselves: json.dumps would escape the quote marks the line needs. A null or non-dict
+        # tool_input carries no approval line (independent probe rcf, direct-mcp-create-input-null).
+        return None if has_approval([v[:MAX_TEXT] for v in _strings(ti)]) else REASON
+    if not isinstance(ti, dict):
         return None
     if tool == 'Bash':
         cmd = ti.get('command')
         if not isinstance(cmd, str):
             return None
-        # Viktor 50057 class (g): a creation past the MAX_TEXT cut is still searched (the linear regexes on the rest,
-        # from 1 KB before the cut, so a creation across it is seen), and blocks without the approval line
-        over = len(cmd) > MAX_TEXT and creates_repo(cmd[MAX_TEXT - 1024:])
+        # Viktor 50057 class (g): a creation past the MAX_TEXT cut is still searched (the linear regexes on the WHOLE
+        # command: a REST path before the cut and its write signal after it is one creation; independent probe rcf,
+        # direct-ghapi-words-field-end-1m), and blocks without the approval line
+        over = len(cmd) > MAX_TEXT and creates_repo(cmd)
         cmd = cmd[:MAX_TEXT]
         files = referenced_files(cmd, payload.get('cwd'))
         if not over and not any(creates_repo(t) for t in [executed_text(cmd)] + files):
             return None
         desc = ti.get('description') if isinstance(ti.get('description'), str) else ''
         return None if has_approval([cmd, desc] + files) else REASON
-    if tool.startswith('mcp__') and MCP_CREATE_RX.search(tool):
-        # The string values themselves: json.dumps would escape the quote marks the line needs.
-        return None if has_approval([v[:MAX_TEXT] for v in _strings(ti)]) else REASON
     return None
 
 
@@ -641,7 +655,14 @@ def fallback_creates(payload):
     ti = payload.get('tool_input')
     if tool == 'Bash':
         cmd = ti.get('command') if isinstance(ti, dict) else None
-        return isinstance(cmd, str) and creates_repo(cmd)
+        if not isinstance(cmd, str):
+            return False
+        if creates_repo(cmd):
+            return True
+        try:
+            return any(creates_repo(t) for t in referenced_files(cmd[:MAX_TEXT], payload.get('cwd')))
+        except Exception:
+            return False
     return tool.startswith('mcp__') and bool(MCP_CREATE_RX.search(tool))
 
 
@@ -653,10 +674,10 @@ def main():
         return 0
     try:
         reason = verdict(payload)
-    except Exception as ex:  # a crashing gate must not become a silent exit 1
+    except (Exception, KeyboardInterrupt) as ex:  # a crashing gate must not become a silent exit 1
         try:
             blocked = fallback_creates(payload)
-        except Exception:
+        except (Exception, KeyboardInterrupt):
             blocked = False
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -666,13 +687,21 @@ def main():
         except Exception:
             pass
         if blocked:
-            sys.stderr.write(REASON_INTERNAL + '\n')
+            _say(REASON_INTERNAL)
             return 2
         return 0
     if reason:
-        sys.stderr.write(reason + '\n')
+        _say(reason)
         return 2
     return 0
+
+
+def _say(msg):
+    """stderr may be closed (sys.stderr is None): the exit code still decides (independent probe rcf)."""
+    try:
+        sys.stderr.write(msg + '\n')
+    except Exception:
+        pass
 
 
 if __name__ == '__main__':
