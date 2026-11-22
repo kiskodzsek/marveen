@@ -697,6 +697,7 @@ BS_NL_RX = re.compile(r'\\\r?\n')
 LIST_MARK_RX = re.compile(r'(?:^|(?<=\s))\d{1,3}\)', re.M)
 CASE_WORD_RX = re.compile(r'\bcase\b')
 IN_WORD_RX = re.compile(r'\bin\b')
+PAREN_RX = re.compile(r'[()]')
 # The same R1, its second shape: a message heredoc line "  then curl -s -X PUT ..." read as a card PUT (main lets it
 # through). then / elif / else at a start is a prefix word only after an `if` earlier in the command, and do only after
 # a for / while / until / select (a real multi-line `if x<newline>then curl ...` has its if); else its first letter
@@ -720,12 +721,16 @@ def _unmark_lists(view):
 
     def mark(m):
         close = m.end() - 1
-        part = view[state['pos']:close]
-        state['depth'] += part.count('(') - part.count(')')
+        # A stray ) (a smiley ":)", a quoted ")", an "a)" list) closes nothing: the depth never goes below 0, else a
+        # later $(: 1)curl would sit at depth 0 again (Viktor r3).
+        d = state['depth']
+        for p in PAREN_RX.finditer(view, state['pos'], close):
+            d = d + 1 if p.group() == '(' else max(0, d - 1)
         state['pos'] = close + 1
-        if m.start() < lim and state['depth'] <= 0:
+        if m.start() < lim and d == 0:
+            state['depth'] = 0
             return m.group(0)[:-1] + ' '
-        state['depth'] -= 1  # the kept ) closes a parenthesis
+        state['depth'] = max(0, d - 1)  # the kept ) closes a parenthesis
         return m.group(0)
     view = LIST_MARK_RX.sub(mark, view)
     f_if, f_loop = IF_RX.search(view), LOOP_RX.search(view)

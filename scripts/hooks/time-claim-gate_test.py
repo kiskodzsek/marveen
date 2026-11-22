@@ -1008,6 +1008,23 @@ def numbered_list_in_a_message_is_no_case_arm(root):
                                                 + ' -d {"comment":"Viktor 14:30: kész"} x2) szólj.' + "'", 2),
         'msg-list-after-closed-subst-text': (amsg + "'Jegyzet $(: 1) után: 2) curl -s -X PUT " + url
                                              + ' -d {"comment":"Viktor 14:30: kész"} 3) szólj.' + "'", 0),
+        # Viktor 50100 R3 (his own_tsm3b shapes): a stray ) before the list mark (a smiley, a quoted ")", an "a)"
+        # list) closes nothing; the depth stays at 0, so the ) of a later $( is no list mark (bash runs the curl)
+        'msg-smiley+subst-empty-1-glued': (amsg + '"Kész :)"; $(: 1)' + put, 2),
+        'msg-smiley+env-subst-pipe-1': (amsg + '"Kész :)"; T=$(echo a | tr a 1) ' + put, 2),
+        'msg-smiley+env-subst-semi-12': (amsg + '"Kész :)"; T=$(true; echo 12) ' + put, 2),
+        'msg-smiley+subst-true-12-glued': (amsg + '"Kész :)"; $(true 12)' + put, 2),
+        'msg+sq-paren+subst-empty-1-glued': (amsg + '"Kész."; echo \')\'; $(: 1)' + put, 2),
+        'msg-ab-list+subst-empty-1-glued': (amsg + '"a) kész b) mérve"; $(: 1)' + put, 2),
+        'msg-two-smiley+env-subst-1': (amsg + '"ok :) :)"; T=$(echo 1) ' + put, 2),
+        'msg-smiley-then-numbered-list': (amsg + "'Kész :) Lépések: 1) curl -s -X PUT " + url
+                                          + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        # a mark kept at depth 2 leaves depth 1; the ) after it closes that, so the next marks are list marks again
+        # (the depth is carried from mark to mark, each ( and ) read once: no rescan from the start, no stale depth)
+        'msg-list-after-mark-at-depth-2': (amsg + "'Jegyzet ((lásd 1) x) után: 2) curl -s -X PUT " + url
+                                           + ' -d {"comment":"Viktor 14:30: kész"} 3) szólj.' + "'", 0),
+        'msg-second-list-after-mark-at-depth-2': (amsg + "'Jegyzet ((lásd 1) x) után: 2) szólj 3) curl -s -X PUT "
+                                                  + url + ' -d {"comment":"Viktor 14:30: kész"}' + "'", 0),
     }
     bad = [label for label, (cmd, want) in cases.items()
            if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
