@@ -590,6 +590,51 @@
       "name": "SENDWRAP924: reverse -- eight nested wrappers + a non-sender, inside the bound",
       "cmd": "nohup nohup nohup nohup nohup nohup nohup nohup echo sendmail",
       "expected": false
+    },
+    {
+      "name": "HDSTRICT1122 empty heredoc body, then a real send (bash runs it)",
+      "cmd": "cat <<E\nE\nsendmail -t a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 here-string <<<E is no heredoc opener: the send on the next line runs",
+      "cmd": "cat <<<E\nsendmail -t a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 heredoc opener inside double quotes is text: the send on the next line runs",
+      "cmd": "echo \"<<E\"\nsendmail -t a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 <<- body ends at the tab-led word, the send after it runs",
+      "cmd": "cat <<-E\nx\n\tE\nsendmail -t a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 doubtful, unclosed body: no strict cut, audited (over-audit by design)",
+      "cmd": "cat > n.md <<'EOF'\nsendmail -t a@b.hu is how it worked\n",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 doubtful, word not plain \\w+ (E-1): no cut, audited",
+      "cmd": "cat > n.md <<'E-1'\nsendmail -t a@b.hu is how it worked\nE-1",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 doubtful, opener inside $( ) closed on its line: no cut (bash runs the send)",
+      "cmd": "x $(<<E)\nsendmail -t a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 doubtful, opener line ends in a backslash: no strict cut, the body line is audited (over-audit by design)",
+      "cmd": "cat <<E \\\n> n.md\nsendmail -t a@b.hu is how it worked\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 a clean quoted heredoc body is still cut: notes text is no send",
+      "cmd": "cat <<'EOF' > n.md\nsendmail -t a@b.hu is how it worked\nEOF\necho done",
+      "expected": false
     }
   ]
 }

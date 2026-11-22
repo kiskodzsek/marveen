@@ -72,6 +72,128 @@ import sys
 # sorrendnel a torzs parancsnak latszott (FP), (b) a bevezeto sor
 # eldobasa a heredoc-taplalt VALODI kuldot vesztette volna el (FN).
 _HEREDOC = re.compile(r"(<<-?\s*'?(\w+)'?[^\n]*)\n.*?\n\2(?=\s|$)", re.S)
+# LOOSELIN1122 (card bbc6bad4): _HEREDOC.sub is quadratic on unclosed openers -- the lazy body scans from every
+# opener to the end (main as well: 8000 "x <<Q<i>" lines 5.3 s, x4 per doubling; 120 000 of them run past the hook
+# timeout, and a timed-out hook lets the command through). _loose_heredoc_cut returns the SAME text as
+# _HEREDOC.sub(r"\1", cmd) in linear time: the delimiter lines are indexed once (a line whose whole leading \w-run is
+# the word, then whitespace or the end), and per opener a bisect finds the first one starting at least two characters
+# past the opener line's newline (the lazy .*? is followed by a newline of its own). The \w+ group backtracks to
+# shorter words, so prefixes are tried longest first, only at lengths some indexed word has. The regex stays as the
+# reference: send-heredoc-strict.test.ts compares the two on generated strings.
+_LOOSE_OPEN = re.compile(r"<<-?\s*'?(\w+)")
+_LOOSE_END = re.compile(r"\n(\w+)(?=\s|$)")
+
+
+def _loose_heredoc_cut(cmd: str) -> str:
+    """_HEREDOC.sub(r"\\1", cmd), linear (LOOSELIN1122)."""
+    import bisect
+    ends: dict = {}
+    for m in _LOOSE_END.finditer(cmd):
+        ends.setdefault(m.group(1), []).append(m.start(1))
+    lens = sorted({len(w) for w in ends}, reverse=True)
+    out, last, pos, nl = [], 0, 0, -1
+    while True:
+        m = _LOOSE_OPEN.search(cmd, pos)
+        if m is None:
+            break
+        if nl < m.end(1):  # reuse the newline found for an earlier opener on this line (many openers, one long line)
+            nl = cmd.find("\n", m.end(1))
+            if nl < 0:
+                break  # no newline left: no later opener can match either
+        stop = -1
+        word = m.group(1)
+        for n in lens:
+            if n > len(word):
+                continue
+            qs = ends.get(word[:n])
+            if qs:
+                k = bisect.bisect_left(qs, nl + 2)
+                if k < len(qs):
+                    stop = qs[k] + n
+                    break
+        if stop < 0:
+            pos = m.start() + 1
+            continue
+        out.append(cmd[last:nl])
+        last = pos = stop
+    out.append(cmd[last:])
+    return "".join(out)
+# HDSTRICT1122 (card bbc6bad4, Viktor 50205 / 50220): the _HEREDOC cut above can drop a command bash RUNS: an empty
+# body (the lazy .*? needs one body line, so it closes on a later delimiter line), a here-string (<<<E), an opener
+# inside quotes, a <<- body whose tab-led end bash takes. Measured with a bash oracle (agents/kernel/work/
+# occ-heredoc-1122/): 63 such misses in 80000 synthetic strings, 0 of Kernel's real commands. The fix only ADDS
+# sends: is_send_invocation is (loose cut) OR (strict cut), on the same segmenter. The strict cut drops a body only
+# where bash surely reads one: the opener is no part of <<< and not glued after a word char; its word is \w+ or
+# wholly quoted \w+; the opener's line prefix has no open quote, no comment and no open $( / ( / backtick; the
+# opener line does not end in a backslash; the body ends at the FIRST line that is exactly the word (after tabs for
+# <<-), an empty body included. In every doubtful case it cuts NOTHING (an unclosed body: nothing after it either),
+# so its error always leans to an extra audit. Linear: one opener per line, and the first unclosed body stops it.
+# Known limits: a comment on the opener line (opener-comment: shlex reads the comment over the newline, the next
+# line's send joins it; the comment class of card e00a44b0); a body text that looks like a send in a doubtful case
+# is audited (over-audit by design). Mirrored in email-send-gate.mjs (STRICT_OPEN_RE); send-invocation-cases.json
+# binds the two.
+_STRICT_OPEN = re.compile(r"(?<![<\w])<<(-?)[ \t]*(['\"]?)(\w+)\2(?=[ \t;&|)<>]|$)[^\n]*(?:\n|$)", re.M | re.A)  # re.A: \w as in JS
+
+
+def _strict_prefix_ok(prefix: str) -> bool:
+    """No open quote, no comment and no open $( / ( / backtick before a heredoc opener on its line."""
+    q, depth, bt, prev, i = None, 0, False, ' ', 0
+    while i < len(prefix):
+        ch = prefix[i]
+        if q == "'":
+            if ch == "'":
+                q = None
+        elif q == '"':
+            if ch == '\\':
+                i += 1
+            elif ch == '"':
+                q = None
+            elif ch == '`':
+                bt = not bt
+            elif ch == '$' and prefix[i + 1:i + 2] == '(':
+                depth += 1
+                i += 1
+        else:
+            if ch == '\\':
+                i += 1
+            elif ch in '\'"':
+                q = ch
+            elif ch == '#' and prev in ' \t;&|()':
+                return False
+            elif ch == '`':
+                bt = not bt
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth = max(0, depth - 1)
+        prev = ch
+        i += 1
+    return q is None and depth == 0 and not bt
+
+
+def _strict_heredoc_cut(cmd: str) -> str:
+    """cmd with only the heredoc bodies bash surely reads cut out (the opener line kept), see HDSTRICT1122."""
+    out, pos = [], 0
+    while True:
+        m = _STRICT_OPEN.search(cmd, pos)
+        if not m:
+            out.append(cmd[pos:])
+            return ''.join(out)
+        opener = m.group(0)
+        line_start = cmd.rfind('\n', 0, m.start()) + 1
+        if not opener.endswith('\n') or opener.endswith('\\\n') \
+                or not _strict_prefix_ok(cmd[line_start:m.start()]):
+            out.append(cmd[pos:m.end()])
+            pos = m.end()
+            continue
+        end = re.compile('^' + ('\\t*' if m.group(1) else '') + re.escape(m.group(3)) + '$', re.M).search(cmd, m.end())
+        if not end:
+            out.append(cmd[pos:])  # unclosed: bash reads the rest as this body; cut nothing, stop
+            return ''.join(out)
+        out.append(cmd[pos:m.end() - 1])
+        pos = end.end()
+
+
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 # KWSPLIT924: shell reserved words that put the NEXT word in command position.
 # The segmenter splits on operators only, so `if true; then sendmail x; fi`
@@ -241,10 +363,11 @@ def _mask_subshell_markers(cmd: str) -> str:
     return "".join(out)
 
 
-def _segments_tokens(cmd: str):
-    """[[token, ...], ...] szegmensenkent -- quote-tudatosan, poziciot orizve."""
+def _segments_tokens(cmd: str, strict: bool = False):
+    """[[token, ...], ...] szegmensenkent -- quote-tudatosan, poziciot orizve. strict: the HDSTRICT1122 cut."""
     import shlex
-    lex = shlex.shlex(_mask_subshell_markers(_HEREDOC.sub(r"\1", cmd)),
+    text = _strict_heredoc_cut(cmd) if strict else _loose_heredoc_cut(cmd)
+    lex = shlex.shlex(_mask_subshell_markers(text),
                       posix=True, punctuation_chars="();|&")
     lex.whitespace_split = True
     segments, cur = [], []
@@ -422,6 +545,20 @@ def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
         # Konzervativ visszaeses: csak akkor auditalunk, ha eros kuldes-literal
         # all a szovegben -- igy egy fura, de valodi kuldes nem csuszik at
         # neman, a tipikus belso parancsok viszont nem kapnak hamis pozitivot.
+        return bool(_FALLBACK_LITERALS.search(cmd))
+    if any(_segment_is_send(toks, _depth) for toks in segments):
+        return True
+    return send_only_by_strict_heredoc(cmd, _depth)
+
+
+def send_only_by_strict_heredoc(cmd: str, _depth: int = 0) -> bool:
+    """The HDSTRICT1122 second pass alone: a send the strict heredoc cut exposes (call it after the loose pass said
+    no). A parse error of the strict text falls back like the loose one (strong literals): an extra audit, not a miss."""
+    if '<<' not in cmd:
+        return False
+    try:
+        segments = _segments_tokens(cmd, strict=True)
+    except ValueError:
         return bool(_FALLBACK_LITERALS.search(cmd))
     return any(_segment_is_send(toks, _depth) for toks in segments)
 
