@@ -55,8 +55,14 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     Rule 7 (the closing stamp, Viktor 49927, his probe_ts7 labels): py-var (the comment text in a Python variable,
     the dict built elsewhere) and jq-arg (jq --arg) are not read, the value is not at a content / comment key;
     hu-dot-date ("2026.11.22. 13:30") and mmdd-short ("(11-22 13:30)") are other date forms, not judged; a named
-    time zone other than Z, UTC, GMT, CET, CEST is not judged; deadline-word: a stamp right after határidő /
-    deadline / until / by passes on purpose (a deadline, as in rule 2; none in the 12866-comment replay).
+    time zone other than Z, UTC, GMT, CET, CEST (any case; UTC/GMT with an hour offset) is not judged; deadline-word:
+    a stamp right after határidő / deadline / until / by passes on purpose (a deadline, as in rule 2; none in the
+    12866-comment replay). Viktor 49939: shellvar-other (the text in a shell variable of another name, like py-var)
+    is not read; u0022-in-value (a raw " inside a heredoc JSON value) is invalid JSON, the value ends there;
+    key-twice-last-clean (an overblock: two content keys in one object, the last one clean) blocks, every value is
+    read, so a second curl in the same command is not skipped. Overblocks accepted in Viktor 49952: js-other-object
+    (an object literal with a bare content key that is not the one posted), echo-comma-comment-key (prose
+    ", comment: '...'" in an echo), py-sub-dumped-not-posted (a name json.dumps-ed anywhere counts as posted).
   - Bash that writes a shared/*.md through the shell (Radar 39251: `cat >> .../shared/hibanaplo.md <<'EOF'`
     wrote a future time unseen): a `>` / `>>` / `>|` redirect or a `tee [-a]` whose target resolves to a
     shared/*.md. The command text (the heredoc body) is judged; lines already in a target file pass, like
@@ -173,6 +179,7 @@ import os
 import re
 import stat
 import sys
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -204,6 +211,9 @@ MARKER_RX = re.compile(
 # A deadline, not a measurement: "22:00-ig", "22:00-ra", "22:00 óráig"; "határidő 22:00", "by 22:00".
 DEADLINE_AFTER_RX = re.compile(r'\s?-?\s?(?:ig|ra|re)(?!\w)|\s+óráig(?!\w)', re.I)
 DEADLINE_BEFORE_RX = re.compile(r'(?<!\w)(?:határidő|határidővel|deadline|until|by)[:\s]+$', re.I)
+# Rule 7 only (Viktor 49939 dl-bold-deadline): the same words in markdown marks (**deadline** (stamp)).
+# Round 2 (Viktor 49949 dl-standby-word): a hyphen before the word ("stand-by") is not a deadline either.
+DEADLINE_TAIL_RX = re.compile(r'(?<![\w-])[*_`~]*(?:határidő|határidővel|deadline|until|by)[*_`~]*[:\s]+$', re.I)
 # Inter-agent message, memory and daily-log writes (placeholder rule only, see SCOPE).
 API_WRITE_RX = re.compile(r'(?<![\w-])(?:[a-z]+-msg|msg-close)\.sh(?![\w-])|/api/(?:messages|memories|daily-log)')
 # Rule 3: the heading at the start of a daily-log payload's "content" value. The rest of the heading line (up to a
@@ -230,21 +240,62 @@ COMMENT_HEAD_NOT_STAMP_RX = re.compile(r'-[^\W\d_]|[ \t]+(?:után|előtt|terv\w*
 # Python dict key with a "..." or '...' value, the key and value escaped inside a double-quoted -d, or a content= /
 # comment= keyword (dict(...), a kwarg). The value runs to its first unescaped closing quote, one unit per char
 # (linear: no value can overlap the next key's quote).
-_TAIL_KEY = r'(?:(?P<k>["\'])(?:content|comment)(?P=k)\s*:|(?<![\w.$-])(?:content|comment)\s*=)\s*'
+# Viktor 49939 item 2: a Python subscript (body['content'] = ...), a bare key (a JS object or jq, content: "..."),
+# and an f-, r-, b- or u-prefixed Python literal (f'{n}/28 ...'). Round 2 (Viktor 49949 R1, 8 overblocks: a YAML
+# line, a git message, a shell comment, "comment:" inside another text): a bare key counts only as an object-literal
+# key, right after { or a comma; a subscript only when the same name is what the command posts (json.dumps(body),
+# json=body, data=body, see POSTED_RX), so meta['content'] passes; jq's .comment = "..." (Viktor fo-jq-dot-assign)
+# counts after a quote, a pipe, a paren or a blank.
+_TAIL_KEY = (r'(?:(?P<k>["\'])(?:content|comment)(?P=k)\s*:'
+             r'|(?P<sub>\[)(?P<k2>["\'])(?:content|comment)(?P=k2)\]\s*='
+             r'|[{,]\s*(?:content|comment)\s*:|(?<![\w.$-])(?:content|comment)\s*='
+             r'|(?<=[\'"|(\s])\.(?:content|comment)\s*\|?=)\s*(?:[rRbBfFuU]{1,2})?')
+# The value forms after a key, in one alternation (one scan of the text, round 2: five separate regexes cost about
+# 1.5x per byte): a Python triple-quoted value first (Viktor 49949 fo-py-triple-quote; a lone quote inside it is one
+# unit, so the scan stays linear), then "...", '...' and a JS template literal (fo-js-template). Groups v1..v5.
+VALUE_GROUPS = ('v1', 'v2', 'v3', 'v4', 'v5')
 COMMENT_VALUE_RXS = (
-    re.compile(_TAIL_KEY + r'"(?P<v>(?:[^"\\]|\\[\s\S])*)"'),
-    re.compile(_TAIL_KEY + r"'(?P<v>(?:[^'\\]|\\[\s\S])*)'"),
-    re.compile(r'\\"(?:content|comment)\\"\s*:\s*\\"(?P<v>(?:[^"\\]|\\[^"])*)\\"'),
+    re.compile(_TAIL_KEY + r"(?:'''(?P<v1>(?:[^'\\]|\\[\s\S]|'(?!''))*)'''"
+               r'|"""(?P<v2>(?:[^"\\]|\\[\s\S]|"(?!""))*)"""'
+               r'|"(?P<v3>(?:[^"\\]|\\[\s\S])*)"'
+               r"|'(?P<v4>(?:[^'\\]|\\[\s\S])*)'"
+               r'|`(?P<v5>(?:[^`\\]|\\[\s\S])*)`)'),
+    # Inside a double-quoted -d the shell turns \\ into a JSON backslash and \" into a JSON quote, so a JSON escape
+    # is \\ followed by \\, \" or a plain char, and a lone backslash with a plain char (\n) is one too. Viktor 49939
+    # dq-escquote-before-stamp: the old unit list read \\ then stopped at the \" of an escaped \\\" quote.
+    re.compile(r'\\"(?:content|comment)\\"\s*:\s*\\"(?P<v1>(?:[^"\\]|\\\\(?:\\\\|\\"|[^\\])|\\[^"\\])*)\\"'),
 )
 # The stamp at the very end of the value, once the trailing whitespace, dots, markdown marks and a stray backslash
 # are stripped (_value_end): "(YYYY-MM-DD HH:MM)", seconds and a fraction optional, a T allowed, and a time zone
 # (Viktor 49927 T2: Z, +-HH:MM, or a name; a named zone outside TAIL_TZ_MIN is not judged). Groups 1-5: date, time.
+# Viktor 49939 item 3: two blanks or a comma between the date and the time, a fraction of up to 9 digits, a bare
+# +HH offset, a lower-case zone name, UTC+1 / GMT-5, and a nested closing paren ("(review ok (stamp))").
 COMMENT_TAIL_RX = re.compile(
-    r'\((\d{4})-(\d{2})-(\d{2})[ T]([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:[.,]\d{1,6})?)?'
-    r'(?:[ \t]?(?P<tz>Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d|[A-Z]{2,5}))?\)\Z')
-# A value built by concatenation, 'x' + ' (stamp)' (Viktor 49927 py-concat): the last literal of the chain counts.
-CONCAT_RX = re.compile(r'\s*\+\s*(?:"(?P<d>(?:[^"\\]|\\[\s\S])*)"|\'(?P<s>(?:[^\'\\]|\\[\s\S])*)\')')
-TAIL_STRIP = frozenset(' \t\r\n.*`_~ \\')
+    r'\((\d{4})-(\d{2})-(\d{2})(?:T|,?[ \t]+)([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:[.,]\d{1,9})?)?'
+    r'(?:[ \t]?(?P<tz>Z|[+-](?:[01]\d|2[0-3])(?::?[0-5]\d)?|(?P<tzn>[A-Za-z]{2,5})(?P<tzo>[+-]\d{1,2})?))?\)'
+    r'(?:[ \t]*\))?\Z')
+# A value built by concatenation, 'x' + ' (stamp)' (Viktor 49927 py-concat): the last literal of the chain counts,
+# also across a name ('x ' + n + ' (stamp)', Viktor 49939 concat-var-mid) and for adjacent literals ('x' ' (stamp)',
+# py-implicit-concat).
+# Round 2 (Viktor 49949): a call in the chain (+ str(n) +, fo-concat-call-mid), and an adjacent literal only when a
+# closing , } ) ] + or a further literal follows it (ob-adjacent-shell-arg: echo comment="1 ok" "more" glued the next
+# shell word; a chain's last literal still needs the closing mark, time-adjacent-many).
+_CONCAT_LIT = r'(?:"(?P<{0}>(?:[^"\\]|\\[\s\S])*)"|\'(?P<{1}>(?:[^\'\\]|\\[\s\S])*)\')'
+CONCAT_RX = re.compile(r'\s*\+\s*(?:[A-Za-z_][\w.]*(?:\([^()\'"\n]*\))?\s*\+\s*)*' + _CONCAT_LIT.format('d', 's')
+                       + r'|[ \t]+' + _CONCAT_LIT.format('d2', 's2') + r'(?=\s*[,})\]+\'"])')
+# A subscript key counts only when its name is what the command posts (Viktor 49949 ob-other-dict-subscript).
+# Collected once per command (Viktor 49952 R2: a re.search per subscript match re-read the whole command, 300 KB of
+# subscripts took 62 s against a 10 s hook timeout); the subscript branch then only checks membership.
+# data=json.dumps(x): the data= branch must not take "json" as the name (it would consume the json.dumps(x) match).
+POSTED_RX = re.compile(r'(?:json\.dumps\(\s*|(?<![\w.])(?:json|data)\s*=\s*(?!json\.dumps\())([A-Za-z_]\w*)(?!\w)')
+# The subscripted name, read back from at most 64 chars before the [ (the key branch is anchored on the [, so the
+# scan does not start a name match at every word).
+SUB_NAME_RX = re.compile(r'(?<![\w.])([A-Za-z_]\w*)\Z')
+# Trailing chars after the stamp that do not end the comment's own text: whitespace, dots, markdown marks, a no-break
+# space, a stray backslash, an escaped quote, and (Viktor 49939 item 3) ! ? ; ] , a variation selector, and any
+# format char (zero-width space), emoji or symbol (TAIL_STRIP_CATS).
+TAIL_STRIP_CATS = frozenset(('Cf', 'So', 'Sk'))
+TAIL_STRIP = frozenset(' \t\r\n.*`_~ \\"\'!?;]\ufe0f')
 TAIL_TZ_MIN = {'Z': 0, 'UTC': 0, 'GMT': 0, 'CET': 60, 'CEST': 120}
 # Rule 5, the send path (retro R1, card 028205dd): an inter-agent message, a close result or a daily-log entry.
 # Not a memory: a memory is not a report to anyone, and its times are mostly plans.
@@ -465,7 +516,7 @@ def _value_end(v):
     """The index after the last char of the value that is not trailing whitespace, a dot, a markdown mark or a
     stray backslash (one pass from the end: linear, no copy)."""
     i = len(v)
-    while i and v[i - 1] in TAIL_STRIP:
+    while i and (v[i - 1] in TAIL_STRIP or unicodedata.category(v[i - 1]) in TAIL_STRIP_CATS):
         i -= 1
     return i
 
@@ -479,13 +530,16 @@ def _tail_local(m):
     tz = m.group('tz')
     if not tz:
         return stamp
-    if tz in TAIL_TZ_MIN:
+    if m.group('tzn'):  # a name, upper-cased (utc), optionally with an hour offset (UTC+1, GMT-5)
+        name, hours = m.group('tzn').upper(), m.group('tzo')
+        if name not in TAIL_TZ_MIN or (hours and name not in ('UTC', 'GMT')):
+            return None
+        off = TAIL_TZ_MIN[name] + (int(hours) * 60 if hours else 0)
+    elif tz in TAIL_TZ_MIN:
         off = TAIL_TZ_MIN[tz]
-    elif tz[0] in '+-':
+    else:  # +HH, +HHMM, +HH:MM
         digits = tz[1:].replace(':', '')
-        off = (int(digits[:2]) * 60 + int(digits[2:])) * (1 if tz[0] == '+' else -1)
-    else:
-        return None
+        off = (int(digits[:2]) * 60 + int(digits[2:] or 0)) * (1 if tz[0] == '+' else -1)
     return datetime.datetime.fromtimestamp(calendar.timegm(stamp.timetuple()) - off * 60)
 
 
@@ -495,26 +549,37 @@ def comment_tail_findings(text, now):
     does a deadline ("határidő (... 18:00)", as rule 2)."""
     out = []
     limit = now.hour * 60 + now.minute + SLACK_MIN
+    posted = None  # the posted names, read once on the first subscript
     for rx in COMMENT_VALUE_RXS:
         for mv in rx.finditer(text):
             if len(out) >= MAX_TIMES_PER_LINE:
                 return out
-            v, vstart, pos = mv.group('v'), mv.start('v'), mv.end()
+            if mv.groupdict().get('sub'):
+                mn = SUB_NAME_RX.search(text, max(0, mv.start() - 64), mv.start())
+                if posted is None:
+                    posted = {m.group(1) for m in POSTED_RX.finditer(text)}
+                if not mn or mn.group(1) not in posted:
+                    continue
+            vg = next(g for g in VALUE_GROUPS if mv.groupdict().get(g) is not None)
+            v, vstart, pos = mv.group(vg), mv.start(vg), mv.end()
             while True:  # 'x' + ' (stamp)': the last literal of a concatenation
                 mc = CONCAT_RX.match(text, pos)
                 if not mc:
                     break
-                grp = 'd' if mc.group('d') is not None else 's'
+                grp = next(g for g in ('d', 's', 'd2', 's2') if mc.group(g) is not None)
                 v, vstart, pos = mc.group(grp), mc.start(grp), mc.end()
             end = _value_end(v)
             tail = v[max(0, end - 120):end]
             m = COMMENT_TAIL_RX.search(tail)
-            if not m or DEADLINE_BEFORE_RX.search(tail[:m.start()]):
+            if not m or DEADLINE_TAIL_RX.search(tail[:m.start()]):
                 continue
             local = _tail_local(m)
-            if local is None or local.date() != now.date():
+            # Today's stamp: today's date written, or a zoned stamp that lands on today (Viktor 49939
+            # tz-today-to-tomorrow: "(today 23:30 -05:00)" is tomorrow morning here, still ahead of the clock).
+            written_today = (int(m.group(1)), int(m.group(2)), int(m.group(3))) == (now.year, now.month, now.day)
+            if local is None or local.date() < now.date() or (local.date() != now.date() and not written_today):
                 continue
-            if local.hour * 60 + local.minute > limit:
+            if local.date() > now.date() or local.hour * 60 + local.minute > limit:
                 out.append((text.count('\n', 0, vstart + end) + 1, f'{local:%H:%M}', 'card-tail'))
     return out
 

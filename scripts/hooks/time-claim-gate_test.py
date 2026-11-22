@@ -33,6 +33,8 @@ def make_root(tmp):
 
 def run(hook, tool, tool_input=None, now='18:14', raw=None, cwd=None, errlog=None):
     env = {'PATH': '/usr/bin:/bin', 'TIME_CLAIM_GATE_NOW': now, 'HOOK_ERRLOG_PATH': errlog or os.devnull}
+    if os.environ.get('TZ'):  # Viktor 49949 (3): the gate runs in the test's zone, so TZ=UTC measures the gate too
+        env['TZ'] = os.environ['TZ']
     body = {'tool_name': tool, 'tool_input': tool_input}
     if cwd:
         body['cwd'] = cwd
@@ -229,6 +231,241 @@ def block_closing_stamp_round2_shapes(root):
     ]
     for c in shapes:
         ok &= run(h, 'Bash', {'command': c}, now='22:04')[0] == 2
+    return ok
+
+
+@case
+def closing_stamp_after_an_escaped_quote_in_a_double_quoted_d(root):
+    # Viktor 49939 dq-escquote-before-stamp: in a double-quoted -d a JSON-escaped quote is \\\" in the command; the
+    # value runs past it to the stamp (BLOCK), and still ends at its own \" so a later title's stamp is not read.
+    h = root['hook']
+    stamp = _tail('').strip()
+    block = [
+        MOVE + r' -d "{\"status\":\"waiting\",\"comment\":\"27/28 \\\"kész\\\" ' + stamp + r'\"}"',
+        KANBAN + r' -d "{\"author\":\"kernel\",\"content\":\"27/28 \\\"kész\\\" ' + stamp + r'\"}"',
+        KANBAN + r' -d "{\"content\":\"Kör 3 \\\\\\\"idézet\\\\\\\" kész ' + stamp + r'\"}"',
+    ]
+    allow = [
+        PUT + r' -d "{\"comment\":\"27/28 \\\"kész\\\"\",\"title\":\"Teszt 2 ' + stamp + r'\"}"',
+        KANBAN + r' -d "{\"content\":\"27/28 \\\"kész\\\" rendben\",\"author\":\"viktor ' + stamp + r'\"}"',
+    ]
+    ok = all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 2 for c in block)
+    return ok and all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 0 for c in allow)
+
+
+@case
+def closing_stamp_in_a_subscript_a_bare_key_or_a_prefixed_literal(root):
+    # Viktor 49939 item 2: py-fstring, py-subscript, js-bare-key, jq-bare-key (BLOCK); the same shapes on a title
+    # key, and a longer word ending in "content", pass.
+    h = root['hook']
+    stamp = _tail('').strip()
+    py = "python3 - <<'P'\nimport json, urllib.request\n{}\nurllib.request.urlopen(urllib.request.Request(" \
+         "'http://localhost:3420/api/kanban/abc/comments', json.dumps(body).encode()))\nP"
+    node = ("node -e 'fetch(\"http://localhost:3420/api/kanban/abc/comments\",{{method:\"POST\","
+            "body:JSON.stringify({{author:\"kernel\",{}:\"27/28 kész " + stamp + "\"}})}})'")
+    jq = ("jq -n '{{author:\"kernel\",{}:\"27/28 kész " + stamp + "\"}}' | curl -s -X POST "
+          "http://localhost:3420/api/kanban/abc/comments --data-binary @-")
+    block = [
+        py.format("n = 27\nbody = {'author': 'kernel', 'content': f'{n}/28 kész " + stamp + "'}"),
+        py.format("body = {'author': 'kernel'}\nbody['content'] = '27/28 kész " + stamp + "'"),
+        py.format("body = {}\nbody[\"comment\"] = rb'27/28 kész " + stamp + "'"),
+        node.format('content'),
+        jq.format('content'),
+    ]
+    allow = [
+        py.format("body = {'content': '27/28 kész'}\nbody['title'] = 'Teszt 2 " + stamp + "'"),
+        node.format('title'),
+        jq.format('discontent'),
+    ]
+    ok = all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 2 for c in block)
+    return ok and all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 0 for c in allow)
+
+
+def _zst(hh, mm, zone_off, suffix, sep=' ', secs=''):
+    """A stamp whose LOCAL time is today hh:mm, written in a zone zone_off minutes from UTC (Viktor's zst)."""
+    import time as _t
+    loc = _t.localtime(_t.mktime((TODAY.year, TODAY.month, TODAY.day, hh, mm, 0, 0, 0, -1))).tm_gmtoff // 60
+    d = datetime.datetime.combine(TODAY, datetime.time(hh, mm)) - datetime.timedelta(minutes=loc - zone_off)
+    return f'({d:%Y-%m-%d}{sep}{d:%H:%M}{secs}{suffix})'
+
+
+@case
+def closing_stamp_round3_ends_zones_separators_and_concatenation(root):
+    # Viktor 49939 item 3: a closing ! ? ; ] emoji, zero-width space, nested paren or escaped quote after the stamp;
+    # utc in lower case, UTC+1, a bare +HH, a 9-digit fraction, a stamp written today that lands on tomorrow here;
+    # two blanks or a comma before the time; a name in a concatenation, adjacent literals (BLOCK). A zoned stamp
+    # written today that lands on yesterday, an unknown or offset non-UTC zone, a past UTC+1, a stamp in the
+    # middle (ALLOW).
+    h = root['hook']
+    s, t = _tail('').strip(), TODAY.isoformat()
+
+    def j(val):
+        return KANBAN + " --data-binary @- <<'J'\n" + json.dumps({'author': 'kernel', 'content': val},
+                                                                   ensure_ascii=False) + '\nJ'
+    py = "python3 - <<'P'\nimport json, urllib.request\n{}\nurllib.request.urlopen(urllib.request.Request(" \
+         "'http://localhost:3420/api/kanban/abc/comments', json.dumps(body).encode()))\nP"
+    block = [j('27/28 kész ' + s + e) for e in ('!', '?', ';', ' ✅', '​')] + [
+        j('[27/28 kész ' + s + ']'),
+        j('27/28 kész (review ok ' + s + ')'),
+        KANBAN + " -d '" + r'{"content":"27/28 \"kész ' + s + r'\""}' + "'",
+        j('27/28 kész ' + _zst(22, 6, 0, ' utc')),
+        j('27/28 kész ' + _zst(22, 6, 60, ' UTC+1')),
+        j('27/28 kész ' + _zst(22, 6, 60, '+01')),
+        j('27/28 kész ' + _zst(22, 6, 0, 'Z', 'T', ':05.123456789')),
+        j('27/28 kész (' + t + ' 23:30 -05:00)'),
+        j('27/28 kész (' + t + '  22:06)'),
+        j('27/28 kész (' + t + ', 22:06)'),
+        py.format("n = '27'\nbody = {'author': 'kernel', 'content': '27/28 ' + n + ' kész " + s + "'}"),
+        py.format("body = {'author': 'kernel', 'content': '27/28 kész' ' " + s + "'}"),
+    ]
+    allow = [
+        j('27/28 kész (' + t + ' 12:30 +14:00)'),
+        j('27/28 kész (' + t + ' 22:06 PST)'),
+        j('27/28 kész ' + _zst(22, 6, 120, ' CET+1')),
+        j('27/28 kész ' + _zst(21, 30, 60, ' UTC+1')),
+        j('27/28 kész (review ok ' + s + ') és tovább'),
+    ]
+    bad = [c for c in block if run(h, 'Bash', {'command': c}, now='22:04')[0] != 2]
+    bad += [c for c in allow if run(h, 'Bash', {'command': c}, now='22:04')[0] != 0]
+    for c in bad:
+        print('  round3 wrong verdict:', c[-90:].replace('\n', ' | '))
+    return not bad
+
+
+@case
+def closing_stamp_after_a_marked_deadline_word(root):
+    # Viktor 49939 dl-bold-deadline (an overblock): a deadline word in markdown marks passes like a bare one; a bold
+    # word that is not a deadline still blocks.
+    h = root['hook']
+    s = _tail('').strip()
+
+    def j(val):
+        return KANBAN + " -d '" + json.dumps({'content': val}, ensure_ascii=False) + "'"
+    return (all(run(h, 'Bash', {'command': j(v)}, now='22:04')[0] == 0
+                for v in ('27/28 **deadline** ' + s, '27/28 _határidő_: ' + s, '27/28 `until` ' + s))
+            and run(h, 'Bash', {'command': j('27/28 **kész** ' + s)}, now='22:04')[0] == 2)
+
+
+@case
+def round2_key_shapes_outside_a_posted_object_pass(root):
+    # Viktor 49949 R1 (8 overblocks of round 1): a bare "comment:" / "content:" counts only as an object-literal key
+    # (after { or a comma), a subscript only on the posted dict, an adjacent literal only before a closing mark. A
+    # title text, the comment's own middle, a shell comment, a YAML heredoc, a markdown list line, a git message,
+    # another dict, and the next shell word pass; the comment itself is clean.
+    h = root['hook']
+    s = _tail('').strip()
+    clean = KANBAN + " -d '{\"content\":\"1 ok\"}'"
+    py = "python3 - <<'P'\nimport json, urllib.request\n{}\nurllib.request.urlopen(urllib.request.Request(" \
+         "'http://localhost:3420/api/kanban/abc/comments', json.dumps(body).encode()))\nP"
+    allow = [
+        PUT + " -d '" + json.dumps({'title': "9 Re comment: 'átnézve " + s + "' marad", 'comment': '1 ok'},
+                                   ensure_ascii=False) + "'",
+        py.format("body = {'content': '3 átírva: comment: \"vázlat " + s + "\" helyett végleges'}"),
+        '# comment: "vázlat ' + s + '"\n' + clean,
+        "cat > notes.yml <<'EOF'\ncomment: \"9 jegyzet " + s + "\"\nEOF\n" + clean,
+        "cat > plan.md <<'EOF'\n- content: \"9 terv " + s + "\"\nEOF\n" + clean,
+        'git commit -m "content: \'rendrakás ' + s + '\'" && ' + clean,
+        py.format("meta = {}\nmeta['content'] = '9 cache " + s + "'\nbody = {'content': '1 ok'}"),
+        'echo comment="1 ok" "más ' + s + '" >> log.txt\n' + clean,
+    ]
+    bad = [c for c in allow if run(h, 'Bash', {'command': c}, now='22:04')[0] != 0]
+    for c in bad:
+        print('  round2 overblock:', c[:90].replace('\n', ' | '))
+    return not bad
+
+
+@case
+def round2_closing_stamp_shapes_that_block(root):
+    # Viktor 49949 new fail-opens: a hyphen-word before the stamp (stand-by) is no deadline, a call in a concatenation,
+    # jq's .comment = "...", a Python triple-quoted value, a JS template literal, and a chain of adjacent literals.
+    h = root['hook']
+    s = _tail('').strip()
+    py = "python3 - <<'P'\nimport json, urllib.request\n{}\nurllib.request.urlopen(urllib.request.Request(" \
+         "'http://localhost:3420/api/kanban/abc/comments', json.dumps(body).encode()))\nP"
+    block = [
+        KANBAN + " -d '" + json.dumps({'content': '1 szerver stand-by ' + s}) + "'",
+        py.format("n = 27\nbody = {'content': 'kész ' + str(n) + ' " + s + "'}"),
+        "jq -n '.comment = \"2 kész " + s + "\"' | curl -s -X PUT http://localhost:3420/api/kanban/abc --data-binary @-",
+        py.format("body = {'content': \x27\x27\x2727/28 kész " + s + "\x27\x27\x27}"),
+        "node -e 'fetch(\"http://localhost:3420/api/kanban/abc/comments\", {method: \"POST\", "
+        "body: JSON.stringify({content: `27/28 kész " + s + "`})})'",
+        py.format("body = {'content': '1'" + " 'a'" * 40 + " ' " + s + "'}"),
+        "python3 - <<'P'\nimport requests\nbody = {}\nbody['comment'] = '27/28 kész " + s + "'\n"
+        "requests.post('http://localhost:3420/api/kanban/abc/comments', json=body)\nP",
+    ]
+    bad = [c for c in block if run(h, 'Bash', {'command': c}, now='22:04')[0] != 2]
+    for c in bad:
+        print('  round2 fail-open:', c[:90].replace('\n', ' | '))
+    return not bad
+
+
+@case
+def round3_subscripts_scale_and_data_dumps_counts_as_posted(root):
+    # Viktor 49952 R2: a re.search per subscript match re-read the whole command (300 KB of x['content'] = 'a' lines
+    # took 62 s, the hook timeout is 10 s). The posted names are read once; a posted name's future stamp after the
+    # run still blocks, an unposted name's run passes, each under 3 s. data=json.dumps(x) posts x (the data= branch
+    # must not take "json" as the posted name).
+    import time as _t
+    h = root['hook']
+    s = _tail('').strip()
+    n = 300 * 1024 // len("x['content'] = 'a'\n")
+    post = "requests.post('http://localhost:3420/api/kanban/abc/comments', {})"
+
+    def py(body):
+        return "python3 - <<'P'\nimport json, requests\n" + body + "\nP"
+    rows = [
+        (0, py("x = {}\n" + "x['content'] = 'a'\n" * n + "body = {'content': '1 ok'}\n" + post.format('json=body'))),
+        (0, py("".join(f"x{i % 97}['comment'] = 'a'\n" for i in range(n)) + "body = {'content': '1 ok'}\n"
+               + post.format('json=body'))),
+        (2, py("body = {}\n" + "body['content'] = 'a'\n" * n + "body['content'] = '27/28 kész " + s + "'\n"
+               + post.format('json=body'))),
+        (2, py("x = {}\nx['comment'] = '27/28 kész " + s + "'\n" + post.format('data=json.dumps(x)'))),
+    ]
+    ok = True
+    for want, cmd in rows:
+        t0 = _t.monotonic()
+        got = run(h, 'Bash', {'command': cmd}, now='22:04')[0]
+        took = _t.monotonic() - t0
+        if got != want or took >= 3:
+            ok = False
+            print(f'  round3: want {want} got {got} in {took:.2f} s, {len(cmd)} bytes:', cmd[-90:].replace('\n', ' | '))
+    return ok
+
+
+@case
+def zoned_rows_hold_under_utc_and_tokyo(root):
+    # Viktor 49949 (3): the zone branch with the gate in another machine zone (TZ passed by run()), as on a UTC CI
+    # runner and far east; the stamps and today's date are computed in that zone.
+    import time as _t
+    h = root['hook']
+    saved = os.environ.get('TZ')
+    ok = True
+    try:
+        for zone in ('UTC', 'Asia/Tokyo'):
+            os.environ['TZ'] = zone
+            _t.tzset()
+            d = datetime.date.fromtimestamp(_t.time())
+            ts = _t.mktime((d.year, d.month, d.day, 22, 6, 0, 0, 0, -1))
+            off = _t.localtime(ts).tm_gmtoff // 60
+            utc = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+            sign = '+' if off >= 0 else '-'
+            zoned = f'({d.isoformat()}T22:06:00{sign}{abs(off) // 60:02d}:{abs(off) % 60:02d})'
+            block = [f'({d.isoformat()} 22:06)', zoned, f'({utc:%Y-%m-%dT%H:%M:%S}Z)', f'({utc:%Y-%m-%d %H:%M} utc)']
+            allow = [f'({d.isoformat()} 21:00)', f'({utc - datetime.timedelta(hours=2):%Y-%m-%dT%H:%M}Z)']
+
+            def j(stamp):
+                return KANBAN + " -d '" + json.dumps({'content': '27/28 kész ' + stamp}) + "'"
+            got_b = [run(h, 'Bash', {'command': j(x)}, now='22:04')[0] for x in block]
+            got_a = [run(h, 'Bash', {'command': j(x)}, now='22:04')[0] for x in allow]
+            if got_b != [2] * len(block) or got_a != [0] * len(allow):
+                print('  zone', zone, 'block rc', got_b, 'allow rc', got_a)
+                ok = False
+    finally:
+        if saved is None:
+            os.environ.pop('TZ', None)
+        else:
+            os.environ['TZ'] = saved
+        _t.tzset()
     return ok
 
 
