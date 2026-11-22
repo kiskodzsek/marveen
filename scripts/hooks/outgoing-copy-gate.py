@@ -374,10 +374,22 @@ def _basename(tok: str) -> str:
 
 def _mask_subshell_markers(cmd: str) -> str:
     """Idezojelen KIVULI ujsor/`$(`/backtick -> `;` szeparator, hogy a shlex
-    szegmens-hatarkent lassa; idezojelen BELUL a szoveg erintetlen (tartalom)."""
+    szegmens-hatarkent lassa; idezojelen BELUL a szoveg erintetlen (tartalom).
+    SENDCOMMENT1122 (card 64d10325, Viktor 50274, HIGH): an unquoted `#` at the start of a word is a comment up to
+    the end of its ORIGINAL line (inside an unquoted backtick substitution: or up to the closing backtick, which bash
+    finds first -- `true # c`&sendmail runs sendmail), and it is dropped HERE; the newline after it stays a separator.
+    Before, shlex read the comment (commenters="#") over the `;` this mask had put in place of the newline, so a
+    comment line before a send swallowed the send: `# note` + newline + a send was not a send, and email-approval-gate.py (which loads this
+    function) let a Bash send through with no approval and no audit. Word start as bash measured it (bash -c, 11-22):
+    after a blank, a newline, one of ;&|()<> or a backtick, after `$(`, and at the start; NOT mid-word (`a#b`, `$#`,
+    `${#x}`, an escaped `\\#`, right after a closing quote). shlex runs with commenters="" (its mid-word `#` was a
+    comment too, which bash does not do). Mirrored in email-send-gate.mjs maskSubshellMarkers."""
     out = []
     q = None  # None | "'" | '"'
     i, n = 0, len(cmd)
+    prev = "\n"  # the previous character outside quotes, for the word-start test of `#`
+    bt = False  # inside an unquoted backtick substitution: a comment there ends at the closing backtick
+    nxt = {"\n": -1, "`": -1}  # cached next position of each comment end at or after i (n = none left): linear
     while i < n:
         ch = cmd[i]
         if q:
@@ -385,15 +397,28 @@ def _mask_subshell_markers(cmd: str) -> str:
                 out.append(cmd[i:i + 2]); i += 2; continue
             if ch == q:
                 q = None
+                prev = ch
             out.append(ch); i += 1; continue
         if ch in "'\"":
             q = ch; out.append(ch); i += 1; continue
         if ch == "\\" and i + 1 < n:
-            out.append(cmd[i:i + 2]); i += 2; continue
+            out.append(cmd[i:i + 2]); i += 2; prev = "a"; continue
+        if ch == "#" and prev in " \t\n;&|()<>`":
+            for c in ("\n", "`") if bt else ("\n",):
+                if nxt[c] < i:
+                    k = cmd.find(c, i)
+                    nxt[c] = n if k < 0 else k
+            i = min(nxt["\n"], nxt["`"]) if bt else nxt["\n"]
+            continue
+        prev = ch
+        if ch == "`":
+            bt = not bt
+        if ch in "<>" and i + 1 < n and cmd[i + 1] == "&":  # SENDREDIR1122: `2>&1` -- the `&` split the segment
+            out.append(ch); i += 2; continue
         if ch == "\n" or ch == "`":
             out.append(";"); i += 1; continue
         if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
-            out.append(";"); i += 2; continue
+            out.append(";"); i += 2; prev = "("; continue
         out.append(ch); i += 1
     return "".join(out)
 
@@ -453,6 +478,7 @@ def _segments_tokens(cmd: str, strict: bool = False, bound: bool = False):
     lex = shlex.shlex(masked,
                       posix=True, punctuation_chars="();|&")
     lex.whitespace_split = True
+    lex.commenters = ""  # SENDCOMMENT1122: comments are dropped by the mask, line by line, as bash reads them
     segments, cur = [], []
     for tok in lex:
         # SEGSPLIT923: shlex(punctuation_chars) returns a RUN of operator
@@ -506,13 +532,27 @@ _WRAPPERS = {
     "setsid": ("", (), 0),
 }
 _HEAD_DEPTH = 8
+# SENDREDIR1122 (card 64d10325): a redirect may stand before the command word -- `>/dev/null sendmail x`,
+# `2>err sendmail x`, `< in sendmail x`, `x=1 >log sendmail x`, `{fd}>x sendmail x`: bash runs sendmail, the gate
+# took the redirect (or its target) for the program. Stepped over with the assignments; an operator token alone
+# (`>`, `2>`) takes the next token, its target. Measured with bash (comment_fuzz.py, work/occ-other-1122): the
+# comment fix alone uncovered two such sends in the JS twin that a stray token after `#` used to over-audit.
+_REDIR = re.compile(r"^(?:\d+|\{\w+\})?(?:<<<|<<-?|<>|>>|>\||&>>|&>|<|>)(.*)$", re.S)
 
 
 def _command_heads(toks, _d: int = 0):
     """Every token list that can be the real command of this segment, after the
     leading assignments, command-position keywords and wrappers are stepped over."""
-    while toks and (_ENV_ASSIGN.match(toks[0]) or toks[0] in _CMD_POSITION_KEYWORDS):
-        toks = toks[1:]
+    k = 0  # an index, not a slice per token: a long `a=1 a=1 ...` chain was quadratic (redos-probe --fuzz, main too)
+    while k < len(toks):
+        if _ENV_ASSIGN.match(toks[k]) or toks[k] in _CMD_POSITION_KEYWORDS:
+            k += 1
+            continue
+        r = _REDIR.match(toks[k])
+        if r is None:
+            break
+        k += 1 if r.group(1) else 2
+    toks = toks[k:]
     if not toks:
         return [toks]
     w = _basename(toks[0])

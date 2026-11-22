@@ -665,6 +665,146 @@
       "name": "HDSTRICT1122 r2 (P14, strict-only): an opener inside an open double quote, the quote closes on the next line and the send runs; the loose cut hides it, the strict pass must not cut",
       "cmd": "echo \"x <<E\n\"; sendmail a@b.c; echo \"\nE\n\"",
       "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a comment line before a send (Viktor 50274)",
+      "cmd": "# level Patriknak\npython3 scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a command, a comment line, then a send",
+      "cmd": "cd /tmp\n# x\npython3 scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a trailing comment, the send on the next line",
+      "cmd": "cd /tmp # go there\npython3 scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a comment with an apostrophe before a send",
+      "cmd": "# don't forget\npython3 scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a mid-word # is no comment (bash), the next line's send",
+      "cmd": "echo a#b\npython3 scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: $# is no comment, the next line's send",
+      "cmd": "echo $# x\npython3 scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a comment after an assignment, the send on the next line",
+      "cmd": "x=1 #c\npython3 scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a # inside double quotes is text, the send after ;",
+      "cmd": "echo \"a # b\"; python3 scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a comment right after ; then a send on the next line",
+      "cmd": "true;# c\nsendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a send commented out is not a send",
+      "cmd": "# python3 scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122: a send after a trailing # on the same line is a comment",
+      "cmd": "echo hi # sendmail a@b.c",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122: a send commented out after a real command line",
+      "cmd": "cd /tmp\n#sendmail a@b.c",
+      "expected": false
+    },
+    {
+      "name": "SENDREDIR1122: a redirect before the command word, then a send",
+      "cmd": ">/dev/null sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDREDIR1122: an fd redirect with its target as a separate token, then a send",
+      "cmd": "2> err.log sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDREDIR1122: an input redirect before the send script",
+      "cmd": "< /dev/null python3 scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": true
+    },
+    {
+      "name": "SENDREDIR1122: an assignment and a redirect before a send",
+      "cmd": "x=1 >log sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDREDIR1122: 2>&1 before a send (the & no longer splits the segment)",
+      "cmd": "2>&1 sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDREDIR1122: a redirect into a file named like the sender runs no sender",
+      "cmd": "> sendmail true",
+      "expected": false
+    },
+    {
+      "name": "SENDREDIR1122: a comment line, then a redirect and a send",
+      "cmd": "# x\n>/dev/null sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a comment inside backticks ends at the closing backtick, the send after it runs",
+      "cmd": "`true # c`&sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a send commented out inside backticks is not a send",
+      "cmd": "`# sendmail a@b.c`",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122: a comment with an apostrophe, a send, a later quote (the apostrophe must not open a quote)",
+      "cmd": "# don't\nsendmail a@b.c\necho 'x'",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a # right after ; starts a comment, a send after it on the same line is not run",
+      "cmd": "true;# x; sendmail a@b.c",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122: a mid-word # with a send after ; on the same line",
+      "cmd": "echo a#b; sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a # right after a closing quote is mid-word, the send after ; runs",
+      "cmd": "echo \"a\"#b; sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a # after an escaped blank is mid-word, the send after ; runs",
+      "cmd": "echo \\ #x; sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122: a # right after $( starts a comment, a send after it on the same line is not run",
+      "cmd": "x=$(#c; sendmail a@b.c\n)",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122: a comment at the very start with an apostrophe, a send, a second such comment (balanced quotes would hide the send)",
+      "cmd": "# it's\nsendmail a@b.c\n# it's",
+      "expected": true
     }
   ]
 }

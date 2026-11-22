@@ -219,21 +219,38 @@ const codeStringSends = (code) => CODE_SEND.test(code) || (CODE_EXECISH.test(cod
 
 // Unquoted newline / backtick / `$(` become segment separators; quoted text is
 // untouched (it is content). Tracks quote state by hand -- no shell involved.
+// SENDCOMMENT1122 (card 64d10325, Viktor 50274): an unquoted `#` at the start of a word is a comment up to the end
+// of its line, dropped here (the newline stays a separator), as bash reads it; full rationale at
+// _mask_subshell_markers in outgoing-copy-gate.py (the python twin). This twin had no comment handling: a comment
+// line before a send was harmless here, but a send commented out (`# sendmail x`) counted as a send.
 export function maskSubshellMarkers(cmd) {
   let out = ''
   let q = null
+  let prev = '\n'
+  let bt = false // inside an unquoted backtick substitution: a comment there ends at the closing backtick
+  const nxt = { '\n': -1, '`': -1 } // cached next position of each comment end (length = none left): linear
   for (let i = 0; i < cmd.length; i++) {
     const ch = cmd[i]
     if (q) {
       if (ch === '\\' && q === '"' && i + 1 < cmd.length) { out += cmd[i] + cmd[i + 1]; i++; continue }
-      if (ch === q) q = null
+      if (ch === q) { q = null; prev = ch }
       out += ch
       continue
     }
     if (ch === "'" || ch === '"') { q = ch; out += ch; continue }
-    if (ch === '\\' && i + 1 < cmd.length) { out += cmd[i] + cmd[i + 1]; i++; continue }
+    if (ch === '\\' && i + 1 < cmd.length) { out += cmd[i] + cmd[i + 1]; i++; prev = 'a'; continue }
+    if (ch === '#' && ' \t\n;&|()<>`'.includes(prev)) {
+      for (const c of bt ? ['\n', '`'] : ['\n']) {
+        if (nxt[c] < i) { const k = cmd.indexOf(c, i); nxt[c] = k < 0 ? cmd.length : k }
+      }
+      i = (bt ? Math.min(nxt['\n'], nxt['`']) : nxt['\n']) - 1
+      continue
+    }
+    prev = ch
+    if (ch === '`') bt = !bt
+    if ((ch === '<' || ch === '>') && cmd[i + 1] === '&') { out += ch; i++; continue } // SENDREDIR1122: `2>&1`
     if (ch === '\n' || ch === '`') { out += ';'; continue }
-    if (ch === '$' && cmd[i + 1] === '(') { out += ';'; i++; continue }
+    if (ch === '$' && cmd[i + 1] === '(') { out += ';'; i++; prev = '('; continue }
     out += ch
   }
   return out
@@ -291,10 +308,20 @@ const WRAPPERS = new Map([
   ['setsid', ['', [], 0]],
 ])
 const HEAD_DEPTH = 8
+// SENDREDIR1122: a redirect before the command word is stepped over (an operator token alone takes its target);
+// see _REDIR in outgoing-copy-gate.py (the python twin).
+const REDIR = /^(?:\d+|\{\w+\})?(?:<<<|<<-?|<>|>>|>\||&>>|&>|<|>)(.*)$/s
 
 function commandHeads(toksIn, d = 0) {
   let toks = toksIn
-  while (toks.length && (ENV_ASSIGN.test(toks[0]) || CMD_POSITION_KEYWORDS.has(toks[0]))) toks = toks.slice(1)
+  let k = 0 // an index, not a slice per token (a long assignment chain was quadratic, see the python twin)
+  while (k < toks.length) {
+    if (ENV_ASSIGN.test(toks[k]) || CMD_POSITION_KEYWORDS.has(toks[k])) { k++; continue }
+    const r = REDIR.exec(toks[k])
+    if (!r) break
+    k += r[1] ? 1 : 2
+  }
+  toks = toks.slice(k)
   if (!toks.length) return [toks]
   const w = basename(toks[0])
   // Still a wrapper at the depth bound: counts as a send (null), see the python twin.
