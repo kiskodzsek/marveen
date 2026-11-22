@@ -86,12 +86,31 @@ _LOOSE_END = re.compile(r"\n(\w+)(?=\s|$)")
 
 def _loose_heredoc_cut(cmd: str) -> str:
     """_HEREDOC.sub(r"\\1", cmd), linear (LOOSELIN1122)."""
+    out, last = [], 0
+    for nl, _q, stop in _loose_heredoc_spans(cmd):
+        out.append(cmd[last:nl])
+        last = stop
+    out.append(cmd[last:])
+    return "".join(out)
+
+
+def _loose_heredoc_first_body(cmd: str):
+    """re.search(_HEREDOC) body (the text between the opener line's newline and the closing line's newline), or None
+    when there is no match; linear. LINEXTRACT1122 (Viktor 50275 B1): _curl_payload_raw's `@-` branch used the same
+    lazy regex directly (re.search with \\1 in place of \\2), quadratic on unclosed openers after a curl -d @-."""
+    for nl, q, _stop in _loose_heredoc_spans(cmd):
+        return cmd[nl + 1:q - 1]
+    return None
+
+
+def _loose_heredoc_spans(cmd: str):
+    """(opener line's newline, closing word's start, match end) of every _HEREDOC.finditer match, in order, linear."""
     import bisect
     ends: dict = {}
     for m in _LOOSE_END.finditer(cmd):
         ends.setdefault(m.group(1), []).append(m.start(1))
     lens = sorted({len(w) for w in ends}, reverse=True)
-    out, last, pos, nl = [], 0, 0, -1
+    pos, nl = 0, -1
     while True:
         m = _LOOSE_OPEN.search(cmd, pos)
         if m is None:
@@ -100,7 +119,7 @@ def _loose_heredoc_cut(cmd: str) -> str:
             nl = cmd.find("\n", m.end(1))
             if nl < 0:
                 break  # no newline left: no later opener can match either
-        stop = -1
+        stop = q = -1
         word = m.group(1)
         for n in lens:
             if n > len(word):
@@ -109,15 +128,14 @@ def _loose_heredoc_cut(cmd: str) -> str:
             if qs:
                 k = bisect.bisect_left(qs, nl + 2)
                 if k < len(qs):
-                    stop = qs[k] + n
+                    q = qs[k]
+                    stop = q + n
                     break
         if stop < 0:
             pos = m.start() + 1
             continue
-        out.append(cmd[last:nl])
-        last = pos = stop
-    out.append(cmd[last:])
-    return "".join(out)
+        yield nl, q, stop
+        pos = stop
 # HDSTRICT1122 (card bbc6bad4, Viktor 50205 / 50220): the _HEREDOC cut above can drop a command bash RUNS: an empty
 # body (the lazy .*? needs one body line, so it closes on a later delimiter line), a here-string (<<<E), an opener
 # inside quotes, a <<- body whose tab-led end bash takes. Measured with a bash oracle (agents/kernel/work/
@@ -1484,12 +1502,14 @@ def _curl_payload_raw(cmd: str, toks, all_flags: bool = False):
         if val.startswith("@") and not is_raw_flag:
             ref = val[1:]
             if ref == "-":
-                m = re.search(r"<<-?\s*'?(\w+)'?[^\n]*\n(.*?)\n\1(?=\s|$)", cmd, re.S)
-                if not m:
+                # LINEXTRACT1122: was re.search(r"<<-?\s*'?(\w+)'?[^\n]*\n(.*?)\n\1(?=\s|$)", cmd, re.S), the
+                # _HEREDOC pattern (quadratic on unclosed openers); the same first body, linear.
+                body = _loose_heredoc_first_body(cmd)
+                if body is None:
                     return None, "a torzs stdin-rol jon (@-), heredoc nelkul"
-                if not re.search(r"<<-?\s*'", cmd) and _IA_SUBST.search(m.group(2)):
+                if not re.search(r"<<-?\s*'", cmd) and _IA_SUBST.search(body):
                     return None, "a heredoc NEM idezett, es shell-behelyettesitest tartalmaz"
-                raw = m.group(2)
+                raw = body
             else:
                 path = os.path.expandvars(os.path.expanduser(_ia_resolve_local_vars(cmd, ref)))
                 if "$" in path:

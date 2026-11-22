@@ -635,6 +635,36 @@
       "name": "HDSTRICT1122 a clean quoted heredoc body is still cut: notes text is no send",
       "cmd": "cat <<'EOF' > n.md\nsendmail -t a@b.hu is how it worked\nEOF\necho done",
       "expected": false
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P07): an opener line ending in a backslash joins the next line, whose send runs before the body",
+      "cmd": "cat <<E \\\n; sendmail a@b.c\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P11/J10): the same with an apostrophe in the body (the strict text does not parse: fallback)",
+      "cmd": "cat <<E \\\n; sendmail a@b.c\nit's\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P13): a <<- body ends only at a line that IS the word after tabs, not one that begins with it",
+      "cmd": "cat <<-E\n\tEx\ny <<F\n\tE\nsendmail a@b.c\nF",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P14): an opener inside an open double quote opens no heredoc, the send after the quote runs",
+      "cmd": "echo \"x <<E\n\"; sendmail a@b.c\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P11/J10, strict-only): a here-string is no heredoc; a $'a\\'b' word the shell reads but shlex does not breaks only the strict text (the loose cut drops it): the fallback keeps the send",
+      "cmd": "cat <<<E\nsendmail a@b.c\necho $'a\\'b'\nE\n",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P14, strict-only): an opener inside an open double quote, the quote closes on the next line and the send runs; the loose cut hides it, the strict pass must not cut",
+      "cmd": "echo \"x <<E\n\"; sendmail a@b.c; echo \"\nE\n\"",
+      "expected": true
     }
   ]
 }

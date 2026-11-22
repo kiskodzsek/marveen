@@ -67,6 +67,25 @@ describe('HDSTRICT1122: the hard-gate deny for a send only the strict heredoc pa
     expect(strictHeredocCut('cat <<-E\nx\n\tE\nsendmail a\nE')).toBe('cat <<-E\nsendmail a\nE')
     expect(strictHeredocCut('cat <<E\nunclosed\nsendmail a')).toBe('cat <<E\nunclosed\nsendmail a')
   })
+
+  // Round 2 (Viktor 50275 I1): the python strict cut had no unit of its own (mutant P09, "an unclosed body cuts the
+  // rest", lived; bash agrees with that mutant -- an unclosed heredoc runs nothing after it -- so no shared bash row
+  // can kill it: the "cut nothing" rule is a design choice that errs toward an extra audit, pinned here per twin).
+  it('the python strict cut gives the same text as the JS one on the same units', () => {
+    const units = [
+      "cat <<'E' > f\nbody\nE\necho x", 'cat <<E\nE\nsendmail a', 'cat <<<E\nsendmail a\nE', 'echo "<<E"\nsendmail a\nE',
+      'cat <<-E\nx\n\tE\nsendmail a\nE', 'cat <<E\nunclosed\nsendmail a', '# cat <<E\nsendmail a\nE',
+      'cat <<E \\\n; sendmail a\nE', 'cat <<E\nEx\nE\nsendmail a',
+    ]
+    const out = runPy(`
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("gate", ${JSON.stringify(GATE_PY)})
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+print(json.dumps([g._strict_heredoc_cut(c) for c in json.load(open(sys.argv[1]))]))
+`, units)
+    expect(JSON.parse(out.trim())).toEqual(units.map((u) => strictHeredocCut(u)))
+    expect(strictHeredocCut('cat <<E\nunclosed\nsendmail a')).toBe('cat <<E\nunclosed\nsendmail a')
+  })
 })
 
 describe('HDSTRICT1122: known twin divergence (not in the shared list; card e00a44b0)', () => {

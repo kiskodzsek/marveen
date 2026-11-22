@@ -20,10 +20,66 @@ collect_bash_body / collect_mcp_body moved here VERBATIM from
 outgoing-copy-gate.py (behavior-neutral; parity proven byte-for-byte against a
 golden captured from the pre-move code -- scripts/__tests__/email-extract-parity.test.py).
 """
+import bisect
 import json
 import os
 import re
 import unicodedata
+
+# LINEXTRACT1122 (card bbc6bad4, Viktor 50275 B1 MEDIUM): the heredoc payload loop below was
+# re.finditer(_HEREDOC_BODY_RE), whose lazy body scans from every opener to the end: quadratic on unclosed openers
+# (Viktor: 158 KB 3.3 s, x4 per doubling; a 1.2-1.4 MB send with unclosed openers ran past 60 s in the python hook,
+# and email-approval-gate.py (10 s) calls the same function: a timed-out hook lets the command through).
+# _heredoc_bodies returns the SAME bodies in linear-ish time. The opener at a position is unique (its \w+ word must
+# be followed by an optional quote and a newline, so the word never backtracks), so every opener is found once; the
+# body ends at the first newline at or after the body start whose line BEGINS with the word (\n\1 has no lookahead:
+# a line "EOFx" closes "EOF"). Those lines are indexed once per opener word (a line's leading \w-run, cut at every
+# length some opener word has), and per opener a bisect finds the first one. After a match the search goes on at its
+# end, after a miss at the next opener: re.finditer's order. The regex stays as the reference
+# (email-extract-linear.test.py compares the two on generated strings).
+_HEREDOC_BODY_RE = re.compile(r"<<-?\s*'?(\w+)'?\n(.*?)\n\1", re.S)
+_XOPEN = re.compile(r"<<-?\s*'?(\w+)'?\n")
+_XRUN = re.compile(r"\n(\w+)")
+
+
+def _heredoc_bodies(cmd: str):
+    """[m.group(2) for m in _HEREDOC_BODY_RE.finditer(cmd)], linear-ish (LINEXTRACT1122)."""
+    if "<<" not in cmd:
+        return []
+    openers, pos = [], 0
+    while True:
+        m = _XOPEN.search(cmd, pos)
+        if m is None:
+            break
+        openers.append((m.start(), m.group(1), m.end()))
+        pos = m.start() + 1
+    if not openers:
+        return []
+    words = {w for _s, w, _b in openers}
+    lens = sorted({len(w) for w in words})
+    at: dict = {}
+    for m in _XRUN.finditer(cmd):
+        run = m.group(1)
+        for n in lens:
+            if n > len(run):
+                break
+            key = run[:n]
+            if key in words:
+                at.setdefault(key, []).append(m.start())
+    bodies, pos = [], 0
+    for s, w, b in openers:
+        if s < pos:
+            continue
+        qs = at.get(w)
+        if not qs:
+            continue
+        k = bisect.bisect_left(qs, b)
+        if k == len(qs):
+            continue
+        bodies.append(cmd[b:qs[k]])
+        pos = qs[k] + 1 + len(w)
+    return bodies
+
 
 def collect_bash_body(cmd: str):
     """Return (text, unreadable_reason). text is '' when nothing was recovered."""
@@ -43,8 +99,7 @@ def collect_bash_body(cmd: str):
                     f"({val[:60]}...) -- igy a parancs szoveget vizsgalnam, nem a levelet")
         parts.append(val)
     # heredoc payloads sit inline in the command string
-    for m in re.finditer(r"<<-?\s*'?(\w+)'?\n(.*?)\n\1", cmd, re.S):
-        parts.append(m.group(2))
+    parts.extend(_heredoc_bodies(cmd))  # = finditer(_HEREDOC_BODY_RE) group 2, linear (LINEXTRACT1122)
     # A single `<` only. Without the lookarounds a heredoc (`<<'EOF'`) matches
     # here and the quoted delimiter is taken for a filename -- caught by the
     # first live probe of this gate, which blocked with "'EOF': No such file".
