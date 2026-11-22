@@ -956,6 +956,67 @@ def smuggle_shapes_next_to_a_write_are_cards(root):
 
 
 @case
+def numbered_list_in_a_message_is_no_case_arm(root):
+    # Viktor 50003 R1 (his probe_tsm labels, verbatim shapes): a numbered list mark in a message is no segment start
+    # (main lets it through, the ) start had made it a card); a case arm stays one, also with a number, and a list
+    # after a `case WORD in` blocks (the safe side). A then at a message line start, with no if before it, is no prefix
+    # word (main lets it through); a real multi-line if/then and a do after while stay cards, and a message that also
+    # says "if" reads the then (the safe side, Known limits).
+    url = 'http://localhost:3420/api/kanban/abc123'
+    amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh viktor dave '
+    put = 'curl -s -X PUT ' + url + """ -d '{"comment":"Viktor 14:30: kész"}'"""
+    h, d = root['hook'], root['dir']
+    cases = {
+        'msg-numbered-list-paren': (amsg + "'Lépések: 1) curl -s -X PUT " + url
+                                    + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        'msg-numbered-list-line-start': (amsg + "- <<'EOF'\nLépések:\n12) " + put + '\n13) szólj.\nEOF', 0),
+        'case-arm-number': ('case "$1" in 1) ' + put + ' ;; esac; ' + amsg + '"Kész."', 2),
+        'list-after-case-in': ('case "$1" in *) : ;; esac; ' + amsg + "'1) " + put.replace("'", '') + "'", 2),
+        'known-quote-linestart-then': (amsg + "- <<'EOF'\nHa zöld:\n  then " + put + '\nEOF', 0),
+        'msg-numbered-then-else-do': (amsg + "- <<'EOF'\n1) then " + put + '\n  else ' + put + '\ndo ' + put
+                                      + '\nEOF', 0),
+        'multiline-if-then': ('if true\nthen ' + put + '\nfi\n' + amsg + '"Kész."', 2),
+        'multiline-elif': ('if false\nthen :\nelif ' + put + '\nthen :\nfi\n' + amsg + '"Kész."', 2),
+        'while-newline-do': ('while true\ndo ' + put + '; break\ndone\n' + amsg + '"Kész."', 2),
+        'msg-if-then-safe-side': (amsg + "- <<'EOF'\nif zöld\n  then " + put + '\nEOF', 2),
+        'msg-semicolon-then': (amsg + "- <<'EOF'\nHa zöld; then " + put + '\nEOF', 0),
+        'msg-if-inside-a-word': (amsg + "- <<'EOF'\nVerifikáció:\n  then " + put + '\nEOF', 0),
+        'env-value-word-digit-paren': ('T=$(echo a | tr a b1) ' + put + '\n' + amsg + '"Kész."', 2),
+        # Viktor 50062 R2: a ) that closes an open $( is no list mark (his own_tsm2 shapes, after a message write)
+        'msg+subst-empty-1-glued': (amsg + '"Kész."; $(: 1)' + put, 2),
+        'msg+subst-empty-1-glued-dq': (amsg + '"Kész."; "$(: 1)"' + put, 2),
+        'msg+subst-true-12-glued': (amsg + '"Kész."; $(true 12)' + put, 2),
+        'msg+env-subst-pipe-1': (amsg + '"Kész."; T=$(echo a | tr a 1) ' + put, 2),
+        'msg+env-subst-semi-12': (amsg + '"Kész."; T=$(true; echo 12) ' + put, 2),
+        'msg-list-after-balanced-parens': (amsg + "'Lépések (két dolog): 1) curl -s -X PUT " + url
+                                           + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        'msg-word-case-no-case-in': (amsg + "'In this case: 1) curl -s -X PUT " + url
+                                     + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        # round 3: bash also takes a newline before `in` and a WORD with spaces in a $( ); the narrow `case WORD in`
+        # form let these numbered arms through (bash runs the curl in all three; 0619a859 blocks them)
+        'case-subst-word': ('case $(echo 1) in 1) ' + put + ' ;; esac; ' + amsg + '"Kész."', 2),
+        'case-newline-in': ('case 1\nin 1) ' + put + ' ;; esac; ' + amsg + '"Kész."', 2),
+        'case-newline-in-nl-arm': ('case 1\nin\n1) ' + put + ' ;; esac; ' + amsg + '"Kész."', 2),
+        'for-in-before-case-newline-in': ('for i in 1; do :; done; case 1\nin 1) ' + put + ' ;; esac; ' + amsg
+                                          + '"Kész."', 2),
+        'msg-case-then-in-safe-side': (amsg + "'In case: 1) curl -s -X PUT " + url
+                                       + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj in.' + "'", 2),
+        # only a number of up to three digits at a word start is a list mark; the kept ) closes its parenthesis
+        'msg-lettered-mark-stays-start': (amsg + "'Lépések: a) curl -s -X PUT " + url
+                                          + ' -d {"comment":"Viktor 14:30: kész"} b) szólj.' + "'", 2),
+        'msg-digit-glued-to-word-stays-start': (amsg + "'Lépések: x1) curl -s -X PUT " + url
+                                                + ' -d {"comment":"Viktor 14:30: kész"} x2) szólj.' + "'", 2),
+        'msg-list-after-closed-subst-text': (amsg + "'Jegyzet $(: 1) után: 2) curl -s -X PUT " + url
+                                             + ' -d {"comment":"Viktor 14:30: kész"} 3) szólj.' + "'", 0),
+    }
+    bad = [label for label, (cmd, want) in cases.items()
+           if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
+    for b in bad:
+        print('  r1:', b)
+    return not bad
+
+
+@case
 def python_dict_triple_fstring_and_variable_on_rules_3_and_4(root):
     # Viktor 49912 K1: rule 3 (daily-log heading) and rule 4 (card opening stamp) read a triple-quoted or f-prefixed
     # Python value, rule 3 also a `content = '## ...'` variable; a past card stamp, another endpoint, the {{NOW}} token

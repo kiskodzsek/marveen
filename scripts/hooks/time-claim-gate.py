@@ -42,10 +42,13 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     message or memory that quotes a kanban PUT after a backtick, a ( or a ; or at a line start (a heredoc line
     "x=a 'b c' curl -sX PUT ...") with a plan time in it is judged as a card (the segment search reads quoted text
     too: imitating shell quoting in a hook hid real PUTs twice, Viktor 49845 L13, 49870); send the quote in its own
-    command, or write it without those marks.
+    command, or write it without those marks. Viktor 50003 R1: a numbered list mark ("1) curl -X PUT ...") is no start
+    before the first `case` word with an `in` word after it, and a then / elif / else (do) is a prefix word only after an if (for / while / until /
+    select) earlier in the command; a message that also holds such a word still reads them (the safe side).
     envvalue (Viktor 49858): an env prefix whose value holds a $( ) with ; | or parentheses inside (T=$(date | tr a b)
     curl, A=$(( (1+2) )) curl) is no unit of the main's segment search; CURL_SEG2_RX starts a segment after the ),
-    so next to a message or memory write that PUT is a card too.
+    so next to a message or memory write that PUT is a card too, also after a lone number ($(echo 1) curl: the ) closes
+    the $( and is no list mark, Viktor 50062 R2).
     The 13 smuggle labels of Viktor 49901 (indep7) and the five of 49912 K2 are closed by views next to the main's
     segment search (CURL_SEG2_RX, _kanban_put_segment; a view only adds a card judgment): shell words before curl
     (then, do, {, !, if, time, command, env, timeout N, a redirect ...), "curl" and \\curl, quotes read as units in
@@ -684,6 +687,57 @@ CURL_ARG_RX = re.compile(r'(?<![\w-])(?:-[HdF]|--(?:header|data(?:-raw|-binary|-
                          r'|[^\s;&|\'"])+')
 # A line continuation joins words in bash (cu\<newline>rl, T\<newline>=v); the views also read the joined text.
 BS_NL_RX = re.compile(r'\\\r?\n')
+# Viktor 50003 R1: the ) start is for a case arm and a $( ) env value, but a numbered list in a message ("Lépések:
+# 1) curl -s -X PUT .../api/kanban/... 2) szólj.") read as a card PUT, which main lets through. A number of up to three
+# digits at a line or word start, then ), is a list mark, not a start, until the first `case` word that has an `in` word
+# somewhere after it (a case arm such as `1) curl ...` stays a start after it). Not the `case WORD in` form itself: bash
+# also takes a newline before `in` and a WORD with spaces inside a $( ) or quotes (case $(echo 1) in 1) curl ...), and
+# the narrow form let those arms through (Kernel, round 3). All searches are linear (a bounded \d run per start; one
+# pass for the first case word, one for the last in word).
+LIST_MARK_RX = re.compile(r'(?:^|(?<=\s))\d{1,3}\)', re.M)
+CASE_WORD_RX = re.compile(r'\bcase\b')
+IN_WORD_RX = re.compile(r'\bin\b')
+# The same R1, its second shape: a message heredoc line "  then curl -s -X PUT ..." read as a card PUT (main lets it
+# through). then / elif / else at a start is a prefix word only after an `if` earlier in the command, and do only after
+# a for / while / until / select (a real multi-line `if x<newline>then curl ...` has its if); else its first letter
+# is changed (same length), so the line reads as on main.
+CLAUSE_KW_RX = re.compile(r'(?:^|(?<=[;&|(`)]))[ \t]*(then|elif|else|do)\b', re.M)
+IF_RX = re.compile(r'\bif\b')
+LOOP_RX = re.compile(r'\b(?:for|while|until|select)\b')
+
+
+def _unmark_lists(view):
+    """`view` (same length) with the ) of each list mark before the first `case` word (with an `in` word after it) blanked, and a then / elif /
+    else / do with no opener before it made no prefix word. Viktor 50062 R2: a ) that closes an open ( or $( (an env
+    value $(echo a | tr a 1), a curl glued to $(: 1)) is no list mark: the parenthesis depth before it, counted once
+    over the view (linear), must be 0."""
+    c = CASE_WORD_RX.search(view)
+    last_in = None
+    for last_in in IN_WORD_RX.finditer(view):
+        pass
+    lim = c.start() if c and last_in and c.start() < last_in.start() else len(view)
+    state = {'pos': 0, 'depth': 0}
+
+    def mark(m):
+        close = m.end() - 1
+        part = view[state['pos']:close]
+        state['depth'] += part.count('(') - part.count(')')
+        state['pos'] = close + 1
+        if m.start() < lim and state['depth'] <= 0:
+            return m.group(0)[:-1] + ' '
+        state['depth'] -= 1  # the kept ) closes a parenthesis
+        return m.group(0)
+    view = LIST_MARK_RX.sub(mark, view)
+    f_if, f_loop = IF_RX.search(view), LOOP_RX.search(view)
+    first_if = f_if.start() if f_if else len(view)
+    first_loop = f_loop.start() if f_loop else len(view)
+
+    def kw(m):
+        k, at = m.group(1), m.start(1)
+        if at > (first_loop if k == 'do' else first_if):
+            return m.group(0)
+        return m.group(0)[:at - m.start()] + 'x' + k[1:]
+    return CLAUSE_KW_RX.sub(kw, view)
 
 
 def _kanban_put_segment(cmd):
@@ -694,7 +748,7 @@ def _kanban_put_segment(cmd):
         return True
     joined = BS_NL_RX.sub('', cmd)
     for view in (cmd, joined) if joined != cmd else (cmd,):
-        for m in CURL_SEG2_RX.finditer(view):
+        for m in CURL_SEG2_RX.finditer(_unmark_lists(view)):
             if m.group('curl') and PUT_RX.search(m.group(0)):
                 own = CURL_ARG_RX.sub(' ', m.group('curl'))
                 i = own.find('/api/')
