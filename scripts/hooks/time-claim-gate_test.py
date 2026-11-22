@@ -858,26 +858,29 @@ def allow_html_tag_in_a_stdin_herestring_body(root):
 @case
 def allow_assignment_chain_with_no_curl_and_known_limit_subst(root):
     # A VAR=value chain is consumed even with no curl after it (Viktor 49870 L14); only a match with the curl group is a
-    # segment, so a kanban URL and -XPUT in assignments next to a message are no card PUT. Known limit (all heads): a
-    # $( ) holding a pipe or nested parentheses is no env unit, so that PUT next to a message is not judged as a card.
+    # segment, so a kanban URL and -XPUT in assignments next to a message are no card PUT. The old envvalue known limit
+    # (a $( ) holding a pipe or nested parentheses before curl) is closed by CURL_SEG2_RX's ) start: that PUT blocks.
     with open(os.path.join(root['dir'], 'put4.json'), 'w', encoding='utf-8') as fh:
         fh.write(json.dumps({'status': 'done', 'comment': 'Kernel 18:44: kész'}))
     msg = ' && bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel "Kártya kész."'
-    cmds = ['A=' + KB + ' B=-sXPUT --data-binary @put4.json' + msg,
-            'T=$(date | tr a b) curl -sX PUT ' + KB + ' --data-binary @put4.json' + msg]
-    return all(run(root['hook'], 'Bash', {'command': c}, now='18:14', cwd=root['dir'])[0] == 0 for c in cmds)
+    h, d = root['hook'], root['dir']
+    return (run(h, 'Bash', {'command': 'A=' + KB + ' B=-sXPUT --data-binary @put4.json' + msg}, now='18:14', cwd=d)[0] == 0
+            and all(run(h, 'Bash', {'command': pre + 'curl -sX PUT ' + KB + ' --data-binary @put4.json' + msg},
+                        now='18:14', cwd=d)[0] == 2
+                    for pre in ('T=$(date | tr a b) ', 'T=$(printf %s $(date)) ', 'A=$(( (1+2) )) ')))
 
 
 @case
-def known_limits_next_to_a_write_are_pinned(root):
-    # Klodel 49904 / 49907 (the named fail-open cap, Viktor 49901 indep7): the "smuggle" Known limit of the
-    # docstring. Next to a message / memory write such a card PUT is not seen as a curl segment, so it is not judged
-    # as a card (ALLOW); alone it is (BLOCK). A fix that closes one fails this row: then drop it from the docstring.
+def smuggle_shapes_next_to_a_write_are_cards(root):
+    # Viktor 49901 (indep7, the 13 smuggle labels of the old Known limit) and 49912 K2 (command, env, timeout, time,
+    # if before curl), plus sudo -u, timeout -s SIG, a case arm: next to a message / memory write the card PUT is a
+    # card (BLOCK), as alone. CURL_SEG2_RX and the joined view find it; the main's search did not.
     url = 'http://localhost:3420/api/kanban/abc123'
     msg = ("curl -s -X POST http://localhost:3420/api/messages -H 'Content-Type: application/json' "
            """-d '{"from":"kernel","to":"klodel","content":"Kész."}'""")
     mem = ("curl -s -X POST http://localhost:3420/api/" + "memories -H 'Content-Type: application/json' "
            """-d '{"agent_id":"kernel","content":"jegyzet","category":"hot"}'""")
+    amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel "Kész."'
     bs, nl, fut = '\\', '\n', 'Kernel 12:30: kész'
     body = """-d '{"comment":\"""" + fut + """\"}'"""
 
@@ -892,6 +895,7 @@ def known_limits_next_to_a_write_are_pinned(root):
                                     + fut + '"' + nl + "}' " + url, nl + msg),
         'env-apiword-first': (put(pre='R="ld /api/messages" '), ''),
         'hdr-apiword-first': ("curl -s -X PUT -H 'X-Ref: /api/" + "memories' " + url + ' ' + body, nl + mem),
+        'data-apiword-first': ("curl -s -X PUT -d '{\"comment\":\"" + fut + " /api/messages\"}' " + url, nl + msg),
         'kw-then': ('if true; then ' + put() + '; fi', nl + msg),
         'kw-do': ('for i in 1; do ' + put(pre='T="b c" ') + '; done', nl + msg),
         'kw-brace': ('{ ' + put() + '; }', nl + mem),
@@ -899,15 +903,203 @@ def known_limits_next_to_a_write_are_pinned(root):
         'redir-prefix': ('2>/dev/null ' + put(), nl + msg),
         'quoted-cmd-name': (put(name='"curl"'), nl + msg),
         'bs-cmd-name': (put(name=bs + 'curl'), nl + msg),
+        'pre-command': (put(pre='command '), nl + mem),
+        'pre-env': (put(pre='env T=1 '), nl + mem),
+        'pre-timeout': (put(pre='timeout 10 '), nl + mem),
+        'pre-timeout-signal': (put(pre='timeout -s KILL 10 '), ' && ' + amsg),
+        'pre-time': (put(pre='time '), nl + mem),
+        'pre-if': ('if ' + put() + '; then :; fi', nl + mem),
+        'pre-sudo': (put(pre='sudo -u klodel '), ' && ' + amsg),
+        'case-arm': ('case "$1" in *) ' + put() + ' ;; esac', '; ' + amsg),
+        'kw-while': ('while ' + put() + '; do break; done', nl + msg),
+        'kw-until': ('until ' + put() + '; do :; done', nl + msg),
+        'kw-else': ('if false; then :; else ' + put() + '; fi', nl + msg),
+        'kw-elif': ('if false; then :; elif ' + put() + '; then :; fi', nl + msg),
+        'pre-nohup': ('(nohup ' + put() + ')', nl + msg),
+        'pre-exec': ('(exec ' + put() + ')', nl + msg),
+        'pre-builtin': (put(pre='builtin '), nl + msg),
+        'env-then-prefix': (put(pre='T=1 timeout 10 '), nl + msg),
+        'hdr-ansi-quote-semicolon': ("curl -s -X PUT -H $'X-Note: it\\'s; ok' " + body + ' ' + url, nl + msg),
+        'hdr-dq-semicolon': ('curl -s -X PUT -H "Content-Type: application/json; charset=utf-8" ' + body + ' ' + url,
+                             nl + msg),
+        'pre-nice': (put(pre='nice -n 5 '), nl + msg),
+        'pre-time-p': (put(pre='time -p '), nl + msg),
+        'pre-env-flag': (put(pre='env -i T=1 '), nl + msg),
+        'pre-xargs': ('echo x | xargs -I{} ' + put(), ' && ' + amsg),
+        'pre-redirect-fd': (put(pre='>&2 '), nl + msg),
+        'pre-redirect-amp': (put(pre='&>/dev/null '), nl + msg),
+        'pre-timeout-kill-after': (put(pre='timeout -k 5 10s '), nl + msg),
     }
     h, d = root['hook'], root['dir']
+    bad = []
     for label, (shape, write) in shapes.items():
-        if run(h, 'Bash', {'command': shape + write}, now='12:00', cwd=d)[0] != 0:
-            return False
         alone = shape.replace('/api/messages', '/x').replace('/api/' + 'memories', '/x')
-        if run(h, 'Bash', {'command': alone}, now='12:00', cwd=d)[0] != 2:
-            return False
-    return True
+        if (run(h, 'Bash', {'command': shape + write}, now='12:00', cwd=d)[0] != 2
+                or run(h, 'Bash', {'command': alone}, now='12:00', cwd=d)[0] != 2):
+            bad.append(label)
+    # a long run of the view's start chars and prefix words next to the write stays bounded (the ) start once read
+    # the rest of a ) run per char: 120 KB 27 s)
+    import time as _t
+    for unit in (')', 'then ', 'xargs -I{} ', '\\' + nl, "'", '; curl -X PUT '):
+        cmd = amsg + nl + 'echo -X PUT' + nl + unit * (300 * 1024 // len(unit)) + ' ' + url
+        t0 = _t.monotonic()
+        run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)
+        if _t.monotonic() - t0 >= 3:
+            bad.append('slow ' + repr(unit))
+    # the same shapes with a past opening stamp pass: the view adds the card judgment, not a block
+    past = put(pre='command ').replace('12:30', '11:30') + nl + msg
+    if run(h, 'Bash', {'command': past}, now='12:00', cwd=d)[0] != 0:
+        bad.append('past-passes')
+    for b in bad:
+        print('  smuggle:', b)
+    return not bad
+
+
+@case
+def numbered_list_in_a_message_is_no_case_arm(root):
+    # Viktor 50003 R1 (his probe_tsm labels, verbatim shapes): a numbered list mark in a message is no segment start
+    # (main lets it through, the ) start had made it a card); a case arm stays one, also with a number, and a list
+    # after a `case WORD in` blocks (the safe side). A then at a message line start, with no if before it, is no prefix
+    # word (main lets it through); a real multi-line if/then and a do after while stay cards, and a message that also
+    # says "if" reads the then (the safe side, Known limits).
+    url = 'http://localhost:3420/api/kanban/abc123'
+    amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh viktor dave '
+    put = 'curl -s -X PUT ' + url + """ -d '{"comment":"Viktor 14:30: kész"}'"""
+    h, d = root['hook'], root['dir']
+    cases = {
+        'msg-numbered-list-paren': (amsg + "'Lépések: 1) curl -s -X PUT " + url
+                                    + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        'msg-numbered-list-line-start': (amsg + "- <<'EOF'\nLépések:\n12) " + put + '\n13) szólj.\nEOF', 0),
+        'case-arm-number': ('case "$1" in 1) ' + put + ' ;; esac; ' + amsg + '"Kész."', 2),
+        'list-after-case-in': ('case "$1" in *) : ;; esac; ' + amsg + "'1) " + put.replace("'", '') + "'", 2),
+        'known-quote-linestart-then': (amsg + "- <<'EOF'\nHa zöld:\n  then " + put + '\nEOF', 0),
+        'msg-numbered-then-else-do': (amsg + "- <<'EOF'\n1) then " + put + '\n  else ' + put + '\ndo ' + put
+                                      + '\nEOF', 0),
+        'multiline-if-then': ('if true\nthen ' + put + '\nfi\n' + amsg + '"Kész."', 2),
+        'multiline-elif': ('if false\nthen :\nelif ' + put + '\nthen :\nfi\n' + amsg + '"Kész."', 2),
+        'while-newline-do': ('while true\ndo ' + put + '; break\ndone\n' + amsg + '"Kész."', 2),
+        'msg-if-then-safe-side': (amsg + "- <<'EOF'\nif zöld\n  then " + put + '\nEOF', 2),
+        'msg-semicolon-then': (amsg + "- <<'EOF'\nHa zöld; then " + put + '\nEOF', 0),
+        'msg-if-inside-a-word': (amsg + "- <<'EOF'\nVerifikáció:\n  then " + put + '\nEOF', 0),
+        'env-value-word-digit-paren': ('T=$(echo a | tr a b1) ' + put + '\n' + amsg + '"Kész."', 2),
+        # Viktor 50062 R2: a ) that closes an open $( is no list mark (his own_tsm2 shapes, after a message write)
+        'msg+subst-empty-1-glued': (amsg + '"Kész."; $(: 1)' + put, 2),
+        'msg+subst-empty-1-glued-dq': (amsg + '"Kész."; "$(: 1)"' + put, 2),
+        'msg+subst-true-12-glued': (amsg + '"Kész."; $(true 12)' + put, 2),
+        'msg+env-subst-pipe-1': (amsg + '"Kész."; T=$(echo a | tr a 1) ' + put, 2),
+        'msg+env-subst-semi-12': (amsg + '"Kész."; T=$(true; echo 12) ' + put, 2),
+        'msg-list-after-balanced-parens': (amsg + "'Lépések (két dolog): 1) curl -s -X PUT " + url
+                                           + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        'msg-word-case-no-case-in': (amsg + "'In this case: 1) curl -s -X PUT " + url
+                                     + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        # round 3: bash also takes a newline before `in` and a WORD with spaces in a $( ); the narrow `case WORD in`
+        # form let these numbered arms through (bash runs the curl in all three; 0619a859 blocks them)
+        'case-subst-word': ('case $(echo 1) in 1) ' + put + ' ;; esac; ' + amsg + '"Kész."', 2),
+        'case-newline-in': ('case 1\nin 1) ' + put + ' ;; esac; ' + amsg + '"Kész."', 2),
+        'case-newline-in-nl-arm': ('case 1\nin\n1) ' + put + ' ;; esac; ' + amsg + '"Kész."', 2),
+        'for-in-before-case-newline-in': ('for i in 1; do :; done; case 1\nin 1) ' + put + ' ;; esac; ' + amsg
+                                          + '"Kész."', 2),
+        'msg-case-then-in-safe-side': (amsg + "'In case: 1) curl -s -X PUT " + url
+                                       + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj in.' + "'", 2),
+        # only a number of up to three digits at a word start is a list mark; the kept ) closes its parenthesis
+        'msg-lettered-mark-stays-start': (amsg + "'Lépések: a) curl -s -X PUT " + url
+                                          + ' -d {"comment":"Viktor 14:30: kész"} b) szólj.' + "'", 2),
+        'msg-digit-glued-to-word-stays-start': (amsg + "'Lépések: x1) curl -s -X PUT " + url
+                                                + ' -d {"comment":"Viktor 14:30: kész"} x2) szólj.' + "'", 2),
+        'msg-list-after-closed-subst-text': (amsg + "'Jegyzet $(: 1) után: 2) curl -s -X PUT " + url
+                                             + ' -d {"comment":"Viktor 14:30: kész"} 3) szólj.' + "'", 0),
+        # Viktor 50100 R3 (his own_tsm3b shapes): a stray ) before the list mark (a smiley, a quoted ")", an "a)"
+        # list) closes nothing; the depth stays at 0, so the ) of a later $( is no list mark (bash runs the curl)
+        'msg-smiley+subst-empty-1-glued': (amsg + '"Kész :)"; $(: 1)' + put, 2),
+        'msg-smiley+env-subst-pipe-1': (amsg + '"Kész :)"; T=$(echo a | tr a 1) ' + put, 2),
+        'msg-smiley+env-subst-semi-12': (amsg + '"Kész :)"; T=$(true; echo 12) ' + put, 2),
+        'msg-smiley+subst-true-12-glued': (amsg + '"Kész :)"; $(true 12)' + put, 2),
+        'msg+sq-paren+subst-empty-1-glued': (amsg + '"Kész."; echo \')\'; $(: 1)' + put, 2),
+        'msg-ab-list+subst-empty-1-glued': (amsg + '"a) kész b) mérve"; $(: 1)' + put, 2),
+        'msg-two-smiley+env-subst-1': (amsg + '"ok :) :)"; T=$(echo 1) ' + put, 2),
+        'msg-smiley-then-numbered-list': (amsg + "'Kész :) Lépések: 1) curl -s -X PUT " + url
+                                          + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        # a mark kept at depth 2 leaves depth 1; the ) after it closes that, so the next marks are list marks again
+        # (the depth is carried from mark to mark, each ( and ) read once: no rescan from the start, no stale depth)
+        'msg-list-after-mark-at-depth-2': (amsg + "'Jegyzet ((lásd 1) x) után: 2) curl -s -X PUT " + url
+                                           + ' -d {"comment":"Viktor 14:30: kész"} 3) szólj.' + "'", 0),
+        'msg-second-list-after-mark-at-depth-2': (amsg + "'Jegyzet ((lásd 1) x) után: 2) szólj 3) curl -s -X PUT "
+                                                  + url + ' -d {"comment":"Viktor 14:30: kész"}' + "'", 0),
+        # Viktor 50142 R4 (his indep9 shapes): a quoted ) inside the $( ) of an env value closes nothing; the depth
+        # counts only the shell's own parentheses, so the real ) after the number is no list mark (bash runs the curl)
+        'envsubst-quoted-smiley': (amsg + "'kész :)'\nT=$(echo ':)' 1) " + put, 2),
+        'envsubst-printf-paren': (amsg + "'1) ok'\nT=$(printf '%s' ')'; echo 1) " + put, 2),
+        'envsubst-dq-paren': (amsg + "'kész'\nT=$(echo \")\" 1) " + put, 2),
+        'envsubst-escaped-paren': (amsg + "'kész'\nT=$(echo \\) 1) " + put, 2),
+        # a quoted ( does not open one either: the list after it stays a list
+        'msg-quoted-open-paren-then-list': (amsg + "'Nézd: \"(\" Lépések: 1) curl -s -X PUT " + url
+                                            + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        # round-5 mutation holes: a $( ) nested in a "..." $( ) keeps its own depth (the list after it stays a list),
+        # and a kept, quoted mark inside a $( ) closes no level (the real ) after it is still kept: bash runs the curl)
+        'msg-dq-nested-subst-then-list': (amsg + '"x $(echo $(echo a) )" ' + "'Lépések: 1) curl -s -X PUT " + url
+                                          + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        'envsubst-quoted-kept-mark': (amsg + "'kész'\nT=$(echo ' 1)' 1) " + put, 2),
+    }
+    bad = [label for label, (cmd, want) in cases.items()
+           if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
+    for b in bad:
+        print('  r1:', b)
+    return not bad
+
+
+@case
+def quote_blind_view_counts_only_the_shells_own_parentheses(root):
+    # Viktor 50142 R4, the round-5 view: inside '...' and "..." and after a backslash every char is a space; a $( in
+    # "..." is a real substitution (its parentheses stay, quoting starts over in it, its ) returns to the "..."), and
+    # a \" does not end a "..." (round-5 mutation holes M5, M9: checked on the view itself)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tcg_view', root['hook'])
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    want = {
+        '"a $(b) c)" d)': '   $(b)     d)',
+        '"a \\" b)" c)': '          c)',
+        '"$(echo $(echo a) )" x)': ' $(echo $(echo a) )  x)',
+        "echo ' 1)' 1)": 'echo       1)',
+        'a \\) b)': 'a    b)',
+        '"$(echo ")") x)" y)': ' $(echo    )     y)',
+    }
+    bad = [k for k, v in want.items() if g._quote_blind(k) != v or len(g._quote_blind(k)) != len(k)]
+    for b in bad:
+        print('  view:', repr(b), '->', repr(g._quote_blind(b)))
+    return not bad
+
+
+@case
+def python_dict_triple_fstring_and_variable_on_rules_3_and_4(root):
+    # Viktor 49912 K1: rule 3 (daily-log heading) and rule 4 (card opening stamp) read a triple-quoted or f-prefixed
+    # Python value, rule 3 also a `content = '## ...'` variable; a past card stamp, another endpoint, the {{NOW}} token
+    # pass (a typed daily-log heading of today blocks even when past: rule 6).
+    h = root['hook']
+
+    def py(url, src, pre=''):
+        return ("python3 - <<'PY'\nimport json, urllib.request\n" + pre + 'body = ' + src + '\n'
+                "urllib.request.urlopen(urllib.request.Request('http://localhost:3420" + url
+                + "', data=json.dumps(body).encode(), method='POST'))\nPY")
+    dl, card = '/api/daily-log', '/api/kanban/abc123/comments'
+    block = [
+        py(dl, "{'agent_id': 'kernel', 'content': '''## 13:30 -- Audit\nKész.'''}"),
+        py(dl, '{"agent_id": "kernel", "content": """## 13:30 -- Audit"""}'),
+        py(dl, "{'agent_id': 'kernel', 'content': f'## 13:30 -- {t}'}", pre="t = 'Audit'\n"),
+        py(dl, "{'agent_id': 'kernel', 'content': content}", pre="content = '## 13:30 -- Audit\\nKész.'\n"),
+        py(card, "{'author': 'kernel', 'content': '''Kernel 13:30: kész'''}"),
+        py(card, "{'author': 'kernel', 'content': f'Kernel 13:30: {r}'}", pre="r = 'kész'\n"),
+    ]
+    allow = [
+        py(dl, "{'agent_id': 'kernel', 'content': f'## {{NOW}} -- {t}'}", pre="t = 'Audit'\n"),
+        py('/api/' + 'memories', "{'agent_id': 'kernel', 'content': content}", pre="content = '## 13:30 -- jegyzet'\n"),
+        py(card, "{'author': 'kernel', 'content': f'Kernel 12:30: {r}'}", pre="r = 'kész'\n"),
+    ]
+    bad = [c for c in block if run(h, 'Bash', {'command': c}, now='13:00')[0] != 2]
+    bad += [c for c in allow if run(h, 'Bash', {'command': c}, now='13:00')[0] != 0]
+    for c in bad:
+        print('  K1:', c[30:110].replace('\n', ' | '))
+    return not bad
 
 
 @case
