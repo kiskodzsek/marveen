@@ -58,7 +58,9 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     time zone other than Z, UTC, GMT, CET, CEST (any case; UTC/GMT with an hour offset) is not judged; deadline-word:
     a stamp right after határidő / deadline / until / by passes on purpose (a deadline, as in rule 2; none in the
     12866-comment replay). Viktor 49939: shellvar-other (the text in a shell variable of another name, like py-var)
-    is not read; u0022-in-value (a raw " inside a heredoc JSON value) is invalid JSON, the value ends there.
+    is not read; u0022-in-value (a raw " inside a heredoc JSON value) is invalid JSON, the value ends there;
+    key-twice-last-clean (an overblock: two content keys in one object, the last one clean) blocks, every value is
+    read, so a second curl in the same command is not skipped.
   - Bash that writes a shared/*.md through the shell (Radar 39251: `cat >> .../shared/hibanaplo.md <<'EOF'`
     wrote a future time unseen): a `>` / `>>` / `>|` redirect or a `tee [-a]` whose target resolves to a
     shared/*.md. The command text (the heredoc body) is judged; lines already in a target file pass, like
@@ -207,6 +209,8 @@ MARKER_RX = re.compile(
 # A deadline, not a measurement: "22:00-ig", "22:00-ra", "22:00 óráig"; "határidő 22:00", "by 22:00".
 DEADLINE_AFTER_RX = re.compile(r'\s?-?\s?(?:ig|ra|re)(?!\w)|\s+óráig(?!\w)', re.I)
 DEADLINE_BEFORE_RX = re.compile(r'(?<!\w)(?:határidő|határidővel|deadline|until|by)[:\s]+$', re.I)
+# Rule 7 only (Viktor 49939 dl-bold-deadline): the same words in markdown marks (**deadline** (stamp)).
+DEADLINE_TAIL_RX = re.compile(r'(?<!\w)[*_`~]*(?:határidő|határidővel|deadline|until|by)[*_`~]*[:\s]+$', re.I)
 # Inter-agent message, memory and daily-log writes (placeholder rule only, see SCOPE).
 API_WRITE_RX = re.compile(r'(?<![\w-])(?:[a-z]+-msg|msg-close)\.sh(?![\w-])|/api/(?:messages|memories|daily-log)')
 # Rule 3: the heading at the start of a daily-log payload's "content" value. The rest of the heading line (up to a
@@ -531,7 +535,7 @@ def comment_tail_findings(text, now):
             end = _value_end(v)
             tail = v[max(0, end - 120):end]
             m = COMMENT_TAIL_RX.search(tail)
-            if not m or DEADLINE_BEFORE_RX.search(tail[:m.start()]):
+            if not m or DEADLINE_TAIL_RX.search(tail[:m.start()]):
                 continue
             local = _tail_local(m)
             # Today's stamp: today's date written, or a zoned stamp that lands on today (Viktor 49939

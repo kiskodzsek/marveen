@@ -331,6 +331,20 @@ def closing_stamp_round3_ends_zones_separators_and_concatenation(root):
 
 
 @case
+def closing_stamp_after_a_marked_deadline_word(root):
+    # Viktor 49939 dl-bold-deadline (an overblock): a deadline word in markdown marks passes like a bare one; a bold
+    # word that is not a deadline still blocks.
+    h = root['hook']
+    s = _tail('').strip()
+
+    def j(val):
+        return KANBAN + " -d '" + json.dumps({'content': val}, ensure_ascii=False) + "'"
+    return (all(run(h, 'Bash', {'command': j(v)}, now='22:04')[0] == 0
+                for v in ('27/28 **deadline** ' + s, '27/28 _határidő_: ' + s, '27/28 `until` ' + s))
+            and run(h, 'Bash', {'command': j('27/28 **kész** ' + s)}, now='22:04')[0] == 2)
+
+
+@case
 def allow_closing_stamp_outside_the_comment_value(root):
     # Viktor 49927 T1 (a regression of round 1): only the content / comment value is read; a title, description or
     # author ending in a stamp passes (his A-put-title, A-put-title-first, A-comment-author), and so does a
