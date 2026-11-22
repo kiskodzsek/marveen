@@ -68,6 +68,11 @@ KNOWN-KTP-VAR, a value not bound or bound otherwise: var-ifs, var-array (X=(evil
   (${X:+..}), var-assigndefault (${X:=..}), var-escsemi, read-var, positional-glob (`set -- e*.py; python3 $1`),
   a zsh paren after an unexpanded value or substitution (`$X(easure.py|z)`, `$PWD/e(vil.py|x)`, `$(echo
   m)(easure.py|z)`), and a value set outside the command or by a substitution (`X=$(..)`), as everywhere below.
+A backslash in a script word (card e3d2fd6e, under KNOWN-KTP-WORD: `./x\\.sh`, `\\./x.sh`): read at a code
+  position, in a shell's payload and in a heredoc a shell reads; inside a quote of a command that may run it some
+  other way (`ssh h './x\\.sh'`, `tmux send-keys './x\\.sh'`, `awk '{system("./x\\.sh")}'`) and in a
+  quoted-delimiter heredoc into another program it is data, as on main. A word after a shell's -c is read as a
+  command (`bash -c '..' _ 'a ))\\/(( )) b'` blocks: a lean, as for a quoted or `$` word there on main).
 KNOWN-KTP-OVER, not open but leans: they block a harmless call (old unless named new): every word a brace makes
   is read as a script (brace-seq, brace-empty, braceargs-benign, bracenested-alt, `python3 {l..n}easure.py
   stat.py` runs leasure.py), a zsh order qualifier (new: zshqual-om2, (On), (om): the order is not modelled),
@@ -2900,6 +2905,11 @@ DIRECT_RX = re.compile(SCRIPT_POSITION + r'''['"]?((?:\.{1,2}/|/|[\w.-]+/)[^\s'"
 _ESC_PATH_START = r'''(?=[.\\]*\\)(?:\\?\.){1,2}\\?/|\\/|[\w.-]+\\/'''
 DIRECT_WORD_RX = re.compile(SCRIPT_POSITION + r'''((?:['"]?(?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*['"`$\\]|'''
                             + _ESC_PATH_START + r''')\S*)''')
+# The words DIRECT_WORD_RX took before card e3d2fd6e (a quote, `$` or backtick after the path start). A word it takes
+# only for a backslash is read at a code position alone (_esc_word_at_code): the fleet replay on main 99ee40e4 found
+# 5 commands whose regex text (`/\.(?:py|sh)$/` in a JS file a `python3 - <<'PY'` writes, `\/` in a `sed '...'`
+# script) a zsh-group reading then took for an unread script word
+_DIRECT_WORD_PLAIN_RX = re.compile(SCRIPT_POSITION + r'''(['"]?(?:\.{1,2}/|/|[\w.-]+/)[^\s'";|&<>()`$]*['"`$]\S*)''')
 # A literal naming the binary: 'security', "/usr/bin/security", `security` (a JS template), or a shell assignment
 # SEC=security. The assignment branch walks path segments, not \S*: `=\s*['"]?(?:\S*/)?security` ran to the end of every
 # space-free run and searched back for "/" at each "=", quadratic: 100 000 "=" took 9 s, 1 MB never returned within the
@@ -3114,6 +3124,36 @@ def _blank_data_heredocs(text):
                 if out[i] != '\n':
                     out[i] = ' '
     return ''.join(out)
+
+
+_ESC_MAX_COPIES = 64
+
+
+def _esc_word_at_code(text, at, cmd=None, word=None):
+    """card e3d2fd6e: a word DIRECT_WORD_RX takes only for a backslash, starting at text[at], is read unless the char
+    before it is inside a quote ('...', $'...', the literal part of "...") or the word is in the body of a
+    quoted-delimiter heredoc no shell reads (its own first char: the newline before a body's first line is the
+    command line's). A shell's payload (`bash -c '..'`, `eval '..'`) is read as a text of its own, where it is code.
+    A text the lexer does not fully read keeps the word (fail-closed), unless it is a text made from cmd (the lexer
+    view: the r3 replay found a `sed '..\\/$(( ))\\/..'` read there) and every copy of the word in cmd, which the lexer
+    reads, is data, and the text has it no more often (at most _ESC_MAX_COPIES copies are looked at)."""
+    lx = lex_or_none(text)
+    if lx is None:
+        if cmd is None or text == cmd or not word:
+            return True
+        n = cmd.count(word)
+        if not n or n > _ESC_MAX_COPIES or text.count(word) > n:
+            return True  # (a cmd the lexer does not read either: its first copy below keeps the word)
+        i = cmd.find(word)
+        while i >= 0:
+            if _esc_word_at_code(cmd, i):
+                return True
+            i = cmd.find(word, i + 1)
+        return False
+    cls = lx['cls']
+    if cls[at] == 'h':
+        return _blank_data_heredocs(text)[at] == text[at]
+    return not (at and cls[at - 1] in ('q', 'a', 'd'))
 
 
 # a cd and its target word: plain characters and ${NAME}/$NAME, up to a blank or an operator; `cd $(..)`, a bare cd
@@ -4671,6 +4711,8 @@ def script_paths(cmd, cwd, normalised=None, extra=(), live=None):
     # Kernel r3: a heredoc body no shell reads (blanked here) keeps the cut zsh flag group's glob reading (KNOWN-V9)
     data_texts = {id(t): _blank_data_heredocs(t) if '${(' in t else t for t in word_texts}
     for t, m in ((t, m) for t in word_texts for m in DIRECT_WORD_RX.finditer(t)):
+        if not _DIRECT_WORD_PLAIN_RX.match(t, m.start()) and not _esc_word_at_code(t, m.start(1), cmd, m.group(1)):
+            continue
         in_data = data_texts[id(t)][m.start(1)] != t[m.start(1)]
         raw = m.group(1).rstrip(';&|<>')
         if len(raw) > ARGS_WINDOW:  # without_substs is a loop per nesting level: an unbounded word is not read

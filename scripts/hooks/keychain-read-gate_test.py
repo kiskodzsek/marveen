@@ -1855,6 +1855,24 @@ def script_cases():
             ('echo $(sub\\/deep.py)', d),
             ('cd sub && \\../dump.sh', d),  # `\../` and `.\./` ran ../x.sh (truth2.py)
             ('cd sub && .\\./dump.sh', d),
+            # card e3d2fd6e r3: the word in a shell's payload or in a heredoc a shell reads is code
+            ("bash -c './dump\\.sh'", d),
+            ("eval './dump\\.sh'", d),
+            ('bash -c "echo $(./dump\\.sh)"', d),
+            ("bash <<'EOF'\n./dump\\.sh\nEOF", d),
+            ("bash <<'EOF'\nx=1; ./dump\\.sh\nEOF", d),
+            ('bash <<EOF\n./dump\\.sh\nEOF', d),
+            ('cat > /dev/null <<EOF\n$(./dump\\.sh)\nEOF', d),  # an unquoted body: the shell runs its $( )
+            # a text the lexer does not fully read (a heredoc in a substitution) keeps the word (fail-closed)
+            ("echo $(cat <<'E'\nx\nE\n); ./dump\\.sh", d),
+            ("echo `cat <<'E'\nx\nE\n`; ./dump\\.sh", d),
+            # a quote right after the word makes it one DIRECT_WORD_RX took before e3d2fd6e: read as on main
+            ("git commit --dry-run -m 'x; ./dump\\.sh'", d),
+            # past _ESC_MAX_COPIES copies the command is not searched: the word is kept (fail-closed)
+            ("python3 -c 'print(1)'" + " 'a ))\\/(( )) b'" * 65, d),
+            # a copy of the word at a code position of the command keeps it, the second copy too
+            ("python3 -c 'print(1)' 'x; ./dump\\.sh ))\\/(( ))'; ./dump\\.sh", d),
+            ("python3 -c 'print(1)' 'a ))\\/(( )) b'\n./dump\\.sh", d),
             ('sub/deep.py', d),
             (os.path.join(d, 'sub', 'deep.py') + ' --x', None),
             ('python3 export.py', d),
@@ -3065,6 +3083,22 @@ def script_cases():
             ('./ok\\.js', d),
             ('\\./ok.js', d),
             ('grep -n "./dump\\.sh" /dev/null; true', d),
+            # card e3d2fd6e r3: a backslash word in a quote or in a heredoc no shell reads is data (the fleet replay
+            # on 99ee40e4: a JS regex a python heredoc writes, a sed script; a zsh-group reading took it for a script)
+            ("python3 - <<'PY'\nif (a && /\\.(?:py|sh)$/.test(x)) return\nPY", d),
+            ("python3 - <<'PY'\nconst rx = /expect\\(r\\)\\.(not\\.)?m\\((\\/(?:\\\\.|[^\\/\\n])+\\/[a-z]*)\\)/g\nPY", d),
+            ("sed -n 's/^1\\. x/1. y (# a ${ }\\/$(( ))\\/ z/' /dev/null", d),
+            ("echo 'a; ./dump\\.sh'", d),
+            ('echo "a; ./dump\\.sh"', d),
+            ("printf %s $'a; ./dump\\\\.sh'", d),
+            ('git commit --dry-run -m "x; ./dump\\.sh y"', d),
+            ("git commit --dry-run -m 'x; ./dump\\.sh y'", d),
+            # the r3 replay: a quoted argument after a python -c payload; the lexer view of it does not lex, the
+            # command does, and every copy of the word in it is in a quote
+            ("python3 -I -c 'import sys; print(sys.argv[1])' 's/a ))\\/(( )) b/'", d),
+            ("python3 -c 'print(1)' 'a (# ${ }\\/$(( ))\\/(( )) b), c'", d),
+            ("python3 - <<'PY'\n./dump\\.sh\nPY", d),
+            ("cat > /dev/null <<'EOF'\nx && ./dump\\.sh\nEOF", d),
             ('python3 "no"tes.py stat.py', d),
             ('python3 -m "notes"', d),
             ('python3 -Inotes', d),
