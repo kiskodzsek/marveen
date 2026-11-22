@@ -7,7 +7,7 @@ quadratic regex came back four times on one card (81a70e99), each found only by 
 time of the real hook process (python start included, what the session waits for), against a 1 s budget per run.
 
   probe.py all <repo> <rev> <workdir> [--workers N] [--size BYTES] [--only NAME[,NAME]] [--python PY]
-      prepare + run (in the sandbox) + table; the table goes to stdout and <workdir>/table.md.
+      prepare + run (in the sandbox) + table; the table goes to stdout and <workdir>/table-<sha8>.md.
   probe.py prepare <repo> <rev> <root>     git archive <rev> scripts/ into the empty <root>
   probe.py run <root> [...]                inside sandbox-exec -f gatetime.sb -D ROOT=<root> only (self-check)
   probe.py table <root>/results.jsonl      the per-gate table (markdown)
@@ -253,7 +253,9 @@ def cmd_run(root, workers, size, only, py):
 
 def cmd_table(path):
     rows, conf, meta, info = [], {}, {}, {}
-    for line in open(path, encoding='utf-8'):
+    with open(path, encoding='utf-8') as fh:
+        lines = fh.readlines()
+    for line in lines:
         r = json.loads(line)
         if r.get('meta'):
             info = r
@@ -334,7 +336,7 @@ def main(argv):
         subprocess.run(['tar', '-x', '-C', root], input=a.stdout, check=True)
         return 0
     if cmd == 'run' and len(args) == 2:
-        return cmd_run(os.path.abspath(args[1]), int(opts['--workers']), int(opts['--size']), only, opts['--python'])
+        return cmd_run(os.path.realpath(args[1]), int(opts['--workers']), int(opts['--size']), only, opts['--python'])
     if cmd == 'table' and len(args) == 2:
         print(cmd_table(args[1]))
         return 0
@@ -344,7 +346,9 @@ def main(argv):
         if not sha:
             print('probe: unknown rev ' + rev, file=sys.stderr)
             return 2
-        root = os.path.join(os.path.abspath(work), 'root-' + sha[:8] + '-' + time.strftime('%Y%m%d%H%M%S'))
+        # realpath: the sandbox's (subpath ROOT) matches the resolved path, so a work dir behind a symlink (the
+        # macOS temp dir /var/folders is /private/var/folders) would deny every write of the run.
+        root = os.path.join(os.path.realpath(work), 'root-' + sha[:8] + '-' + time.strftime('%Y%m%d%H%M%S'))
         rc = main([argv[0], 'prepare', repo, sha, root])
         if rc:
             return rc
