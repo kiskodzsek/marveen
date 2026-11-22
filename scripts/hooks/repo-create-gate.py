@@ -38,11 +38,20 @@ SCOPE OF THE MATCH (Viktor 40095 L2/L3): this stops an accidental model error, n
   Neither is a program given with -c / -e that itself reads stdin (python3 -c "exec(...stdin...)" next to a sink word).
   Overblocks on purpose: open-quote opener, dq-arg spans heredoc text, unquoted body arith next to a sink, a
   never-closing quoted word.
+  Known limits of the write-signal and path match (Viktor 50155, indep10 probe labels; all on main too, LOW): curl
+  -d with an attached quote (-d'{...}'), a combined short-flag cluster (-sSd), --data-ascii, wget --post-data,
+  httpie (http POST), a placeholder in the REST path (a shell variable, gh api's {owner}), gh api -f with an attached
+  value (-fname=x), -F with a query-at-file value, -f with a cat-subst value ($(cat f)), a heredoc body sent to a
+  .json sink-then-input (the --input names it in a later command), a requests session object's .post (any other
+  name than session/client), a request whose data= is on a separate-line from its POST, and an MCP tool name with
+  another prefixed server part that only ends in create_repository are not seen as a creation.
 
 CONTRACT (hook-exit-code-invariant): exit 2 = block, exit 0 = allow, never exit 1. Malformed stdin allows. An internal
 error (also a KeyboardInterrupt) is recorded in store/hook-errors.log through hook_errlog; then only the linear
 creation regexes run on the raw command and on the files it names (an MCP call: its tool name), a hit blocks, anything
-else allows (fallback_creates, Viktor 50057, 50109). A closed stderr does not change the exit code.
+else allows (fallback_creates, Viktor 50057, 50109). A closed stderr (fd 2 closed) does not change the exit code.
+  Known limit (Viktor 50155, real-stderr-pipe-closed, old, on main too): when stderr is a pipe whose reader end is
+  already closed, the interpreter's final flush fails at exit and a block leaves with 120, not 2.
   Known limits of the crash path (independent probe rcf labels): fallback-raises (a crash inside the fallback itself
   allows, never exit 1); watchdog-env (REPO_GATE_WATCHDOG_S can only lower the 6 s watchdog, the hook limit is 10 s);
   real-crash-approved (a reference that once crashed the gate is skipped now, so an approved creation passes, as it
