@@ -702,6 +702,31 @@ LIST_MARK_RX = re.compile(r'(?:^|(?<=\s))\d{1,3}\)', re.M)
 CASE_WORD_RX = re.compile(r'\bcase\b')
 IN_WORD_RX = re.compile(r'\bin\b')
 PAREN_RX = re.compile(r'[()]')
+# Viktor 50181 R5 (card 09f76463): _quote_blind models '...', "...", $( in "..." and a backslash, nothing else. A
+# $'...' (where \' does not close), a word-start # (a comment), a ${...} and a heredoc inside an open parenthesis can
+# hide a ) the shell reads or show one it does not, so the depth after them is a guess: four rounds each brought a
+# new shape when the model grew. Fail-closed instead (Viktor's direction, NOT a wider model): from the first such
+# sign at a depth above 0 on, no list mark is blanked (a kept mark is a start: at worst an overblock). Linear: one
+# pass over the parentheses and these signs, stopping at the first hit.
+UNMODELED_RX = re.compile(r"[()]|\$['{]|<<|#")
+_WORD_START = ' \t\n;&|()`'
+
+
+def _unmodeled_from(view, blind):
+    """The position of the first sign _quote_blind does not model (see UNMODELED_RX) inside an open parenthesis,
+    or len(view). A sign inside quotes (blanked in `blind`) is text; a # only at a word start."""
+    depth = 0
+    for m in UNMODELED_RX.finditer(view):
+        i, c = m.start(), m.group()
+        if blind[i] == ' ':
+            continue
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth = max(0, depth - 1)
+        elif depth and (c != '#' or i == 0 or view[i - 1] in _WORD_START):
+            return i
+    return len(view)
 
 
 def _quote_blind(view):
@@ -767,6 +792,7 @@ def _unmark_lists(view):
     lim = c.start() if c and last_in and c.start() < last_in.start() else len(view)
     state = {'pos': 0, 'depth': 0}
     blind = _quote_blind(view)
+    unmodeled = _unmodeled_from(view, blind)
 
     def mark(m):
         close = m.end() - 1
@@ -776,7 +802,7 @@ def _unmark_lists(view):
         for p in PAREN_RX.finditer(blind, state['pos'], close):
             d = d + 1 if p.group() == '(' else max(0, d - 1)
         state['pos'] = close + 1
-        if m.start() < lim and d == 0:
+        if m.start() < lim and d == 0 and close < unmodeled:
             state['depth'] = 0
             return m.group(0)[:-1] + ' '
         state['depth'] = max(0, d - 1) if blind[close] == ')' else d  # a kept, unquoted ) closes a parenthesis

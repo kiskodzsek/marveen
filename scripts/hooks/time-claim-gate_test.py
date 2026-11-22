@@ -1071,6 +1071,65 @@ def quote_blind_view_counts_only_the_shells_own_parentheses(root):
 
 
 @case
+def unmodeled_sign_in_a_substitution_keeps_the_list_mark(root):
+    # Viktor 50181 R5 (card 09f76463, his verify_r5 shapes): inside the $( ) of an env value, a $'...' with \', a
+    # comment, a ${...} and a heredoc are not modeled by _quote_blind, and each showed or hid a ) so that the real ) after
+    # the number read as a list mark at depth 0 (main and the round-5 head let the PUT through; zsh runs it in all four,
+    # /bin/bash 3.2 in the first two). Fail-closed: from such a sign at a depth above 0 on, no list mark is blanked.
+    # Each has an ALLOW pair: the same sign at the top level (depth 0) before a numbered list in a message.
+    url = 'http://localhost:3420/api/kanban/abc123'
+    amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh viktor dave '
+    put = 'curl -s -X PUT ' + url + """ -d '{"comment":"Viktor 14:30: kész"}'"""
+    lst = "'Lépések: 1) curl -s -X PUT " + url + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'"
+    h, d = root['hook'], root['dir']
+
+    def sub(inner, msg="'kész :)'"):
+        return amsg + msg + '\nT=$(' + inner + ' 1) ' + put
+    cases = {
+        'fo-ansic-escq-paren': (sub("echo $'\\')'"), 2),
+        'fo-ansic-escq-paren-list': (sub("echo $'\\')'", "'1) ok'"), 2),
+        'fo-comment-paren': (sub('echo a # )\n'), 2),
+        'fo-brace-default': (sub('echo ${x:-)}'), 2),
+        'fo-heredoc-paren': (sub('cat <<E\n)\nE\n'), 2),
+        # the ALLOW pairs: the sign at depth 0, then a message with a numbered list (no PUT runs)
+        'top-ansic-then-list': (amsg + "$'it\\'s 1) curl -X PUT " + url + " Viktor 14:30: kész'", 0),
+        'top-comment-then-list': ('# jegyzet: a lista lent\n' + amsg + lst, 0),
+        'top-brace-then-list': ('echo ${HOME:-x}; ' + amsg + lst, 0),
+        'top-heredoc-then-list': (amsg + "- <<'EOF'\nLépések:\n12) " + put + '\n13) szólj.\nEOF', 0),
+        # inside a substitution but modeled: a quoted #, a mid-word #, a quoted ${ change nothing (the depth is right)
+        'sub-quoted-hash-list-after': (amsg + "\"$(echo '#')\" " + lst, 0),
+        'sub-midword-hash-list-after': (amsg + '"$(echo a#b)" ' + lst, 0),
+    }
+    bad = [label for label, (cmd, want) in cases.items()
+           if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
+    for b in bad:
+        print('  r5:', b)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tcg_r5', root['hook'])
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    want = {
+        "T=$(echo $'a' 1)": 9,      # $' inside the $(
+        'T=$(a # c\n 1)': 6,        # a word-start #
+        'T=$(a;# c\n 1)': 6,
+        'T=$(a#b 1)': 10,           # a mid-word # is no comment: none (len)
+        'T=$(echo ${x} 1)': 9,
+        'T=$(cat <<E\n)\nE\n 1)': 8,
+        "T=$(echo '#${<<' 1)": 19,  # quoted: text
+        "echo $'a' ${x} # c <<E": 22,  # depth 0: none
+        'T=$(a) # c': 10,           # the $( closed before the #
+        '"$(echo ${x})"': 8,        # a $( inside "..." is a real substitution
+        'a) # c': 6,                # a stray ) leaves the depth at 0, not below: the # is at depth 0
+    }
+    for k, v in want.items():
+        got = g._unmodeled_from(k, g._quote_blind(k))
+        if got != v:
+            bad.append(k)
+            print('  unmodeled:', repr(k), '->', got, 'want', v)
+    return not bad
+
+
+@case
 def python_dict_triple_fstring_and_variable_on_rules_3_and_4(root):
     # Viktor 49912 K1: rule 3 (daily-log heading) and rule 4 (card opening stamp) read a triple-quoted or f-prefixed
     # Python value, rule 3 also a `content = '## ...'` variable; a past card stamp, another endpoint, the {{NOW}} token
