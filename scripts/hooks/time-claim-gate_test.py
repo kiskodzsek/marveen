@@ -135,6 +135,133 @@ def block_move_comment_future_and_from_data_file(root):
     return run(root['hook'], 'Bash', {'command': MOVE + ' --data-binary @' + body}, now='18:14')[0] == 2
 
 
+def _tail(text):
+    return text + ' (' + TODAY.isoformat() + ' 22:06)'
+
+
+@case
+def block_closing_stamp_ahead(root):
+    # Rule 7, Dave 49852, card fec4c8c8: the move comment written at 22:04 ended "(<today> 22:06)" and passed
+    # (no marker word for rule 2, rule 4 reads only the opening stamp). Verbatim shape, today's date.
+    h = root['hook']
+    verbatim = _tail('Mutáció kész: 27/28 KILLED (1 egyenértékű).')
+    body = json.dumps({'status': 'waiting', 'comment': verbatim})
+    py = ("python3 - <<'P'\nimport json, urllib.request\nd = {'author': 'dave', 'content': '"
+          + _tail('Kör 3 kész') + "'}\nurllib.request.urlopen(urllib.request.Request("
+          "'http://localhost:3420/api/kanban/abc/comments', json.dumps(d).encode()))\nP")
+    shapes = [
+        MOVE + " --data-binary @- <<'J'\n" + body + "\nJ",
+        MOVE + " -d '" + body + "'",
+        KANBAN + " -d '" + json.dumps({'author': 'dave', 'content': _tail('Kör 3 kész') + '.'}) + "'",
+        KANBAN + " -d '" + json.dumps({'author': 'dave', 'content': 'Kör 3 kész (' + TODAY.isoformat() + 'T22:06:30) '}) + "'",
+        KANBAN + " -d '" + json.dumps({'content': '1. sor\n2. sor ' + _tail('')}) + "'",
+        PUT + " -d '" + json.dumps({'comment': _tail('VÁR: Viktor, 12. kör')}) + "'",
+        py,
+        # the closing quote escaped in a double-quoted -d, and a trailing newline (printf '%s\n' into the body)
+        MOVE + ' -d "{\\"status\\":\\"waiting\\",\\"comment\\":\\"' + _tail('Kör 3 kész') + '\\"}"',
+        KANBAN + " -d '" + json.dumps({'content': _tail('Kör 3 kész') + '\n'}) + "'",
+        KANBAN + " --data-binary @- <<'J'\n" + json.dumps({'content': _tail('Kör 3 kész') + ' .\n\n'}) + "\nJ",
+    ]
+    return all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 2 for c in shapes)
+
+
+@case
+def block_closing_stamp_from_data_file(root):
+    body = os.path.join(root['dir'], 'tail.json')
+    with open(body, 'w', encoding='utf-8') as fh:
+        json.dump({'status': 'waiting', 'comment': _tail('VÁR: review, 3. kör')}, fh)
+    p = run(root['hook'], 'Bash', {'command': MOVE + ' --data-binary @' + body}, now='22:04')
+    return p[0] == 2 and 'closing comment stamp' in p[2]
+
+
+@case
+def allow_closing_stamp_not_ahead_or_not_a_stamp(root):
+    h = root['hook']
+    yesterday = (TODAY - datetime.timedelta(days=1)).isoformat()
+    ok = [
+        (KANBAN + " -d '" + json.dumps({'content': _tail('Kör 3 kész')}) + "'", '22:06'),  # same minute
+        (KANBAN + " -d '" + json.dumps({'content': _tail('Kör 3 kész')}) + "'", '22:07'),
+        (KANBAN + " -d '" + json.dumps({'content': 'Kör 3 kész (' + TODAY.isoformat() + ' 21:30)'}) + "'", '22:04'),  # past
+        (KANBAN + " -d '" + json.dumps({'content': 'Kör 3 kész (' + yesterday + ' 22:06)'}) + "'", '22:04'),  # another day
+        (KANBAN + " -d '" + json.dumps({'content': 'Kör 3: partner-levelek (22:06).'}) + "'", '22:04'),  # time only: a plan
+        (KANBAN + " -d '" + json.dumps({'content': _tail('Kör 3 kész') + ' után indul a kör'}) + "'", '22:04'),  # not the end
+        (KANBAN + " -d '" + json.dumps({'content': _tail('Kör 3 kész'), 'x': 1}) + "'", '22:06'),
+        (MOVE + " -d '" + json.dumps({'status': 'done', 'comment': 'Kör 3 kész ' + TODAY.isoformat() + ' 22:06'}) + "'",
+         '22:04'),  # no parentheses
+        (API + "memories -d '" + json.dumps({'agent_id': 'dave', 'content': _tail('Kör 3 kész')}) + "'",
+         '22:04'),  # not a card comment (a memory: placeholder rule only)
+        (PUT + " -d '" + json.dumps({'description': _tail('terv')}) + "'", '22:04'),  # no comment key: not a comment
+    ]
+    return all(run(h, 'Bash', {'command': c}, now=n)[0] == 0 for c, n in ok)
+
+
+def _zoned_stamps(hh=22, mm=6):
+    """Today's local hh:mm written with an offset, as UTC with Z, and as UTC (the date may differ): the gate turns
+    each back into local time, so the cases hold in any machine zone (a UTC CI runner too)."""
+    import time as _t
+    ts = _t.mktime((TODAY.year, TODAY.month, TODAY.day, hh, mm, 0, 0, 0, -1))
+    off = _t.localtime(ts).tm_gmtoff // 60
+    sign = '+' if off >= 0 else '-'
+    local = f'{TODAY.isoformat()}T{hh:02d}:{mm:02d}'
+    utc = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+    return [f'({local}:00{sign}{abs(off) // 60:02d}:{abs(off) % 60:02d})', f'({utc:%Y-%m-%dT%H:%M:%S}Z)',
+            f'({utc:%Y-%m-%dT%H:%M:%S}.250Z)', f'({utc:%Y-%m-%d %H:%M} UTC)']
+
+
+@case
+def block_closing_stamp_round2_shapes(root):
+    # Viktor 49927: T2 time zones (an offset, Z, a fraction, a UTC name), T3 a JSON-escaped CRLF, and his probe's
+    # py-dict-call-last, md-bold, md-code, a doubled backslash-n in a double-quoted -d, and py-concat.
+    h = root['hook']
+    ok = True
+    for stamp in _zoned_stamps():
+        ok &= run(h, 'Bash', {'command': KANBAN + " -d '" + json.dumps({'content': 'Kör 3 kész ' + stamp}) + "'"},
+                  now='22:04')[0] == 2
+    py = "python3 - <<'P'\nimport json, urllib.request\n{}\nurllib.request.urlopen(urllib.request.Request(" \
+         "'http://localhost:3420/api/kanban/abc/comments', json.dumps(d).encode()))\nP"
+    shapes = [
+        KANBAN + " -d '{\"content\":\"Kör 3 kész " + _tail('').strip() + "\\r\\n\"}'",
+        py.format("d = dict(author='dave', content='Kör 3 kész " + _tail('').strip() + "')"),
+        KANBAN + " -d '" + json.dumps({'content': 'Kör 3 kész **' + _tail('').strip() + '**'}) + "'",
+        KANBAN + " -d '" + json.dumps({'content': 'Kör 3 kész `' + _tail('').strip() + '`'}) + "'",
+        MOVE + ' -d "{\\"status\\":\\"waiting\\",\\"comment\\":\\"' + _tail('Kör 3 kész') + '\\\\n\\"}"',
+        py.format("d = {'content': 'Kör 3 kész' + ' " + _tail('').strip() + "'}"),
+    ]
+    for c in shapes:
+        ok &= run(h, 'Bash', {'command': c}, now='22:04')[0] == 2
+    return ok
+
+
+@case
+def allow_closing_stamp_outside_the_comment_value(root):
+    # Viktor 49927 T1 (a regression of round 1): only the content / comment value is read; a title, description or
+    # author ending in a stamp passes (his A-put-title, A-put-title-first, A-comment-author), and so does a
+    # deadline. Known limits pinned: the text in a Python variable (py-var) and jq --arg (jq-arg).
+    h = root['hook']
+    stamp = _tail('').strip()
+    py_var = ("python3 - <<'P'\nimport json, urllib.request\nc = 'Kör 3 kész " + stamp + "'\nd = {'content': c}\n"
+              "urllib.request.urlopen(urllib.request.Request('http://localhost:3420/api/kanban/abc/comments', "
+              "json.dumps(d).encode()))\nP")
+    jq_arg = ("jq -n --arg c 'Kör 3 kész " + stamp + "' '{content: $c}' | curl -s -X POST "
+              "http://localhost:3420/api/kanban/abc/comments --data-binary @-")
+    cases = [
+        PUT + " -d '" + json.dumps({'comment': 'Kör 3 rendben', 'title': 'Teszt 2 ' + stamp}) + "'",
+        PUT + " -d '" + json.dumps({'title': 'Teszt 2 ' + stamp, 'comment': 'Kör 3 rendben'}) + "'",
+        KANBAN + " -d '" + json.dumps({'content': 'Kör 3 rendben', 'author': 'viktor ' + stamp}) + "'",
+        KANBAN + " -d '" + json.dumps({'content': 'Kör 3: 2 tétel, határidő ' + stamp}) + "'",
+        py_var,
+        jq_arg,
+    ]
+    return all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 0 for c in cases)
+
+
+@case
+def closing_stamp_same_as_opening_is_reported_once(root):
+    text = '22:06 kész (' + TODAY.isoformat() + ' 22:06)'
+    p = run(root['hook'], 'Bash', {'command': KANBAN + " -d '" + json.dumps({'content': text}) + "'"}, now='22:04')
+    return p[0] == 2 and p[2].count('"22:06"') == 1
+
+
 @case
 def allow_move_clean_and_without_comment(root):
     h = root['hook']
