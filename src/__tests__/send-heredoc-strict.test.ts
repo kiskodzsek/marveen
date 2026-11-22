@@ -15,6 +15,12 @@ import { gateDecision, isSendInvocation, sendOnlyByStrictHeredoc, strictHeredocC
 // wall time. Wall time failed once in a sandbox under load 3.3 (6.7 s for the whole it, the shapes 2.0 s each, the
 // same bytes on the previous head), a red CI run that costs credit and says nothing about the gate. A quadratic
 // regression still shows: it is CPU the gate itself burns.
+// Viktor 50318 I1: CPU time is not load-proof either: under load 6-10 the python 1 MB shapes took 2.5-2.6 s of
+// process_time (1.5-2.0 s at load 3). The python bound is therefore 4 s of CPU: the regressions these tests guard
+// against cost 9 s and more at 1 MB (a quadratic shlex token 9.1 s, the lazy heredoc regex 26 s at 165 KB), so 4 s
+// still tells them apart, and the hook timeout it protects is 10 s. The JS bound stays 2 s (0.2 s measured).
+const PY_CPU = 4
+
 function cpuSeconds(fn: () => unknown): number {
   const t0 = process.cpuUsage()
   fn()
@@ -127,7 +133,7 @@ describe('HDSTRICT1122: 1 MB inputs stay under 2 s on both gates (Viktor 50205 p
 
   it('the python copy gate', () => {
     const { seconds } = pySend(shapes)
-    for (const s of seconds) expect(s).toBeLessThan(2)
+    for (const s of seconds) expect(s).toBeLessThan(PY_CPU)
   })
 
   // Viktor 50253 (measured on main: python 165 KB 26 s, the JS hook 693 KB 77 s, a timed-out hook lets the command
@@ -147,7 +153,7 @@ describe('HDSTRICT1122: 1 MB inputs stay under 2 s on both gates (Viktor 50205 p
     }
     const { verdicts, seconds } = pySend(sendFirst)
     expect(verdicts).toEqual([true, true])
-    for (const s of seconds) expect(s).toBeLessThan(2)
+    for (const s of seconds) expect(s).toBeLessThan(PY_CPU)
   })
 })
 
@@ -155,7 +161,7 @@ describe('HDSTRICT1122: 1 MB inputs stay under 2 s on both gates (Viktor 50205 p
 // word after a send ('sendmail a@b.hu ' + 1 MB of 'w': 9.1 s, main 9.8 s) ran past the approval gate's 10 s hook
 // timeout. Past a 32 KiB token run the python send check skips shlex and decides on a sender name anywhere in the
 // command (an extra audit, never a miss). The JS twin tokenizes in linear time and keeps its exact reading.
-describe('LONGTOK1122: a long token after a send stays under 2 s on the python gate, and still counts', () => {
+describe('LONGTOK1122: a long token after a send stays under the CPU bound on the python gate, and still counts', () => {
   const W = 'w'.repeat(1_000_000)
   const T32 = 'w'.repeat(32 * 1024)
   const cases: Array<[string, string, boolean]> = [
@@ -176,11 +182,11 @@ describe('LONGTOK1122: a long token after a send stays under 2 s on the python g
     ['a long token on a line only the strict pass keeps', "echo 'x <<E'\nsendmail a@b.hu " + 'w'.repeat(40_000) + '\nE\n', true],
   ]
 
-  it('every shape: the verdict, and under 2 s of CPU', () => {
+  it('every shape: the verdict, and under the CPU bound', () => {
     const { verdicts, seconds } = pySend(cases.map((c) => c[1]))
     cases.forEach(([name, , want], i) => {
       expect([name, verdicts[i]]).toEqual([name, want])
-      expect([name, seconds[i] < 2]).toEqual([name, true])
+      expect([name, seconds[i] < PY_CPU]).toEqual([name, true])
     })
   })
 
@@ -191,6 +197,26 @@ describe('LONGTOK1122: a long token after a send stays under 2 s on the python g
     expect(pySend(["echo 'sendmail' " + 'w '.repeat(20_000)]).verdicts).toEqual([false])
     // the known twin divergence past the bound: the JS twin keeps reading positions
     expect(isSendInvocation(mention(40_000))).toBe(false)
+  })
+
+  // Viktor 50318 B1: the shell removes quotes and backslashes before it runs a word, so a split sender name next to a
+  // long token is a send (bash and zsh run all of these); the literal search runs on a dequoted copy.
+  it('a split sender name next to a 40 KB token is a send, as it is without the token', () => {
+    const PAD = 'x'.repeat(40_000)
+    const split = [
+      's"e"ndmail a@b.hu ',
+      "send''mail a@b.hu ",
+      'sendmai\\l a@b.hu ',
+      'python3 scripts/support-mail/se""nd.py --to=a@b.hu --subject x ',
+      "$'sendmail' a@b.hu ",
+    ]
+    expect(pySend(split.map((c) => c + PAD)).verdicts).toEqual(split.map(() => true))
+    expect(pySend([PAD + ' ; s"e"ndmail a@b.hu']).verdicts).toEqual([true])
+    // a backslash-newline inside the name (bash joins it), and a split name on a line only the strict pass keeps
+    expect(pySend(['s\\\nendmail a@b.hu ' + PAD, "echo 'x <<E'\ns\"e\"ndmail a@b.hu " + PAD + '\nE\n']).verdicts)
+      .toEqual([true, true])
+    // the controls: the same shapes without the token take the exact (shlex) reading
+    expect(pySend(split.slice(0, 4).map((c) => c.trim())).verdicts).toEqual([true, true, true, true])
   })
 })
 

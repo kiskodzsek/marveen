@@ -399,6 +399,17 @@ _LONG_TOKEN_SENDERS = re.compile(
 )
 
 
+# LONGTOK1122 round 2 (Viktor 50318 B1, B2): the shell removes quotes and backslashes before it runs a word, so a
+# split name (s"e"ndmail, send''mail, sendmai\l, se""nd.py, /api/mess''ages, api.tele''gram.org) is the program /
+# the target, and a literal search on the raw text missed it (be2bb57a's shlex joined it). The literals of the long-token
+# arms are searched on this copy: every quote and backslash dropped, a backslash-newline dropped as a pair. Linear.
+_DEQUOTE = re.compile(r"\\\n|[\"'\\]")
+
+
+def _dequoted(cmd: str) -> str:
+    return _DEQUOTE.sub("", cmd)
+
+
 class _LongToken(ValueError):
     """A token run past _LONG_TOKEN: the caller decides on _LONG_TOKEN_SENDERS instead of the segments."""
 
@@ -589,7 +600,7 @@ def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
     try:
         segments = _segments_tokens(cmd, bound=True)
     except _LongToken:
-        return bool(_LONG_TOKEN_SENDERS.search(cmd))
+        return bool(_LONG_TOKEN_SENDERS.search(_dequoted(cmd)))
     except ValueError:
         # Parse-hiba (pl. lezaratlan idezojel): nem tudunk poziciot mondani.
         # Konzervativ visszaeses: csak akkor auditalunk, ha eros kuldes-literal
@@ -609,7 +620,7 @@ def send_only_by_strict_heredoc(cmd: str, _depth: int = 0) -> bool:
     try:
         segments = _segments_tokens(cmd, strict=True, bound=True)
     except _LongToken:
-        return bool(_LONG_TOKEN_SENDERS.search(cmd))
+        return bool(_LONG_TOKEN_SENDERS.search(_dequoted(cmd)))
     except ValueError:
         return bool(_FALLBACK_LITERALS.search(cmd))
     return any(_segment_is_send(toks, _depth) for toks in segments)
@@ -1225,7 +1236,7 @@ def http_channel_gate(cmd: str) -> None:
     except _LongToken:
         # LONGTOK1122: no segments past the token bound. A covered channel named anywhere in the command fails
         # closed, as an unreadable body does here; without one it is no covered send.
-        hit = _HTTP_CHANNEL_LITERAL.search(cmd)
+        hit = _HTTP_CHANNEL_LITERAL.search(_dequoted(cmd))
         if not hit:
             return
         sys.stderr.write(
@@ -1618,9 +1629,11 @@ def inter_agent_homoglyph_gate(cmd: str) -> None:
         # LONGTOK1122: no segments past the token bound. With /api/messages named anywhere, the WHOLE command is
         # checked for mixed-script words (an extra block is possible, a missed lookalike is not); without it,
         # no inter-agent message.
-        if not _IA_LITERAL.search(cmd):
+        dq = _dequoted(cmd)
+        if not _IA_LITERAL.search(dq):
             sys.exit(0)
-        text, unreadable = cmd, None
+        # both readings: the shell's (quotes gone, so p''<lookalike> is one word) and the raw one
+        text, unreadable = dq + "\n" + cmd, None
     else:
         if toks is None:
             sys.exit(0)

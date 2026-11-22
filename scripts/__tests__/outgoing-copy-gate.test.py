@@ -445,8 +445,8 @@ def main():
         # The approval gate's hook timeout is 10 s and a timed-out hook lets the command through; on the previous
         # head 'sendmail a@b.hu ' + 1 MB of 'w' took 9.1 s in is_send_invocation alone, and the echo shape 12.7 s
         # through the HTTP and inter-agent arms. 10 s of wall time per process is the acceptance bound (measured
-        # 0.03-0.27 s on the fixed head); 3 s of the hook's own CPU (RUSAGE_CHILDREN, load-proof) is the regression
-        # guard: one arm left unbounded burns 6-9 s of CPU on the 1 MB shapes.
+        # 0.03-0.27 s on the fixed head); 4 s of the hook's own CPU (RUSAGE_CHILDREN) is the regression guard: one arm
+        # left unbounded burns 6-9 s of CPU on the 1 MB shapes (Viktor 50318 I1: CPU time grows under load 6-10 too).
         import resource as _resource
         import time as _time
         w1m = "w" * 1_000_000
@@ -460,6 +460,17 @@ def main():
              + '{"content":"' + "w " * 40_000 + " kаrtya\"}'", 2, "homoglifa"),
             ("/api/messages + 40 KB clean token passes", ia.replace("--data-binary @- ", "-d '")
              + '{"content":"' + "w " * 40_000 + "\"}'", 0, None),
+            # Viktor 50318 B2: the shell removes the quotes, so a split target is the target; the literals of the
+            # long-token arms are searched on a dequoted copy
+            ("split /api/messages + 40 KB token + lookalike blocks",
+             "curl -s -X POST localhost:3420/api/mess''ages -d '{\"content\":\"p\u0430ss\"}' " + "x" * 40_000,
+             2, "homoglifa"),
+            ("split Telegram API + 40 KB token fails closed",
+             "curl -s https://api.tele''gram.org/botX/sendMessage -d 'text=" + "w" * 40_000 + "'", 2, "api.telegram.org"),
+            ("/api/messages + 40 KB token + a lookalike only the shell joins (p, a, ss split by quotes)",
+             'curl -s -X POST localhost:3420/api/messages -H x p""\u0430""ss ' + "x" * 40_000, 2, "homoglifa"),
+            ("split /api/messages + lookalike, no long token (control: the exact reading)",
+             "curl -s -X POST localhost:3420/api/mess''ages -d '{\"content\":\"p\u0430ss\"}'", 2, "homoglifa"),
         ]
         for name, cmd, want, needle in long_rows:
             ru0 = _resource.getrusage(_resource.RUSAGE_CHILDREN)
@@ -470,7 +481,7 @@ def main():
             cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
             check(f"LONGTOK1122: {name}", code, want)
             check_true(f"LONGTOK1122: {name} -- under 10 s", wall < 10, f"{wall:.2f} s")
-            check_true(f"LONGTOK1122: {name} -- under 3 s of hook CPU", cpu < 3, f"{cpu:.2f} s")
+            check_true(f"LONGTOK1122: {name} -- under 4 s of hook CPU", cpu < 4, f"{cpu:.2f} s")
             if needle:
                 check_true(f"LONGTOK1122: {name} -- names {needle}", needle in err, err[:200])
 
