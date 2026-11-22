@@ -128,6 +128,9 @@ jobs:
       # with, and the golden file against the JS lexer's inputs; no files, no network.
       - run: python3 -I scripts/lib/shell_lex_test.py
       - run: node scripts/lib/shell-lex-golden.mjs --check
+      # Card 3b05ae69: the gate run-time probe - `run` outside the sandbox refuses and runs no gate, and the table
+      # from a synthetic results file; the sandboxed end-to-end case is macOS-only and skips here. Temp dirs only.
+      - run: python3 -I scripts/gate-timing/probe_test.py
       # WTPRUNESQUASH1106: the prune decides what `git worktree remove` takes;
       # its "keep unmerged work" cases are the gate. Throwaway git repos in a
       # temp dir, a stub lsof, no network.

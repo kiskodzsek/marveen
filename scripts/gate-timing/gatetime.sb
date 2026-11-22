@@ -1,0 +1,40 @@
+;; gatetime.sb -- the sandbox the gate run-time probe (probe.py run) runs in, with every gate it starts.
+;;
+;; Why (card 3b05ae69): the probe feeds every scripts/hooks/*gate.py thousands of generated payloads. About half
+;; of the gates write (a deny log, a state file, store/hook-errors.log), ten name /Users/klodel/... paths, and one
+;; can call a notifier. The gates run from a git-archive copy (their repo root is the copy), and this profile makes
+;; sure no run writes, signals or connects outside it, whatever path a gate takes:
+;; - file writes only under (param "ROOT") (the copy) and /dev/null, /dev/tty, /dev/fd;
+;; - no network at all (no localhost: the dashboard has a restart API, and a notifier would reach Telegram);
+;; - a signal only to a process of this same sandbox;
+;; - launchctl, osascript and open cannot start; the dashboard token cannot be read, nor the content of the
+;;   oauth token (and copies), vault.json, any .credentials.json and the login keychains.
+;; probe.py run refuses to start unless a write outside ROOT, a localhost connect and the token read all fail.
+(version 1)
+(allow default)
+
+(deny network*)
+
+(deny file-write*)
+(allow file-write*
+  (subpath (param "ROOT"))
+  (literal "/dev/null")
+  (literal "/dev/tty")
+  (regex #"^/dev/fd/"))
+
+(deny signal)
+(allow signal (target same-sandbox))
+
+(deny process-exec
+  (literal "/bin/launchctl")
+  (literal "/usr/bin/osascript")
+  (literal "/usr/bin/open"))
+
+(deny file-read* (literal "/Users/klodel/marveen/store/.dashboard-token"))
+;; Viktor 50112 (optional, taken): no gate reads these, so their content stays unreadable in the run; file-read-data,
+;; not file-read*, so a stat still works. The oauth token's prefix also covers its .bak-* and .verified copies.
+(deny file-read-data
+  (regex #"^/Users/klodel/marveen/store/\.claude-oauth-token")
+  (literal "/Users/klodel/marveen/store/vault.json")
+  (regex #"/\.credentials\.json$")
+  (regex #"^/Users/[^/]+/Library/Keychains/"))
