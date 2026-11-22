@@ -403,6 +403,13 @@ _LONG_TOKEN_SENDERS = re.compile(
 # split name (s"e"ndmail, send''mail, sendmai\l, se""nd.py, /api/mess''ages, api.tele''gram.org) is the program /
 # the target, and a literal search on the raw text missed it (be2bb57a's shlex joined it). The literals of the long-token
 # arms are searched on this copy: every quote and backslash dropped, a backslash-newline dropped as a pair. Linear.
+# Known limits of the long-token send arms (Viktor 50330 K1-K4; main misses them too, follow-up, not regressions):
+# K1 a piece that expands to nothing inside a name or host (send$''mail, send``mail, send$(:)mail, an empty
+#    variable): the dequoted copy does not join them; K2 ANSI-C escapes ($'\x73endmail', octal, with eval too; main's
+#    shlex does not read them either); K3 brace expansion (send{,}mail), a name built from variables, a glob
+#    (sendmai[l]); K4 a send that is recognized but audits a decoy text (echo --subject ... PAD; printf ... |
+#    sendmail; bash <<E with sendmail in a heredoc body that is code, not the letter). The inter-agent arm fails
+#    closed past the bound (round 6), so its /api/messages literal is the only thing read there.
 _DEQUOTE = re.compile(r"\\\n|[\"'\\]")
 
 
@@ -1629,11 +1636,22 @@ def inter_agent_homoglyph_gate(cmd: str) -> None:
         # LONGTOK1122: no segments past the token bound. With /api/messages named anywhere, the WHOLE command is
         # checked for mixed-script words (an extra block is possible, a missed lookalike is not); without it,
         # no inter-agent message.
-        dq = _dequoted(cmd)
-        if not _IA_LITERAL.search(dq):
+        if not _IA_LITERAL.search(_dequoted(cmd)):
             sys.exit(0)
-        # both readings: the shell's (quotes gone, so p''<lookalike> is one word) and the raw one
-        text, unreadable = dq + "\n" + cmd, None
+        # LONGTOK1122 round 6 (Viktor 50330 R1, 50350; Klodel 50352): FAIL-CLOSED here, unlike the short arm. Without
+        # tokens this arm cannot read the body the way the short arm does (json.loads, the @file, the heredoc): rounds
+        # 4 and 5 searched the raw text and then decoded \u escapes and opened @files on their own, and each round let
+        # a new shape through that main blocks (a JSON escape, an @file, a decoy @ref, a quoted path). Measured
+        # 2026-11-22 over 43 241 inter-agent messages since 2026-10-12: none longer than 32 768 characters (the longest
+        # 22 789), so a block here costs no real traffic; the way out (a heredoc or an @file, which the bound does not
+        # count: heredoc bodies are cut before it is measured) is in the message.
+        sys.stderr.write(
+            "KIMENO-SZOVEG KAPU (inter-agent, homoglifa): TILTVA, mert az uzenetet nem tudtam megvizsgalni.\n"
+            f"Ok: a parancsban egy {_LONG_TOKEN // 1024} KiB-nal hosszabb, szokoz nelkuli (vagy idezett) token all, "
+            "ennyit a kapu nem bont szavakra, igy a torzset sem olvassa.\n\n"
+            "Vizsgalhato alak: idezett heredoc (--data-binary @- <<'JSON') vagy @/abszolut/ut.json, a hosszu "
+            "szoveg a torzsben.\n")
+        sys.exit(2)
     else:
         if toks is None:
             sys.exit(0)

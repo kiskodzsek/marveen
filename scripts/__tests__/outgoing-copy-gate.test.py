@@ -458,8 +458,9 @@ def main():
              + "w" * 40_000 + "'", 2, "api.telegram.org"),
             ("/api/messages + 40 KB token + lookalike blocks", ia.replace("--data-binary @- ", "-d '")
              + '{"content":"' + "w " * 40_000 + " kаrtya\"}'", 2, "homoglifa"),
-            ("/api/messages + 40 KB clean token passes", ia.replace("--data-binary @- ", "-d '")
-             + '{"content":"' + "w " * 40_000 + "\"}'", 0, None),
+            # round 6 (Viktor 50350, Klodel 50352): the inter-agent arm fails closed past the bound
+            ("/api/messages + 40 KB clean token fails closed", ia.replace("--data-binary @- ", "-d '")
+             + '{"content":"' + "w " * 40_000 + "\"}'", 2, "KiB-nal hosszabb"),
             # Viktor 50318 B2: the shell removes the quotes, so a split target is the target; the literals of the
             # long-token arms are searched on a dequoted copy
             ("split /api/messages + 40 KB token + lookalike blocks",
@@ -484,6 +485,58 @@ def main():
             check_true(f"LONGTOK1122: {name} -- under 4 s of hook CPU", cpu < 4, f"{cpu:.2f} s")
             if needle:
                 check_true(f"LONGTOK1122: {name} -- names {needle}", needle in err, err[:200])
+
+        # --- LONGTOK1122 round 6 (Viktor 50330 R1, 50350 R1a/R1b): what main reads and the long arm cannot -------
+        # Next to a long token every /api/messages command fails closed, whatever shape the body has; without the token
+        # (the control) the short arm reads it as main does. The way out the message names (a heredoc or an @file)
+        # passes a clean 40 KB body and blocks a lookalike in it: the bound does not count a heredoc body.
+        lk = os.path.join(tmp, "r6-lookalike.json")
+        with open(lk, "w", encoding="utf-8") as fh:
+            fh.write('{"to":"klodel","content":"p\u0430trik"}')
+        os.makedirs(os.path.join(tmp, "r6 sp"), exist_ok=True)
+        lk_sp = os.path.join(tmp, "r6 sp", "body.json")
+        with open(lk_sp, "w", encoding="utf-8") as fh:
+            fh.write('{"to":"klodel","content":"p\u0430trik"}')
+        big_clean = os.path.join(tmp, "r6-big-clean.json")
+        with open(big_clean, "w", encoding="utf-8") as fh:
+            fh.write('{"to":"klodel","content":"' + "w" * 40_000 + '"}')
+        h = "curl -s -X POST localhost:3420/api/messages -H 'Content-Type: application/json' "
+        jesc = "\\u0430"  # a JSON escape in the command text: six ASCII characters
+        r6_rows = [
+            ("inline -d with a JSON-escaped lookalike", h + "-d '{\"content\":\"p" + jesc + "trik\"}'", 2),
+            ("@file with a lookalike", h + "--data-binary @" + lk, 2),
+            ("@- heredoc with a JSON-escaped lookalike", h + "--data-binary @- <<'JSON'\n{\"content\":\"p" + jesc
+             + "trik\"}\nJSON", 2),
+            ("inline lookalike next to a decoy unreadable @ref", h + "-d '{\"content\":\"p\u0430trik, lasd -d @/nope/m.json\"}'",
+             2),
+            ("double-quoted @path with a space", h + "--data-binary \"@" + lk_sp + "\"", 2),
+            ("clean inline body", h + "-d '{\"content\":\"patrik\"}'", 0),
+        ]
+        for name, cmd, ctl in r6_rows:
+            for pad_name, pad in (("40 000 character token", " -H 'X-Pad: " + "x" * 40_000 + "'"),
+                                  ("32 769 character token", " -H X-Pad:" + "x" * (32_769 - 6)),
+                                  ("no long token (control)", "")):
+                full = cmd.replace(" -H 'Content-Type", pad + " -H 'Content-Type", 1) if pad else cmd
+                code, out, err = run_hook(bash(full), rules_file=active)
+                want = ctl if not pad else 2
+                check(f"LONGTOK1122 r6: {name}, {pad_name}", code, want)
+                if pad:
+                    check_true(f"LONGTOK1122 r6: {name}, {pad_name} -- names the bound", "KiB-nal hosszabb" in err,
+                               err[:200])
+        # the bound itself: 32 768 characters is still read (the short arm), 32 769 fails closed
+        code, out, err = run_hook(bash(h + "-d '{\"content\":\"patrik\"}' -H X-Pad:" + "x" * (32_768 - 6)),
+                                  rules_file=active)
+        check("LONGTOK1122 r6: a 32 768 character token is still read (clean passes)", code, 0)
+        # the way out the message names
+        code, out, err = run_hook(bash(h + "--data-binary @- <<'JSON'\n{\"content\":\"" + "w" * 40_000
+                                       + "\"}\nJSON"), rules_file=active)
+        check("LONGTOK1122 r6: a heredoc with a 40 KB clean word passes (the bound does not count it)", code, 0)
+        code, out, err = run_hook(bash(h + "--data-binary @- <<'JSON'\n{\"content\":\"" + "w" * 40_000
+                                       + " p\u0430trik\"}\nJSON"), rules_file=active)
+        check("LONGTOK1122 r6: a heredoc with a 40 KB word and a lookalike blocks", code, 2)
+        check_true("LONGTOK1122 r6: ... as a homoglyph, not as the bound", "VEGYES" in err, err[:200])
+        code, out, err = run_hook(bash(h + "--data-binary @" + big_clean), rules_file=active)
+        check("LONGTOK1122 r6: an @file with a 40 KB clean word passes", code, 0)
 
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
