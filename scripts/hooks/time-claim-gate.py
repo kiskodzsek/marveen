@@ -55,8 +55,10 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     Rule 7 (the closing stamp, Viktor 49927, his probe_ts7 labels): py-var (the comment text in a Python variable,
     the dict built elsewhere) and jq-arg (jq --arg) are not read, the value is not at a content / comment key;
     hu-dot-date ("2026.11.22. 13:30") and mmdd-short ("(11-22 13:30)") are other date forms, not judged; a named
-    time zone other than Z, UTC, GMT, CET, CEST is not judged; deadline-word: a stamp right after határidő /
-    deadline / until / by passes on purpose (a deadline, as in rule 2; none in the 12866-comment replay).
+    time zone other than Z, UTC, GMT, CET, CEST (any case; UTC/GMT with an hour offset) is not judged; deadline-word:
+    a stamp right after határidő / deadline / until / by passes on purpose (a deadline, as in rule 2; none in the
+    12866-comment replay). Viktor 49939: shellvar-other (the text in a shell variable of another name, like py-var)
+    is not read; u0022-in-value (a raw " inside a heredoc JSON value) is invalid JSON, the value ends there.
   - Bash that writes a shared/*.md through the shell (Radar 39251: `cat >> .../shared/hibanaplo.md <<'EOF'`
     wrote a future time unseen): a `>` / `>>` / `>|` redirect or a `tee [-a]` whose target resolves to a
     shared/*.md. The command text (the heredoc body) is judged; lines already in a target file pass, like
@@ -173,6 +175,7 @@ import os
 import re
 import stat
 import sys
+import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -245,12 +248,22 @@ COMMENT_VALUE_RXS = (
 # The stamp at the very end of the value, once the trailing whitespace, dots, markdown marks and a stray backslash
 # are stripped (_value_end): "(YYYY-MM-DD HH:MM)", seconds and a fraction optional, a T allowed, and a time zone
 # (Viktor 49927 T2: Z, +-HH:MM, or a name; a named zone outside TAIL_TZ_MIN is not judged). Groups 1-5: date, time.
+# Viktor 49939 item 3: two blanks or a comma between the date and the time, a fraction of up to 9 digits, a bare
+# +HH offset, a lower-case zone name, UTC+1 / GMT-5, and a nested closing paren ("(review ok (stamp))").
 COMMENT_TAIL_RX = re.compile(
-    r'\((\d{4})-(\d{2})-(\d{2})[ T]([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:[.,]\d{1,6})?)?'
-    r'(?:[ \t]?(?P<tz>Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d|[A-Z]{2,5}))?\)\Z')
-# A value built by concatenation, 'x' + ' (stamp)' (Viktor 49927 py-concat): the last literal of the chain counts.
-CONCAT_RX = re.compile(r'\s*\+\s*(?:"(?P<d>(?:[^"\\]|\\[\s\S])*)"|\'(?P<s>(?:[^\'\\]|\\[\s\S])*)\')')
-TAIL_STRIP = frozenset(' \t\r\n.*`_~ \\')
+    r'\((\d{4})-(\d{2})-(\d{2})(?:T|,?[ \t]+)([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:[.,]\d{1,9})?)?'
+    r'(?:[ \t]?(?P<tz>Z|[+-](?:[01]\d|2[0-3])(?::?[0-5]\d)?|(?P<tzn>[A-Za-z]{2,5})(?P<tzo>[+-]\d{1,2})?))?\)'
+    r'(?:[ \t]*\))?\Z')
+# A value built by concatenation, 'x' + ' (stamp)' (Viktor 49927 py-concat): the last literal of the chain counts,
+# also across a name ('x ' + n + ' (stamp)', Viktor 49939 concat-var-mid) and for adjacent literals ('x' ' (stamp)',
+# py-implicit-concat).
+CONCAT_RX = re.compile(r'(?:\s*\+\s*(?:[A-Za-z_][\w.]*\s*\+\s*)*|[ \t]+)'
+                       r'(?:"(?P<d>(?:[^"\\]|\\[\s\S])*)"|\'(?P<s>(?:[^\'\\]|\\[\s\S])*)\')')
+# Trailing chars after the stamp that do not end the comment's own text: whitespace, dots, markdown marks, a no-break
+# space, a stray backslash, an escaped quote, and (Viktor 49939 item 3) ! ? ; ] , a variation selector, and any
+# format char (zero-width space), emoji or symbol (TAIL_STRIP_CATS).
+TAIL_STRIP_CATS = frozenset(('Cf', 'So', 'Sk'))
+TAIL_STRIP = frozenset(' \t\r\n.*`_~ \\"\'!?;]\ufe0f')
 TAIL_TZ_MIN = {'Z': 0, 'UTC': 0, 'GMT': 0, 'CET': 60, 'CEST': 120}
 # Rule 5, the send path (retro R1, card 028205dd): an inter-agent message, a close result or a daily-log entry.
 # Not a memory: a memory is not a report to anyone, and its times are mostly plans.
@@ -471,7 +484,7 @@ def _value_end(v):
     """The index after the last char of the value that is not trailing whitespace, a dot, a markdown mark or a
     stray backslash (one pass from the end: linear, no copy)."""
     i = len(v)
-    while i and v[i - 1] in TAIL_STRIP:
+    while i and (v[i - 1] in TAIL_STRIP or unicodedata.category(v[i - 1]) in TAIL_STRIP_CATS):
         i -= 1
     return i
 
@@ -485,13 +498,16 @@ def _tail_local(m):
     tz = m.group('tz')
     if not tz:
         return stamp
-    if tz in TAIL_TZ_MIN:
+    if m.group('tzn'):  # a name, upper-cased (utc), optionally with an hour offset (UTC+1, GMT-5)
+        name, hours = m.group('tzn').upper(), m.group('tzo')
+        if name not in TAIL_TZ_MIN or (hours and name not in ('UTC', 'GMT')):
+            return None
+        off = TAIL_TZ_MIN[name] + (int(hours) * 60 if hours else 0)
+    elif tz in TAIL_TZ_MIN:
         off = TAIL_TZ_MIN[tz]
-    elif tz[0] in '+-':
+    else:  # +HH, +HHMM, +HH:MM
         digits = tz[1:].replace(':', '')
-        off = (int(digits[:2]) * 60 + int(digits[2:])) * (1 if tz[0] == '+' else -1)
-    else:
-        return None
+        off = (int(digits[:2]) * 60 + int(digits[2:] or 0)) * (1 if tz[0] == '+' else -1)
     return datetime.datetime.fromtimestamp(calendar.timegm(stamp.timetuple()) - off * 60)
 
 
@@ -518,9 +534,12 @@ def comment_tail_findings(text, now):
             if not m or DEADLINE_BEFORE_RX.search(tail[:m.start()]):
                 continue
             local = _tail_local(m)
-            if local is None or local.date() != now.date():
+            # Today's stamp: today's date written, or a zoned stamp that lands on today (Viktor 49939
+            # tz-today-to-tomorrow: "(today 23:30 -05:00)" is tomorrow morning here, still ahead of the clock).
+            written_today = (int(m.group(1)), int(m.group(2)), int(m.group(3))) == (now.year, now.month, now.day)
+            if local is None or local.date() < now.date() or (local.date() != now.date() and not written_today):
                 continue
-            if local.hour * 60 + local.minute > limit:
+            if local.date() > now.date() or local.hour * 60 + local.minute > limit:
                 out.append((text.count('\n', 0, vstart + end) + 1, f'{local:%H:%M}', 'card-tail'))
     return out
 

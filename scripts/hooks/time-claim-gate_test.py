@@ -279,6 +279,57 @@ def closing_stamp_in_a_subscript_a_bare_key_or_a_prefixed_literal(root):
     return ok and all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 0 for c in allow)
 
 
+def _zst(hh, mm, zone_off, suffix, sep=' ', secs=''):
+    """A stamp whose LOCAL time is today hh:mm, written in a zone zone_off minutes from UTC (Viktor's zst)."""
+    import time as _t
+    loc = _t.localtime(_t.mktime((TODAY.year, TODAY.month, TODAY.day, hh, mm, 0, 0, 0, -1))).tm_gmtoff // 60
+    d = datetime.datetime.combine(TODAY, datetime.time(hh, mm)) - datetime.timedelta(minutes=loc - zone_off)
+    return f'({d:%Y-%m-%d}{sep}{d:%H:%M}{secs}{suffix})'
+
+
+@case
+def closing_stamp_round3_ends_zones_separators_and_concatenation(root):
+    # Viktor 49939 item 3: a closing ! ? ; ] emoji, zero-width space, nested paren or escaped quote after the stamp;
+    # utc in lower case, UTC+1, a bare +HH, a 9-digit fraction, a stamp written today that lands on tomorrow here;
+    # two blanks or a comma before the time; a name in a concatenation, adjacent literals (BLOCK). A zoned stamp
+    # written today that lands on yesterday, an unknown or offset non-UTC zone, a past UTC+1, a stamp in the
+    # middle (ALLOW).
+    h = root['hook']
+    s, t = _tail('').strip(), TODAY.isoformat()
+
+    def j(val):
+        return KANBAN + " --data-binary @- <<'J'\n" + json.dumps({'author': 'kernel', 'content': val},
+                                                                   ensure_ascii=False) + '\nJ'
+    py = "python3 - <<'P'\nimport json, urllib.request\n{}\nurllib.request.urlopen(urllib.request.Request(" \
+         "'http://localhost:3420/api/kanban/abc/comments', json.dumps(body).encode()))\nP"
+    block = [j('27/28 kész ' + s + e) for e in ('!', '?', ';', ' ✅', '​')] + [
+        j('[27/28 kész ' + s + ']'),
+        j('27/28 kész (review ok ' + s + ')'),
+        KANBAN + " -d '" + r'{"content":"27/28 \"kész ' + s + r'\""}' + "'",
+        j('27/28 kész ' + _zst(22, 6, 0, ' utc')),
+        j('27/28 kész ' + _zst(22, 6, 60, ' UTC+1')),
+        j('27/28 kész ' + _zst(22, 6, 60, '+01')),
+        j('27/28 kész ' + _zst(22, 6, 0, 'Z', 'T', ':05.123456789')),
+        j('27/28 kész (' + t + ' 23:30 -05:00)'),
+        j('27/28 kész (' + t + '  22:06)'),
+        j('27/28 kész (' + t + ', 22:06)'),
+        py.format("n = '27'\nbody = {'author': 'kernel', 'content': '27/28 ' + n + ' kész " + s + "'}"),
+        py.format("body = {'author': 'kernel', 'content': '27/28 kész' ' " + s + "'}"),
+    ]
+    allow = [
+        j('27/28 kész (' + t + ' 00:30 +14:00)'),
+        j('27/28 kész (' + t + ' 22:06 PST)'),
+        j('27/28 kész (' + t + ' 22:06 CET+1)'),
+        j('27/28 kész ' + _zst(21, 0, 60, ' UTC+1')),
+        j('27/28 kész (review ok ' + s + ') és tovább'),
+    ]
+    bad = [c for c in block if run(h, 'Bash', {'command': c}, now='22:04')[0] != 2]
+    bad += [c for c in allow if run(h, 'Bash', {'command': c}, now='22:04')[0] != 0]
+    for c in bad:
+        print('  round3 wrong verdict:', c[-90:].replace('\n', ' | '))
+    return not bad
+
+
 @case
 def allow_closing_stamp_outside_the_comment_value(root):
     # Viktor 49927 T1 (a regression of round 1): only the content / comment value is read; a title, description or
