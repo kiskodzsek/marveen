@@ -234,7 +234,10 @@ _TAIL_KEY = r'(?:(?P<k>["\'])(?:content|comment)(?P=k)\s*:|(?<![\w.$-])(?:conten
 COMMENT_VALUE_RXS = (
     re.compile(_TAIL_KEY + r'"(?P<v>(?:[^"\\]|\\[\s\S])*)"'),
     re.compile(_TAIL_KEY + r"'(?P<v>(?:[^'\\]|\\[\s\S])*)'"),
-    re.compile(r'\\"(?:content|comment)\\"\s*:\s*\\"(?P<v>(?:[^"\\]|\\[^"])*)\\"'),
+    # Inside a double-quoted -d the shell turns \\ into a JSON backslash and \" into a JSON quote, so a JSON escape
+    # is \\ followed by \\, \" or a plain char, and a lone backslash with a plain char (\n) is one too. Viktor 49939
+    # dq-escquote-before-stamp: the old unit list read \\ then stopped at the \" of an escaped \\\" quote.
+    re.compile(r'\\"(?:content|comment)\\"\s*:\s*\\"(?P<v>(?:[^"\\]|\\\\(?:\\\\|\\"|[^\\])|\\[^"\\])*)\\"'),
 )
 # The stamp at the very end of the value, once the trailing whitespace, dots, markdown marks and a stray backslash
 # are stripped (_value_end): "(YYYY-MM-DD HH:MM)", seconds and a fraction optional, a T allowed, and a time zone

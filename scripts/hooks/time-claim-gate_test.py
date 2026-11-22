@@ -233,6 +233,25 @@ def block_closing_stamp_round2_shapes(root):
 
 
 @case
+def closing_stamp_after_an_escaped_quote_in_a_double_quoted_d(root):
+    # Viktor 49939 dq-escquote-before-stamp: in a double-quoted -d a JSON-escaped quote is \\\" in the command; the
+    # value runs past it to the stamp (BLOCK), and still ends at its own \" so a later title's stamp is not read.
+    h = root['hook']
+    stamp = _tail('').strip()
+    block = [
+        MOVE + r' -d "{\"status\":\"waiting\",\"comment\":\"27/28 \\\"kész\\\" ' + stamp + r'\"}"',
+        KANBAN + r' -d "{\"author\":\"kernel\",\"content\":\"27/28 \\\"kész\\\" ' + stamp + r'\"}"',
+        KANBAN + r' -d "{\"content\":\"Kör 3 \\\\\\\"idézet\\\\\\\" kész ' + stamp + r'\"}"',
+    ]
+    allow = [
+        PUT + r' -d "{\"comment\":\"27/28 \\\"kész\\\"\",\"title\":\"Teszt 2 ' + stamp + r'\"}"',
+        KANBAN + r' -d "{\"content\":\"27/28 \\\"kész\\\" rendben\",\"author\":\"viktor ' + stamp + r'\"}"',
+    ]
+    ok = all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 2 for c in block)
+    return ok and all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 0 for c in allow)
+
+
+@case
 def allow_closing_stamp_outside_the_comment_value(root):
     # Viktor 49927 T1 (a regression of round 1): only the content / comment value is read; a title, description or
     # author ending in a stamp passes (his A-put-title, A-put-title-first, A-comment-author), and so does a
