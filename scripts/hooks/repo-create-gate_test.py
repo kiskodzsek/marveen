@@ -18,9 +18,12 @@ FAILS = []
 
 
 def run(payload):
-    p = subprocess.run([sys.executable, '-I', GATE], input=json.dumps(payload), capture_output=True, text=True,
-                       env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'},
-                       timeout=20)
+    try:
+        p = subprocess.run([sys.executable, '-I', GATE], input=json.dumps(payload), capture_output=True, text=True,
+                           env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'},
+                           timeout=20)
+    except subprocess.TimeoutExpired:
+        return None, 'TIMEOUT after 20 s (the 10 s hook timeout would let the call through)'
     return p.returncode, p.stderr
 
 
@@ -190,6 +193,226 @@ expect('NEG quote cut before "?" in a question row blocks', (rc, ''), 2)
 QS = 'PATRIK-KERTE: TG 18153 "csinálj egy repót sajat néven"'
 rc, _ = ledger_run(f'gh repo create x --private  # {QS}', [('18153', 'Csinálj egy repót sajat néven. Utána mi jön?')])
 expect('a statement followed by a separate question passes', (rc, ''), 0)
+
+# --- Card 3b05ae69 (Viktor 50005/50006): a padded creation must block, and well before the 10 s hook timeout -------
+# A timed-out hook does not block. On main these shapes ran 4.6-21 s (quadratic heredoc search, unanchored [\w-]*,
+# every `gh api` / `urlopen(` / `curl` start reading on to the line end); each must now block in under 2 s
+# (Viktor 50036).
+import time  # noqa: E402
+
+CREATE = 'gh repo create kiskodzsek/x --private'
+
+
+def timed(name, cmd, want, limit=2.0):
+    t0 = time.time()
+    got = bash(cmd)
+    dt = time.time() - t0
+    expect(name, got, want)
+    if dt > limit:
+        FAILS.append(f'{name}: {dt:.2f} s, limit {limit} s')
+
+
+PAD = 'cat <<E\n' * 37500  # 300 KB
+timed('NEG creation then 300 KB of `cat <<E` lines blocks in time (Viktor shape)', CREATE + '\n' + PAD, 2)
+timed('NEG 200 KB of `cat <<E` lines then the creation blocks in time', 'cat <<E\n' * 25000 + CREATE, 2)
+timed('NEG a 200 KB word run then the creation blocks in time', 'x' + 'a' * 200000 + '\n' + CREATE, 2)
+timed('NEG a 200 KB `-a-a` run then the creation blocks in time', '-a' * 100000 + '\n' + CREATE, 2)
+timed('NEG 30000 `gh api ` without a field, then -X POST to user/repos, blocks in time',
+      'gh api ' * 30000 + 'curl -X POST https://api.github.com/user/repos', 2)
+timed('NEG 30000 `urlopen(` without data=, then -X POST to user/repos, blocks in time',
+      'urlopen(' * 30000 + 'curl -X POST https://api.github.com/user/repos', 2)
+timed('NEG 20000 `git commit ` on a heredoc head line, body creates, blocks in time',
+      'git commit ' * 20000 + "x <<'E'\n" + CREATE + '\nE', 2)
+# main read every `curl` start on to the segment end: 1 s at 30000, so 50000 against a 1 s limit (new: ~0.02 s)
+timed('NEG 50000 `curl ` in one segment then the creation blocks in time', 'curl ' * 50000 + '\n' + CREATE, 2, 1.0)
+timed('NEG 30000 `.tee` on a heredoc head line, body creates, blocks in time',
+      'echo ' + '.tee' * 30000 + " <<'E'\n" + CREATE + '\nE', 2)
+timed('a 200 KB message heredoc into agent-msg.sh that talks about creation passes in time',
+      "bash scripts/agent-msg.sh kernel viktor - <<'MSG'\n" + ('a ' + CREATE + '\n') * 4000 + 'MSG', 0)
+
+# --- A body dropped into a sink must be what bash reads as the body (Kernel 50035): on main each of these was ALLOW,
+# and bash ran the creation (measured with echo). The gate now finds heredocs as bash quotes the command.
+expect('NEG B1 an empty heredoc body, then the creation, blocks', bash(f"cat > n.md <<'E'\nE\n{CREATE}\nE"), 2)
+expect("NEG B2 delimiter E'X' (bash: EX) blocks", bash(f"cat > n.md <<E'X'\nEX\n{CREATE}\nE"), 2)
+expect('NEG B2b delimiter E-1 blocks', bash(f'cat > n.md <<E-1\nE-1\n{CREATE}\nE'), 2)
+expect('NEG B3 a here-string into agent-msg.sh is no heredoc', bash(f'bash scripts/agent-msg.sh k v - <<<E\n{CREATE}\nE'), 2)
+expect('NEG B3b a here-string into a dashboard curl is no heredoc',
+       bash(f'curl -s -X POST localhost:3420/api/messages -d @- <<<E\n{CREATE}\nE'), 2)
+expect('NEG B4 an opener inside double quotes is no heredoc', bash(f'bash scripts/agent-msg.sh k v "x <<E y"\n{CREATE}\nE'), 2)
+expect('NEG B4b an opener inside single quotes is no heredoc', bash(f"bash scripts/agent-msg.sh k v 'x <<E y'\n{CREATE}\nE"), 2)
+expect('NEG B5 an opener in a comment is no heredoc', bash(f'bash scripts/agent-msg.sh k v x # <<E\n{CREATE}\nE'), 2)
+expect('NEG B6 an opener line continued by a backslash blocks', bash(f"cat > n.md <<'E' \\\n; {CREATE}\nbody\nE"), 2)
+expect('NEG B7 an opener inside a two-line double quote is no heredoc',
+       bash(f'bash scripts/agent-msg.sh k v "a\nx <<E y"\n{CREATE}\nE'), 2)
+expect('NEG an unterminated quote before an opener: nothing dropped',
+       bash(f"bash scripts/agent-msg.sh k v \"x - <<'E'\n{CREATE}\nE"), 2)
+expect('NEG B8 a lone & after the opener backgrounds and runs the creation',
+       bash(f"bash scripts/agent-msg.sh k v - <<'E' & {CREATE}\nbody\nE"), 2)
+expect('NEG B8b a process substitution after the opener runs the creation',
+       bash(f"cat > n.md <<'E' <({CREATE})\nbody\nE"), 2)
+expect('NEG delimiter "E"X (bash: EX) is no plainly quoted word: nothing dropped',
+       bash(f'cat > n.md <<"E"X\nEX\n{CREATE}\nE'), 2)
+expect('NEG delimiter \\E (bash: E, quoted) is no plain word: nothing dropped, the body is judged',
+       bash(f'cat > n.md <<\\E\n{CREATE}\nE'), 2)
+expect('a <<- message heredoc closed by a tab-indented word passes',
+       bash(f"bash scripts/agent-msg.sh k v - <<-'E'\n{CREATE} is gated\n\tE"), 0)
+expect('a << E message heredoc (a space before the word) passes',
+       bash(f"bash scripts/agent-msg.sh k v - << E\n{CREATE} is gated\nE"), 0)
+expect('NEG a <<- message heredoc, then the creation after its tab-indented closer, blocks',
+       bash(f"bash scripts/agent-msg.sh k v - <<-'E'\nbody\n\tE\n{CREATE}"), 2)
+expect('NEG B9 an unquoted message heredoc runs a $( ) in its body',
+       bash(f'curl localhost:3420/api/messages -d @- <<-E\n$(\n{CREATE}\n)\n\tE'), 2)
+expect('NEG B9b an unquoted message heredoc runs a backtick in its body',
+       bash(f'bash scripts/agent-msg.sh k v - <<EOF\nx `{CREATE}` y\nEOF'), 2)
+expect('a QUOTED message heredoc with a $( ) in its body is text and passes',
+       bash(f"bash scripts/agent-msg.sh k v - <<'EOF'\nx $({CREATE}) y\nEOF"), 0)
+expect('an unquoted message heredoc without a substitution passes',
+       bash(f'bash scripts/agent-msg.sh k v - <<EOF\n{CREATE} is gated, $HOME too\nEOF'), 0)
+expect('NEG <<<<E: the << inside a here-string operator is no opener',
+       bash(f'bash scripts/agent-msg.sh k v - <<<<E\n{CREATE}\nE'), 2)
+expect('a # inside a word (a#b) is no comment and the message heredoc passes',
+       bash(f"bash scripts/agent-msg.sh k v a#b - <<'E'\n{CREATE} is gated\nE"), 0)
+expect('NEG an opener line that ends inside a single quote: nothing dropped',
+       bash(f"bash scripts/agent-msg.sh k v - <<'E' 'a\n{CREATE}\nE\n'"), 2)
+expect('NEG an opener line that ends inside a double quote: nothing dropped',
+       bash(f'bash scripts/agent-msg.sh k v - <<\'E\' "a\n{CREATE}\nE\n"'), 2)
+expect('NEG a second << on an opener line is not read as a heredoc: its body is judged',
+       bash(f"cat <<'A' > n.md <<'B'\nx\nA\n{CREATE}\nB"), 2)
+# Mutation survivors M34/M35/M40 (card 3b05ae69): bash runs each creation (measured with echo), the dropped body would
+# hide it. A quote opened on the opener line that closes on the NEXT line, with a command after it on that line:
+expect("NEG a single quote from the opener line closing on the next line, a command after it, blocks",
+       bash(f"bash scripts/agent-msg.sh k v - <<'E' 'a\nb' ; {CREATE}\nE"), 2)
+expect('NEG a double quote from the opener line closing on the next line, a command after it, blocks',
+       bash(f'bash scripts/agent-msg.sh k v - <<\'E\' "a\nb" ; {CREATE}\nE'), 2)
+# ... and an unquoted first heredoc with a quoted second one on the same line: bash expands the first body's $( ).
+expect('NEG an unquoted heredoc, then a quoted second << on its line: the first body runs its $( )',
+       bash(f"bash scripts/agent-msg.sh k v - <<A <<'B'\n$({CREATE})\nA\nB"), 2)
+
+# --- Viktor 50057 (each shape run by bash in his own_rcl.py / probe_rcl.py: the creation ran) ---
+# R1: bash closes on the bare word (<<- after leading tabs only); a line with spaces around it does not close
+for label, line in (('trailing spaces', 'E  '), ('leading spaces', '  E'), ('a leading tab without <<-', '\tE')):
+    expect(f'NEG R1 a closing line with {label}, then a sink heredoc, blocks',
+           bash(f"cat > n.md <<'E'\n{line}\ncat > m.md <<'Z'\nE\n{CREATE}\nZ"), 2)
+expect('R1 a body line "E  " is text, the real closing line closes: the message passes',
+       bash(f"bash scripts/agent-msg.sh k v - <<'E'\nE  \n{CREATE} is gated\nE"), 0)
+# R2: a second << on the opener line: no heredoc after it is dropped
+expect("NEG R2 a second quoted << on the opener line, a sink opener in its body, blocks",
+       bash(f"cat > n.md <<'A' <<'B'\nx\nA\ncat > m.md <<'Z'\nB\n{CREATE}\nZ"), 2)
+expect('NEG R2 a second unquoted << on the opener line, a sink opener in its body, blocks',
+       bash(f"cat > n.md <<A <<B\nx\nA\ncat > m.md <<'Z'\nB\n{CREATE}\nZ"), 2)
+# (a) an interpreter that reads its program from stdin runs the body; the sink word is only an argument
+for head in ('sh -s scripts/agent-msg.sh', 'bash -s agent-msg.sh klodel', 'ksh -s tee n.md', 'ksh -s git commit -F -',
+             'python3 - scripts/agent-msg.sh', 'perl - curl /api/messages', 'python3 -X utf8 - scripts/agent-msg.sh',
+             'bash -o pipefail -s agent-msg.sh k', 'sh -O extglob -s scripts/agent-msg.sh'):
+    expect(f'NEG (a) {head} reads the body as its program', bash(f"{head} <<'E'\n{CREATE}\nE"), 2)
+# an option's own argument is no script operand, even when it names the message script (OPT_ARG; both run the body)
+for head in ('bash --rcfile scripts/agent-msg.sh -s agent-msg.sh k', 'python3 -X scripts/agent-msg.sh - scripts/agent-msg.sh'):
+    expect(f'NEG (a) {head}: the option argument is skipped', bash(f"{head} <<'E'\n{CREATE}\nE"), 2)
+expect('(a) bash running the message script file is a sink and passes',
+       bash(f"bash scripts/agent-msg.sh k v - <<'E'\n{CREATE} is gated\nE"), 0)
+# (c) the wrapped test comes from the walk's stack (a quoted ")" or a case pattern fooled the count)
+expect('NEG (c) a quoted ")" before $(sh <<E: wrapped', bash(f"scripts/agent-msg.sh a \")\" $(sh <<'E'\n{CREATE}\nE\n)"), 2)
+expect('NEG (c) a case pattern ( ) inside $( ): wrapped',
+       bash(f"scripts/agent-msg.sh a b $(case a in (a) sh <<'E'\n{CREATE}\nE\n;; esac)"), 2)
+expect("NEG (c) a quoted backtick before a backtick substitution: wrapped",
+       bash(f"scripts/agent-msg.sh a '`' `sh <<'E'\n{CREATE}\nE\n`"), 2)
+# (d) no opener inside $[ ], $(( )) or ${ }
+for arg in ('$[1<<E ]', '")" $((1<<E ))', '${u:-<<E }', '${u#<<E }'):
+    expect(f'NEG (d) {arg} holds no opener: the next lines run', bash(f'scripts/agent-msg.sh a b {arg}\n{CREATE}\nE'), 2)
+expect('NEG (d) "$((1<<E ))" inside double quotes holds no opener', bash(f'scripts/agent-msg.sh a "$((1<<E ))"\n{CREATE}\nE'), 2)
+# ... and the contexts close: an arithmetic, a ${ } or a here-string BEFORE a real message heredoc keeps it a message
+expect('$((1<<2)) before a message heredoc passes', bash(f"bash scripts/agent-msg.sh k $((1<<2)) - <<'E'\n{CREATE} is gated\nE"), 0)
+expect('"$((1<<2))" before a message heredoc passes',
+       bash(f"bash scripts/agent-msg.sh k \"$((1<<2))\" - <<'E'\n{CREATE} is gated\nE"), 0)
+expect('"${HOME}" before a message heredoc passes', bash(f"bash scripts/agent-msg.sh \"${{HOME}}\" k - <<'E'\n{CREATE} is gated\nE"), 0)
+expect('a here-string, then a message heredoc, passes',
+       bash(f"cat <<<x; bash scripts/agent-msg.sh k v - <<'E'\n{CREATE} is gated\nE"), 0)
+# (e) an outer << the walk cannot follow (never closes, or E-1): bash expands the inner $( )
+expect('NEG (e) an outer unclosed unquoted heredoc expands the inner body',
+       bash(f"cat <<Z >/dev/null\nbash scripts/agent-msg.sh k v - <<'E'\n$({CREATE})\nE"), 2)
+expect('NEG (e) an outer <<E-1 heredoc expands the inner body',
+       bash(f"cat <<E-1 >/dev/null\nbash scripts/agent-msg.sh k v - <<'Q'\n$({CREATE})\nQ\nE-1"), 2)
+expect('NEG (e) <<EOF closing only at a line E (bash reads on and expands): no later heredoc is dropped',
+       bash(f"cat <<EOF >/dev/null\nx\nE\nbash scripts/agent-msg.sh k v - <<'Q'\n$({CREATE})\nQ"), 2)
+# (f) a backslash-newline in an unquoted body joins lines: bash may close there
+expect('NEG (f) an unquoted body whose backslash-newline forms the closing line',
+       bash(f'bash scripts/agent-msg.sh k v - <<E\nhi\nE\\\n\n{CREATE}\nE'), 2)
+# (g) a creation past the 256 KB cut
+expect('NEG (g) 300 KB of true; segments, the creation at the tail past the cut, blocks',
+       bash('true; ' * 50000 + CREATE), 2)
+expect('NEG an opener line whose $( goes on past the line: no later heredoc is dropped',
+       bash(f"cat > n.md <<'A' $(true\n)\nbody\nA\nbash scripts/agent-msg.sh k v - <<'B'\n{CREATE}\nB"), 2)
+# ... and the usual shapes still pass: a quote, a comment, a $( ) or an apostrophe around a message heredoc
+expect("a message heredoc with an apostrophe in the body passes",
+       bash(f"bash scripts/agent-msg.sh k v - <<'MSG'\nit's about {CREATE}\nMSG"), 0)
+expect('a comment line, then a message heredoc, passes',
+       bash(f"# it's a note\nbash scripts/agent-msg.sh k v - <<'MSG'\n{CREATE} is gated\nMSG"), 0)
+expect('a quoted argument with ( ) and a $( ) before a message heredoc passes',
+       bash(f"bash scripts/agent-msg.sh \"$(echo k)\" 'v (x)' - <<'MSG'\n{CREATE} is gated\nMSG"), 0)
+expect("an escaped quote (\\') before a message heredoc is no quote and passes",
+       bash(f"echo \\' ; bash scripts/agent-msg.sh k v - <<'E'\n{CREATE} is gated\nE"), 0)
+expect('an escaped double quote inside a double-quoted argument passes',
+       bash(f"bash scripts/agent-msg.sh k \"a\\\"b\" - <<'E'\n{CREATE} is gated\nE"), 0)
+expect("a $'a\\'b' argument (an escaped quote inside $'...') passes",
+       bash(f"bash scripts/agent-msg.sh k $'a\\'b' - <<'E'\n{CREATE} is gated\nE"), 0)
+expect('two message heredocs in one command pass',
+       bash(f"bash scripts/agent-msg.sh k v - <<'A'\n{CREATE}\nA\nbash scripts/agent-msg.sh k w - <<'B'\n{CREATE}\nB"), 0)
+expect('NEG two heredocs, the creation between them, blocks',
+       bash(f"bash scripts/agent-msg.sh k v - <<'A'\nx\nA\n{CREATE}\nbash scripts/agent-msg.sh k w - <<'B'\ny\nB"), 2)
+
+# Watchdog: whatever runs slow blocks (exit 2) before the hook timeout; the env seam can only lower the limit.
+try:
+    p = subprocess.run([sys.executable, '-I', GATE], capture_output=True, text=True, timeout=20,
+                       input=json.dumps({'tool_name': 'Bash',
+                                         'tool_input': {'command': 'echo ' + 'cat <<E\n' * 60000}}),
+                       env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                            'REPO_GATE_WATCHDOG_S': '0.001'})
+    wd = (p.returncode, p.stderr)
+except subprocess.TimeoutExpired:
+    wd = (None, 'TIMEOUT after 20 s')
+expect('NEG the watchdog fires: exit 2', wd, 2)
+if 'watchdog' not in wd[1]:
+    FAILS.append(f'watchdog message missing: {wd[1][:200]!r}')
+import importlib.util  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location('repo_create_gate_mod', GATE)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+_ws = getattr(_mod, 'watchdog_s', None)
+if _ws is None:
+    FAILS.append('watchdog_s: missing (no watchdog)')
+else:
+    for raw, want in [('100', 6.0), ('6', 6.0), ('2.5', 2.5), ('0', 0.001), ('-1', 0.001), ('nan', 6.0), ('x', 6.0)]:
+        os.environ['REPO_GATE_WATCHDOG_S'] = raw
+        got = _ws()
+        if got != want:
+            FAILS.append(f'watchdog_s({raw!r}) = {got}, want {want}')
+        else:
+            print(f'ok   watchdog_s({raw!r}) = {want}')
+    os.environ.pop('REPO_GATE_WATCHDOG_S', None)
+    got = _ws()
+    expect('watchdog_s() unset = 6.0', (0 if got == 6.0 else 1, str(got)), 0)
+
+# --- The linear sink / write tests keep the old regex's edges (mutation survivors of the first round, card 3b05ae69) ---
+expect('NEG agent-msg.sh.bak is no message wrapper: the body is judged',
+       bash(f"cat x/agent-msg.sh.bak <<'E'\n{CREATE}\nE"), 2)
+expect('NEG -F - BEFORE git commit is no commit-message sink',
+       bash(f"echo -F - git commit x <<'E'\n{CREATE}\nE"), 2)
+expect('NEG cat > n.md x: the notes file must be the last word of the head',
+       bash(f"cat > n.md x <<'E'\n{CREATE}\nE"), 2)
+expect('NEG xtee n.md is no tee', bash(f"xtee n.md <<'E'\n{CREATE}\nE"), 2)
+expect('cat > "n.md" (a quoted notes file) is a sink and passes', bash(f"cat > \"n.md\" <<'E'\n{CREATE} is gated\nE"), 0)
+expect('tee -a n.md is a sink and passes', bash(f"tee -a n.md <<'E'\n{CREATE} is gated\nE"), 0)
+with tempfile.TemporaryDirectory() as d:
+    with open(os.path.join(d, 'm.json'), 'w') as fh:
+        fh.write('{"content": "A kapu blokkolja: gh repo create x --private"}\n')  # a creation: read, it would BLOCK
+    expect('a payload file posted to a dashboard curl is a message, not a run, and passes',
+           bash('curl -s -X POST localhost:3420/api/messages -d @m.json', cwd=d), 0)
+expect('NEG urlopen(..., data=) to user/repos blocks',
+       bash("python3 -c \"import urllib.request as u; u.urlopen('https://api.github.com/user/repos', data=b'{}')\""), 2)
+expect('urlopen( whose data= lies past the next ")" is no write and passes',
+       bash("python3 -c \"u.urlopen(r); f('https://api.github.com/user/repos', data=1)\""), 0)
+expect('gh api user/repos --fieldset x (no field flag) is a read and passes', bash('gh api user/repos --fieldset x'), 0)
 
 # --- POSITIVE: approved creations, reads and unrelated commands pass ---------------------------------------
 expect('gh repo create with PATRIK-KERTE in the command passes',
