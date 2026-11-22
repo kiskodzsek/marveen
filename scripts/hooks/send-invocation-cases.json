@@ -805,6 +805,196 @@
       "name": "SENDCOMMENT1122: a comment at the very start with an apostrophe, a send, a second such comment (balanced quotes would hide the send)",
       "cmd": "# it's\nsendmail a@b.c\n# it's",
       "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (Viktor 50275 I1, P06/J05): an opener inside a comment opens no heredoc, the next line's send runs",
+      "cmd": "# cat <<E\nsendmail a@b.c\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2: a comment on the opener line, an empty body, then a send (the old opener-comment divergence)",
+      "cmd": "cat <<'E' # c\nE\nsendmail a@b.c\n",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B3 f1-natural): a comment naming <<EOF, then the send with its own <<EOF body",
+      "cmd": "# a torzs a lenti <<EOF blokkban\nsendmail a@b.c <<EOF\nhello\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B3 f1-natural-cat): a comment with a heredoc pipe, then the real one",
+      "cmd": "# kuldes: cat <<EOF | sendmail\ncat <<EOF | sendmail a@b.c\nszia\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B3 f1-pelda): a commented example opener, the send on the next line",
+      "cmd": "# pelda: cat <<EOF\nsendmail a@b.c\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B3 f1-cd-comment): an opener in a trailing comment, the send on the next line",
+      "cmd": "cd /tmp # cat <<EOF\nsendmail a@b.c\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B3 control): no comment, a send with a heredoc body",
+      "cmd": "echo x\nsendmail a@b.c <<EOF\nhello\nEOF",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B1): a blank then # inside ${x:- ...} is no comment",
+      "cmd": "echo ${x:- #}; sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B1): the same with text before the #",
+      "cmd": "echo ${x:-a #b}; sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B1): a # after a blank in a ${x/ pattern/} is no comment",
+      "cmd": "echo ${x/ #/y}; sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B1): a # after a blank inside an arithmetic command is no comment",
+      "cmd": "(( 1 #x )); sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B1 guard): a comment inside $( ) is a comment (C context)",
+      "cmd": "echo $(true # sendmail a@b.c\n)",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B1 guard): after ${...} closes a # is a comment again",
+      "cmd": "echo ${x} # sendmail a@b.c",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B1 guard): after (( )) closes a # is a comment again",
+      "cmd": "(( 1 )) # sendmail a@b.c",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B1 guard): a subshell ( ) keeps comments (P context)",
+      "cmd": "( true # sendmail a@b.c\n)",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B2): a backslash-newline joins the comment line: an apostrophe in it, then a graph-mail send",
+      "cmd": "true \\\n# don't\ngraph-mail send x",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B2 pair): the same with sendmail",
+      "cmd": "true \\\n# don't\nsendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B4 P14): a here-string before the command word",
+      "cmd": "<<< x sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B4 P18): a {fd} redirect before the command word (bash >= 4.1 runs the send; /bin/bash 3.2 and zsh here stop on a syntax error, so true is the safe side)",
+      "cmd": "{fd}>x sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B4 P01/J01): a tab before # starts a comment",
+      "cmd": "true\t# sendmail a@b.c",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B4 P02): a | before # starts a comment (the pipe goes on to the next line)",
+      "cmd": "true|# sendmail a@b.c\ncat",
+      "expected": false
+    },
+    {
+      "name": "SENDCOMMENT1122 r2 (Viktor 50303 B4 P03): a backtick before # starts a comment up to the closing backtick",
+      "cmd": "echo `# sendmail a@b.c`",
+      "expected": false
+    },
+    {
+      "name": "SENDCONT1122 (Viktor 50303 K2, card e00a44b0): a backslash-newline after an assignment, then the command word",
+      "cmd": "a=1 \\\n  sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCONT1122 (Viktor 50303 K2, card e00a44b0): a backslash-newline after &&, then the send",
+      "cmd": "true && \\\n  sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCONT1122 (Viktor 50303 K2, card e00a44b0): a backslash-newline between python3 and send.py",
+      "cmd": "python3 \\\n  scripts/support-mail/send.py --to=a@b.c --subject x",
+      "expected": true
+    },
+    {
+      "name": "SENDCONT1122 (Viktor 50303 K2, card e00a44b0): a backslash-newline at the very start",
+      "cmd": "\\\nsendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCONT1122 (Viktor 50303 K2, card e00a44b0): control: an escaped # stays a word char, the send after ; runs",
+      "cmd": "echo \\#x; sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDCONT1122 (Viktor 50303 K2, card e00a44b0): control: a backslash-newline inside double quotes is content",
+      "cmd": "echo \"a \\\n# sendmail a@b.c\"",
+      "expected": false
+    },
+    {
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant P01/J01): a tab before # starts a comment, a ; inside it is no separator",
+      "cmd": "true\t# x; sendmail a@b.c",
+      "expected": false
+    },
+    {
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant P02): a | before # starts a comment, a ; inside it is no separator",
+      "cmd": "true|# x; sendmail a@b.c\ncat",
+      "expected": false
+    },
+    {
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant P03): a backtick before # starts a comment up to the closing backtick",
+      "cmd": "echo `# x; sendmail a@b.c`",
+      "expected": false
+    },
+    {
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K03/K23): a comment inside a subshell ( ) is a comment",
+      "cmd": "( true # x; sendmail a@b.c\n)",
+      "expected": false
+    },
+    {
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K06/K26): a $( ) inside ${...} keeps its comments",
+      "cmd": "echo ${x:-$(true # x; sendmail a@b.c\n)}",
+      "expected": false
+    },
+    {
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K08/K28): after ${x} closes a # is a comment again",
+      "cmd": "echo ${x} # x; sendmail a@b.c",
+      "expected": false
+    },
+    {
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K09/K29): a mid-word (( is no arithmetic command",
+      "cmd": "echo ${x:-a((} # x; sendmail a@b.c",
+      "expected": false
+    },
+    {
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K11/K31): after (( )) closes a # is a comment again",
+      "cmd": "(( 1 )) # x; sendmail a@b.c",
+      "expected": false
+    },
+    {
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K12/K32): a ( ) closed inside (( )) leaves the (( on top",
+      "cmd": "(( (1) #x )); sendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K13): a parse error ($'a\\'b' after the send) falls back on graph-mail ... send",
+      "cmd": "graph-mail send x; echo $'a\\'b'",
+      "expected": true
     }
   ]
 }

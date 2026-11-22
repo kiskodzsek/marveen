@@ -139,10 +139,8 @@ export function looseHeredocCut(cmd) {
 // cut): the strict cut drops a body only where bash surely reads one, and in every doubtful case cuts nothing, so its
 // error leans to a deny (kind 'heredoc-strict', whose message gives the way out: the text from a file). Full rationale
 // and Known limits at _STRICT_OPEN in outgoing-copy-gate.py (the python twin); send-invocation-cases.json binds them.
-// Known limits of THIS twin: the opener-comment case the python twin misses, the JS twin SEES (its tokenizer has no
-// comment handling, so the next line's send stays a segment of its own; pinned in send-heredoc-strict.test.ts); a
-// backslash-newline at the start of a line the JS twin does NOT read as a line join (main as well: an old twin
-// divergence, card e00a44b0).
+// Known limits of THIS twin: none of its own since SENDCOMMENT1122 / SENDCONT1122 (card 64d10325): the opener-comment
+// case is seen by both twins, and a backslash-newline is dropped by both masks before words are read.
 const STRICT_OPEN_RE = /(?<![<\w])<<(-?)[ \t]*(['"]?)(\w+)\2(?=[ \t;&|)<>]|$)[^\n]*(?:\n|$)/gm
 
 function strictPrefixOk(prefix) {
@@ -223,12 +221,15 @@ const codeStringSends = (code) => CODE_SEND.test(code) || (CODE_EXECISH.test(cod
 // of its line, dropped here (the newline stays a separator), as bash reads it; full rationale at
 // _mask_subshell_markers in outgoing-copy-gate.py (the python twin). This twin had no comment handling: a comment
 // line before a send was harmless here, but a send commented out (`# sendmail x`) counted as a send.
+// SENDEXPR1122 / SENDCONT1122 (Viktor 50303 B1/B2): no comment inside `${...}` or an arithmetic command `((...))` (a
+// stack of the open constructs decides), and a backslash-newline is dropped before words are read; see the python twin.
 export function maskSubshellMarkers(cmd) {
   let out = ''
   let q = null
   let prev = '\n'
   let bt = false // inside an unquoted backtick substitution: a comment there ends at the closing backtick
   const nxt = { '\n': -1, '`': -1 } // cached next position of each comment end (length = none left): linear
+  const ctx = [] // SENDEXPR1122: open ${ (B), (( (A), $( (C), ( (P)
   for (let i = 0; i < cmd.length; i++) {
     const ch = cmd[i]
     if (q) {
@@ -238,19 +239,33 @@ export function maskSubshellMarkers(cmd) {
       continue
     }
     if (ch === "'" || ch === '"') { q = ch; out += ch; continue }
-    if (ch === '\\' && i + 1 < cmd.length) { out += cmd[i] + cmd[i + 1]; i++; prev = 'a'; continue }
-    if (ch === '#' && ' \t\n;&|()<>`'.includes(prev)) {
+    if (ch === '\\' && i + 1 < cmd.length) {
+      if (cmd[i + 1] === '\n') { i++; continue } // SENDCONT1122: a line continuation is gone before bash reads words
+      out += cmd[i] + cmd[i + 1]; i++; prev = 'a'; continue
+    }
+    const top = ctx.length ? ctx[ctx.length - 1] : ''
+    if (ch === '#' && ' \t\n;&|()<>`'.includes(prev) && (top === '' || top === 'C' || top === 'P')) {
       for (const c of bt ? ['\n', '`'] : ['\n']) {
         if (nxt[c] < i) { const k = cmd.indexOf(c, i); nxt[c] = k < 0 ? cmd.length : k }
       }
       i = (bt ? Math.min(nxt['\n'], nxt['`']) : nxt['\n']) - 1
       continue
     }
+    const wordStart = ' \t\n;&|()<>`'.includes(prev)
     prev = ch
     if (ch === '`') bt = !bt
     if ((ch === '<' || ch === '>') && cmd[i + 1] === '&') { out += ch; i++; continue } // SENDREDIR1122: `2>&1`
     if (ch === '\n' || ch === '`') { out += ';'; continue }
-    if (ch === '$' && cmd[i + 1] === '(') { out += ';'; i++; prev = '('; continue }
+    if (ch === '$' && cmd[i + 1] === '(') { ctx.push('C'); out += ';'; i++; prev = '('; continue }
+    if (ch === '$' && cmd[i + 1] === '{') ctx.push('B')
+    else if (ch === '}' && top === 'B') ctx.pop()
+    else if (ch === '(') {
+      if (wordStart && cmd[i + 1] === '(') { ctx.push('A'); out += '(('; i++; continue } // an arithmetic command
+      ctx.push('P')
+    } else if (ch === ')' && top) {
+      if (top === 'A' && cmd[i + 1] === ')') { ctx.pop(); out += '))'; i++; continue }
+      if (top === 'C' || top === 'P') ctx.pop()
+    }
     out += ch
   }
   return out

@@ -8,8 +8,8 @@ import { gateDecision, isSendInvocation, sendOnlyByStrictHeredoc, strictHeredocC
 
 // HDSTRICT1122 (card bbc6bad4, Viktor 50205 / 50220): the loose heredoc cut of both mail gates could drop a command
 // bash runs; the strict second pass only ADDS sends. The shared verdicts live in send-invocation-cases.json (the
-// conformance test); this file pins what is NOT shared: the hard-gate's deny kind and its way-out message, the known
-// twin divergence on a comment, and the run time on 1 MB inputs (Viktor 50205 point 2: under 2 s on both gates).
+// conformance test); this file pins what is NOT shared: the hard-gate's deny kind and its way-out message, the
+// opener-comment case both twins now see (SENDCOMMENT1122), and the run time on 1 MB inputs (Viktor 50205 point 2: under 2 s on both gates).
 
 // Viktor 50311 I2: the 2 s bounds are CPU seconds of the gate (python time.process_time, node process.cpuUsage), not
 // wall time. Wall time failed once in a sandbox under load 3.3 (6.7 s for the whole it, the shapes 2.0 s each, the
@@ -105,13 +105,14 @@ print(json.dumps([g._strict_heredoc_cut(c) for c in json.load(open(sys.argv[1]))
   })
 })
 
-describe('HDSTRICT1122: known twin divergence (not in the shared list; card e00a44b0)', () => {
-  it('opener-comment: the python twin misses a send after a commented opener line, the JS twin sees it', () => {
-    // shlex reads the comment over the newline, so the next line joins it; the JS tokenizer has no comment
-    // handling. Measured on main as well (pre-existing). Pinned here so a fix on either side shows up.
+describe('HDSTRICT1122: the opener-comment divergence is gone (SENDCOMMENT1122, card 64d10325)', () => {
+  it('opener-comment: both twins see a send after a commented opener line', () => {
+    // Until card 64d10325 the python twin missed it (shlex read the comment over the masked newline, so the next
+    // line joined it) while the JS twin saw it. The comment is now dropped line by line in both masks; the shape is
+    // also a shared row in send-invocation-cases.json.
     const cmd = "cat <<'E' # c\nE\nsendmail -t a@b.hu\n"
     expect(isSendInvocation(cmd)).toBe(true)
-    expect(pySend([cmd]).verdicts).toEqual([false])
+    expect(pySend([cmd]).verdicts).toEqual([true])
   })
 })
 

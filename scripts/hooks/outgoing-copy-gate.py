@@ -163,9 +163,9 @@ def _loose_heredoc_spans(cmd: str):
 # opener line does not end in a backslash; the body ends at the FIRST line that is exactly the word (after tabs for
 # <<-), an empty body included. In every doubtful case it cuts NOTHING (an unclosed body: nothing after it either),
 # so its error always leans to an extra audit. Linear: one opener per line, and the first unclosed body stops it.
-# Known limits: a comment on the opener line (opener-comment: shlex reads the comment over the newline, the next
-# line's send joins it; the comment class of card e00a44b0); a body text that looks like a send in a doubtful case
-# is audited (over-audit by design). Mirrored in email-send-gate.mjs (STRICT_OPEN_RE); send-invocation-cases.json
+# Known limits: a body text that looks like a send in a doubtful case is audited (over-audit by design). A comment
+# on the opener line is no longer a limit: SENDCOMMENT1122 (card 64d10325) masks it before shlex, so the next line's
+# send stays a segment of its own in both twins. Mirrored in email-send-gate.mjs (STRICT_OPEN_RE); send-invocation-cases.json
 # binds the two.
 _STRICT_OPEN = re.compile(r"(?<![<\w])<<(-?)[ \t]*(['\"]?)(\w+)\2(?=[ \t;&|)<>]|$)[^\n]*(?:\n|$)", re.M | re.A)  # re.A: \w as in JS
 
@@ -364,7 +364,10 @@ def _curl_resend_verdict(rest):
 # akkor) konzervativan visszaesunk -- lasd is_send_invocation vegen.
 _FALLBACK_LITERALS = re.compile(
     r"send\.py|api\.resend\.com|\bsendmail\b|\bmsmtp\b|\bswaks\b"
-    r"|\bsmtplib\b|\bsendMail\s*\(", re.I
+    r"|\bsmtplib\b|\bsendMail\s*\("
+    # SENDCONT1122 (Viktor 50303 B2): the JS twin's legacy fallback has graph-mail ... send; this one had no
+    # graph-mail, so a parse error (an apostrophe in a comment the mask could not drop) let a graph-mail send through.
+    r"|\bgraph-mail\b[^\n]*\bsend\b", re.I
 )
 
 
@@ -383,13 +386,20 @@ def _mask_subshell_markers(cmd: str) -> str:
     function) let a Bash send through with no approval and no audit. Word start as bash measured it (bash -c, 11-22):
     after a blank, a newline, one of ;&|()<> or a backtick, after `$(`, and at the start; NOT mid-word (`a#b`, `$#`,
     `${#x}`, an escaped `\\#`, right after a closing quote). shlex runs with commenters="" (its mid-word `#` was a
-    comment too, which bash does not do). Mirrored in email-send-gate.mjs maskSubshellMarkers."""
+    comment too, which bash does not do). Mirrored in email-send-gate.mjs maskSubshellMarkers.
+    SENDEXPR1122 (Viktor 50303 B1): inside `${...}` and an arithmetic command `((...))` a `#` after a blank is no
+    comment for bash (`echo ${x:- #}; sendmail x`, `(( 1 #x )); sendmail x` run the send); a stack of the open `${`
+    (B), `((` at a word start (A), `$(` (C) and `(` (P) decides: a comment only with an empty stack or a C/P on top.
+    Not cutting is the safe side (the text stays and is read). `$((` is `$(` + `(` here (C, P): a blank `#` inside an
+    arithmetic EXPANSION is an error on which a non-interactive bash or zsh exits, so nothing after it runs. SENDCONT1122 (B2): bash drops a backslash-newline before
+    it reads words, so `true \\` + newline + `# c` is `true # c`, a comment; the mask drops it too (prev stays)."""
     out = []
     q = None  # None | "'" | '"'
     i, n = 0, len(cmd)
     prev = "\n"  # the previous character outside quotes, for the word-start test of `#`
     bt = False  # inside an unquoted backtick substitution: a comment there ends at the closing backtick
     nxt = {"\n": -1, "`": -1}  # cached next position of each comment end at or after i (n = none left): linear
+    ctx = []  # SENDEXPR1122: open ${ (B), (( (A), $( (C), ( (P)
     while i < n:
         ch = cmd[i]
         if q:
@@ -402,14 +412,17 @@ def _mask_subshell_markers(cmd: str) -> str:
         if ch in "'\"":
             q = ch; out.append(ch); i += 1; continue
         if ch == "\\" and i + 1 < n:
+            if cmd[i + 1] == "\n":  # SENDCONT1122: a line continuation is gone before bash reads words
+                i += 2; continue
             out.append(cmd[i:i + 2]); i += 2; prev = "a"; continue
-        if ch == "#" and prev in " \t\n;&|()<>`":
+        if ch == "#" and prev in " \t\n;&|()<>`" and (not ctx or ctx[-1] in "CP"):
             for c in ("\n", "`") if bt else ("\n",):
                 if nxt[c] < i:
                     k = cmd.find(c, i)
                     nxt[c] = n if k < 0 else k
             i = min(nxt["\n"], nxt["`"]) if bt else nxt["\n"]
             continue
+        word_start = prev in " \t\n;&|()<>`"
         prev = ch
         if ch == "`":
             bt = not bt
@@ -418,7 +431,20 @@ def _mask_subshell_markers(cmd: str) -> str:
         if ch == "\n" or ch == "`":
             out.append(";"); i += 1; continue
         if ch == "$" and i + 1 < n and cmd[i + 1] == "(":
-            out.append(";"); i += 2; prev = "("; continue
+            ctx.append("C"); out.append(";"); i += 2; prev = "("; continue
+        if ch == "$" and i + 1 < n and cmd[i + 1] == "{":
+            ctx.append("B")
+        elif ch == "}" and ctx and ctx[-1] == "B":
+            ctx.pop()
+        elif ch == "(":
+            if word_start and i + 1 < n and cmd[i + 1] == "(":  # an arithmetic command `(( ... ))`
+                ctx.append("A"); out.append("(("); i += 2; continue
+            ctx.append("P")
+        elif ch == ")" and ctx:
+            if ctx[-1] == "A" and i + 1 < n and cmd[i + 1] == ")":
+                ctx.pop(); out.append("))"); i += 2; continue
+            if ctx[-1] in "CP":
+                ctx.pop()
         out.append(ch); i += 1
     return "".join(out)
 
