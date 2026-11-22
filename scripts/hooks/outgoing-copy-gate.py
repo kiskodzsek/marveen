@@ -390,7 +390,9 @@ def _mask_subshell_markers(cmd: str) -> str:
     SENDEXPR1122 (Viktor 50303 B1): inside `${...}` and an arithmetic command `((...))` a `#` after a blank is no
     comment for bash (`echo ${x:- #}; sendmail x`, `(( 1 #x )); sendmail x` run the send); a stack of the open `${`
     (B), `((` at a word start (A), `$(` (C) and `(` (P) decides: a comment only with an empty stack or a C/P on top.
-    Not cutting is the safe side (the text stays and is read). `$((` is `$(` + `(` here (C, P): a blank `#` inside an
+    Not cutting is the safe side (the text stays and is read). SENDDPAREN1122 (Viktor 50342 R1): a lone `)` with
+    an A on top means bash took the `((` as two subshells (`((true) ) # it's` is `( (true) )` and the `#` a comment):
+    the inner one closes, the outer stays open as a P, so a comment after it is cut. `$((` is `$(` + `(` here (C, P): a blank `#` inside an
     arithmetic EXPANSION is an error on which a non-interactive bash or zsh exits, so nothing after it runs. SENDCONT1122 (B2): bash drops a backslash-newline before
     it reads words, so `true \\` + newline + `# c` is `true # c`, a comment; the mask drops it too (prev stays)."""
     out = []
@@ -443,7 +445,9 @@ def _mask_subshell_markers(cmd: str) -> str:
         elif ch == ")" and ctx:
             if ctx[-1] == "A" and i + 1 < n and cmd[i + 1] == ")":
                 ctx.pop(); out.append("))"); i += 2; continue
-            if ctx[-1] in "CP":
+            if ctx[-1] == "A":  # SENDDPAREN1122: a lone ) -- bash reads the (( as two subshells, ((true) ) = ( (true) )
+                ctx[-1] = "P"
+            elif ctx[-1] in "CP":
                 ctx.pop()
         out.append(ch); i += 1
     return "".join(out)

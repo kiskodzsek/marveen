@@ -264,7 +264,8 @@ export function maskSubshellMarkers(cmd) {
       ctx.push('P')
     } else if (ch === ')' && top) {
       if (top === 'A' && cmd[i + 1] === ')') { ctx.pop(); out += '))'; i++; continue }
-      if (top === 'C' || top === 'P') ctx.pop()
+      if (top === 'A') ctx[ctx.length - 1] = 'P' // SENDDPAREN1122: a lone ) -- the (( was two subshells, ((true) ) = ( (true) )
+      else if (top === 'C' || top === 'P') ctx.pop()
     }
     out += ch
   }

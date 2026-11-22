@@ -995,6 +995,41 @@
       "name": "SENDEXPR1122 r2 (Viktor 50303 B4, mutant K13): a parse error ($'a\\'b' after the send) falls back on graph-mail ... send",
       "cmd": "graph-mail send x; echo $'a\\'b'",
       "expected": true
+    },
+    {
+      "name": "SENDDPAREN1122 (Viktor 50342 R1): ((true) ) is two subshells, so # it's after it is a comment; the send on the next line runs",
+      "cmd": "((true) ) # it's\nsendmail a@b.c\n: \\'",
+      "expected": true
+    },
+    {
+      "name": "SENDDPAREN1122 (Viktor 50342 R1): the same with graph-mail ... send",
+      "cmd": "((true) ) # it's\ngraph-mail send --to a@b.c\n: \\'",
+      "expected": true
+    },
+    {
+      "name": "SENDDPAREN1122 (Viktor 50342 R1): control: without the closing quote line",
+      "cmd": "((true) ) # it's\nsendmail a@b.c",
+      "expected": true
+    },
+    {
+      "name": "SENDDPAREN1122 (Viktor 50342 R1): ((echo hi) ; true) -- the outer subshell closes on its own ), the comment after it is cut",
+      "cmd": "((echo hi) ; true) # it's\nsendmail a@b.c\n: \\'",
+      "expected": true
+    },
+    {
+      "name": "SENDDPAREN1122 (Viktor 50342 R1): control: a real (( )) with a ( ) inside, the comment after it",
+      "cmd": "(( 1 + (2) )) # it's\nsendmail a@b.c\n: \\'",
+      "expected": true
+    },
+    {
+      "name": "SENDDPAREN1122 (Viktor 50342 R1): control: (( (1+2))) -- the inner ) and then )) close it",
+      "cmd": "(( (1+2))) # it's\nsendmail a@b.c\n: \\'",
+      "expected": true
+    },
+    {
+      "name": "SENDCONT1122 (Viktor 50342 T1, mutant P13): a backslash-newline inside the sender name is dropped whole",
+      "cmd": "send\\\nmail a@b.c",
+      "expected": true
     }
   ]
 }
