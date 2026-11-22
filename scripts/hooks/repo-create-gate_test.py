@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GATE = os.path.join(HERE, 'repo-create-gate.py')
@@ -543,6 +544,118 @@ p = subprocess.run(['/bin/sh', '-c', 'exec "$0" -I -c "$1" "$2" verdict 2>&-', s
                    env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
                         'HOOK_ERRLOG_PATH': os.devnull})
 expect('NEG internal error + a raw creation with a closed stderr exits 2, not 1', (p.returncode, ''), 2)
+
+# --- KNOWN LIMITS, pinned (Viktor 50172, Klodel 50170 cap 20; independent probe indep10 labels) --------------------
+# Each row pins TODAY's behaviour of a documented Known limit (module docstring), so a later fix shows up as a red
+# row here that has to be turned around on purpose. The row name starts with "KNOWN-LIMIT <word>"; the word is the one
+# the docstring uses. A row that starts to block is a change of the documented limit, not a regression.
+GH_ = 'g' + 'h'
+POST_ = 'PO' + 'ST'
+UR_ = 'us' + 'er/repos'
+API_ = 'https://api.github.com/'
+GQL_ = 'mutation{' + 'create' + 'Repository' + '(input:{name:"x",visibility:PRIVATE}){repository{url}}}'
+with tempfile.TemporaryDirectory() as kd:
+    with open(os.path.join(kd, 'q.graphql'), 'w') as fh:
+        fh.write(GQL_ + '\n')
+    with open(os.path.join(kd, 'mk.py'), 'w') as fh:
+        fh.write("import requests\nrequests.post('" + API_ + UR_ + "', json={'name': 'x'})\n")
+    with open(os.path.join(kd, 'mk.sh'), 'w') as fh:
+        fh.write(CREATE + '\n')
+    pins = [
+        ('attached (curl -d with an attached quote)',
+         f"curl -H 'Accept: application/json' {API_}{UR_} -d'{{\"name\":\"x\"}}'"),
+        ('combined (curl -sSd short-flag cluster)', f"curl -sSd '{{\"name\":\"x\"}}' {API_}{UR_}"),
+        ('ascii (curl --data-ascii)', f"curl --data-ascii '{{\"name\":\"x\"}}' {API_}{UR_}"),
+        ('wget (wget --post-data)', f"wget --post-data='{{\"name\":\"x\"}}' {API_}{UR_}"),
+        ('httpie (http POST)', f'http {POST_} {API_}{UR_} name=x'),
+        ('placeholder (shell variables in the forks path)', f'curl -X {POST_} "{API_}repos/$OWNER/$NAME/forks"'),
+        ('placeholder (gh api {owner}/{repo} forks)', f'{GH_} api -X {POST_} repos/{{owner}}/{{repo}}/forks'),
+        ('attached (gh api -fname=x)', f'{GH_} api {UR_} -fname=x'),
+        ('query-at-file (gh api graphql -F query=@file)', f'{GH_} api graphql -F query=@q.graphql'),
+        ('cat-subst (gh api graphql -f query="$(cat file)")', f'{GH_} api graphql -f query="$(cat q.graphql)"'),
+        ('sink-then-input (heredoc .json sink, --input later)',
+         "cat > q2.json <<'EOF'\n" + json.dumps({'query': GQL_}) + f"\nEOF\n{GH_} api graphql --input q2.json"),
+        ('session (requests.Session object .post)',
+         "python3 -c \"import requests; s=requests.Session(); s.post('" + API_ + UR_ + "', json={'name':'x'})\""),
+        ('separate-line (urllib Request data= on its own line)',
+         "python3 - <<'EOF'\nimport json, urllib.request as u\nreq = u.Request('" + API_ + UR_
+         + "', data=json.dumps({'name': 'x'}).encode())\nu.urlopen(req)\nEOF"),
+    ]
+    for word, cmd in pins:
+        expect(f'KNOWN-LIMIT {word}: allowed today', bash(cmd, cwd=kd), 0)
+    expect('KNOWN-LIMIT prefixed (an MCP name that only ends in create_repository): allowed today',
+           run({'tool_name': 'mcp__gh__github_create_repository', 'tool_input': {'name': 'x'}, 'cwd': kd}), 0)
+
+    # KNOWN-LIMIT pipe (real-stderr-pipe-closed): a stderr pipe whose reader end is closed makes the final flush fail;
+    # a block leaves with 120, not 2.
+    pp = subprocess.Popen([sys.executable, '-I', GATE], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.PIPE, env={'PATH': '/usr/bin:/bin',
+                                                       'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'})
+    pp.stderr.close()
+    try:
+        pp.stdin.write(json.dumps(bash_payload(CREATE)).encode())
+        pp.stdin.close()
+    except BrokenPipeError:
+        pass
+    expect('KNOWN-LIMIT pipe (a closed stderr pipe): a block exits 120 today', (pp.wait(timeout=20), ''), 120)
+
+    # KNOWN-LIMIT fallback-raises: an internal error inside the fallback itself allows (never exit 1).
+    INJ_ONE = '''import importlib.util, sys
+spec = importlib.util.spec_from_file_location('rcg_pin', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+exc = {'rt': RuntimeError, 'os': OSError}[sys.argv[3]]
+def boom(*a, **k):
+    raise exc('injected')
+setattr(m, sys.argv[2], boom)
+sys.exit(m.main())
+'''
+    for fn, kind, cmd in (('heredocs', 'rt', 'python3 mk.py'), ('_read_small', 'os', 'bash mk.sh'),
+                          ('creates_repo', 'rt', CREATE)):
+        pi = subprocess.run([sys.executable, '-I', '-c', INJ_ONE, GATE, fn, kind],
+                            input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}, 'cwd': kd}),
+                            capture_output=True, text=True, timeout=20,
+                            env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                                 'HOOK_ERRLOG_PATH': os.devnull})
+        expect(f'KNOWN-LIMIT fallback-raises ({fn} raises, {cmd.split()[0]} ...): allowed today', (pi.returncode, pi.stderr), 0)
+
+# KNOWN-LIMIT deep-json: stdin nested too deep to parse is malformed stdin and allows.
+deep = ('{"tool_name":"Bash","tool_input":{"command":' + json.dumps(CREATE) + '},"x":' + '[' * 200000
+        + ']' * 200000 + '}')
+pd = subprocess.run([sys.executable, '-I', GATE], input=deep, capture_output=True, text=True, timeout=20,
+                    env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'})
+expect('KNOWN-LIMIT deep-json (nesting too deep to parse): allowed today', (pd.returncode, pd.stderr), 0)
+
+# KNOWN-LIMIT malformed (invalid UTF-8 in stdin, UTF-8 locale): malformed stdin allows. Only where the interpreter
+# reads stdin with errors='strict' (3.9 here): read() raises, the "malformed stdin" branch allows. With UTF-8 mode
+# (the default from 3.15) stdin is surrogateescape, the bytes survive, the command is judged and blocks. The row takes
+# the want from this interpreter's own stdin errors setting, under the same env.
+_LOC = {'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8'}
+_errs = subprocess.run([sys.executable, '-I', '-c', 'import sys; print(sys.stdin.errors)'], capture_output=True,
+                       text=True, timeout=20, env=_LOC).stdout.strip()
+pm = subprocess.run([sys.executable, '-I', GATE],
+                    input=b'{"tool_name":"Bash","tool_input":{"command":"' + CREATE.encode() + b' \xff"}}',
+                    capture_output=True, timeout=20,
+                    env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                         'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8'})
+expect(f'KNOWN-LIMIT malformed (invalid UTF-8 stdin, stdin errors={_errs}): '
+       + ('allowed today' if _errs == 'strict' else 'judged and blocked'), (pm.returncode, ''),
+       0 if _errs == 'strict' else 2)
+
+# KNOWN-LIMIT watchdog-env: with the env seam at 0.2 s, a closed fd 2 and stdin that arrives late, the watchdog fires
+# with nowhere to write, and the call is allowed. The stdin delay (1.5 s) is far above the seam, so a slow start
+# under load does not turn the row.
+pw = subprocess.Popen(['/bin/sh', '-c', 'exec "$0" -I "$1" 2>&-', sys.executable, GATE], stdin=subprocess.PIPE,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                           'REPO_GATE_WATCHDOG_S': '0.2'})
+time.sleep(1.5)
+try:
+    pw.stdin.write(json.dumps(bash_payload(CREATE)).encode())
+    pw.stdin.close()
+except BrokenPipeError:
+    pass
+expect('KNOWN-LIMIT watchdog-env (seam 0.2 s, fd 2 closed, late stdin): allowed today', (pw.wait(timeout=20), ''), 0)
 
 if FAILS:
     print('\nFAILED:\n' + '\n'.join(FAILS))
