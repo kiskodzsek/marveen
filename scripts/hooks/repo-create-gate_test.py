@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GATE = os.path.join(HERE, 'repo-create-gate.py')
@@ -102,7 +103,10 @@ def ledger_run(cmd, rows):
             {'tool_name': 'Bash', 'tool_input': {'command': cmd}}), capture_output=True, text=True,
             env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': db}, timeout=20)
         log = os.path.join(d, 'repo-create-gate.log')
-        return p.returncode, (open(log).read() if os.path.exists(log) else '')
+        if not os.path.exists(log):
+            return p.returncode, ''
+        with open(log) as fh:
+            return p.returncode, fh.read()
 
 
 OKQ = 'PATRIK-KERTE: TG 18160 "csinálj egy privát repót sajat-rendszer néven"'
@@ -430,6 +434,228 @@ expect('a POST to another endpoint passes', bash('gh api --method POST repos/a/b
 expect('non-Bash tool passes', run({'tool_name': 'Read', 'tool_input': {'file_path': '/tmp/x'}}), 0)
 expect('malformed stdin fails open', (subprocess.run([sys.executable, '-I', GATE], input='not json',
                                                      capture_output=True, text=True).returncode, ''), 0)
+
+# --- INTERNAL ERROR (Viktor 50057 follow-up): verdict() crashes, then only the raw creation regexes decide --------
+# No input crashes verdict() today (Viktor: 0 ERR on the probes), so a wrapper runs the real main() with verdict()
+# (and, for the last rows, creates_repo()) replaced by a raising function; stdin, stderr, the log and the exit code
+# are the real ones.
+CRASH_WRAP = '''import importlib.util, sys
+spec = importlib.util.spec_from_file_location('rcg', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+def boom(*a, **k):
+    raise RuntimeError('injected')
+def kbi(*a, **k):
+    raise KeyboardInterrupt
+m.verdict = kbi if sys.argv[2].startswith('kbi') else boom
+if sys.argv[2] == 'both':
+    m.creates_repo = boom
+if sys.argv[2] == 'kbi-both':
+    m.creates_repo = kbi
+sys.exit(m.main())
+'''
+
+
+def crash_run(payload, mode='verdict'):
+    d = tempfile.mkdtemp(prefix='rcg-crash-')
+    log = os.path.join(d, 'hook-errors.log')
+    p = subprocess.run([sys.executable, '-I', '-c', CRASH_WRAP, GATE, mode], input=json.dumps(payload),
+                       capture_output=True, text=True, timeout=20,
+                       env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                            'HOOK_ERRLOG_PATH': log})
+    logged = ''
+    if os.path.exists(log):
+        with open(log) as fh:
+            logged = fh.read()
+    return p.returncode, p.stderr, logged
+
+
+def crash_expect(name, got, want_rc, want_log):
+    rc, err, logged = got
+    if rc != want_rc or want_log not in logged:
+        FAILS.append(f'{name}: rc={rc}, want {want_rc}; log has {want_log!r}: {want_log in logged}; stderr={err[:200]!r}')
+    else:
+        print(f'ok   {name}')
+
+
+def bash_payload(cmd):
+    return {'tool_name': 'Bash', 'tool_input': {'command': cmd, 'description': ''}}
+
+
+crash_expect('NEG internal error + a raw creation blocks', crash_run(bash_payload(CREATE)), 2, 'blocked (raw creation)')
+crash_expect('NEG internal error + a creation only in a message heredoc body blocks (no dropping on a crash)',
+             crash_run(bash_payload(f"bash scripts/agent-msg.sh k v - <<'E'\n{CREATE}\nE")), 2, 'blocked (raw creation)')
+crash_expect('NEG internal error + an approved creation blocks (the approval line is not read on a crash)',
+             crash_run(bash_payload(f'{CREATE}  # {OK_LINE}')), 2, 'blocked (raw creation)')
+crash_expect('NEG internal error + an MCP create tool blocks',
+             crash_run({'tool_name': 'mcp__github__create_repository', 'tool_input': {'name': 'x'}}), 2,
+             'blocked (raw creation)')
+crash_expect('internal error + a harmless command is allowed and logged', crash_run(bash_payload('git status')), 0,
+             'internal error, allowed')
+crash_expect('internal error + another MCP tool is allowed', crash_run({'tool_name': 'mcp__github__get_me',
+                                                                          'tool_input': {}}), 0, 'allowed')
+crash_expect('internal error + a non-dict tool_input is allowed', crash_run({'tool_name': 'Bash', 'tool_input': 'x'}), 0,
+             'allowed')
+crash_expect('internal error + a non-string command is not judged (as verdict) and is allowed',
+             crash_run({'tool_name': 'Bash', 'tool_input': {'command': [CREATE]}}), 0, 'allowed')
+crash_expect('internal error in the fallback too: allowed, never exit 1', crash_run(bash_payload(CREATE), 'both'), 0,
+             'internal error, allowed')
+r = crash_run(bash_payload(CREATE))
+expect('the internal-error block message names the cause', (0 if 'belső hibára' in r[1] else 1, r[1]), 0)
+
+# Viktor 50109 (independent probe rcf). R1: "~<lone surrogate>" / "~<NUL>" made expanduser raise inside
+# referenced_files(), and the creation in an EARLIER referenced script went through (98e55fd3 and main: 0).
+with tempfile.TemporaryDirectory() as d:
+    with open(os.path.join(d, 'mk.py'), 'w') as fh:
+        fh.write(f'import os\nos.system("{CREATE}")\n')
+    expect('NEG R1 a referenced creation, then a ~<lone surrogate> reference, blocks',
+           bash('python3 mk.py; python3 ~\ud800/x.py', cwd=d), 2)
+    expect('NEG R1 a referenced creation, then a ~<NUL> reference, blocks', bash('python3 mk.py; python3 ~\x00/x.py', cwd=d), 2)
+    # (c) after a crash the fallback reads the files the command names too
+    crash_expect('NEG internal error + a creation only in a referenced script blocks',
+                 crash_run({'tool_name': 'Bash', 'tool_input': {'command': 'python3 mk.py'}, 'cwd': d}), 2,
+                 'blocked (raw creation)')
+# R2: over 256 KB the rest was searched only from 1 KB before the cut; a REST path before the cut and its gh api
+# field after it is one creation (direct-ghapi-words-field-end-1m)
+expect('NEG R2 1 MB: the REST path before the cut, the gh api field after it, blocks',
+       bash('gh api /user/repos ' + 'w ' * (512 * 1024) + '-f name=x'), 2)
+# V02: after a crash the fallback reads the WHOLE command, not the first 256 KB
+crash_expect('NEG internal error + a creation past 256 KB blocks',
+             crash_run(bash_payload('echo ' + 'w ' * (160 * 1024) + '; ' + CREATE)), 2, 'blocked (raw creation)')
+# (d) a null / non-dict tool_input of an MCP create tool carries no approval line (direct-mcp-create-input-null)
+expect('NEG an MCP create tool with a null tool_input blocks', run({'tool_name': 'mcp__github__create_repository',
+                                                                    'tool_input': None}), 2)
+expect('NEG an MCP create tool with a string tool_input blocks', run({'tool_name': 'mcp__github__create_repository',
+                                                                      'tool_input': 'x'}), 2)
+# (e) a closed stderr still blocks with exit 2, not 1 (direct-stderr-closed-create); a KeyboardInterrupt in the
+# judgment takes the crash path (kbi-cli-create)
+p = subprocess.run(['/bin/sh', '-c', 'exec "$0" -I "$1" 2>&-', sys.executable, GATE],
+                   input=json.dumps(bash_payload(CREATE)), capture_output=True, text=True, timeout=20,
+                   env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'})
+expect('NEG a creation with a closed stderr exits 2, not 1', (p.returncode, ''), 2)
+crash_expect('NEG a KeyboardInterrupt in the judgment + a raw creation blocks',
+             crash_run(bash_payload(CREATE), 'kbi'), 2, 'blocked (raw creation)')
+# a KeyboardInterrupt in the fallback too is caught like any crash there: allowed, logged, never a traceback exit
+crash_expect('a KeyboardInterrupt in the judgment and in the fallback: allowed, never exit 1',
+             crash_run(bash_payload(CREATE), 'kbi-both'), 0, 'internal error, allowed')
+# the crash path's block message with a closed stderr still exits 2
+p = subprocess.run(['/bin/sh', '-c', 'exec "$0" -I -c "$1" "$2" verdict 2>&-', sys.executable, CRASH_WRAP, GATE],
+                   input=json.dumps(bash_payload(CREATE)), capture_output=True, text=True, timeout=20,
+                   env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                        'HOOK_ERRLOG_PATH': os.devnull})
+expect('NEG internal error + a raw creation with a closed stderr exits 2, not 1', (p.returncode, ''), 2)
+
+# --- KNOWN LIMITS, pinned (Viktor 50172, Klodel 50170 cap 20; independent probe indep10 labels) --------------------
+# Each row pins TODAY's behaviour of a documented Known limit (module docstring), so a later fix shows up as a red
+# row here that has to be turned around on purpose. The row name starts with "KNOWN-LIMIT <word>"; the word is the one
+# the docstring uses. A row that starts to block is a change of the documented limit, not a regression.
+GH_ = 'g' + 'h'
+POST_ = 'PO' + 'ST'
+UR_ = 'us' + 'er/repos'
+API_ = 'https://api.github.com/'
+GQL_ = 'mutation{' + 'create' + 'Repository' + '(input:{name:"x",visibility:PRIVATE}){repository{url}}}'
+with tempfile.TemporaryDirectory() as kd:
+    with open(os.path.join(kd, 'q.graphql'), 'w') as fh:
+        fh.write(GQL_ + '\n')
+    with open(os.path.join(kd, 'mk.py'), 'w') as fh:
+        fh.write("import requests\nrequests.post('" + API_ + UR_ + "', json={'name': 'x'})\n")
+    with open(os.path.join(kd, 'mk.sh'), 'w') as fh:
+        fh.write(CREATE + '\n')
+    pins = [
+        ('attached (curl -d with an attached quote)',
+         f"curl -H 'Accept: application/json' {API_}{UR_} -d'{{\"name\":\"x\"}}'"),
+        ('combined (curl -sSd short-flag cluster)', f"curl -sSd '{{\"name\":\"x\"}}' {API_}{UR_}"),
+        ('ascii (curl --data-ascii)', f"curl --data-ascii '{{\"name\":\"x\"}}' {API_}{UR_}"),
+        ('wget (wget --post-data)', f"wget --post-data='{{\"name\":\"x\"}}' {API_}{UR_}"),
+        ('httpie (http POST)', f'http {POST_} {API_}{UR_} name=x'),
+        ('placeholder (shell variables in the forks path)', f'curl -X {POST_} "{API_}repos/$OWNER/$NAME/forks"'),
+        ('placeholder (gh api {owner}/{repo} forks)', f'{GH_} api -X {POST_} repos/{{owner}}/{{repo}}/forks'),
+        ('attached (gh api -fname=x)', f'{GH_} api {UR_} -fname=x'),
+        ('query-at-file (gh api graphql -F query=@file)', f'{GH_} api graphql -F query=@q.graphql'),
+        ('cat-subst (gh api graphql -f query="$(cat file)")', f'{GH_} api graphql -f query="$(cat q.graphql)"'),
+        ('sink-then-input (heredoc .json sink, --input later)',
+         "cat > q2.json <<'EOF'\n" + json.dumps({'query': GQL_}) + f"\nEOF\n{GH_} api graphql --input q2.json"),
+        ('session (requests.Session object .post)',
+         "python3 -c \"import requests; s=requests.Session(); s.post('" + API_ + UR_ + "', json={'name':'x'})\""),
+        ('separate-line (urllib Request data= on its own line)',
+         "python3 - <<'EOF'\nimport json, urllib.request as u\nreq = u.Request('" + API_ + UR_
+         + "', data=json.dumps({'name': 'x'}).encode())\nu.urlopen(req)\nEOF"),
+    ]
+    for word, cmd in pins:
+        expect(f'KNOWN-LIMIT {word}: allowed today', bash(cmd, cwd=kd), 0)
+    expect('KNOWN-LIMIT prefixed (an MCP name that only ends in create_repository): allowed today',
+           run({'tool_name': 'mcp__gh__github_create_repository', 'tool_input': {'name': 'x'}, 'cwd': kd}), 0)
+
+    # KNOWN-LIMIT pipe (real-stderr-pipe-closed): a stderr pipe whose reader end is closed makes the final flush fail;
+    # a block leaves with 120, not 2.
+    pp = subprocess.Popen([sys.executable, '-I', GATE], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.PIPE, env={'PATH': '/usr/bin:/bin',
+                                                       'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'})
+    pp.stderr.close()
+    try:
+        pp.stdin.write(json.dumps(bash_payload(CREATE)).encode())
+        pp.stdin.close()
+    except BrokenPipeError:
+        pass
+    expect('KNOWN-LIMIT pipe (a closed stderr pipe): a block exits 120 today', (pp.wait(timeout=20), ''), 120)
+
+    # KNOWN-LIMIT fallback-raises: an internal error inside the fallback itself allows (never exit 1).
+    INJ_ONE = '''import importlib.util, sys
+spec = importlib.util.spec_from_file_location('rcg_pin', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+exc = {'rt': RuntimeError, 'os': OSError}[sys.argv[3]]
+def boom(*a, **k):
+    raise exc('injected')
+setattr(m, sys.argv[2], boom)
+sys.exit(m.main())
+'''
+    for fn, kind, cmd in (('heredocs', 'rt', 'python3 mk.py'), ('_read_small', 'os', 'bash mk.sh'),
+                          ('creates_repo', 'rt', CREATE)):
+        pi = subprocess.run([sys.executable, '-I', '-c', INJ_ONE, GATE, fn, kind],
+                            input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}, 'cwd': kd}),
+                            capture_output=True, text=True, timeout=20,
+                            env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                                 'HOOK_ERRLOG_PATH': os.devnull})
+        expect(f'KNOWN-LIMIT fallback-raises ({fn} raises, {cmd.split()[0]} ...): allowed today', (pi.returncode, pi.stderr), 0)
+
+# KNOWN-LIMIT deep-json: stdin nested too deep to parse is malformed stdin and allows.
+deep = ('{"tool_name":"Bash","tool_input":{"command":' + json.dumps(CREATE) + '},"x":' + '[' * 200000
+        + ']' * 200000 + '}')
+pd = subprocess.run([sys.executable, '-I', GATE], input=deep, capture_output=True, text=True, timeout=20,
+                    env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'})
+expect('KNOWN-LIMIT deep-json (nesting too deep to parse): allowed today', (pd.returncode, pd.stderr), 0)
+
+# KNOWN-LIMIT malformed (invalid UTF-8 in stdin, UTF-8 locale): malformed stdin allows. Only where the interpreter
+# reads stdin with errors='strict' (3.9 here): read() raises, the "malformed stdin" branch allows. With UTF-8 mode
+# (the default from 3.15) stdin is surrogateescape, the bytes survive, the command is judged and blocks. The row takes
+# the want from this interpreter's own stdin errors setting, under the same env.
+_LOC = {'PATH': '/usr/bin:/bin', 'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8'}
+_errs = subprocess.run([sys.executable, '-I', '-c', 'import sys; print(sys.stdin.errors)'], capture_output=True,
+                       text=True, timeout=20, env=_LOC).stdout.strip()
+pm = subprocess.run([sys.executable, '-I', GATE],
+                    input=b'{"tool_name":"Bash","tool_input":{"command":"' + CREATE.encode() + b' \xff"}}',
+                    capture_output=True, timeout=20,
+                    env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                         'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8'})
+expect(f'KNOWN-LIMIT malformed (invalid UTF-8 stdin, stdin errors={_errs}): '
+       + ('allowed today' if _errs == 'strict' else 'judged and blocked'), (pm.returncode, ''),
+       0 if _errs == 'strict' else 2)
+
+# KNOWN-LIMIT watchdog-env: with the env seam at 0.2 s, a closed fd 2 and stdin that arrives late, the watchdog fires
+# with nowhere to write, and the call is allowed. The stdin delay (1.5 s) is far above the seam, so a slow start
+# under load does not turn the row.
+pw = subprocess.Popen(['/bin/sh', '-c', 'exec "$0" -I "$1" 2>&-', sys.executable, GATE], stdin=subprocess.PIPE,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                           'REPO_GATE_WATCHDOG_S': '0.2'})
+time.sleep(1.5)
+try:
+    pw.stdin.write(json.dumps(bash_payload(CREATE)).encode())
+    pw.stdin.close()
+except BrokenPipeError:
+    pass
+expect('KNOWN-LIMIT watchdog-env (seam 0.2 s, fd 2 closed, late stdin): allowed today', (pw.wait(timeout=20), ''), 0)
 
 if FAILS:
     print('\nFAILED:\n' + '\n'.join(FAILS))

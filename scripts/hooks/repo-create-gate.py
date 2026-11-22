@@ -38,9 +38,24 @@ SCOPE OF THE MATCH (Viktor 40095 L2/L3): this stops an accidental model error, n
   Neither is a program given with -c / -e that itself reads stdin (python3 -c "exec(...stdin...)" next to a sink word).
   Overblocks on purpose: open-quote opener, dq-arg spans heredoc text, unquoted body arith next to a sink, a
   never-closing quoted word.
+  Known limits of the write-signal and path match (Viktor 50155, indep10 probe labels; all on main too, LOW): curl
+  -d with an attached quote (-d'{...}'), a combined short-flag cluster (-sSd), --data-ascii, wget --post-data,
+  httpie (http POST), a placeholder in the REST path (a shell variable, gh api's {owner}), gh api -f with an attached
+  value (-fname=x), -F with a query-at-file value, -f with a cat-subst value ($(cat f)), a heredoc body sent to a
+  .json sink-then-input (the --input names it in a later command), a requests session object's .post (any other
+  name than session/client), a request whose data= is on a separate-line from its POST, and an MCP tool name with
+  another prefixed server part that only ends in create_repository are not seen as a creation.
 
-CONTRACT (hook-exit-code-invariant): exit 2 = block, exit 0 = allow, never exit 1. Malformed stdin or an internal
-error allows (fail OPEN) and is recorded in store/hook-errors.log through hook_errlog.
+CONTRACT (hook-exit-code-invariant): exit 2 = block, exit 0 = allow, never exit 1. Malformed stdin allows. An internal
+error (also a KeyboardInterrupt) is recorded in store/hook-errors.log through hook_errlog; then only the linear
+creation regexes run on the raw command and on the files it names (an MCP call: its tool name), a hit blocks, anything
+else allows (fallback_creates, Viktor 50057, 50109). A closed stderr (fd 2 closed) does not change the exit code.
+  Known limit (Viktor 50155, real-stderr-pipe-closed, old, on main too): when stderr is a pipe whose reader end is
+  already closed, the interpreter's final flush fails at exit and a block leaves with 120, not 2.
+  Known limits of the crash path (independent probe rcf labels): fallback-raises (a crash inside the fallback itself
+  allows, never exit 1); watchdog-env (REPO_GATE_WATCHDOG_S can only lower the 6 s watchdog, the hook limit is 10 s);
+  real-crash-approved (a reference that once crashed the gate is skipped now, so an approved creation passes, as it
+  should); deep-json (stdin nested too deep to parse is malformed stdin and allows).
 Tests: python3 -I scripts/hooks/repo-create-gate_test.py
 """
 import json
@@ -550,7 +565,12 @@ def referenced_files(cmd, cwd):
     for ref in refs:
         if ref.startswith('-'):
             continue
-        path = os.path.expanduser(ref)
+        try:
+            # "~<lone surrogate>" / "~<NUL>": pwd.getpwnam raises (UnicodeEncodeError, ValueError); one bad
+            # reference must not crash the judgment of the others (independent probe rcf, real-crash-file-create)
+            path = os.path.expanduser(ref)
+        except ValueError:
+            continue
         if not os.path.isabs(path):
             if not (isinstance(cwd, str) and os.path.isabs(cwd)):
                 continue
@@ -573,24 +593,28 @@ def verdict(payload):
         return None
     tool = payload.get('tool_name')
     ti = payload.get('tool_input')
-    if not isinstance(tool, str) or not isinstance(ti, dict):
+    if not isinstance(tool, str):
+        return None
+    if tool.startswith('mcp__') and MCP_CREATE_RX.search(tool):
+        # The string values themselves: json.dumps would escape the quote marks the line needs. A null or non-dict
+        # tool_input carries no approval line (independent probe rcf, direct-mcp-create-input-null).
+        return None if has_approval([v[:MAX_TEXT] for v in _strings(ti)]) else REASON
+    if not isinstance(ti, dict):
         return None
     if tool == 'Bash':
         cmd = ti.get('command')
         if not isinstance(cmd, str):
             return None
-        # Viktor 50057 class (g): a creation past the MAX_TEXT cut is still searched (the linear regexes on the rest,
-        # from 1 KB before the cut, so a creation across it is seen), and blocks without the approval line
-        over = len(cmd) > MAX_TEXT and creates_repo(cmd[MAX_TEXT - 1024:])
+        # Viktor 50057 class (g): a creation past the MAX_TEXT cut is still searched (the linear regexes on the WHOLE
+        # command: a REST path before the cut and its write signal after it is one creation; independent probe rcf,
+        # direct-ghapi-words-field-end-1m), and blocks without the approval line
+        over = len(cmd) > MAX_TEXT and creates_repo(cmd)
         cmd = cmd[:MAX_TEXT]
         files = referenced_files(cmd, payload.get('cwd'))
         if not over and not any(creates_repo(t) for t in [executed_text(cmd)] + files):
             return None
         desc = ti.get('description') if isinstance(ti.get('description'), str) else ''
         return None if has_approval([cmd, desc] + files) else REASON
-    if tool.startswith('mcp__') and MCP_CREATE_RX.search(tool):
-        # The string values themselves: json.dumps would escape the quote marks the line needs.
-        return None if has_approval([v[:MAX_TEXT] for v in _strings(ti)]) else REASON
     return None
 
 
@@ -621,6 +645,36 @@ def arm_watchdog():
     signal.setitimer(signal.ITIMER_REAL, watchdog_s())
 
 
+REASON_INTERNAL = ('REPO-KAPU / REPO-CREATE-GATE: a kapu belső hibára futott, és a nyers parancsban repó-létrehozás '
+                   'áll, ezért blokkol (a jóváhagyás-sort ilyenkor nem olvassa). / The gate hit an internal error and the '
+                   'raw command creates a repository, so it blocks.')
+
+
+def fallback_creates(payload):
+    """After an internal error in verdict() (Viktor 50057, a LOW follow-up of card 3b05ae69): only the linear
+    creation regexes, on the RAW command (no heredoc dropping, no referenced files, no approval line) or, for an MCP
+    call, the tool name. Fully fail-closed would stop every Bash call of the fleet on a crash; fully fail-open let
+    a creation through whenever any part of the judgment crashed. A hit blocks, anything else stays allowed (and
+    logged)."""
+    if not isinstance(payload, dict):
+        return False
+    tool = payload.get('tool_name')
+    if not isinstance(tool, str):
+        return False
+    ti = payload.get('tool_input')
+    if tool == 'Bash':
+        cmd = ti.get('command') if isinstance(ti, dict) else None
+        if not isinstance(cmd, str):
+            return False
+        if creates_repo(cmd):
+            return True
+        try:
+            return any(creates_repo(t) for t in referenced_files(cmd[:MAX_TEXT], payload.get('cwd')))
+        except Exception:
+            return False
+    return tool.startswith('mcp__') and bool(MCP_CREATE_RX.search(tool))
+
+
 def main():
     arm_watchdog()
     try:
@@ -629,18 +683,34 @@ def main():
         return 0
     try:
         reason = verdict(payload)
-    except Exception as ex:  # a crashing gate must not become a silent exit 1
+    except (Exception, KeyboardInterrupt) as ex:  # a crashing gate must not become a silent exit 1
+        try:
+            blocked = fallback_creates(payload)
+        except (Exception, KeyboardInterrupt):
+            blocked = False
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import hook_errlog
-            hook_errlog.report('repo-create-gate', 'internal error, allowed', ex)
+            hook_errlog.report('repo-create-gate', 'internal error, %s' % ('blocked (raw creation)' if blocked
+                                                                           else 'allowed'), ex)
         except Exception:
             pass
+        if blocked:
+            _say(REASON_INTERNAL)
+            return 2
         return 0
     if reason:
-        sys.stderr.write(reason + '\n')
+        _say(reason)
         return 2
     return 0
+
+
+def _say(msg):
+    """stderr may be closed (sys.stderr is None): the exit code still decides (independent probe rcf)."""
+    try:
+        sys.stderr.write(msg + '\n')
+    except Exception:
+        pass
 
 
 if __name__ == '__main__':
