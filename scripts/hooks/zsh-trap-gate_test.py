@@ -358,6 +358,39 @@ def unterminated_input_does_not_hang_or_crash(_):
     return True
 
 
+# Card 3b05ae69 (the gate-timing probe): 1-2 KB of repeated nesting units ran into Python's recursion limit, an
+# internal error that allowed silently. Past MAX_DEPTH nested sequences the gate now blocks with MSG_DEEP.
+DEEP = [('$(', 500), ('(a=', 500), ('"$(', 340), ('<(', 1000), ('=(', 500), ('$( ', 500),
+        # match_paren and read_dq call each other, past parse_seq (redos-probe fuzz, work/zshtrap-1122/rec.log)
+        ('"$((', 500), ('x"$((|', 500), ('a=$"$(((', 500)]
+
+
+@case
+def deep_nesting_blocks_instead_of_crashing(_):
+    ok = all(blocks(u * k, 'ZSH-CSAPDA (mélység)') for u, k in DEEP)
+    ok = ok and blocks('$(' * 500, 'ZSH-CSAPDA (mélység)', env=BASH)   # the rm check runs in any shell
+    rc, err = run('$(' * 500, env={'HOOK_ERRLOG_PATH': os.devnull})
+    return ok and rc == 2 and 'mélység' in err
+
+
+@case
+def nesting_up_to_the_cap_is_parsed(_):
+    # the top-level sequence counts as one level: 63 nested $( reach MAX_DEPTH, 64 go past it. Literal counts, not
+    # gate.MAX_DEPTH: a lowered cap (6 would still pass the 5-level command) must fail here (mutation M2)
+    real = 'echo $(echo $(echo $(echo $(echo a))))'
+    return (passes('$(' * 63) and blocks('$(' * 64, 'ZSH-CSAPDA (mélység)')
+            and passes(real) and blocks('for f in $(echo $(echo x)) $V; do :; done', 'ZSH-CSAPDA (szóbontás)'))
+
+
+@case
+def backtick_glued_to_a_word_closes_its_sequence(_):
+    # before: the closing backtick glued to a word opened a new nested sequence (500 x 'a`' crashed), and the
+    # rest of the command was read inside it, so the word-split trap after it was missed
+    return (passes('a`' * 500) and passes('echo a`date`b')
+            and blocks('for f in `ls`x $V; do :; done', 'ZSH-CSAPDA (szóbontás)')
+            and blocks('echo a`b`c; for f in x $V; do :; done', 'ZSH-CSAPDA (szóbontás)'))
+
+
 def main():
     failed = 0
     for fn in CASES:
