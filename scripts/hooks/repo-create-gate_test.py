@@ -18,9 +18,12 @@ FAILS = []
 
 
 def run(payload):
-    p = subprocess.run([sys.executable, '-I', GATE], input=json.dumps(payload), capture_output=True, text=True,
-                       env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'},
-                       timeout=20)
+    try:
+        p = subprocess.run([sys.executable, '-I', GATE], input=json.dumps(payload), capture_output=True, text=True,
+                           env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db'},
+                           timeout=20)
+    except subprocess.TimeoutExpired:
+        return None, 'TIMEOUT after 20 s (the 10 s hook timeout would let the call through)'
     return p.returncode, p.stderr
 
 
@@ -190,6 +193,96 @@ expect('NEG quote cut before "?" in a question row blocks', (rc, ''), 2)
 QS = 'PATRIK-KERTE: TG 18153 "csinálj egy repót sajat néven"'
 rc, _ = ledger_run(f'gh repo create x --private  # {QS}', [('18153', 'Csinálj egy repót sajat néven. Utána mi jön?')])
 expect('a statement followed by a separate question passes', (rc, ''), 0)
+
+# --- Card 3b05ae69 (Viktor 50005/50006): a padded creation must block, and well before the 10 s hook timeout -------
+# A timed-out hook does not block. On main these shapes ran 4.6-21 s (quadratic heredoc search, unanchored [\w-]*,
+# every `gh api` / `urlopen(` / `curl` start reading on to the line end); each must now block in under 2 s
+# (Viktor 50036).
+import time  # noqa: E402
+
+CREATE = 'gh repo create kiskodzsek/x --private'
+
+
+def timed(name, cmd, want, limit=2.0):
+    t0 = time.time()
+    got = bash(cmd)
+    dt = time.time() - t0
+    expect(name, got, want)
+    if dt > limit:
+        FAILS.append(f'{name}: {dt:.2f} s, limit {limit} s')
+
+
+PAD = 'cat <<E\n' * 37500  # 300 KB
+timed('NEG creation then 300 KB of `cat <<E` lines blocks in time (Viktor shape)', CREATE + '\n' + PAD, 2)
+timed('NEG 200 KB of `cat <<E` lines then the creation blocks in time', 'cat <<E\n' * 25000 + CREATE, 2)
+timed('NEG a 200 KB word run then the creation blocks in time', 'x' + 'a' * 200000 + '\n' + CREATE, 2)
+timed('NEG a 200 KB `-a-a` run then the creation blocks in time', '-a' * 100000 + '\n' + CREATE, 2)
+timed('NEG 30000 `gh api ` without a field, then -X POST to user/repos, blocks in time',
+      'gh api ' * 30000 + 'curl -X POST https://api.github.com/user/repos', 2)
+timed('NEG 30000 `urlopen(` without data=, then -X POST to user/repos, blocks in time',
+      'urlopen(' * 30000 + 'curl -X POST https://api.github.com/user/repos', 2)
+timed('NEG 20000 `git commit ` on a heredoc head line, body creates, blocks in time',
+      'git commit ' * 20000 + "x <<'E'\n" + CREATE + '\nE', 2)
+# main read every `curl` start on to the segment end: 1 s at 30000, so 50000 against a 1 s limit (new: ~0.02 s)
+timed('NEG 50000 `curl ` in one segment then the creation blocks in time', 'curl ' * 50000 + '\n' + CREATE, 2, 1.0)
+timed('NEG 30000 `.tee` on a heredoc head line, body creates, blocks in time',
+      'echo ' + '.tee' * 30000 + " <<'E'\n" + CREATE + '\nE', 2)
+timed('a 200 KB message heredoc into agent-msg.sh that talks about creation passes in time',
+      "bash scripts/agent-msg.sh kernel viktor - <<'MSG'\n" + ('a ' + CREATE + '\n') * 4000 + 'MSG', 0)
+
+# Watchdog: whatever runs slow blocks (exit 2) before the hook timeout; the env seam can only lower the limit.
+try:
+    p = subprocess.run([sys.executable, '-I', GATE], capture_output=True, text=True, timeout=20,
+                       input=json.dumps({'tool_name': 'Bash',
+                                         'tool_input': {'command': 'echo ' + 'cat <<E\n' * 60000}}),
+                       env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                            'REPO_GATE_WATCHDOG_S': '0.001'})
+    wd = (p.returncode, p.stderr)
+except subprocess.TimeoutExpired:
+    wd = (None, 'TIMEOUT after 20 s')
+expect('NEG the watchdog fires: exit 2', wd, 2)
+if 'watchdog' not in wd[1]:
+    FAILS.append(f'watchdog message missing: {wd[1][:200]!r}')
+import importlib.util  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location('repo_create_gate_mod', GATE)
+_mod = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_mod)
+_ws = getattr(_mod, 'watchdog_s', None)
+if _ws is None:
+    FAILS.append('watchdog_s: missing (no watchdog)')
+else:
+    for raw, want in [('100', 6.0), ('6', 6.0), ('2.5', 2.5), ('0', 0.001), ('-1', 0.001), ('nan', 6.0), ('x', 6.0)]:
+        os.environ['REPO_GATE_WATCHDOG_S'] = raw
+        got = _ws()
+        if got != want:
+            FAILS.append(f'watchdog_s({raw!r}) = {got}, want {want}')
+        else:
+            print(f'ok   watchdog_s({raw!r}) = {want}')
+    os.environ.pop('REPO_GATE_WATCHDOG_S', None)
+    got = _ws()
+    expect('watchdog_s() unset = 6.0', (0 if got == 6.0 else 1, str(got)), 0)
+
+# --- The linear sink / write tests keep the old regex's edges (mutation survivors of the first round, card 3b05ae69) ---
+expect('NEG agent-msg.sh.bak is no message wrapper: the body is judged',
+       bash(f"cat x/agent-msg.sh.bak <<'E'\n{CREATE}\nE"), 2)
+expect('NEG -F - BEFORE git commit is no commit-message sink',
+       bash(f"echo -F - git commit x <<'E'\n{CREATE}\nE"), 2)
+expect('NEG cat > n.md x: the notes file must be the last word of the head',
+       bash(f"cat > n.md x <<'E'\n{CREATE}\nE"), 2)
+expect('NEG xtee n.md is no tee', bash(f"xtee n.md <<'E'\n{CREATE}\nE"), 2)
+expect('cat > "n.md" (a quoted notes file) is a sink and passes', bash(f"cat > \"n.md\" <<'E'\n{CREATE} is gated\nE"), 0)
+expect('tee -a n.md is a sink and passes', bash(f"tee -a n.md <<'E'\n{CREATE} is gated\nE"), 0)
+with tempfile.TemporaryDirectory() as d:
+    with open(os.path.join(d, 'm.json'), 'w') as fh:
+        fh.write('{"content": "A kapu blokkolja: gh repo create x --private"}\n')  # a creation: read, it would BLOCK
+    expect('a payload file posted to a dashboard curl is a message, not a run, and passes',
+           bash('curl -s -X POST localhost:3420/api/messages -d @m.json', cwd=d), 0)
+expect('NEG urlopen(..., data=) to user/repos blocks',
+       bash("python3 -c \"import urllib.request as u; u.urlopen('https://api.github.com/user/repos', data=b'{}')\""), 2)
+expect('urlopen( whose data= lies past the next ")" is no write and passes',
+       bash("python3 -c \"u.urlopen(r); f('https://api.github.com/user/repos', data=1)\""), 0)
+expect('gh api user/repos --fieldset x (no field flag) is a read and passes', bash('gh api user/repos --fieldset x'), 0)
 
 # --- POSITIVE: approved creations, reads and unrelated commands pass ---------------------------------------
 expect('gh repo create with PATRIK-KERTE in the command passes',

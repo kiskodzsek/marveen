@@ -50,14 +50,21 @@ CREATE_API_RX = re.compile(
     r'|\bPOST[ \t]+/?(?:user/repos|orgs/[\w.-]+/repos|repos/[\w.-]+/[\w.-]+/(?:forks|generate))\b')
 REST_PATH_RX = re.compile(
     r'(?<![\w-])(?:user/repos|orgs/[\w.-]+/repos|repos/[\w.-]+/[\w.-]+/(?:forks|generate))/?(?![\w/-])')
+# A write: WRITE_RX, or a `gh api` line with a field flag, or urlopen( with data= before the next ")". The two last were
+# alternatives of WRITE_RX, `gh[ \t]+api\b[^\n]*?(?<![\w-])(?:-f|-F|--field|--raw-field|--input)(?![\w-])` and
+# `urlopen\([^)]*data[ \t]*=` (re.I), and were quadratic (card 3b05ae69: 16000 x `gh api ` after a REST path, 10 s):
+# every start read on to the line end or the next ")". is_write() judges each line / each ")"-free stretch from its
+# first start only, which gives the same verdicts (a later start sees a subset of the same stretch).
 WRITE_RX = re.compile(
     r'(?:-X|--request|--method)[ \t=]*[\'"]?POST\b'
-    r'|(?<![\w-])gh[ \t]+api\b[^\n]*?(?<![\w-])(?:-f|-F|--field|--raw-field|--input)(?![\w-])'
     r'|(?<![\w-])(?:-d|--data(?:-binary|-raw|-urlencode)?|--json)(?:[ \t=]|$)'
     r'|method[ \t]*=[ \t]*[\'"]POST[\'"]'
     r'|[\'"]POST[\'"]'
-    r'|\b(?:requests|httpx|session|client)\.post\('
-    r'|urlopen\([^)]*data[ \t]*=', re.I)
+    r'|\b(?:requests|httpx|session|client)\.post\(', re.I)
+GH_API_RX = re.compile(r'(?<![\w-])gh[ \t]+api\b', re.I)
+GH_FIELD_RX = re.compile(r'(?<![\w-])(?:-f|-F|--field|--raw-field|--input)(?![\w-])', re.I)
+URLOPEN_RX = re.compile(r'urlopen\(', re.I)
+URL_DATA_RX = re.compile(r'data[ \t]*=', re.I)
 MCP_CREATE_RX = re.compile(r'(?:^|__)(?:create_repository(?:_using_template)?|fork_repository)$')
 APPROVAL_RX = re.compile(r'PATRIK-KERTE:[ \t]*TG[ \t]*#?(\d{2,})[ \t]+["„“]([^"”\n]+)["”]')
 SCRIPT_RX = re.compile(r'(?<![\w./-])(?:python3?|node|bash|sh|zsh|deno|bun|ruby|tsx|ts-node|npx(?:[ \t]+(?:tsx|ts-node))?'
@@ -74,27 +81,125 @@ MAX_TEXT = 256 * 1024
 MAX_FILES = 20
 
 
-HEREDOC_RX = re.compile(r'<<-?[ \t]*([\'"]?)(\w+)\1[^\n]*\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)', re.S)
+# A heredoc, left to right: <<-?[ \t]*(['"]?)(\w+)\1[^\n]*\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$) (re.S). Searched that way
+# it is quadratic (card 3b05ae69, Viktor 50005/50006: a real create command padded with `cat <<E` lines to 160 KB took
+# 21 s, past the 10 s hook timeout, and a timed-out hook does not block): every opener without a closing line reads
+# to the end. heredocs() gives the same matches in linear time: each opener once (HEREDOC_OPEN_RX), the closing line
+# from an index of the lines that are a bare word. As in the regex, an unquoted word whose full form never closes is
+# tried shorter (<<EOF closes at a line E), the body never closes on the line right after the opener, and a match
+# that starts inside the previous one does not count.
+HEREDOC_OPEN_RX = re.compile(r'<<-?[ \t]*([\'"]?)(\w+)\1[^\n]*\n')
+WORD_LINE_RX = re.compile(r'[ \t]*(\w+)[ \t]*')
+
+
+class _Heredoc:
+    """The parts of a heredoc match executed_text() uses (start, end, the whole text, the delimiter)."""
+    __slots__ = ('_s', '_e', '_text', '_delim')
+
+    def __init__(self, s, e, text, delim):
+        self._s, self._e, self._text, self._delim = s, e, text, delim
+
+    def start(self):
+        return self._s
+
+    def end(self):
+        return self._e
+
+    def group(self, n=0):
+        return self._text if n == 0 else self._delim
+
+
+def heredocs(cmd):
+    """The non-overlapping heredoc matches of the left-to-right pattern above, in order, in linear time."""
+    if '<<' not in cmd:
+        return []
+    import bisect
+    lines = cmd.split('\n')
+    starts, p = [], 0
+    for ln in lines:
+        starts.append(p)
+        p += len(ln) + 1
+    closers = {}
+    for i, ln in enumerate(lines):
+        m = WORD_LINE_RX.fullmatch(ln)
+        if m:
+            closers.setdefault(m.group(1), []).append(i)
+    lengths = sorted({len(w) for w in closers}, reverse=True)
+    out, pos = [], 0
+    for c in re.finditer(r'(?=<<)', cmd):
+        at = c.start()
+        if at < pos:
+            continue
+        o = HEREDOC_OPEN_RX.match(cmd, at)
+        if not o:
+            continue
+        word = o.group(2)
+        opener_line = bisect.bisect_right(starts, at) - 1
+        tries = [word] if o.group(1) else [word[:k] for k in lengths if k <= len(word)]
+        for d in tries:
+            rows = closers.get(d)
+            if not rows:
+                continue
+            j = bisect.bisect_left(rows, opener_line + 2)
+            if j < len(rows):
+                end = starts[rows[j]] + len(lines[rows[j]])
+                out.append(_Heredoc(at, end, cmd[at:end], d))
+                pos = end
+                break
+    return out
 # A heredoc body is dropped ONLY when it goes into a known sink that does not execute it (Viktor 40174 MEDIUM: the
 # earlier denylist of interpreter heads let `cat <<EOF | bash`, `sh -c "$(cat <<EOF ...)"` and `tee mk.sh <<EOF;
 # bash mk.sh` through): a message wrapper, a commit message, a dashboard curl, or a text/data file.
-MSG_SH = r'(?:[\w-]*-msg|msg-close)\.sh'
-SINK_RX = re.compile(r'(?:^|[\s;&(/])' + MSG_SH + r'(?![\w.-])'
-                     r'|(?<![\w-])git[ \t]+commit\b[^\n]*?(?<![\w-])-F[ \t]*-(?![\w-])'
-                     r'|(?<![\w-])curl\b[^\n]*/api/(?:messages|kanban)\b'
-                     r'|(?<![\w-])(?:cat[ \t]*>{1,2}|tee(?:[ \t]+-a)?)[ \t]*[\'"]?[^\s\'";|&<>()]+'
-                     r'\.(?:md|txt|json|jsonl|log)[\'"]?[ \t]*$')
+# The sink test was one regex (re.search, same verdicts):
+#   (?:^|[\s;&(/])MSG_SH(?![\w.-])
+#   |(?<![\w-])git[ \t]+commit\b[^\n]*?(?<![\w-])-F[ \t]*-(?![\w-])
+#   |(?<![\w-])curl\b[^\n]*/api/(?:messages|kanban)\b
+#   |(?<![\w-])(?:cat[ \t]*>{1,2}|tee(?:[ \t]+-a)?)[ \t]*['"]?[^\s'";|&<>()]+\.(?:md|txt|json|jsonl|log)['"]?[ \t]*$
+# Each alternative was quadratic on one long line (card 3b05ae69, redos-probe grid): an unanchored [\w-]* tried from
+# every character of a word run, and every `git commit` / `curl` / `.tee` start read on to the line end. Now the
+# [\w-]* starts only where the run starts (the same matches: any later start lies inside that run), a `git commit` or
+# `curl` line is judged from its FIRST start (a later start sees a subset of the same line), and the file sink, which
+# ends at $, is matched once, backwards, on the reversed line.
+MSG_SH = r'(?:(?<![\w-])[\w-]*-msg|msg-close)\.sh'
+MSG_SINK_RX = re.compile(r'(?:^|[\s;&(/])' + MSG_SH + r'(?![\w.-])')
+GIT_COMMIT_RX = re.compile(r'(?<![\w-])git[ \t]+commit\b')
+STDIN_MSG_RX = re.compile(r'(?<![\w-])-F[ \t]*-(?![\w-])')
+CURL_RX = re.compile(r'(?<![\w-])curl\b')
+DASH_API_RX = re.compile(r'/api/(?:messages|kanban)\b')
+FILE_SINK_REV_RX = re.compile(r'[ \t]*[\'"]?(?:dm|txt|nosj|lnosj|gol)\.[^\s\'";|&<>()]+[\'"]?[ \t]*'
+                              r'(?:>{1,2}[ \t]*tac|(?:a-[ \t]+)?eet)(?![\w-])')
 OPENER_RISK_RX = re.compile(r'\||\$\(|`|&&|;')
 MSG_SH_RX = re.compile(MSG_SH + r'$')
+MSG_SEG_RX = re.compile(MSG_SH + r'(?![\w.-])')
+
+
+def _first_then(first_rx, then_rx, text, sep='\n'):
+    """True when some `sep`-free stretch of `text` has a first_rx match followed, in the same stretch, by a then_rx
+    match: the regex first[^\\n]*then (sep "\\n") or first[^)]*then (sep ")"), judged from the first start of each
+    stretch (linear)."""
+    for line in text.split(sep):
+        m = first_rx.search(line)
+        if m and then_rx.search(line, m.end()):
+            return True
+    return False
+
+
+def is_sink(seg):
+    """The former SINK_RX.search(seg), in linear time (see above)."""
+    if MSG_SINK_RX.search(seg) or _first_then(GIT_COMMIT_RX, STDIN_MSG_RX, seg) \
+            or _first_then(CURL_RX, DASH_API_RX, seg):
+        return True
+    tail = seg[:-1] if seg.endswith('\n') else seg  # $ also matches before a final newline
+    return bool(FILE_SINK_REV_RX.match(tail[::-1]))
 
 
 def executed_text(cmd):
-    """The command with the bodies of heredocs that go into a known non-executing sink removed (SINK_RX): a message,
+    """The command with the bodies of heredocs that go into a known non-executing sink removed (is_sink): a message,
     a commit message or a notes file that talks about creating a repository is not a creation (measured: 5 of 8 hits
     on 7 days of real calls were such texts). Every other heredoc body is kept and judged. Nothing is dropped when the
     opener line pipes or substitutes (|, $(, `, &&, ;), or when the command runs any script other than a message
     wrapper (a file written by this very command does not exist yet when the hook reads it)."""
-    bodies = list(HEREDOC_RX.finditer(cmd))
+    bodies = heredocs(cmd)
     if not bodies:
         return cmd
     outside, pos = [], 0
@@ -119,7 +224,7 @@ def executed_text(cmd):
         # an UNCLOSED $( or ` before the opener wraps the heredoc (sh -c "$(cat <<EOF"); a closed one, like a
         # -H "Authorization: Bearer $(cat token)" header, does not
         wrapped = last.count('$(') > last.count(')') or last.count('`') % 2 == 1
-        safe = (SINK_RX.search(last) and not wrapped and '|' not in last
+        safe = (is_sink(last) and not wrapped and '|' not in last
                 and not OPENER_RISK_RX.search(opener_rest))
         out.append('<<' + m.group(2) + '\n' + m.group(2) if safe else m.group(0))
         pos = m.end()
@@ -131,7 +236,13 @@ def creates_repo(text):
     """True when `text` creates a GitHub repository (see the docstring)."""
     if GH_CLI_RX.search(text) or CREATE_API_RX.search(text):
         return True
-    return bool(REST_PATH_RX.search(text) and WRITE_RX.search(text))
+    return bool(REST_PATH_RX.search(text) and is_write(text))
+
+
+def is_write(text):
+    """The former WRITE_RX with the gh api and urlopen alternatives, in linear time (see WRITE_RX)."""
+    return bool(WRITE_RX.search(text) or _first_then(GH_API_RX, GH_FIELD_RX, text)
+                or _first_then(URLOPEN_RX, URL_DATA_RX, text, ')'))
 
 
 def _fold(text):
@@ -224,7 +335,8 @@ def referenced_files(cmd, cwd):
     text = executed_text(cmd)
     refs = [a or b for a, b in SCRIPT_RX.findall(text)] + DIRECT_RX.findall(text) + INPUT_FILE_RX.findall(text)
     for seg in re.split(r'&&|\|\||;|\n', text):
-        if re.search(MSG_SH + r'(?![\w.-])', seg) or re.search(r'(?<![\w-])curl\b.*/api/(?:messages|kanban)\b', seg):
+        # was re.search(r'(?<![\w-])curl\b.*/api/(?:messages|kanban)\b', seg): quadratic with many curls (see is_sink)
+        if MSG_SEG_RX.search(seg) or _first_then(CURL_RX, DASH_API_RX, seg):
             continue
         refs += DATA_FILE_RX.findall(seg) + STDIN_FILE_RX.findall(seg)
     refs = refs[:MAX_FILES]
@@ -272,7 +384,35 @@ def verdict(payload):
     return None
 
 
+# Watchdog (card 3b05ae69, Viktor 50005 item 3): whatever runs slow, the gate blocks before the 10 s hook timeout,
+# which would let the call through. Python's re checks for signals while it matches. os._exit, so no except clause
+# can swallow it. REPO_GATE_WATCHDOG_S can only lower it (a test seam), never to 0 (0 disarms an itimer). 6 s as in
+# the keychain-read gate (the alarm came up to 0.72 s late there, Viktor 41756).
+WATCHDOG_S = 6.0
+
+
+def watchdog_s():
+    try:
+        v = float(os.environ.get('REPO_GATE_WATCHDOG_S', WATCHDOG_S))
+    except ValueError:
+        return WATCHDOG_S
+    return WATCHDOG_S if v != v else max(0.001, min(WATCHDOG_S, v))  # v != v: nan
+
+
+def on_watchdog(signum, frame):
+    os.write(2, ('REPO-KAPU / REPO-CREATE-GATE: a kapu nem végzett időben (watchdog), ezért blokkol: a hook-időtúllépés '
+                 'átengedné a hívást. / The gate did not finish in time and blocks.\n').encode('utf-8'))
+    os._exit(2)
+
+
+def arm_watchdog():
+    import signal
+    signal.signal(signal.SIGALRM, on_watchdog)
+    signal.setitimer(signal.ITIMER_REAL, watchdog_s())
+
+
 def main():
+    arm_watchdog()
     try:
         payload = json.loads(sys.stdin.read())
     except Exception:
