@@ -1863,6 +1863,11 @@ def script_cases():
             ("bash <<'EOF'\nx=1; ./dump\\.sh\nEOF", d),
             ('bash <<EOF\n./dump\\.sh\nEOF', d),
             ('cat > /dev/null <<EOF\n$(./dump\\.sh)\nEOF', d),  # an unquoted body: the shell runs its $( )
+            # r5 (Viktor 49996 R2): an unquoted-delimiter data body with a `$(` or a backtick anywhere keeps every
+            # backslash word of it (fail-closed: the lexer does not tell the substitution's inside apart)
+            ('cat > notes.md <<X\n./dump\\.sh\n$(date)\nX', d),
+            ('cat > notes.md <<X\n`date`\n./dump\\.sh\nX', d),
+            ('cat > notes.md <<X\n$(./dump\\.sh)\nX', d),
             # a text the lexer does not fully read (a heredoc in a substitution) keeps the word (fail-closed)
             ("echo $(cat <<'E'\nx\nE\n); ./dump\\.sh", d),
             ("echo `cat <<'E'\nx\nE\n`; ./dump\\.sh", d),
@@ -3099,6 +3104,13 @@ def script_cases():
             ("python3 -c 'print(1)' 'a (# ${ }\\/$(( ))\\/(( )) b), c'", d),
             ("python3 - <<'PY'\n./dump\\.sh\nPY", d),
             ("cat > /dev/null <<'EOF'\nx && ./dump\\.sh\nEOF", d),
+            # r5 (Viktor 49996 R2): an unquoted-delimiter heredoc into another program is data too (the shell runs only
+            # its $( ) and backticks; measured: bash does not run ./dump.sh), the second heredoc of a command as well
+            ('cat > notes.md <<X\n./dump\\.sh a\nX', d),
+            ('cat > notes.md <<X\nhello\n.\\/dump.sh\nX', d),
+            ("cat > a.md <<'Y'\nz\nY\ncat > notes.md <<X\n./dump\\.sh\nX", d),
+            ('cat >> notes.md <<X\n${HOME} \\./dump.sh\nX', d),
+            ("cat > notes.md <<'X'\n$(date)\n./dump\\.sh\nX", d),  # a quoted body's $( ) is text
             ('python3 "no"tes.py stat.py', d),
             ('python3 -m "notes"', d),
             ('python3 -Inotes', d),
@@ -4438,6 +4450,25 @@ def main():
                              f'{cmd[:40]!r}...')
         except subprocess.TimeoutExpired:
             fails.append(f'hidden-name timing case timed out (5 s): {cmd[:40]!r}...')
+    # card e3d2fd6e r5 (Viktor 49996 R1): a backslash word in a data heredoc is judged against one reading of the
+    # text, not a new one per word: 3 000 line-start `\\./dirN/x.sh` lines (~300 KB) ran into the 6 s watchdog on
+    # 425f2206 (main 0.59 s); under 2 s each, allowed
+    pad = ' ' + 'p' * 90
+    esc_timed = ["cat <<'X'\n" + ''.join('\\./dir%d/x.sh%s\n' % (i, pad) for i in range(3000)) + 'X',
+                 "python3 - <<'PY'\n" + ''.join('\\./dir%d/x.sh%s\n' % (i, pad) for i in range(3000)) + 'PY',
+                 'cat > n.md <<X\n' + ''.join('./d%d\\.sh%s\n' % (i, pad) for i in range(3000)) + 'X']
+    for cmd in esc_timed:
+        try:
+            t = _t.monotonic()
+            p = subprocess.run([sys.executable, '-I', HOOK], capture_output=True, text=True, timeout=5,
+                               input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}),
+                               env={'PATH': '/usr/bin:/bin'})
+            took = _t.monotonic() - t
+            if len(cmd) < 290000 or p.returncode != 0 or took > 2:
+                fails.append(f'backslash-heredoc timing case: want 0 under 2 s at 290 KB+, got {p.returncode} in '
+                             f'{took:.1f} s at {len(cmd)} chars: {cmd[:40]!r}...')
+        except subprocess.TimeoutExpired:
+            fails.append(f'backslash-heredoc timing case timed out (5 s): {cmd[:40]!r}...')
     # card d58d5c30: the made-subcommand rule is linear: the loop table is one pass (a call per match read the text
     # again each time), in process (the hook blocks such texts early on MAX_ARGS): 200-740 KB, 2 s cap each
     # (measured 11-20: 0.07 s at most)

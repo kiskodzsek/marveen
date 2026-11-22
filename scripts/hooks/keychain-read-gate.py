@@ -71,8 +71,11 @@ KNOWN-KTP-VAR, a value not bound or bound otherwise: var-ifs, var-array (X=(evil
 A backslash in a script word (card e3d2fd6e, under KNOWN-KTP-WORD: `./x\\.sh`, `\\./x.sh`): read at a code
   position, in a shell's payload and in a heredoc a shell reads; inside a quote of a command that may run it some
   other way (`ssh h './x\\.sh'`, `tmux send-keys './x\\.sh'`, `awk '{system("./x\\.sh")}'`) and in a
-  quoted-delimiter heredoc into another program it is data, as on main. A word after a shell's -c is read as a
-  command (`bash -c '..' _ 'a ))\\/(( )) b'` blocks: a lean, as for a quoted or `$` word there on main).
+  heredoc into another program it is data, as on main; an unquoted-delimiter body only while it has no `$(` or
+  backtick (the shell runs those: then every backslash word of it is read). A word after a shell's -c is read as a
+  command (`bash -c '..' _ 'a ))\\/(( )) b'` blocks: a lean, as for a quoted or `$` word there on main). Open, on main
+  too: a doubled backslash the shell halves before it runs the word (heredoc-sh-unq: `sh <<X` + `./x\\\\.sh`;
+  eval-dbl: `eval ./x\\\\.sh`), and a backtick inside an unquoted data heredoc body (`` `./x.sh` ``).
 KNOWN-KTP-OVER, not open but leans: they block a harmless call (old unless named new): every word a brace makes
   is read as a script (brace-seq, brace-empty, braceargs-benign, bracenested-alt, `python3 {l..n}easure.py
   stat.py` runs leasure.py), a zsh order qualifier (new: zshqual-om2, (On), (om): the order is not modelled),
@@ -3109,21 +3112,48 @@ def cd_bases(text, cwd, loops=None):
     return Bases(bases)
 
 
+# card e3d2fd6e r1 (Viktor 49996 R1): _esc_word_at_code asked for each backslash word, and building the blanked text
+# per word was quadratic (a data heredoc with 3 000 `\./x.sh` lines ran into the 6 s watchdog, main 0.59 s); each text
+# is read once, as lex_or_none does (the results are only read)
+_HD_CACHE = {}
+_HD_CACHE_MAX = 32
+
+
+def _data_heredoc_view(text):
+    """(blanked, bodies, starts) for text, or None when the lexer does not read it. blanked: text with the body of
+    every heredoc no shell reads blanked (same length). bodies: (bodyStart, bodyEnd, shell-read, substitution) per
+    heredoc in text order, starts their bodyStart (for bisect); substitution: an unquoted-delimiter body with a `$(`
+    or a backtick (the shell runs it when it expands the body)."""
+    if text in _HD_CACHE:
+        return _HD_CACHE[text]
+    lx = lex_or_none(text)
+    view = None
+    if lx is not None:
+        out = list(text) if lx['heredocs'] else None
+        bodies = []
+        for hd in lx['heredocs']:
+            ls = text.rfind('\n', 0, hd['op']) + 1
+            le = text.find('\n', hd['opEnd'])
+            read = bool(STDIN_SHELL_RX.search(text[ls:len(text) if le < 0 else le]))
+            body = text[hd['bodyStart']:hd['bodyEnd']]
+            bodies.append((hd['bodyStart'], hd['bodyEnd'], read,
+                           not hd['quoted'] and ('$(' in body or '`' in body)))
+            if not read:
+                for i in range(hd['bodyStart'], hd['bodyEnd']):
+                    if out[i] != '\n':
+                        out[i] = ' '
+        view = (''.join(out) if out is not None else text, bodies, [b[0] for b in bodies])
+    if len(_HD_CACHE) >= _HD_CACHE_MAX:
+        _HD_CACHE.clear()
+    _HD_CACHE[text] = view
+    return view
+
+
 def _blank_data_heredocs(text):
     """text with the body of every heredoc no shell reads blanked (same length); text itself without the lexer's
     reading (then every cd word in a body still counts, as before)."""
-    lx = lex_or_none(text)
-    if lx is None or not lx['heredocs']:
-        return text
-    out = list(text)
-    for hd in lx['heredocs']:
-        ls = text.rfind('\n', 0, hd['op']) + 1
-        le = text.find('\n', hd['opEnd'])
-        if not STDIN_SHELL_RX.search(text[ls:len(text) if le < 0 else le]):
-            for i in range(hd['bodyStart'], hd['bodyEnd']):
-                if out[i] != '\n':
-                    out[i] = ' '
-    return ''.join(out)
+    view = _data_heredoc_view(text)
+    return text if view is None else view[0]
 
 
 _ESC_MAX_COPIES = 64
@@ -3151,8 +3181,15 @@ def _esc_word_at_code(text, at, cmd=None, word=None):
             i = cmd.find(word, i + 1)
         return False
     cls = lx['cls']
-    if cls[at] == 'h':
-        return _blank_data_heredocs(text)[at] == text[at]
+    if cls[at] in ('h', 'u'):
+        # r1 (Viktor 49996 R2): an unquoted-delimiter body no shell reads is data too (`cat > notes.md <<X` +
+        # `./dump\.sh`: nothing runs it); only its `$( )` and backticks run, so a body with one keeps every word
+        # (fail-closed: the lexer marks the whole body 'u', a word inside the substitution is not told apart)
+        _, bodies, starts = _data_heredoc_view(text)
+        k = bisect.bisect_right(starts, at) - 1
+        if k < 0 or not bodies[k][0] <= at < bodies[k][1]:
+            return True
+        return bodies[k][2] or bodies[k][3]
     return not (at and cls[at - 1] in ('q', 'a', 'd'))
 
 
