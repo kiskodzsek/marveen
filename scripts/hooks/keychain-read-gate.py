@@ -3121,9 +3121,9 @@ _HD_CACHE_MAX = 32
 
 def _data_heredoc_view(text):
     """(blanked, bodies, starts) for text, or None when the lexer does not read it. blanked: text with the body of
-    every heredoc no shell reads blanked (same length). bodies: (bodyStart, bodyEnd, shell-read, substitution) per
-    heredoc in text order, starts their bodyStart (for bisect); substitution: an unquoted-delimiter body with a `$(`
-    or a backtick (the shell runs it when it expands the body)."""
+    every heredoc whose command line has a shell word blanked (same length). bodies: (bodyStart, bodyEnd, shell-read
+    by _shell_reads_heredoc, substitution) per heredoc in text order, starts their bodyStart (for bisect);
+    substitution: an unquoted-delimiter body with a `$(` or a backtick (the shell runs it when it expands the body)."""
     if text in _HD_CACHE:
         return _HD_CACHE[text]
     lx = lex_or_none(text)
@@ -3134,11 +3134,13 @@ def _data_heredoc_view(text):
         for hd in lx['heredocs']:
             ls = text.rfind('\n', 0, hd['op']) + 1
             le = text.find('\n', hd['opEnd'])
-            read = bool(STDIN_SHELL_RX.search(text[ls:len(text) if le < 0 else le]))
+            line_read = bool(STDIN_SHELL_RX.search(text[ls:len(text) if le < 0 else le]))
             body = text[hd['bodyStart']:hd['bodyEnd']]
-            bodies.append((hd['bodyStart'], hd['bodyEnd'], read,
+            # r6 (rebased onto 0196e1ee): the backslash rule asks 0196e1ee's reader test (its own pipeline, source
+            # /dev/stdin, an open pipeline after the body); the blanked text keeps the line test its callers had
+            bodies.append((hd['bodyStart'], hd['bodyEnd'], _shell_reads_heredoc(text, hd),
                            not hd['quoted'] and ('$(' in body or '`' in body)))
-            if not read:
+            if not line_read:
                 for i in range(hd['bodyStart'], hd['bodyEnd']):
                     if out[i] != '\n':
                         out[i] = ' '

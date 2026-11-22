@@ -1868,6 +1868,11 @@ def script_cases():
             ('cat > notes.md <<X\n./dump\\.sh\n$(date)\nX', d),
             ('cat > notes.md <<X\n`date`\n./dump\\.sh\nX', d),
             ('cat > notes.md <<X\n$(./dump\\.sh)\nX', d),
+            # r6 (rebased onto 0196e1ee): a heredoc 0196e1ee's _shell_reads_heredoc gives to a shell keeps the word
+            # (source and . /dev/stdin, a pipeline left open after the body; main does not read the word at all)
+            ('source /dev/stdin <<X\n./dump\\.sh\nX', d),
+            (". /dev/stdin <<'X'\n./dump\\.sh\nX", d),
+            ("cat <<'X' |\n./dump\\.sh\nX\nbash", d),
             # a text the lexer does not fully read (a heredoc in a substitution) keeps the word (fail-closed)
             ("echo $(cat <<'E'\nx\nE\n); ./dump\\.sh", d),
             ("echo `cat <<'E'\nx\nE\n`; ./dump\\.sh", d),
@@ -3111,6 +3116,12 @@ def script_cases():
             ("cat > a.md <<'Y'\nz\nY\ncat > notes.md <<X\n./dump\\.sh\nX", d),
             ('cat >> notes.md <<X\n${HOME} \\./dump.sh\nX', d),
             ("cat > notes.md <<'X'\n$(date)\n./dump\\.sh\nX", d),  # a quoted body's $( ) is text
+            # r6: a shell word elsewhere on the heredoc's line is not its reader (0196e1ee L1b): data, as on main
+            ("grep -c sh <<'X'\n./dump\\.sh\nX", d),
+            ("cat > n.md <<'X'; echo hi | bash\n./dump\\.sh\nX", d),
+            ("echo hi | bash; cat > n.md <<'X'\n./dump\\.sh\nX", d),
+            ("cat > n.md <<'A'; bash <<'B'\n./dump\\.sh\nA\nok\nB", d),
+            ('grep -c sh <<X\n./dump\\.sh\nX', d),
             ('python3 "no"tes.py stat.py', d),
             ('python3 -m "notes"', d),
             ('python3 -Inotes', d),
