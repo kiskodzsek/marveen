@@ -44,10 +44,21 @@ a quoted substitution or backtick, a parameter operator (${F:-..}) or a backtick
 read (stdin_pipelines). The globs, the unread rule and a direct glob hold for a | or a word at a code position of the
 command itself or of a heredoc body a shell reads (`bash <<'EOF'`); in a quote or another heredoc body (a `python3 -
 <<'PY'` editing a file with `| bash` or a JSDoc `/**` in it: 165 fleet commands blocked otherwise) the fed words are
-read as written, as before. Open, LOW and old: KNOWN-FEED-FILE, a file the command writes and a shell then reads (`echo
-./x.sh > p1; bash < p1`: the file does not exist when the gate reads); KNOWN-FEED-CD, a cd and a relative path on
-separate fed lines (`printf 'cd sub\n./x.sh\n' | bash`); KNOWN-FEED-SCRIPT, the unread rule in a script file's body
-(a binary's bytes matched it); another program's output (`echo "$(date)" | bash`) is H1, as everywhere.
+read as written, as before. Open, LOW and old (main too):
+KNOWN-FEED-FILE, a file between the feeder and the shell: one the command writes and a shell then reads (`echo
+  ./x.sh > p1; bash < p1`: the file does not exist when the gate reads), and the unread rule is not applied to a
+  script file's body (a binary's bytes matched it).
+KNOWN-FEED-CD, a cd the fed text or the reader makes: on separate fed lines (`printf 'cd sub\n./x.sh\n' | bash`) or
+  in the reader's own group (reader-cd-fed: `| (cd sub && bash)`); the fed path is read from the command's cwd.
+KNOWN-FEED-READER (Viktor 49925), a reader the gate does not take for a shell, or a loop that runs the line in a way
+  it does not read: a reader word made by a quoted variable, an operator or a substitution (var-reader-q `| "$S"`,
+  var-default `| ${S:-bash}`, subst-reader `| $(echo bash)`), zsh's zsh-equals (`| =bash`), a shell behind a for,
+  case or function call (for-reader, case-reader, func-reader: `| for x in 1; do bash; done`, `| case 1 in 1) bash;;
+  esac`, `f() { bash; }; .. | f`), a shell after another command of the group or the then-branch (true-then `| {
+  true; bash; }`, if-two `| if true; then true; bash; fi`), a while-read loop that runs the line quoted or through
+  command (while-quoted `"$a"`, while-command `command $l`) or is fed a glob (while-fed-glob), a process substitution
+  (procsub-out: `> >(bash)`, `tee >(bash)`) and `| builtin eval "$(cat)"`. Another program's output (`echo "$(date)"
+  | bash`) is H1, as everywhere.
 KNOWN-KTP-VAR, a value not bound or bound otherwise: var-ifs, var-array (X=(evil.py)), array-index, var-append
   (X+=), zshsplit-var ($=X), zshglobsubst-var ($~X), var-ansic ($'..'), var-patsub (${X/a/b}), var-plusalt
   (${X:+..}), var-assigndefault (${X:=..}), var-escsemi, read-var, positional-glob (`set -- e*.py; python3 $1`),
@@ -70,7 +81,7 @@ KNOWN-KTP-OVER, not open but leans: they block a harmless call (old unless named
   (`***/(ok|zz).py`: any match blocks the group unread, as for every zsh paren); a brace whose second member is the
   one that matches (every brace word is read as a script, above); a loop value with `**` is read recursively in
   bash too, where without globstar it is one `*` (one more file read, never fewer). Viktor 49878 INFO: a quoted or
-  escaped loop value (`for f in "a/*/*/measure.py"`, `'**/measure.py'`, `\*`) is no glob in the shell, the gate
+  escaped loop value (`for f in "a/*/*/measure.py"`, `'**/measure.py'`, `\\*`) is no glob in the shell, the gate
   reads it as one (the one-star form on main too).
 A variable glued to a script word (card 8a73eab1, Dave's audit 11-16; Viktor 49425): the word is read with every
 variable whose value the gate does not trust as unset and as set to "": one the text does not set, and one it sets in
@@ -2192,18 +2203,32 @@ def stdin_pipelines(text, lexed=True):
     for b, p, live in merged:
         seg = text[b:p]
         cmds = _seg_cmds(seg)
+        # Viktor 49925 L2: the dedup through a set (a list scan per command was quadratic: a `done` feeder's span is
+        # the text from its start, 28 000 commands of nested loops took 1 s)
+        seen = {tuple(cw) for cw in cmds}
+
+        def _new(cws):
+            out = [cw for cw in cws if tuple(cw) not in seen]
+            seen.update(tuple(cw) for cw in out)
+            return out
         # card 39d885ef: the same words without the redirections: `echo s3curity 2>/dev/null dump-keychain` prints the
         # call whole (bash and zsh ran it, measured); zsh's MULTIOS sends a `>x` to the pipe too. Never fewer reads
-        cmds += [cw for cw in _seg_cmds(seg, strip=True) if cw not in cmds]
+        cmds += _new(_seg_cmds(seg, strip=True))
         # card 0196e1ee: an echo / printf substitution at a code position, its output put in place (see above)
         put = _FEED_ECHO_SUBST_RX.sub(lambda e: ' '.join(_feeder_words(_seg_cmds(e.group(1))[0])[1:])
                                       if _seg_cmds(e.group(1)) else '', seg)
         if put != seg:
-            cmds += [cw for cw in _seg_cmds(put) if cw not in cmds]
+            cmds += _new(_seg_cmds(put))
         for cw in cmds:
-            lines.extend(cw)
+            # Viktor 49925 L1: a pipeline that is not live (a heredoc body no shell reads, a quote) is read as
+            # written, as on main: a glob / brace word at the command position of one of its lines goes quoted, so
+            # the direct-pattern rule (new in this card) does not glob it there (`cat > notes.md <<'X'` + `echo
+            # ./e*.sh | bash`: the line `./e*.sh` matched evil.sh). The other words stay: an interpreter's glob word
+            # (`echo python3 ./m*.py | bash` in a quote) is read as on main
+            lw = cw if live else [_quote_pattern_word(v) for v in cw]
+            lines.extend(lw)
             if len(cw) > 1:
-                lines.append(' '.join(cw[1:]))
+                lines.append(' '.join(lw[1:2] + cw[2:]))
             for v in cw:
                 words.extend(v.split())
                 if live:
@@ -2725,7 +2750,7 @@ def _hits(cmd, script=False):
     if _XARGS_UNREAD[0]:  # card 3bf9a741: an xargs past XARGS_MAX / XARGS_MAX_WORDS / XARGS_MAX_CHARS
         found += [h for h in ['xargs-unread'] if h not in found]
     if _FEED_UNREAD[0] and not script:  # card 0196e1ee: a fed text with a substitution or a backtick; not in a
-        found += [h for h in ['stdin-feed-unread'] if h not in found]  # script file's body (KNOWN-FEED-SCRIPT)
+        found += [h for h in ['stdin-feed-unread'] if h not in found]  # script file's body (KNOWN-FEED-FILE)
     if lines:
         found += [h for h in hits_in('\n'.join(lines), script) if h not in found]
     # card c7234bed: what an echo / printf substitution prints where a reader of shell code runs it (generated_lines)
@@ -4606,11 +4631,14 @@ def script_paths(cmd, cwd, normalised=None, extra=(), live=None):
     # word is diff's argument; the fleet replay blocked one such command); a text the lexer does not read: the
     # command's own lexing (_direct_code_view)
     raw_left = [_DIRECT_RAW_MAX]
+    has_quote = None  # Viktor 49925 L2: searched once per text (per match it was quadratic: 27 000 fed globs, 54 s)
     for m in DIRECT_RX.finditer(text):
         w = m.group(1)
         quoted = m.start(1) > 0 and text[m.start(1) - 1] in '\'"'
         pat = not quoted and unquoted_pattern(w)
-        if pat and (_QUOTED_RX.search(text) or text[m.start()] == ')'):
+        if pat and has_quote is None:
+            has_quote = _QUOTED_RX.search(text) is not None
+        if pat and (has_quote or text[m.start()] == ')'):
             if dcls is None:
                 dcls = _direct_code_view(text, cmd)
             if dcls is False:
@@ -5628,6 +5656,14 @@ def decoded_payloads(text):
         if not level:
             break
     return out
+
+
+def _quote_pattern_word(v):
+    """Viktor 49925 L1 (card 0196e1ee): a glob / brace word of a pipeline that is not live, single-quoted for its
+    line, so DIRECT_RX reads it as written (a word with a ' in it stays as it is: the quote rule sees that one)."""
+    if "'" not in v and (_GLOB_CHARS_RX.search(v) or _BRACE_ALT_RX.search(v)):
+        return "'" + v + "'"
+    return v
 
 
 def _shell_reads_heredoc(cmd, hd):

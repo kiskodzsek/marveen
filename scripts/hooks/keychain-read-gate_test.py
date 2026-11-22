@@ -2279,6 +2279,12 @@ def script_cases():
             # a group right before the pipe is read whole
             ('(echo ./measure.py) | bash', d),
             ('{ echo ./measure.py; } | bash', d),
+            # Viktor 49925 L1: the same fed glob in a heredoc a shell reads, or piped to one, is live
+            ("bash <<'X'\necho ./meas*.py | bash\nX", d),
+            ("cat <<'X' | bash\necho ./meas*.py | bash\nX", d),
+            # ... and an interpreter's glob word on such a data line is read as on main (main blocks it: the 00c714ea
+            # glob reading of a script word; only the command position is quoted, a lean kept, not added)
+            ("cat > notes.md <<'X'\necho python3 ./meas*.py | bash\nX", d),
             # card 0196e1ee (Viktor 43793 LOW/INFO 2, each passed main 749bffd9 and bash ran the fed script,
             # work/0196e1ee): a glob or a brace in the fed text, a path run directly, a reader PIPE_SHELL_RX did not see,
             # a fed text that makes its words itself, and a loop / if / case / function feeding the pipe
@@ -3294,6 +3300,12 @@ def script_cases():
             ('echo hi | bash ./measure.py.txt', d),
             ('(echo ./measure.py); echo hi | bash', d),  # the group ends an earlier command, not this pipeline
             ('{ echo ./measure.py; }; echo hi | bash', d),
+            # Viktor 49925 L1 (main ALLOW, bash and zsh run nothing: data): a fed glob in a heredoc no shell reads is
+            # read as written, its match not taken
+            ("cat > notes.md <<'X'\necho ./meas*.py | bash\nX", d),
+            ("cat > notes.md <<'X'\nx\necho ./meas?re.py | bash\nX", d),
+            ('cat > notes.md <<X\necho ./meas*.py | bash\nX', d),
+            ("cat > /dev/null <<'X'\necho ./{measure,zz}.py | bash\nX", d),
             # card 0196e1ee: a reader of the pipe that runs no code from it, a glob into a non-shell, a quoted direct path
             # (the file named so does not exist), a function / loop that prints a harmless line, a substitution into a
             # non-shell, a benign script fed to a $var reader
@@ -3388,7 +3400,7 @@ def script_cases():
             ('echo "$(echo hi)" | bash', d),
             ('echo "$(date)" | bash', d),
             # card 0196e1ee m6 (unread-hits-script): a script file's body is not read for a fed substitution
-            # (KNOWN-FEED-SCRIPT); a harmless one passes. A data heredoc's pipe after a benign live one stays data
+            # (KNOWN-FEED-FILE); a harmless one passes. A data heredoc's pipe after a benign live one stays data
             ('bash feedhi.sh', d),
             ("echo ./stat.p? | bash; python3 - <<'PY'\nx = 'echo ./meas*.py | bash'\nPY", d),
             # m6 (live-words-reset-off): the live words of one reading are not carried into the next. hits() reads an
@@ -4482,7 +4494,20 @@ def main():
     fails += script_fails
     pre_fails, pre_n = prefilter_cases()
     fails += pre_fails
-    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n + pre_n
+    # Viktor 49925 M1 (card 0196e1ee): an invalid escape in the gate's text (`\\*` in its docstring) is a SyntaxWarning
+    # on python 3.12+ and a SyntaxError under -W error / PYTHONWARNINGS=error; the hook then exits 1, which Claude Code
+    # takes as a non-blocking error: the call goes through. The gate must compile with every warning an error.
+    # The file is read and closed first: an unclosed one is a ResourceWarning on stderr AFTER the "N/N passed" line.
+    import warnings
+    with open(HOOK, encoding='utf-8') as f:
+        hook_src = f.read()
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        try:
+            compile(hook_src, HOOK, 'exec')
+        except SyntaxError as e:
+            fails.append(f'the gate does not compile with warnings as errors: line {e.lineno}: {e.msg}')
+    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n + pre_n + 1
     for f in fails:
         print('FAIL', f)
     print(f'{total - len(fails)}/{total} passed')
