@@ -212,6 +212,11 @@ def all_blocked(cmds, recs):
     return (2 if all(rc == 2 for rc, _ in res) else 0), res[-1][1]
 
 
+def all_allowed(cmds, recs):
+    res = [run(c, recs) for c in cmds]
+    return (0 if all(rc == 0 for rc, _ in res) else 2), res[-1][1]
+
+
 BASE2 = BASE + [att('# CLAUDE.md ... kártya 9dbb581a ...', 'instructions')]
 SECRET_PATH = payload('dashboard-token', FAKE_SECRET + '\n')
 DRAFT = payload('draft.txt', 'fej ' + INV + '\n')
@@ -306,6 +311,31 @@ CASES += [
     ('B7 a path only mentioned in the text is not payload', lambda: run(MSG + '"lásd ' + DRAFT + '"', BASE2), 0),
     ('B8 cat > f heredoc, then send < f (measured)', lambda: run(
         'cat > ' + GOOD + " <<'T'\nfej " + MEAS[:12] + '\nT\n' + MSG + '- < ' + GOOD, BASE2), 0),
+    # round 4 (Viktor 50174, Klodel 50177): an option with =value, -u NAME and a decimal duration are prefix words
+    ('C9 option=value, env -u NAME and a decimal duration before a send block (P01, P03, P04)',
+     lambda: all_blocked([c + ' "fej ' + INV + '"' for c in (
+         'timeout --kill-after=5 10 scripts/agent-msg.sh k v', 'timeout --kill-after=5 10 agent-msg.sh k v',
+         'env -u HOME scripts/agent-msg.sh k v', 'env -u HOME agent-msg.sh k v',
+         'timeout 2.5 scripts/agent-msg.sh k v', 'timeout 2.5 agent-msg.sh k v', 'timeout 1.5s agent-msg.sh k v',
+         'env -u A -u B timeout --signal=TERM 0.5m nice -n 5 bash scripts/agent-msg.sh k v')], BASE2), 2),
+    ('B9 the same round-4 prefixes with a measured hex pass', lambda: all_allowed([c + ' "fej ' + MEAS[:12] + '"'
+     for c in ('timeout --kill-after=5 10 agent-msg.sh k v', 'env -u HOME agent-msg.sh k v',
+               'timeout 2.5 agent-msg.sh k v')], BASE2), 0),
+    ('B10 -u NAME / --opt=value after a non-runner is no send', lambda: all_allowed([c + ' ' + INV for c in (
+        'grep -u HOME scripts/agent-msg.sh', 'ls --color=auto scripts/agent-msg.sh', 'grep -c 2.5 agent-msg.sh',
+        'echo --u HOME agent-msg.sh')], BASE2), 0),
+    # KNOWN-LIMIT rows (module docstring, Viktor 50174 indep11): they pin today's behaviour, an invented hex PASSES;
+    # a later fix turns its row red on purpose.
+    ('KNOWN-LIMIT assign-quoted (MSG="a b" before the send): allowed today',
+     lambda: run('MSG="a b" agent-msg.sh k v "fej ' + INV + '"', BASE2), 0),
+    ('KNOWN-LIMIT case-paren (the send right after a case arm x)): allowed today',
+     lambda: run('case x in x) agent-msg.sh k v "fej ' + INV + '";; esac', BASE2), 0),
+    ('KNOWN-LIMIT source (source scripts/agent-msg.sh): allowed today',
+     lambda: run('source scripts/agent-msg.sh k v "fej ' + INV + '"', BASE2), 0),
+    ('KNOWN-LIMIT eval (the send inside an eval quoted payload): allowed today',
+     lambda: run("eval 'scripts/agent-msg.sh k v fej " + INV + "'", BASE2), 0),
+    ('KNOWN-LIMIT path-part (a quoted part in the script path after env): allowed today',
+     lambda: run("env 'scripts/'agent-msg.sh k v \"fej " + INV + '"', BASE2), 0),
 ]
 
 

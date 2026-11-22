@@ -34,6 +34,10 @@ the script path), GAP-send-xargs-braces (xargs -I{} ... agent-msg.sh), GAP-cd-cu
 searched), GAP-hd-pipe-env-bash (a heredoc piped into env bash), TIME-cd-x-at (many `cd x;` and many @ words:
 payload_text multiplies them, over 3 s), TIME-manyhex-tr1mb (15 000 hex tokens on a 1 MB transcript, 4.7 s, under
 the hook's 10 s).
+Known limits (Viktor 50174, independent probe indep11, all as on main): P02-assign-quoted-space (an assign-quoted
+value with a space, MSG="a b", before the send), P05-case-paren (the send right after a case-paren arm `x)`),
+P06-source (source scripts/agent-msg.sh), P07-eval (the send inside an eval quoted payload),
+KNOWN-quoted-script-path-part (a quoted path-part in the script path after env, 'scripts/'agent-msg.sh).
 
 The block message names a token by its first 8 digits only: a file read by mistake must not echo a secret in full.
 
@@ -53,7 +57,9 @@ import sys
 # The script is a send only in command position (segment start, after VAR=x, after a shell keyword such as then/do,
 # or the argument of a runner such as bash, env, nohup, timeout, nice), so a 'grep -n <hex> scripts/agent-msg.sh' is
 # not one. Read left to right that is
-#   (?:^|[;&|\n(`{]|(?<![\w.-])KEYWORD\s)\s*(?:(?:-[\w-]+|\w+=\S*|\d+[smh]?)\s+)*["\']?(?:[^\s;&|()`\'"]*/)?NAME\.sh\b
+#   (?:^|[;&|\n(`{]|(?<![\w.-])KEYWORD\s)\s*(?:(?:-[\w-]+(?:=\S*)?|-u\s+\w+|\w+=\S*|\d+(?:\.\d+)?[smh]?)\s+)*
+#   ["\']?(?:[^\s;&|()`\'"]*/)?NAME\.sh\b
+# (round 4, Viktor 50174: an option with =value, -u NAME and a decimal duration are prefix words too)
 # but searched that way it is quadratic (card 3b05ae69, 2026-11-22): every newline, '(', '{' or backtick is a start,
 # and from each one \s*, \w+=\S* or the path run reads to the end of the text (20 KB of blank lines in a card PUT:
 # 11 s, past the hook's 10 s timeout, and a timed-out hook does not block). So the NAME is found first (linear), and
@@ -110,11 +116,26 @@ def send_script_in(cmd):
                 w = _WORD_RX.match(rev, i + 1)
                 if w:
                     ends.extend(range(i + 2, w.end() + 1))
+                # an option with its value: -[\w-]+=\S* (timeout --kill-after=5; Viktor 50174 P01-long-opt-eq)
+                wo = _WORDCH_RX.match(rev, i + 1)
+                if wo:
+                    ends.extend(j + 1 for j in range(i + 2, wo.end()) if rev[j] == '-')
                 i = rev.find('=', i + 1, ns.end())
         for d0 in ((r, r + 1) if r < n and rev[r] in 'smh' else (r,)):
             d = _DIGITS_RX.match(rev, d0)
             if d:
                 ends.extend(range(d0 + 1, d.end() + 1))
+                # a decimal duration: \d+\.\d+[smh]? (timeout 2.5; Viktor 50174 P04-timeout-decimal)
+                if d.end() < n and rev[d.end()] == '.':
+                    d2 = _DIGITS_RX.match(rev, d.end() + 1)
+                    if d2:
+                        ends.extend(range(d.end() + 2, d2.end() + 1))
+        # -u NAME (env -u HOME; Viktor 50174 P03-env-u-var): reversed, the NAME word, blanks, then 'u-'
+        w = _WORD_RX.match(rev, r)
+        if w:
+            b = _WS_RX.match(rev, w.end())
+            if b and rev.startswith('u-', b.end()):
+                ends.append(b.end() + 2)
         return ends
 
     def tail(p0):
