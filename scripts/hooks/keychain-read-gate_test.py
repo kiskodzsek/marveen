@@ -3636,6 +3636,8 @@ def script_cases():
                               ('for f in ***/measure.py; do python3 "$f"; done', 2),
                               ('for f in **/*.py; do python3 "$f"; done', 2),
                               ('for f in **/measure.py; do python3 $f; done', 2),
+                              # Viktor 49878 INFO (X08): two ***/ in one loop value (zsh ran it, his x08.txt)
+                              ('for f in a/***/c/***/measure.py; do python3 "$f"; done', 2),
                               ('for f in a/b/c/[^z]easure.py; do python3 "$f"; done', 2),  # [^z] is [!z] (r1)
                               ('for f in **/zz.py; do python3 "$f"; done', 0),  # loop-benign-star2
                               ('for f in a/**/zz.py; do python3 "$f"; done', 0)):

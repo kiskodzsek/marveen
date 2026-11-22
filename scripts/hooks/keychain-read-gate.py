@@ -69,7 +69,9 @@ KNOWN-KTP-OVER, not open but leans: they block a harmless call (old unless named
   New in r5 (Viktor 49863 INFO and M1): a zsh group after `***/` whose matching members are all harmless
   (`***/(ok|zz).py`: any match blocks the group unread, as for every zsh paren); a brace whose second member is the
   one that matches (every brace word is read as a script, above); a loop value with `**` is read recursively in
-  bash too, where without globstar it is one `*` (one more file read, never fewer).
+  bash too, where without globstar it is one `*` (one more file read, never fewer). Viktor 49878 INFO: a quoted or
+  escaped loop value (`for f in "a/*/*/measure.py"`, `'**/measure.py'`, `\*`) is no glob in the shell, the gate
+  reads it as one (the one-star form on main too).
 A variable glued to a script word (card 8a73eab1, Dave's audit 11-16; Viktor 49425): the word is read with every
 variable whose value the gate does not trust as unset and as set to "": one the text does not set, and one it sets in
 an expansion the gate does not trust. Read in bash's and zsh's forms (`evil${X}.py`, `X=; python3 evil$X.py`,
