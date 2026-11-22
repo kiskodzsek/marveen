@@ -858,26 +858,29 @@ def allow_html_tag_in_a_stdin_herestring_body(root):
 @case
 def allow_assignment_chain_with_no_curl_and_known_limit_subst(root):
     # A VAR=value chain is consumed even with no curl after it (Viktor 49870 L14); only a match with the curl group is a
-    # segment, so a kanban URL and -XPUT in assignments next to a message are no card PUT. Known limit (all heads): a
-    # $( ) holding a pipe or nested parentheses is no env unit, so that PUT next to a message is not judged as a card.
+    # segment, so a kanban URL and -XPUT in assignments next to a message are no card PUT. The old envvalue known limit
+    # (a $( ) holding a pipe or nested parentheses before curl) is closed by CURL_SEG2_RX's ) start: that PUT blocks.
     with open(os.path.join(root['dir'], 'put4.json'), 'w', encoding='utf-8') as fh:
         fh.write(json.dumps({'status': 'done', 'comment': 'Kernel 18:44: kész'}))
     msg = ' && bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel "Kártya kész."'
-    cmds = ['A=' + KB + ' B=-sXPUT --data-binary @put4.json' + msg,
-            'T=$(date | tr a b) curl -sX PUT ' + KB + ' --data-binary @put4.json' + msg]
-    return all(run(root['hook'], 'Bash', {'command': c}, now='18:14', cwd=root['dir'])[0] == 0 for c in cmds)
+    h, d = root['hook'], root['dir']
+    return (run(h, 'Bash', {'command': 'A=' + KB + ' B=-sXPUT --data-binary @put4.json' + msg}, now='18:14', cwd=d)[0] == 0
+            and all(run(h, 'Bash', {'command': pre + 'curl -sX PUT ' + KB + ' --data-binary @put4.json' + msg},
+                        now='18:14', cwd=d)[0] == 2
+                    for pre in ('T=$(date | tr a b) ', 'T=$(printf %s $(date)) ', 'A=$(( (1+2) )) ')))
 
 
 @case
-def known_limits_next_to_a_write_are_pinned(root):
-    # Klodel 49904 / 49907 (the named fail-open cap, Viktor 49901 indep7): the "smuggle" Known limit of the
-    # docstring. Next to a message / memory write such a card PUT is not seen as a curl segment, so it is not judged
-    # as a card (ALLOW); alone it is (BLOCK). A fix that closes one fails this row: then drop it from the docstring.
+def smuggle_shapes_next_to_a_write_are_cards(root):
+    # Viktor 49901 (indep7, the 13 smuggle labels of the old Known limit) and 49912 K2 (command, env, timeout, time,
+    # if before curl), plus sudo -u, timeout -s SIG, a case arm: next to a message / memory write the card PUT is a
+    # card (BLOCK), as alone. CURL_SEG2_RX and the joined view find it; the main's search did not.
     url = 'http://localhost:3420/api/kanban/abc123'
     msg = ("curl -s -X POST http://localhost:3420/api/messages -H 'Content-Type: application/json' "
            """-d '{"from":"kernel","to":"klodel","content":"Kész."}'""")
     mem = ("curl -s -X POST http://localhost:3420/api/" + "memories -H 'Content-Type: application/json' "
            """-d '{"agent_id":"kernel","content":"jegyzet","category":"hot"}'""")
+    amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel "Kész."'
     bs, nl, fut = '\\', '\n', 'Kernel 12:30: kész'
     body = """-d '{"comment":\"""" + fut + """\"}'"""
 
@@ -892,6 +895,7 @@ def known_limits_next_to_a_write_are_pinned(root):
                                     + fut + '"' + nl + "}' " + url, nl + msg),
         'env-apiword-first': (put(pre='R="ld /api/messages" '), ''),
         'hdr-apiword-first': ("curl -s -X PUT -H 'X-Ref: /api/" + "memories' " + url + ' ' + body, nl + mem),
+        'data-apiword-first': ("curl -s -X PUT -d '{\"comment\":\"" + fut + " /api/messages\"}' " + url, nl + msg),
         'kw-then': ('if true; then ' + put() + '; fi', nl + msg),
         'kw-do': ('for i in 1; do ' + put(pre='T="b c" ') + '; done', nl + msg),
         'kw-brace': ('{ ' + put() + '; }', nl + mem),
@@ -899,15 +903,88 @@ def known_limits_next_to_a_write_are_pinned(root):
         'redir-prefix': ('2>/dev/null ' + put(), nl + msg),
         'quoted-cmd-name': (put(name='"curl"'), nl + msg),
         'bs-cmd-name': (put(name=bs + 'curl'), nl + msg),
+        'pre-command': (put(pre='command '), nl + mem),
+        'pre-env': (put(pre='env T=1 '), nl + mem),
+        'pre-timeout': (put(pre='timeout 10 '), nl + mem),
+        'pre-timeout-signal': (put(pre='timeout -s KILL 10 '), ' && ' + amsg),
+        'pre-time': (put(pre='time '), nl + mem),
+        'pre-if': ('if ' + put() + '; then :; fi', nl + mem),
+        'pre-sudo': (put(pre='sudo -u klodel '), ' && ' + amsg),
+        'case-arm': ('case "$1" in *) ' + put() + ' ;; esac', '; ' + amsg),
+        'kw-while': ('while ' + put() + '; do break; done', nl + msg),
+        'kw-until': ('until ' + put() + '; do :; done', nl + msg),
+        'kw-else': ('if false; then :; else ' + put() + '; fi', nl + msg),
+        'kw-elif': ('if false; then :; elif ' + put() + '; then :; fi', nl + msg),
+        'pre-nohup': ('(nohup ' + put() + ')', nl + msg),
+        'pre-exec': ('(exec ' + put() + ')', nl + msg),
+        'pre-builtin': (put(pre='builtin '), nl + msg),
+        'env-then-prefix': (put(pre='T=1 timeout 10 '), nl + msg),
+        'hdr-ansi-quote-semicolon': ("curl -s -X PUT -H $'X-Note: it\\'s; ok' " + body + ' ' + url, nl + msg),
+        'hdr-dq-semicolon': ('curl -s -X PUT -H "Content-Type: application/json; charset=utf-8" ' + body + ' ' + url,
+                             nl + msg),
+        'pre-nice': (put(pre='nice -n 5 '), nl + msg),
+        'pre-time-p': (put(pre='time -p '), nl + msg),
+        'pre-env-flag': (put(pre='env -i T=1 '), nl + msg),
+        'pre-xargs': ('echo x | xargs -I{} ' + put(), ' && ' + amsg),
+        'pre-redirect-fd': (put(pre='>&2 '), nl + msg),
+        'pre-redirect-amp': (put(pre='&>/dev/null '), nl + msg),
+        'pre-timeout-kill-after': (put(pre='timeout -k 5 10s '), nl + msg),
     }
     h, d = root['hook'], root['dir']
+    bad = []
     for label, (shape, write) in shapes.items():
-        if run(h, 'Bash', {'command': shape + write}, now='12:00', cwd=d)[0] != 0:
-            return False
         alone = shape.replace('/api/messages', '/x').replace('/api/' + 'memories', '/x')
-        if run(h, 'Bash', {'command': alone}, now='12:00', cwd=d)[0] != 2:
-            return False
-    return True
+        if (run(h, 'Bash', {'command': shape + write}, now='12:00', cwd=d)[0] != 2
+                or run(h, 'Bash', {'command': alone}, now='12:00', cwd=d)[0] != 2):
+            bad.append(label)
+    # a long run of the view's start chars and prefix words next to the write stays bounded (the ) start once read
+    # the rest of a ) run per char: 120 KB 27 s)
+    import time as _t
+    for unit in (')', 'then ', 'xargs -I{} ', '\\' + nl, "'", '; curl -X PUT '):
+        cmd = amsg + nl + 'echo -X PUT' + nl + unit * (300 * 1024 // len(unit)) + ' ' + url
+        t0 = _t.monotonic()
+        run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)
+        if _t.monotonic() - t0 >= 3:
+            bad.append('slow ' + repr(unit))
+    # the same shapes with a past opening stamp pass: the view adds the card judgment, not a block
+    past = put(pre='command ').replace('12:30', '11:30') + nl + msg
+    if run(h, 'Bash', {'command': past}, now='12:00', cwd=d)[0] != 0:
+        bad.append('past-passes')
+    for b in bad:
+        print('  smuggle:', b)
+    return not bad
+
+
+@case
+def python_dict_triple_fstring_and_variable_on_rules_3_and_4(root):
+    # Viktor 49912 K1: rule 3 (daily-log heading) and rule 4 (card opening stamp) read a triple-quoted or f-prefixed
+    # Python value, rule 3 also a `content = '## ...'` variable; a past card stamp, another endpoint, the {{NOW}} token
+    # pass (a typed daily-log heading of today blocks even when past: rule 6).
+    h = root['hook']
+
+    def py(url, src, pre=''):
+        return ("python3 - <<'PY'\nimport json, urllib.request\n" + pre + 'body = ' + src + '\n'
+                "urllib.request.urlopen(urllib.request.Request('http://localhost:3420" + url
+                + "', data=json.dumps(body).encode(), method='POST'))\nPY")
+    dl, card = '/api/daily-log', '/api/kanban/abc123/comments'
+    block = [
+        py(dl, "{'agent_id': 'kernel', 'content': '''## 13:30 -- Audit\nKész.'''}"),
+        py(dl, '{"agent_id": "kernel", "content": """## 13:30 -- Audit"""}'),
+        py(dl, "{'agent_id': 'kernel', 'content': f'## 13:30 -- {t}'}", pre="t = 'Audit'\n"),
+        py(dl, "{'agent_id': 'kernel', 'content': content}", pre="content = '## 13:30 -- Audit\\nKész.'\n"),
+        py(card, "{'author': 'kernel', 'content': '''Kernel 13:30: kész'''}"),
+        py(card, "{'author': 'kernel', 'content': f'Kernel 13:30: {r}'}", pre="r = 'kész'\n"),
+    ]
+    allow = [
+        py(dl, "{'agent_id': 'kernel', 'content': f'## {{NOW}} -- {t}'}", pre="t = 'Audit'\n"),
+        py('/api/' + 'memories', "{'agent_id': 'kernel', 'content': content}", pre="content = '## 13:30 -- jegyzet'\n"),
+        py(card, "{'author': 'kernel', 'content': f'Kernel 12:30: {r}'}", pre="r = 'kész'\n"),
+    ]
+    bad = [c for c in block if run(h, 'Bash', {'command': c}, now='13:00')[0] != 2]
+    bad += [c for c in allow if run(h, 'Bash', {'command': c}, now='13:00')[0] != 0]
+    for c in bad:
+        print('  K1:', c[30:110].replace('\n', ' | '))
+    return not bad
 
 
 @case

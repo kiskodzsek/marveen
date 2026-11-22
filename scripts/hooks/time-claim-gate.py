@@ -31,7 +31,8 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     Known limits of the card path (Viktor 49811, 49824; the same on /comments): a body on stdin (pipe) is not in
     the command text; a url-var (the URL from a variable, no literal /api/kanban/) is not seen; a relfile (a
     relative @file after a cd) is resolved against the payload cwd only; curl -T (an upload file) is not read;
-    rule 4's opening stamp is read in plain JSON or a Python dict, not escaped inside a double-quoted -d, and as
+    rule 4's opening stamp is read in plain JSON or a Python dict (also a triple-quoted or f-/r-/b-/u-prefixed
+    value, Viktor 49912 K1; rule 3 also a `content = '## ...'` variable), not escaped inside a double-quoted -d, and as
     HH:MM only, not with seconds ("Kernel 12:30:00:", an ISO stamp ...T12:30:00+01:00; the same on main);
     a jq shorthand key (`{$comment}`, a variable named comment) is not seen as a comment key; prose: a PUT
     description edit or card text that writes "(comment: ...", ", comment: ..." or ".comment = ..." next to a
@@ -42,16 +43,16 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     "x=a 'b c' curl -sX PUT ...") with a plan time in it is judged as a card (the segment search reads quoted text
     too: imitating shell quoting in a hook hid real PUTs twice, Viktor 49845 L13, 49870); send the quote in its own
     command, or write it without those marks.
-    envvalue: an env prefix before curl whose value holds a $( ) with ; | or parentheses inside (T=$(date | tr a b)
-    curl, T=$(printf %s $(date)) curl, A=$(( (1+2) )) curl) is not read as a curl segment, so next to a message or
-    memory write that PUT is not judged as a card (alone it is; Viktor 49858, the same on every earlier head).
-    smuggle (Viktor 49901, his indep7 labels; Klodel 49904 raised the named cap for them): next to a message or
-    memory write, a card PUT whose curl the segment regex does not see is not judged as a card (alone it is):
-    name-cont-env-dq and cmd-name-cont (a line continuation inside a VAR name or the curl word), bs-cmd-name and
-    quoted-cmd-name (a backslash before curl, "curl"), kw-then, kw-do, kw-brace, kw-bang (curl right after then, do, { or !),
-    redir-prefix (2>/dev/null before curl), hdr-charset-semicolon (a ; inside a quoted header), data-multiline-url-last
-    (a multi-line -d with the kanban URL after it), env-apiword-first and hdr-apiword-first (/api/messages or
-    /api/memories in an env value or a header before the kanban URL). The same on 201485cc; pinned by a test row.
+    envvalue (Viktor 49858): an env prefix whose value holds a $( ) with ; | or parentheses inside (T=$(date | tr a b)
+    curl, A=$(( (1+2) )) curl) is no unit of the main's segment search; CURL_SEG2_RX starts a segment after the ),
+    so next to a message or memory write that PUT is a card too.
+    The 13 smuggle labels of Viktor 49901 (indep7) and the five of 49912 K2 are closed by views next to the main's
+    segment search (CURL_SEG2_RX, _kanban_put_segment; a view only adds a card judgment): shell words before curl
+    (then, do, {, !, if, time, command, env, timeout N, a redirect ...), "curl" and \\curl, quotes read as units in
+    the curl body (a ; in a quoted header, a multi-line -d before the URL), the own URL found with the header and
+    data arguments taken out (/api/messages in an env value, a header or a -d), and the line-continuation-joined
+    text (cu\\<newline>rl, T\\<newline>=v). Not seen: a curl hidden behind a function, an alias, eval or a variable
+    ($c -X PUT ...), and a shell word not in that list (the same on main).
     Rule 7 (the closing stamp, Viktor 49927, his probe_ts7 labels): py-var (the comment text in a Python variable,
     the dict built elsewhere) and jq-arg (jq --arg) are not read, the value is not at a content / comment key;
     hu-dot-date ("2026.11.22. 13:30") and mmdd-short ("(11-22 13:30)") are other date forms, not judged; a named
@@ -80,8 +81,9 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     like #193). Measured read-only on store/claudeclaw.db daily_logs since 2026-11-05: 195 of the 270 entries
     that start with such a heading were written before the time in their heading ("## 15:05" written at 12:43,
     "## 16:58" at 16:48). Only a command that names /api/daily-log, and only the start of the content value:
-    a deadline in the body is not judged, and a message that names the endpoint and quotes a heading is not a
-    log write. A heading line that names another date (MM-DD, YYYY-MM-DD) passes.
+    a deadline in the body is not judged. A message that names the endpoint and quotes a heading in a JSON or
+    Python-dict payload ({'content': '## 13:30 ...'}) is judged as a log write and overblocks (the safe side,
+    Viktor 49912 K3: the payload cannot be told from a real one); without the endpoint it passes. A heading line that names another date (MM-DD, YYYY-MM-DD) passes.
   - Rule 4, card comments only (Dave 39858, 2026-11-13): the comment's own opening time, at the START of a
     payload's "content" (or a move's / PUT's "comment", Viktor 49811 L1) value (after at most 30 characters with no digit, e.g. an author name: "Kernel 08:48",
     "Klodel (13:12, date)", "2026-11-13 08:46 - ..."), must not be later than the current minute, with or without
@@ -227,8 +229,18 @@ COMMENT_HEAD_RX = re.compile(
     r'([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?!:\d)')
 # The same two in a Python dict ('content': '...'), as json.dump in a heredoc or python3 -c writes the payload
 # (Klodel 49904 (2), Viktor 49906: rule 3 and rule 4 passed there on every earlier head). Same groups.
-HEADING_PY_RX = re.compile(HEADING_RX.pattern.replace('"', "'"))
-COMMENT_HEAD_PY_RX = re.compile(COMMENT_HEAD_RX.pattern.replace('"', "'"))
+# Viktor 49912 K1: the value also as a triple-quoted or f-, r-, b- or u-prefixed literal, key and value quotes
+# independent; rule 3 also reads a `content = '## ...'` assignment (the dict then takes the variable).
+_PY_OPEN = r'[fFrRbBuU]{0,2}(?:\'\'\'|"""|\'|")'
+# After a "..." key the plain "..." value is the JSON form (HEADING_RX, COMMENT_HEAD_RX): not read twice.
+_PY_OPEN_DQ_KEY = r'(?:[fFrRbBuU]{1,2}(?:\'\'\'|"""|\'|")|\'\'\'|"""|\')'
+HEADING_PY_RX = re.compile(r'(?:\'content\'\s*:\s*' + _PY_OPEN + r'|"content"\s*:\s*' + _PY_OPEN_DQ_KEY
+                           + r'|(?<![\w.])content[ \t]*=\s*' + _PY_OPEN + r')'
+                           + r'\s*#{1,6}[ \t]*([01]?\d|2[0-3]):([0-5]\d)(?![\d:])([^\'"\n\\]{0,200})')
+COMMENT_HEAD_PY_RX = re.compile(
+    r'(?:\'(?:content|comment)\'\s*:\s*' + _PY_OPEN + r'|"(?:content|comment)"\s*:\s*' + _PY_OPEN_DQ_KEY
+    + r')([^\'"\n\\\d]{0,30}?)'
+    r'(?:(?:(\d{4})-)?(\d{2})-(\d{2})(?:[ \t]{1,3}|[ \t]?,[ \t]{0,2}|T))?([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?!:\d)')
 
 
 def _heads(rx, rx_py, text):
@@ -645,6 +657,52 @@ COMMENT_KEY_RX = re.compile(r'(?:(?<![\w-])\\?[\'"]comment\\?[\'"]\]?|(?:(?<=[{,
                             r'[ \t]*\|?[:=]')
 
 
+# Viktor 49901 (indep7, 13 smuggle labels) and 49912 K2: views next to CURL_SEG_RX, which stays as it was. A card
+# PUT counts when ANY view finds it, so a view can only add a card judgment (an overblock), never hide one the main's
+# search found. CURL_SEG2_RX: shell words before curl (then, do, else, if, while, until, time, command, builtin, exec,
+# nohup, env, nice, timeout [-s SIG] N, sudo -u x, xargs -I{}, !, {, a redirect such as 2>/dev/null), before and after
+# the VAR= chain, also after a ) (a case arm); a sudo / xargs option argument is never the curl word itself (the
+# curl group is optional, so a consumed curl would not be given back: xargs -I{} curl); the path before the curl
+# word stops at a ), the new start char (else every ) re-read the rest of a ) run: 120 KB of ) took 27 s); the curl word
+# also as "curl", 'curl' or \curl; the body reads quotes as units ('...', "...", $'...', also over lines), so a ; in
+# a quoted header or a multi-line -d does not end it. Each quote unit stops at its first closing quote (linear).
+_PREFIX = (r'(?:(?:then|do|else|elif|if|while|until|time(?:[ \t]+-p)?|command|builtin|exec|nohup|!|\{'
+           r'|env(?:[ \t]+-[\w-]+)*|nice(?:[ \t]+-n)?(?:[ \t]+-?\d+)?'
+           r'|timeout(?:[ \t]+-[^\s;&|(`]+(?:[ \t]+(?:[A-Z][A-Z0-9]*|\d+(?:\.\d+)?[smhd]?))?)*[ \t]+\d+(?:\.\d+)?[smhd]?'
+           r'|(?:sudo|xargs)(?:[ \t]+-[^\s;&|(`]+(?:[ \t]+(?!-|[\\"\']?(?:[^\s;&|(`)]*/)?curl\b)[^\s;&|(`]+)?)*'
+           r'|\d*(?:>>?|<|>&|&>>?)[ \t]*[^\s;&|(`<>]+)[ \t]+)*')
+CURL_SEG2_RX = re.compile(r'(?:^|[;&|(`)])[ \t]*' + _PREFIX + r'(?:' + _env_assign('v3') + r'[ \t]+)*' + _PREFIX
+                          + r'(?:' + _env_assign('v4') + r')?'
+                          r'(?P<curl>(?:[^\s;&|(`)]*/)?(?:\\|["\'])?curl\b'
+                          r'(?:[^\n;&|\\\'"$]|\\[\s\S]|\$\'(?:[^\'\\]|\\[\s\S])*\'|\'[^\']*\''
+                          r'|"(?:[^"\\]|\\[\s\S])*"|[$\'"])*)?', re.M)
+# The curl's own URL in a view: the first /api/ once the header and data arguments are taken out (an /api/messages
+# in a header, an env value or a -d before the kanban URL is not the URL; a memory body quoting a kanban PUT after
+# the memory URL still is not a kanban segment).
+CURL_ARG_RX = re.compile(r'(?<![\w-])(?:-[HdF]|--(?:header|data(?:-raw|-binary|-urlencode|-ascii)?|json|form(?:-string)?))'
+                         r'(?:[ \t]+|=|(?=[\'"$]))(?:\$\'(?:[^\'\\]|\\[\s\S])*\'|\'[^\']*\'|"(?:[^"\\]|\\[\s\S])*"'
+                         r'|[^\s;&|\'"])+')
+# A line continuation joins words in bash (cu\<newline>rl, T\<newline>=v); the views also read the joined text.
+BS_NL_RX = re.compile(r'\\\r?\n')
+
+
+def _kanban_put_segment(cmd):
+    """Is there a real curl segment with a PUT whose own URL is a kanban one? The main's search first, then the views
+    (each pass linear)."""
+    if any(m.group('curl') and _seg_url_is_kanban(m.group(0)) and PUT_RX.search(m.group(0))
+           for m in CURL_SEG_RX.finditer(cmd)):
+        return True
+    joined = BS_NL_RX.sub('', cmd)
+    for view in (cmd, joined) if joined != cmd else (cmd,):
+        for m in CURL_SEG2_RX.finditer(view):
+            if m.group('curl') and PUT_RX.search(m.group(0)):
+                own = CURL_ARG_RX.sub(' ', m.group('curl'))
+                i = own.find('/api/')
+                if i >= 0 and own.startswith('/api/kanban/', i):
+                    return True
+    return False
+
+
 def _seg_url_is_kanban(seg):
     # the curl's own URL is the first /api/ in its segment; a kanban PUT quoted in a memory body comes later
     i = seg.find('/api/')
@@ -692,9 +750,8 @@ def judged_texts(tool_name, ti, cwd):
         # (src/web/routes/kanban.ts storeMoveComment); such a PUT counts only when it carries "comment", in the
         # command or a data file it reads, so a title or description edit keeps its plan times.
         card = '/api/kanban/' in cmd and ('/comments' in cmd or '/move' in cmd)
-        if not card and '/api/kanban/' in cmd and PUT_RX.search(cmd) and (not API_WRITE_RX.search(cmd) or any(
-                m.group('curl') and _seg_url_is_kanban(m.group(0)) and PUT_RX.search(m.group(0))
-                for m in CURL_SEG_RX.finditer(cmd))):
+        if not card and '/api/kanban/' in cmd and PUT_RX.search(cmd) and (
+                not API_WRITE_RX.search(cmd) or _kanban_put_segment(cmd)):
             card = bool(COMMENT_KEY_RX.search(cmd)) or any(
                 'comment' in b and COMMENT_KEY_RX.search(b) for b in (_read_small(p) or '' for p in _data_paths(cmd, cwd)))
         if not card and not API_WRITE_RX.search(cmd):
