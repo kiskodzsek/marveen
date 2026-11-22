@@ -29,6 +29,11 @@ agent to route its own value through a tool. Also not caught (Viktor, bekötési
 a payload path held in a variable (`@"$F"`); a file an EARLIER session wrote (a HANDOFF.md read back is a tool
 output here); a hex glued to a letter suffix (`5e6f7a8b9dra`, the suffix could be hex) or to `.Word` (read as a file
 extension). Not read on purpose: `$(< f)` and secret-looking paths (the gate must never open a secret).
+Known limits (Viktor 50075, independent probe hx2, all as on main): GAP-send-quoted-home (a quoted HOME variable in
+the script path), GAP-send-xargs-braces (xargs -I{} ... agent-msg.sh), GAP-cd-cumulative (cd a && cd b: a/b is not
+searched), GAP-hd-pipe-env-bash (a heredoc piped into env bash), TIME-cd-x-at (many `cd x;` and many @ words:
+payload_text multiplies them, over 3 s), TIME-manyhex-tr1mb (15 000 hex tokens on a 1 MB transcript, 4.7 s, under
+the hook's 10 s).
 
 The block message names a token by its first 8 digits only: a file read by mistake must not echo a secret in full.
 
@@ -54,23 +59,38 @@ import sys
 # 11 s, past the hook's 10 s timeout, and a timed-out hook does not block). So the NAME is found first (linear), and
 # from each NAME the same pattern is matched right to left on the reversed command (SEND_PREFIX_REV_RX: every piece
 # reversed, '^' -> \Z, the lookbehind -> a lookahead). A backward read stops at the first word that is not an
-# option, an assignment or a duration, so it never passes the previous plain NAME: the reads are disjoint.
+# option, an assignment or a duration, so it never passes the previous plain NAME. A NAME right after '/' is
+# different: its path run reads back over every earlier NAME of the same word ('agent-msg.sh/' x N read the word N
+# times, quadratic: Viktor 50075 R1), so send_script_in skips a slash NAME whose path run ends where the previous one's
+# did (no PATH_STOP char between them): that one already got the same answer. Each char is then read a bounded
+# number of times.
 _SEND_KEYWORDS = ('bash', 'sh', 'zsh', 'exec', 'env', 'nohup', 'command', 'xargs', 'timeout', 'time', 'nice',
                   'caffeinate', 'stdbuf', 'then', 'do', 'else', 'elif', 'if', 'while', 'until')
 SEND_NAME_RX = re.compile(r'(?:agent-msg|kernel-msg|msg-close|card-comment|send-stamped|send-and-close)\.sh\b')
-SEND_PREFIX_REV_RX = re.compile(r'(?:/[^\s;&|()`\'"]*)?["\']?(?:\s+(?:[\w-]+-|\S*=\w+|[smh]?\d+))*\s*'
+SEND_PREFIX_REV_RX = re.compile(r'(?:(?=(/[^\s;&|()`\'"{]*))\1)?["\']?(?:\s+(?:[\w-]+-|\S*=\w+|[smh]?\d+))*\s*'
                                 r'(?:\Z|[;&|\n(`{]|\s(?:' + '|'.join(k[::-1] for k in _SEND_KEYWORDS) +
                                 r')(?![\w.-]))')
+PATH_STOP_RX = re.compile(r'[\s;&|()`\'"{]')
 
 
 def send_script_in(cmd):
     """True when a send script stands in command position (the left-to-right pattern above, matched backwards)."""
+    # A NAME right after '/' takes the whole path run back to its first PATH_STOP char (the group is atomic), so two
+    # such NAMEs with no PATH_STOP char between them end the path at the same place and get the same answer: the later
+    # one is skipped, else 'agent-msg.sh/' x N re-reads the word N times (independent probe hx2, card 3b05ae69).
     rev = None
+    prev_slash_start = -1
     for m in SEND_NAME_RX.finditer(cmd):
+        start = m.start()
+        slash = start > 0 and cmd[start - 1] == '/'
+        if slash and prev_slash_start >= 0 and not PATH_STOP_RX.search(cmd, prev_slash_start, start):
+            prev_slash_start = start
+            continue
         if rev is None:
             rev = cmd[::-1]
-        if SEND_PREFIX_REV_RX.match(rev, len(cmd) - m.start()):
+        if SEND_PREFIX_REV_RX.match(rev, len(cmd) - start):
             return True
+        prev_slash_start = start if slash else -1
     return False
 API_RX = re.compile(r'/api/(messages|kanban)\b')
 API_WRITE_RX = re.compile(r'-X\s*(POST|PUT|PATCH)\b|--request\s*(POST|PUT|PATCH)\b|--data(-binary|-raw|-urlencode)?\b'

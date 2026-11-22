@@ -360,6 +360,12 @@ CASES += [
      lambda: timed('echo' + ' agent-msg.sh' * 9000 + ' ab12cd34ef'), 0),
     ('T5 120 KB of "<< |" on one line, then a send on the next, blocks in time (main: quadratic heredoc-pipe search)',
      lambda: timed('<< |' * 30000 + ' x\n' + MSG + '"ab12cd34ef"'), 2),
+    # Viktor 50075 R1: a slash NAME's path run reads back over every earlier NAME of the same word (quadratic on the
+    # first linear head 69429a07: 300 KB did not end in 30 s)
+    ('T6 300 KB of agent-msg.sh/ chained in one word, then a card PUT with an invented hex, blocks in time',
+     lambda: timed("echo 'x " + 'agent-msg.sh/' * (300000 // 13) + "' ; " + CARD_PUT + ' ab12cd34ef"}\''), 2),
+    ('T6b 300 KB of kernel-msg.sh/ chained in one word, then a send with an invented hex, blocks in time',
+     lambda: timed("echo 'x " + 'kernel-msg.sh/' * (300000 // 14) + "' ; " + MSG + '"ab12cd34ef"'), 2),
     # the command positions the backward match must keep (each also as main's left-to-right search said)
     ('P1 keyword start: then <script>', lambda: run('if true; then bash scripts/agent-msg.sh k v "ab12cd34ef"; fi'), 2),
     ('P2 assignments, a duration and options before the script',
@@ -399,6 +405,15 @@ CASES += [
         run('true;cd sub15 && ' + MSG + '- < m15.txt'))[-1], 2),
     ('P16 a << AFTER the | into a shell on the same line does not make the shell read the heredoc (as main)',
      lambda: run("echo x | bash -c 'cat' <<'X'\n" + MSG + '"fej ab12cd34ef"\nX'), 0),
+    # Viktor 50075 R1 fix (memo of the slash NAME): the skip must not lose a send main finds (round-2 mutation holes)
+    ('P17 a slash NAME after a non-slash NAME in the same word is still read (as main)',
+     lambda: run('cd x; xagent-msg.sh/agent-msg.sh k v "ab12cd34ef"'), 2),
+    ('P18 a { between two slash NAMEs starts a new path: the second is read (as main)',
+     lambda: run('echo a/agent-msg.sh{b/agent-msg.sh k v "ab12cd34ef"'), 2),
+    ('P19 a ; between two slash NAMEs starts a new path: the second is read (as main)',
+     lambda: run('echo a/agent-msg.sh;b/agent-msg.sh k v "ab12cd34ef"'), 2),
+    ('P20 a { glued before a path is a start char, not part of the path (as main)',
+     lambda: run('echo x{a/agent-msg.sh k v "ab12cd34ef"'), 2),
 ]
 
 
