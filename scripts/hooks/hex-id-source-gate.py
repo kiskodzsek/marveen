@@ -47,11 +47,31 @@ import sys
 
 # The script is a send only in command position (segment start, after VAR=x, after a shell keyword such as then/do,
 # or the argument of a runner such as bash, env, nohup, timeout, nice), so a 'grep -n <hex> scripts/agent-msg.sh' is
-# not one.
-SEND_SCRIPT_RX = re.compile(r'(?:^|[;&|\n(`{]|(?<![\w.-])(?:bash|sh|zsh|exec|env|nohup|command|xargs|timeout|time'
-                            r'|nice|caffeinate|stdbuf|then|do|else|elif|if|while|until)\s)'
-                            r'\s*(?:(?:-[\w-]+|\w+=\S*|\d+[smh]?)\s+)*["\']?(?:[^\s;&|()`\'"]*/)?'
-                            r'(agent-msg|kernel-msg|msg-close|card-comment|send-stamped|send-and-close)\.sh\b')
+# not one. Read left to right that is
+#   (?:^|[;&|\n(`{]|(?<![\w.-])KEYWORD\s)\s*(?:(?:-[\w-]+|\w+=\S*|\d+[smh]?)\s+)*["\']?(?:[^\s;&|()`\'"]*/)?NAME\.sh\b
+# but searched that way it is quadratic (card 3b05ae69, 2026-11-22): every newline, '(', '{' or backtick is a start,
+# and from each one \s*, \w+=\S* or the path run reads to the end of the text (20 KB of blank lines in a card PUT:
+# 11 s, past the hook's 10 s timeout, and a timed-out hook does not block). So the NAME is found first (linear), and
+# from each NAME the same pattern is matched right to left on the reversed command (SEND_PREFIX_REV_RX: every piece
+# reversed, '^' -> \Z, the lookbehind -> a lookahead). A backward read stops at the first word that is not an
+# option, an assignment or a duration, so it never passes the previous plain NAME: the reads are disjoint.
+_SEND_KEYWORDS = ('bash', 'sh', 'zsh', 'exec', 'env', 'nohup', 'command', 'xargs', 'timeout', 'time', 'nice',
+                  'caffeinate', 'stdbuf', 'then', 'do', 'else', 'elif', 'if', 'while', 'until')
+SEND_NAME_RX = re.compile(r'(?:agent-msg|kernel-msg|msg-close|card-comment|send-stamped|send-and-close)\.sh\b')
+SEND_PREFIX_REV_RX = re.compile(r'(?:/[^\s;&|()`\'"]*)?["\']?(?:\s+(?:[\w-]+-|\S*=\w+|[smh]?\d+))*\s*'
+                                r'(?:\Z|[;&|\n(`{]|\s(?:' + '|'.join(k[::-1] for k in _SEND_KEYWORDS) +
+                                r')(?![\w.-]))')
+
+
+def send_script_in(cmd):
+    """True when a send script stands in command position (the left-to-right pattern above, matched backwards)."""
+    rev = None
+    for m in SEND_NAME_RX.finditer(cmd):
+        if rev is None:
+            rev = cmd[::-1]
+        if SEND_PREFIX_REV_RX.match(rev, len(cmd) - m.start()):
+            return True
+    return False
 API_RX = re.compile(r'/api/(messages|kanban)\b')
 API_WRITE_RX = re.compile(r'-X\s*(POST|PUT|PATCH)\b|--request\s*(POST|PUT|PATCH)\b|--data(-binary|-raw|-urlencode)?\b'
                           r'|--json\b|--form\b|(?<!\S)-[dFT]|--upload-file\b')
@@ -63,15 +83,28 @@ HEADER_ARG_RX = re.compile(r'(?<!\S)(?:-H|--header)(?:\s*|=)(?:"[^"]*"|\'[^\']*\
 PAYLOAD_RX = re.compile(r'(?:(?:(?<![<0-9(])|(?<=(?<!\S)0))<(?![<(&])|@)\s*["\']?([^\s;|&<>()\'"`]+)')
 WORD = r'(?:"[^"\s$`]+"|\'[^\'\s]+\'|[^\s;|&<>()\'"`]+)'
 UPLOAD_RX = re.compile(r'(?<!\S)(?:-T|--upload-file)(?:\s+|=)?' + WORD)
-CD_RX = re.compile(r'(?:^|[;&|\n({]|\bthen|\bdo)\s*cd\s+(' + WORD + ')')
+# A cd in command position: (?:^|[;&|\n({]|\bthen|\bdo)\s*cd\s+(WORD), left to right. Searched that way every
+# newline is a start and \s* reads the whole run of them (card 3b05ae69: the second quadratic part of a 120 KB
+# blank-line card PUT), so cd_words() finds each 'cd' + whitespace first and matches the start backwards
+# (CD_PREFIX_REV_RX on the reversed text). A start inside the previous match does not count, as with finditer; the
+# \s*? is lazy so the NEAREST start is found ('x{ \n cd d': the '{' may end the previous word, the '\n' still starts).
+CD_AT_RX = re.compile(r'cd\s+(' + WORD + ')')
+CD_PREFIX_REV_RX = re.compile(r'\s*?(?:\Z|[;&|\n({]|neht(?!\w)|od(?!\w))')
+CD_CAND_RX = re.compile(r'(?=cd\s)')
 SUBST_CAT_RX = re.compile(r'(?:\$\(|`)\s*cat((?:\s+' + WORD + r')+)\s*(?:\)|`)')
 CAT_RX = re.compile(r'(?<![\w.-])cat((?:\s+' + WORD + ')+)')
 WRAPPER_ARGS_RX = re.compile(r'(?:send-stamped|send-and-close)\.sh((?:\s+' + WORD + ')+)')
 SECRET_PATH_RX = re.compile(r'token|secret|credential|passw|\.env\b|\.pem\b|\.key\b|id_rsa|id_ed25519', re.I)
 SCRIPT_EXT_RX = re.compile(r'\.(sh|bash|zsh|py|mjs|cjs|js|ts)$')
 GATE_TAG = 'HEX-FORRAS-KAPU'
-SHELL_HEREDOC_RX = re.compile(r'(?<![\w.-])(?:bash|sh|zsh|dash|ksh)(?:\s+-[\w-]+)*\s*<<'
-                              r'|<<.*\|\s*(?:\S*/)?(?:bash|sh|zsh|dash|ksh)\b')
+# A shell reads the heredoc: (?<![\w.-])SHELL(?:\s+-[\w-]+)*\s*<<  or  <<.*\|\s*(?:\S*/)?SHELL\b. The second form,
+# searched as a regex, is quadratic (card 3b05ae69: every '<<' reads to the line end and back for a '|'; '<< |' x
+# 8000 took 1 s), so shell_reads_heredoc() checks each '|' instead: a '<<' earlier on its line, and SHELL at the start
+# of the word after it (after any whitespace) or right after a '/' inside that word.
+SHELL_HEREDOC_RX = re.compile(r'(?<![\w.-])(?:bash|sh|zsh|dash|ksh)(?:\s+-[\w-]+)*\s*<<')
+SHELL_AT_RX = re.compile(r'(?:bash|sh|zsh|dash|ksh)\b')
+SLASH_SHELL_RX = re.compile(r'/(?=(?:bash|sh|zsh|dash|ksh)\b)')
+WS_RX = re.compile(r'\s*')
 MAX_PAYLOAD = 1 << 20
 FAILOPEN_LOG = os.environ.get('HEX_GATE_FAILOPEN_LOG', os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..', 'store', 'hex-gate-failopen.log')))
@@ -90,12 +123,43 @@ def note_failopen(reason):
         pass
 
 
+def shell_reads_heredoc(cmd):
+    """SHELL_HEREDOC_RX, or a '|' into a shell on a line that has a '<<' before it (the comment above), linear."""
+    if SHELL_HEREDOC_RX.search(cmd):
+        return True
+    if '<<' not in cmd or '|' not in cmd:
+        return False
+    import bisect
+    newlines = [m.start() for m in re.finditer(r'\n', cmd)]
+    heredocs = [m.start() for m in re.finditer(r'<<', cmd)]
+    slash_shells = [m.start() + 1 for m in SLASH_SHELL_RX.finditer(cmd)]
+    runs = [(m.start(), m.end()) for m in re.finditer(r'\S+', cmd)]
+    run_starts = [r[0] for r in runs]
+    for p in re.finditer(r'\|', cmd):
+        b = p.start()
+        k = bisect.bisect_left(newlines, b)
+        line_start = newlines[k - 1] + 1 if k else 0
+        h = bisect.bisect_left(heredocs, line_start)
+        if h == len(heredocs) or heredocs[h] + 2 > b:
+            continue
+        s = WS_RX.match(cmd, b + 1).end()
+        if s >= len(cmd):
+            continue
+        if SHELL_AT_RX.match(cmd, s):
+            return True
+        run_end = runs[bisect.bisect_right(run_starts, s) - 1][1]
+        j = bisect.bisect_right(slash_shells, s)
+        if j < len(slash_shells) and slash_shells[j] < run_end:
+            return True
+    return False
+
+
 def is_send(cmd):
     # a heredoc body is message text or a script's input, not a command (a gate probe that embeds a send line),
     # unless a shell runs it (bash <<X, sh -s <<X, cat <<X | bash): then the body is the command (Viktor, P2)
-    if not SHELL_HEREDOC_RX.search(cmd):
+    if not shell_reads_heredoc(cmd):
         cmd = strip_heredocs(cmd)
-    if SEND_SCRIPT_RX.search(cmd):
+    if send_script_in(cmd):
         return True
     return bool(API_RX.search(cmd) and API_WRITE_RX.search(cmd))
 
@@ -152,6 +216,26 @@ def payload_files(text, body=''):
     return [unquote(w) for w in out]
 
 
+def cd_words(text):
+    """The directory word of every cd in command position, in order, the matches not overlapping (what
+    re.finditer of the left-to-right pattern above gives), in linear time."""
+    out, last, rev, n = [], 0, None, len(text)
+    for c in CD_CAND_RX.finditer(text):
+        i = c.start()
+        if i < last:
+            continue
+        if rev is None:
+            rev = text[::-1]
+        p = CD_PREFIX_REV_RX.match(rev, n - i)
+        if not p or n - p.end() < last:
+            continue
+        m = CD_AT_RX.match(text, i)
+        if m:
+            out.append(m.group(1))
+            last = m.end()
+    return out
+
+
 def payload_text(cmd, cwd):
     """A relative file is looked up in cwd and in every directory the command cd's into (cd sub && send < f): reading
     one file too many can only block, never let a hex through (Viktor, hx4 G04)."""
@@ -159,7 +243,7 @@ def payload_text(cmd, cwd):
     stripped, body = split_heredocs(cmd)
     text = HEADER_ARG_RX.sub(' ', stripped)
     base = cwd or '/'
-    bases = [base] + [os.path.join(base, os.path.expanduser(unquote(m.group(1)))) for m in CD_RX.finditer(text)]
+    bases = [base] + [os.path.join(base, os.path.expanduser(unquote(w))) for w in cd_words(text)]
     for w in payload_files(text, body):
         if not w or w == '-' or w.startswith('$') or SECRET_PATH_RX.search(w) or SCRIPT_EXT_RX.search(w):
             continue
