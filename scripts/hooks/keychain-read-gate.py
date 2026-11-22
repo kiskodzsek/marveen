@@ -5576,7 +5576,11 @@ def lexer_data_spans(cmd, cwd, lx):
             if text.startswith('cd'):
                 target = text.split()[1]
                 back = None if back is None or here is None else back | here
-                here = {target} if target.startswith('/') else None
+                # r2 (Viktor 50201 R1): bash's and zsh's cd is logical, a `..` steps back past a symlink (E/L/.. is E,
+                # not L's target's parent): the target as written (normpath) and the physical one (realpath in
+                # _agent_msg_is_ours) both, and the recipient must be ours from each (as cd_bases, deede5e4 r1 R1)
+                here = (None if not target.startswith('/') else
+                        {os.path.normpath(target), target} if '..' in target.split('/') else {target})
             continue
         if ONE_LETTER_ASSIGN_RX.match(text) and len(shell_lex.words(cmd, lx, seg)) == 1:
             continue

@@ -1284,6 +1284,9 @@ def script_cases():
         with open(os.path.join(d, 'phys', 'twin.py'), 'w', encoding='utf-8') as f:
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         os.symlink(os.path.join(d, 'phys', 'inner'), os.path.join(d, 'lnk'))
+        # card c6c67dde r2 (Viktor 50201 R1): amlnk -> this repo's scripts/; logically amlnk/.. is d (whose
+        # scripts/agent-msg.sh is the look-alike), physically it is this repo's root
+        os.symlink(os.path.join(AM_ROOT, 'scripts'), os.path.join(d, 'amlnk'))
         sub = os.path.join(d, 'sub')
         os.makedirs(sub)
         with open(os.path.join(sub, 'deep.py'), 'w', encoding='utf-8') as f:
@@ -2121,6 +2124,11 @@ def script_cases():
              AM_ROOT),
             ("cd - && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
             ("cd scripts/.. && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            # card c6c67dde r2 (Viktor 50201 R1, bash and zsh ran d's agent-msg.sh): cd is logical, a .. past a symlink
+            # steps back to where the link stands, not to its target's parent
+            ("cd " + d + "/amlnk/.. && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            ("cd " + d + "/amlnk/..; bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            ("cd " + d + "/amlnk/..\nbash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
             ("bash ~/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),  # ~ is not resolved: kept
             # no VAR=x prefix: PATH=, GIT_EXEC_PATH=, BASH_ENV= can hand the body to a program of the caller's choosing
             ("PATH=" + d + ":/usr/bin bash " + AM + " dave v - <<'M'\n./measure.py\nM", d),
@@ -3268,6 +3276,9 @@ def script_cases():
             ("cd /tmp && cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM",
              d),
             ("cd " + AM_ROOT + "\ntrue\nbash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            # card c6c67dde r2: a .. with no symlink before it names the same directory either way
+            ("cd " + AM_ROOT + "/scripts/.. && bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM",
+             d),
             ("git commit -F - <<'MSG'   \n./measure.py\nMSG", d),  # trailing blanks after the operator
             ("cd " + d + " && bash " + AM + " dave viktor - <<'M'\n./measure.py\nM", d),  # absolute: any cd
             ("curl -s -X POST localhost:3420/api/messages --data-binary @- <<'J'\n./measure.py\nJ", d),
