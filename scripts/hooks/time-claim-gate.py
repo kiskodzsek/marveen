@@ -52,6 +52,11 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     redir-prefix (2>/dev/null before curl), hdr-charset-semicolon (a ; inside a quoted header), data-multiline-url-last
     (a multi-line -d with the kanban URL after it), env-apiword-first and hdr-apiword-first (/api/messages or
     /api/memories in an env value or a header before the kanban URL). The same on 201485cc; pinned by a test row.
+    Rule 7 (the closing stamp, Viktor 49927, his probe_ts7 labels): py-var (the comment text in a Python variable,
+    the dict built elsewhere) and jq-arg (jq --arg) are not read, the value is not at a content / comment key;
+    hu-dot-date ("2026.11.22. 13:30") and mmdd-short ("(11-22 13:30)") are other date forms, not judged; a named
+    time zone other than Z, UTC, GMT, CET, CEST is not judged; deadline-word: a stamp right after határidő /
+    deadline / until / by passes on purpose (a deadline, as in rule 2; none in the 12866-comment replay).
   - Bash that writes a shared/*.md through the shell (Radar 39251: `cat >> .../shared/hibanaplo.md <<'EOF'`
     wrote a future time unseen): a `>` / `>>` / `>|` redirect or a `tee [-a]` whose target resolves to a
     shared/*.md. The command text (the heredoc body) is judged; lines already in a target file pass, like
@@ -97,6 +102,18 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     (src/web/now-token.ts), or run `date`.
   - Rule 6, the daily log only (retro R1): the heading time at the start of the "content" value ("## HH:MM") must
     be the {{NOW}} token, not a typed time of today (past or future); a heading that names another day passes.
+  - Rule 7, card comments only (Dave 49852, card fec4c8c8): the comment's own CLOSING stamp, "(YYYY-MM-DD HH:MM)"
+    with today's date (seconds and a fraction optional, a T allowed; a time zone Z, +-HH:MM, UTC, GMT, CET or CEST
+    is turned into local time) as the very END of the value of a "content" / "comment" key (JSON, a Python dict,
+    escaped in a double-quoted -d, or content= / comment= as dict(...) writes it; only that value, Viktor 49927 T1:
+    a title, description or author ending in a stamp passes), after which only whitespace, dots, markdown marks
+    (* ` _ ~) or a stray backslash follow, must not be later than the current minute (slack 0). A deadline
+    ("határidő (... 18:00)", the rule 2 words right before it) passes. Dave's
+    move comment written at 22:04 ended "(2026-11-21 22:06)" and passed: rule 2 wants a marker word, rule 4 reads
+    only the opening stamp. Measured read-only on the kanban comments of the 14 days before 2026-11-21 22:12
+    (12816): 36 end in a parenthesised stamp, 7 of them later than their own created_at; the 4 full date+time ones
+    are all typed-ahead stamps (3 move comments +10 minutes, Dave's +2), and 2 of the 3 time-only ones are plans
+    ("partner-levelek (14:00)."), so a time with no date is not judged. Another day's date passes.
   - Telegram reply / edit_message (Klodel 48360, hibanapló 2026-11-20 02:20): the "text" field, ONLY rule 1
     (placeholder). A placeholder time went out to the group (TG 6577) because the main agent's matcher named only
     Write|Edit|MultiEdit|Bash. Rule 2 is off here for the reason it is off on the message path: a future time in a
@@ -129,6 +146,7 @@ BLOCKS (exit 2, reason on stderr):
   4. A card comment's opening time later than the current minute (SCOPE, rule 4).
   5. A measured time 1-15 minutes ahead on the send path (SCOPE, rule 5).
   6. A typed daily-log heading time of today instead of {{NOW}} (SCOPE, rule 6).
+  7. A card comment's closing "(today HH:MM)" stamp later than the current minute (SCOPE, rule 7).
 Known gaps: a time written after midnight about the previous evening without a date on the line is read as
 future (the block text says to add the date); a shell write whose target is a variable ("> $F"), a relative
 path after a relative cd, or a file written by an interpreter (python3 open(..., 'a')) is not seen; only the
@@ -147,6 +165,7 @@ TEST SEAM: TIME_CLAIM_GATE_NOW="HH:MM" replaces the wall-clock hour and minute (
 an unparseable value is ignored. Nothing else is read from the environment.
 Tests: python3 -I scripts/hooks/time-claim-gate_test.py
 """
+import calendar
 import datetime
 import itertools
 import json
@@ -206,6 +225,27 @@ def _heads(rx, rx_py, text):
     return itertools.chain(rx.finditer(text), rx_py.finditer(text))
 # Right after the time: a suffix ("23:50-es", "08:00-kor") or a plan word; the time is not the comment's stamp.
 COMMENT_HEAD_NOT_STAMP_RX = re.compile(r'-[^\W\d_]|[ \t]+(?:után|előtt|terv\w*)(?!\w)', re.I)
+# Rule 7 (Dave 49852, card fec4c8c8): the comment's own closing stamp. Only the value of a "content" / "comment" key
+# is read (Viktor 49927 T1: a title, description or author value ending in a stamp is not the comment): JSON or a
+# Python dict key with a "..." or '...' value, the key and value escaped inside a double-quoted -d, or a content= /
+# comment= keyword (dict(...), a kwarg). The value runs to its first unescaped closing quote, one unit per char
+# (linear: no value can overlap the next key's quote).
+_TAIL_KEY = r'(?:(?P<k>["\'])(?:content|comment)(?P=k)\s*:|(?<![\w.$-])(?:content|comment)\s*=)\s*'
+COMMENT_VALUE_RXS = (
+    re.compile(_TAIL_KEY + r'"(?P<v>(?:[^"\\]|\\[\s\S])*)"'),
+    re.compile(_TAIL_KEY + r"'(?P<v>(?:[^'\\]|\\[\s\S])*)'"),
+    re.compile(r'\\"(?:content|comment)\\"\s*:\s*\\"(?P<v>(?:[^"\\]|\\[^"])*)\\"'),
+)
+# The stamp at the very end of the value, once the trailing whitespace, dots, markdown marks and a stray backslash
+# are stripped (_value_end): "(YYYY-MM-DD HH:MM)", seconds and a fraction optional, a T allowed, and a time zone
+# (Viktor 49927 T2: Z, +-HH:MM, or a name; a named zone outside TAIL_TZ_MIN is not judged). Groups 1-5: date, time.
+COMMENT_TAIL_RX = re.compile(
+    r'\((\d{4})-(\d{2})-(\d{2})[ T]([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:[.,]\d{1,6})?)?'
+    r'(?:[ \t]?(?P<tz>Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d|[A-Z]{2,5}))?\)\Z')
+# A value built by concatenation, 'x' + ' (stamp)' (Viktor 49927 py-concat): the last literal of the chain counts.
+CONCAT_RX = re.compile(r'\s*\+\s*(?:"(?P<d>(?:[^"\\]|\\[\s\S])*)"|\'(?P<s>(?:[^\'\\]|\\[\s\S])*)\')')
+TAIL_STRIP = frozenset(' \t\r\n.*`_~ \\')
+TAIL_TZ_MIN = {'Z': 0, 'UTC': 0, 'GMT': 0, 'CET': 60, 'CEST': 120}
 # Rule 5, the send path (retro R1, card 028205dd): an inter-agent message, a close result or a daily-log entry.
 # Not a memory: a memory is not a report to anyone, and its times are mostly plans.
 SEND_PATH_RX = re.compile(r'(?<![\w-])(?:[a-z]+-msg|msg-close)\.sh(?![\w-])|/api/(?:messages|daily-log)')
@@ -421,14 +461,74 @@ def comment_head_findings(text, now):
     return out
 
 
+def _value_end(v):
+    """The index after the last char of the value that is not trailing whitespace, a dot, a markdown mark or a
+    stray backslash (one pass from the end: linear, no copy)."""
+    i = len(v)
+    while i and v[i - 1] in TAIL_STRIP:
+        i -= 1
+    return i
+
+
+def _tail_local(m):
+    """The stamp as a local naive datetime, or None (a bad date, an unknown named zone)."""
+    try:
+        stamp = datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5)))
+    except ValueError:
+        return None
+    tz = m.group('tz')
+    if not tz:
+        return stamp
+    if tz in TAIL_TZ_MIN:
+        off = TAIL_TZ_MIN[tz]
+    elif tz[0] in '+-':
+        digits = tz[1:].replace(':', '')
+        off = (int(digits[:2]) * 60 + int(digits[2:])) * (1 if tz[0] == '+' else -1)
+    else:
+        return None
+    return datetime.datetime.fromtimestamp(calendar.timegm(stamp.timetuple()) - off * 60)
+
+
+def comment_tail_findings(text, now):
+    """[(line_no, token, 'card-tail')] for a card comment's closing "(today HH:MM)" stamp later than the current
+    minute (rule 7), read from the content / comment value only. Another day's date passes, past or future, and so
+    does a deadline ("határidő (... 18:00)", as rule 2)."""
+    out = []
+    limit = now.hour * 60 + now.minute + SLACK_MIN
+    for rx in COMMENT_VALUE_RXS:
+        for mv in rx.finditer(text):
+            if len(out) >= MAX_TIMES_PER_LINE:
+                return out
+            v, vstart, pos = mv.group('v'), mv.start('v'), mv.end()
+            while True:  # 'x' + ' (stamp)': the last literal of a concatenation
+                mc = CONCAT_RX.match(text, pos)
+                if not mc:
+                    break
+                grp = 'd' if mc.group('d') is not None else 's'
+                v, vstart, pos = mc.group(grp), mc.start(grp), mc.end()
+            end = _value_end(v)
+            tail = v[max(0, end - 120):end]
+            m = COMMENT_TAIL_RX.search(tail)
+            if not m or DEADLINE_BEFORE_RX.search(tail[:m.start()]):
+                continue
+            local = _tail_local(m)
+            if local is None or local.date() != now.date():
+                continue
+            if local.hour * 60 + local.minute > limit:
+                out.append((text.count('\n', 0, vstart + end) + 1, f'{local:%H:%M}', 'card-tail'))
+    return out
+
+
 JSON_U_RX = re.compile(r'\\u([0-9a-fA-F]{4})')
 
 
 def _json_text(text):
-    """A JSON payload as the reader will see it (retro R1): a literal \\n or \\t is a line break or a tab, and a
-    \\uXXXX escape is its character -- json.dumps writes "M\\u00e9rve", and "x\\nlefutott" hid the marker behind the
-    letter n. A \\" stays as it is: the heading and comment-stamp patterns read the JSON string's end from it."""
-    return JSON_U_RX.sub(lambda m: chr(int(m.group(1), 16)), text.replace('\\n', '\n').replace('\\t', '\t'))
+    """A JSON payload as the reader will see it (retro R1): a literal \\n, \\t or \\r (Viktor 49927 T3) is a line
+    break, a tab or a carriage return, and a \\uXXXX escape is its character -- json.dumps writes "M\\u00e9rve", and
+    "x\\nlefutott" hid the marker behind the letter n. A \\" stays as it is: the heading and comment-stamp patterns
+    read the JSON string's end from it."""
+    text = text.replace('\\n', '\n').replace('\\t', '\t').replace('\\r', '\r')
+    return JSON_U_RX.sub(lambda m: chr(int(m.group(1), 16)), text)
 
 
 PUT_RX = re.compile(r'(?:(?<![\w-])-[A-Za-z]*X|--request)(?:[ \t]|\\\r?\n)*[\'"]?PUT\b'
@@ -580,7 +680,10 @@ def verdict(payload):
             hits += [(label, n, tok, kind) for n, tok, kind in typed_heading_findings(text, now) if (n, tok) not in seen]
         if card:
             seen = {(n, tok) for n, tok, _ in found}
-            hits += [(label, n, tok, kind) for n, tok, kind in comment_head_findings(text, now) if (n, tok) not in seen]
+            head = comment_head_findings(text, now)
+            hits += [(label, n, tok, kind) for n, tok, kind in head if (n, tok) not in seen]
+            seen |= {(n, tok) for n, tok, _ in head}
+            hits += [(label, n, tok, kind) for n, tok, kind in comment_tail_findings(text, now) if (n, tok) not in seen]
     if not hits:
         return None
     parts = []
@@ -588,6 +691,8 @@ def verdict(payload):
         what = ('helykitöltő idő / placeholder time' if kind == 'placeholder'
                 else f'jövőbeli naplófejléc / future daily-log heading (now {now:%H:%M})' if kind == 'heading'
                 else f'jövőbeli komment-időbélyeg / future comment stamp (now {now:%H:%M})' if kind == 'card-head'
+                else f'jövőbeli záró komment-bélyeg / future closing comment stamp (now {now:%H:%M})'
+                if kind == 'card-tail'
                 else 'kézzel írt naplófejléc-idő / typed daily-log heading time' if kind == 'heading-typed'
                 else f'jövőbeli mért idő / future measured time (now {now:%H:%M})')
         parts.append(f'{label}line {n}: "{tok}" = {what}')
