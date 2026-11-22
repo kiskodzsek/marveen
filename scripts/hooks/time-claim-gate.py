@@ -230,7 +230,10 @@ COMMENT_HEAD_NOT_STAMP_RX = re.compile(r'-[^\W\d_]|[ \t]+(?:után|előtt|terv\w*
 # Python dict key with a "..." or '...' value, the key and value escaped inside a double-quoted -d, or a content= /
 # comment= keyword (dict(...), a kwarg). The value runs to its first unescaped closing quote, one unit per char
 # (linear: no value can overlap the next key's quote).
-_TAIL_KEY = r'(?:(?P<k>["\'])(?:content|comment)(?P=k)\s*:|(?<![\w.$-])(?:content|comment)\s*=)\s*'
+# Viktor 49939 item 2: a Python subscript (body['content'] = ...), a bare key (a JS object or jq, content: "..."),
+# and an f-, r-, b- or u-prefixed Python literal (f'{n}/28 ...').
+_TAIL_KEY = (r'(?:(?P<k>["\'])(?:content|comment)(?P=k)\s*:|\[(?P<k2>["\'])(?:content|comment)(?P=k2)\]\s*='
+             r'|(?<![\w.$-])(?:content|comment)\s*[=:])\s*(?:[rRbBfFuU]{1,2})?')
 COMMENT_VALUE_RXS = (
     re.compile(_TAIL_KEY + r'"(?P<v>(?:[^"\\]|\\[\s\S])*)"'),
     re.compile(_TAIL_KEY + r"'(?P<v>(?:[^'\\]|\\[\s\S])*)'"),

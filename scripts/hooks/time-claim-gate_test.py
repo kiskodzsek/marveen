@@ -252,6 +252,34 @@ def closing_stamp_after_an_escaped_quote_in_a_double_quoted_d(root):
 
 
 @case
+def closing_stamp_in_a_subscript_a_bare_key_or_a_prefixed_literal(root):
+    # Viktor 49939 item 2: py-fstring, py-subscript, js-bare-key, jq-bare-key (BLOCK); the same shapes on a title
+    # key, and a longer word ending in "content", pass.
+    h = root['hook']
+    stamp = _tail('').strip()
+    py = "python3 - <<'P'\nimport json, urllib.request\n{}\nurllib.request.urlopen(urllib.request.Request(" \
+         "'http://localhost:3420/api/kanban/abc/comments', json.dumps(body).encode()))\nP"
+    node = ("node -e 'fetch(\"http://localhost:3420/api/kanban/abc/comments\",{{method:\"POST\","
+            "body:JSON.stringify({{author:\"kernel\",{}:\"27/28 kész " + stamp + "\"}})}})'")
+    jq = ("jq -n '{{author:\"kernel\",{}:\"27/28 kész " + stamp + "\"}}' | curl -s -X POST "
+          "http://localhost:3420/api/kanban/abc/comments --data-binary @-")
+    block = [
+        py.format("n = 27\nbody = {'author': 'kernel', 'content': f'{n}/28 kész " + stamp + "'}"),
+        py.format("body = {'author': 'kernel'}\nbody['content'] = '27/28 kész " + stamp + "'"),
+        py.format("body = {}\nbody[\"comment\"] = rb'27/28 kész " + stamp + "'"),
+        node.format('content'),
+        jq.format('content'),
+    ]
+    allow = [
+        py.format("body = {'content': '27/28 kész'}\nbody['title'] = 'Teszt 2 " + stamp + "'"),
+        node.format('title'),
+        jq.format('discontent'),
+    ]
+    ok = all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 2 for c in block)
+    return ok and all(run(h, 'Bash', {'command': c}, now='22:04')[0] == 0 for c in allow)
+
+
+@case
 def allow_closing_stamp_outside_the_comment_value(root):
     # Viktor 49927 T1 (a regression of round 1): only the content / comment value is read; a title, description or
     # author ending in a stamp passes (his A-put-title, A-put-title-first, A-comment-author), and so does a
