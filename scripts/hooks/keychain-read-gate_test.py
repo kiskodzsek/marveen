@@ -1837,6 +1837,52 @@ def script_cases():
             ('bash dump.sh', d),
             ('sh ./assign.sh', d),
             ('./dump.sh', d),
+            # card e3d2fd6e (main too): a backslash in the word or in its path start; bash and zsh took it off and ran
+            # dump.sh (bin/shell-truth.py, 11-21); in a substitution, a backtick and a { } group too
+            ('./dump\\.sh', d),
+            ('./dump\\.sh x', d),
+            ('\\./dump.sh', d),
+            ('.\\/dump.sh', d),
+            ('\\.\\/dump.sh', d),
+            ('true; \\./dump.sh', d),
+            ('echo $(./dump\\.sh)', d),
+            ('echo "$(./dump\\.sh)"', d),
+            ('echo `./dump\\.sh`', d),
+            ('x=`./dump\\.sh`', d),
+            ('{ ./dump\\.sh; }', d),
+            ('\\' + os.path.join(d, 'dump.sh'), None),  # `\/abs/x.sh` and `sub\/y.sh` ran too (work/e3d2fd6e/truth2.py)
+            ('sub\\/deep.py', d),
+            ('echo $(sub\\/deep.py)', d),
+            ('cd sub && \\../dump.sh', d),  # `\../` and `.\./` ran ../x.sh (truth2.py)
+            ('cd sub && .\\./dump.sh', d),
+            # card e3d2fd6e r3: the word in a shell's payload or in a heredoc a shell reads is code
+            ("bash -c './dump\\.sh'", d),
+            ("eval './dump\\.sh'", d),
+            ('bash -c "echo $(./dump\\.sh)"', d),
+            ("bash <<'EOF'\n./dump\\.sh\nEOF", d),
+            ("bash <<'EOF'\nx=1; ./dump\\.sh\nEOF", d),
+            ('bash <<EOF\n./dump\\.sh\nEOF', d),
+            ('cat > /dev/null <<EOF\n$(./dump\\.sh)\nEOF', d),  # an unquoted body: the shell runs its $( )
+            # r5 (Viktor 49996 R2): an unquoted-delimiter data body with a `$(` or a backtick anywhere keeps every
+            # backslash word of it (fail-closed: the lexer does not tell the substitution's inside apart)
+            ('cat > notes.md <<X\n./dump\\.sh\n$(date)\nX', d),
+            ('cat > notes.md <<X\n`date`\n./dump\\.sh\nX', d),
+            ('cat > notes.md <<X\n$(./dump\\.sh)\nX', d),
+            # r6 (rebased onto 0196e1ee): a heredoc 0196e1ee's _shell_reads_heredoc gives to a shell keeps the word
+            # (source and . /dev/stdin, a pipeline left open after the body; main does not read the word at all)
+            ('source /dev/stdin <<X\n./dump\\.sh\nX', d),
+            (". /dev/stdin <<'X'\n./dump\\.sh\nX", d),
+            ("cat <<'X' |\n./dump\\.sh\nX\nbash", d),
+            # a text the lexer does not fully read (a heredoc in a substitution) keeps the word (fail-closed)
+            ("echo $(cat <<'E'\nx\nE\n); ./dump\\.sh", d),
+            ("echo `cat <<'E'\nx\nE\n`; ./dump\\.sh", d),
+            # a quote right after the word makes it one DIRECT_WORD_RX took before e3d2fd6e: read as on main
+            ("git commit --dry-run -m 'x; ./dump\\.sh'", d),
+            # past _ESC_MAX_COPIES copies the command is not searched: the word is kept (fail-closed)
+            ("python3 -c 'print(1)'" + " 'a ))\\/(( )) b'" * 65, d),
+            # a copy of the word at a code position of the command keeps it, the second copy too
+            ("python3 -c 'print(1)' 'x; ./dump\\.sh ))\\/(( ))'; ./dump\\.sh", d),
+            ("python3 -c 'print(1)' 'a ))\\/(( )) b'\n./dump\\.sh", d),
             ('sub/deep.py', d),
             (os.path.join(d, 'sub', 'deep.py') + ' --x', None),
             ('python3 export.py', d),
@@ -3043,6 +3089,39 @@ def script_cases():
             # data file too and blocks there; accepted, conservative)
             ('python3 "st"at.py', d),
             ("python3 $'\\x73'tat.py", d),
+            # card e3d2fd6e: a backslash word that names no keychain-reading file, and one in prose
+            ('./ok\\.js', d),
+            ('\\./ok.js', d),
+            ('grep -n "./dump\\.sh" /dev/null; true', d),
+            # card e3d2fd6e r3: a backslash word in a quote or in a heredoc no shell reads is data (the fleet replay
+            # on 99ee40e4: a JS regex a python heredoc writes, a sed script; a zsh-group reading took it for a script)
+            ("python3 - <<'PY'\nif (a && /\\.(?:py|sh)$/.test(x)) return\nPY", d),
+            ("python3 - <<'PY'\nconst rx = /expect\\(r\\)\\.(not\\.)?m\\((\\/(?:\\\\.|[^\\/\\n])+\\/[a-z]*)\\)/g\nPY", d),
+            ("sed -n 's/^1\\. x/1. y (# a ${ }\\/$(( ))\\/ z/' /dev/null", d),
+            ("echo 'a; ./dump\\.sh'", d),
+            ('echo "a; ./dump\\.sh"', d),
+            ("printf %s $'a; ./dump\\\\.sh'", d),
+            ('git commit --dry-run -m "x; ./dump\\.sh y"', d),
+            ("git commit --dry-run -m 'x; ./dump\\.sh y'", d),
+            # the r3 replay: a quoted argument after a python -c payload; the lexer view of it does not lex, the
+            # command does, and every copy of the word in it is in a quote
+            ("python3 -I -c 'import sys; print(sys.argv[1])' 's/a ))\\/(( )) b/'", d),
+            ("python3 -c 'print(1)' 'a (# ${ }\\/$(( ))\\/(( )) b), c'", d),
+            ("python3 - <<'PY'\n./dump\\.sh\nPY", d),
+            ("cat > /dev/null <<'EOF'\nx && ./dump\\.sh\nEOF", d),
+            # r5 (Viktor 49996 R2): an unquoted-delimiter heredoc into another program is data too (the shell runs only
+            # its $( ) and backticks; measured: bash does not run ./dump.sh), the second heredoc of a command as well
+            ('cat > notes.md <<X\n./dump\\.sh a\nX', d),
+            ('cat > notes.md <<X\nhello\n.\\/dump.sh\nX', d),
+            ("cat > a.md <<'Y'\nz\nY\ncat > notes.md <<X\n./dump\\.sh\nX", d),
+            ('cat >> notes.md <<X\n${HOME} \\./dump.sh\nX', d),
+            ("cat > notes.md <<'X'\n$(date)\n./dump\\.sh\nX", d),  # a quoted body's $( ) is text
+            # r6: a shell word elsewhere on the heredoc's line is not its reader (0196e1ee L1b): data, as on main
+            ("grep -c sh <<'X'\n./dump\\.sh\nX", d),
+            ("cat > n.md <<'X'; echo hi | bash\n./dump\\.sh\nX", d),
+            ("echo hi | bash; cat > n.md <<'X'\n./dump\\.sh\nX", d),
+            ("cat > n.md <<'A'; bash <<'B'\n./dump\\.sh\nA\nok\nB", d),
+            ('grep -c sh <<X\n./dump\\.sh\nX', d),
             ('python3 "no"tes.py stat.py', d),
             ('python3 -m "notes"', d),
             ('python3 -Inotes', d),
@@ -4382,6 +4461,25 @@ def main():
                              f'{cmd[:40]!r}...')
         except subprocess.TimeoutExpired:
             fails.append(f'hidden-name timing case timed out (5 s): {cmd[:40]!r}...')
+    # card e3d2fd6e r5 (Viktor 49996 R1): a backslash word in a data heredoc is judged against one reading of the
+    # text, not a new one per word: 3 000 line-start `\\./dirN/x.sh` lines (~300 KB) ran into the 6 s watchdog on
+    # 425f2206 (main 0.59 s); under 2 s each, allowed
+    pad = ' ' + 'p' * 90
+    esc_timed = ["cat <<'X'\n" + ''.join('\\./dir%d/x.sh%s\n' % (i, pad) for i in range(3000)) + 'X',
+                 "python3 - <<'PY'\n" + ''.join('\\./dir%d/x.sh%s\n' % (i, pad) for i in range(3000)) + 'PY',
+                 'cat > n.md <<X\n' + ''.join('./d%d\\.sh%s\n' % (i, pad) for i in range(3000)) + 'X']
+    for cmd in esc_timed:
+        try:
+            t = _t.monotonic()
+            p = subprocess.run([sys.executable, '-I', HOOK], capture_output=True, text=True, timeout=5,
+                               input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}),
+                               env={'PATH': '/usr/bin:/bin'})
+            took = _t.monotonic() - t
+            if len(cmd) < 290000 or p.returncode != 0 or took > 2:
+                fails.append(f'backslash-heredoc timing case: want 0 under 2 s at 290 KB+, got {p.returncode} in '
+                             f'{took:.1f} s at {len(cmd)} chars: {cmd[:40]!r}...')
+        except subprocess.TimeoutExpired:
+            fails.append(f'backslash-heredoc timing case timed out (5 s): {cmd[:40]!r}...')
     # card d58d5c30: the made-subcommand rule is linear: the loop table is one pass (a call per match read the text
     # again each time), in process (the hook blocks such texts early on MAX_ARGS): 200-740 KB, 2 s cap each
     # (measured 11-20: 0.07 s at most)
