@@ -60,7 +60,9 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     12866-comment replay). Viktor 49939: shellvar-other (the text in a shell variable of another name, like py-var)
     is not read; u0022-in-value (a raw " inside a heredoc JSON value) is invalid JSON, the value ends there;
     key-twice-last-clean (an overblock: two content keys in one object, the last one clean) blocks, every value is
-    read, so a second curl in the same command is not skipped.
+    read, so a second curl in the same command is not skipped. Overblocks accepted in Viktor 49952: js-other-object
+    (an object literal with a bare content key that is not the one posted), echo-comma-comment-key (prose
+    ", comment: '...'" in an echo), py-sub-dumped-not-posted (a name json.dumps-ed anywhere counts as posted).
   - Bash that writes a shared/*.md through the shell (Radar 39251: `cat >> .../shared/hibanaplo.md <<'EOF'`
     wrote a future time unseen): a `>` / `>>` / `>|` redirect or a `tee [-a]` whose target resolves to a
     shared/*.md. The command text (the heredoc body) is judged; lines already in a target file pass, like
@@ -282,7 +284,10 @@ _CONCAT_LIT = r'(?:"(?P<{0}>(?:[^"\\]|\\[\s\S])*)"|\'(?P<{1}>(?:[^\'\\]|\\[\s\S]
 CONCAT_RX = re.compile(r'\s*\+\s*(?:[A-Za-z_][\w.]*(?:\([^()\'"\n]*\))?\s*\+\s*)*' + _CONCAT_LIT.format('d', 's')
                        + r'|[ \t]+' + _CONCAT_LIT.format('d2', 's2') + r'(?=\s*[,})\]+\'"])')
 # A subscript key counts only when its name is what the command posts (Viktor 49949 ob-other-dict-subscript).
-POSTED_FMT = r'(?:json\.dumps\(\s*|(?<![\w.])(?:json|data)\s*=\s*){}(?!\w)'
+# Collected once per command (Viktor 49952 R2: a re.search per subscript match re-read the whole command, 300 KB of
+# subscripts took 62 s against a 10 s hook timeout); the subscript branch then only checks membership.
+# data=json.dumps(x): the data= branch must not take "json" as the name (it would consume the json.dumps(x) match).
+POSTED_RX = re.compile(r'(?:json\.dumps\(\s*|(?<![\w.])(?:json|data)\s*=\s*(?!json\.dumps\())([A-Za-z_]\w*)(?!\w)')
 # The subscripted name, read back from at most 64 chars before the [ (the key branch is anchored on the [, so the
 # scan does not start a name match at every word).
 SUB_NAME_RX = re.compile(r'(?<![\w.])([A-Za-z_]\w*)\Z')
@@ -544,13 +549,16 @@ def comment_tail_findings(text, now):
     does a deadline ("határidő (... 18:00)", as rule 2)."""
     out = []
     limit = now.hour * 60 + now.minute + SLACK_MIN
+    posted = None  # the posted names, read once on the first subscript
     for rx in COMMENT_VALUE_RXS:
         for mv in rx.finditer(text):
             if len(out) >= MAX_TIMES_PER_LINE:
                 return out
             if mv.groupdict().get('sub'):
                 mn = SUB_NAME_RX.search(text, max(0, mv.start() - 64), mv.start())
-                if not mn or not re.search(POSTED_FMT.format(re.escape(mn.group(1))), text):
+                if posted is None:
+                    posted = {m.group(1) for m in POSTED_RX.finditer(text)}
+                if not mn or mn.group(1) not in posted:
                     continue
             vg = next(g for g in VALUE_GROUPS if mv.groupdict().get(g) is not None)
             v, vstart, pos = mv.group(vg), mv.start(vg), mv.end()

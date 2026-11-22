@@ -400,6 +400,39 @@ def round2_closing_stamp_shapes_that_block(root):
 
 
 @case
+def round3_subscripts_scale_and_data_dumps_counts_as_posted(root):
+    # Viktor 49952 R2: a re.search per subscript match re-read the whole command (300 KB of x['content'] = 'a' lines
+    # took 62 s, the hook timeout is 10 s). The posted names are read once; a posted name's future stamp after the
+    # run still blocks, an unposted name's run passes, each under 3 s. data=json.dumps(x) posts x (the data= branch
+    # must not take "json" as the posted name).
+    import time as _t
+    h = root['hook']
+    s = _tail('').strip()
+    n = 300 * 1024 // len("x['content'] = 'a'\n")
+    post = "requests.post('http://localhost:3420/api/kanban/abc/comments', {})"
+
+    def py(body):
+        return "python3 - <<'P'\nimport json, requests\n" + body + "\nP"
+    rows = [
+        (0, py("x = {}\n" + "x['content'] = 'a'\n" * n + "body = {'content': '1 ok'}\n" + post.format('json=body'))),
+        (0, py("".join(f"x{i % 97}['comment'] = 'a'\n" for i in range(n)) + "body = {'content': '1 ok'}\n"
+               + post.format('json=body'))),
+        (2, py("body = {}\n" + "body['content'] = 'a'\n" * n + "body['content'] = '27/28 kész " + s + "'\n"
+               + post.format('json=body'))),
+        (2, py("x = {}\nx['comment'] = '27/28 kész " + s + "'\n" + post.format('data=json.dumps(x)'))),
+    ]
+    ok = True
+    for want, cmd in rows:
+        t0 = _t.monotonic()
+        got = run(h, 'Bash', {'command': cmd}, now='22:04')[0]
+        took = _t.monotonic() - t0
+        if got != want or took >= 3:
+            ok = False
+            print(f'  round3: want {want} got {got} in {took:.2f} s, {len(cmd)} bytes:', cmd[-90:].replace('\n', ' | '))
+    return ok
+
+
+@case
 def zoned_rows_hold_under_utc_and_tokyo(root):
     # Viktor 49949 (3): the zone branch with the gate in another machine zone (TZ passed by run()), as on a UTC CI
     # runner and far east; the stamps and today's date are computed in that zone.
