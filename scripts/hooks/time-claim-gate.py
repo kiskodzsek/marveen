@@ -55,7 +55,11 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     the curl body (a ; in a quoted header, a multi-line -d before the URL), the own URL found with the header and
     data arguments taken out (/api/messages in an env value, a header or a -d), and the line-continuation-joined
     text (cu\\<newline>rl, T\\<newline>=v). Not seen: a curl hidden behind a function, an alias, eval or a variable
-    ($c -X PUT ...), and a shell word not in that list (the same on main).
+    ($c -X PUT ...), and a shell word not in that list (the same on main). Viktor 50142 F1, F2 (his indep9 labels; on
+    main too): a prefix word with an option after it is no prefix word (b-env-u-option: env -u LANG curl,
+    b-exec-a-option: exec -a kurl curl, b-command-p-option: command -p curl), and a curl's own URL is its first /api/
+    URL, so a second URL after it is not judged (b-curl-next-close-then-card: --next, then the kanban URL;
+    b-curl-two-urls-msg-first: /api/messages first, then the kanban URL).
     Rule 7 (the closing stamp, Viktor 49927, his probe_ts7 labels): py-var (the comment text in a Python variable,
     the dict built elsewhere) and jq-arg (jq --arg) are not read, the value is not at a content / comment key;
     hu-dot-date ("2026.11.22. 13:30") and mmdd-short ("(11-22 13:30)") are other date forms, not judged; a named
@@ -698,6 +702,50 @@ LIST_MARK_RX = re.compile(r'(?:^|(?<=\s))\d{1,3}\)', re.M)
 CASE_WORD_RX = re.compile(r'\bcase\b')
 IN_WORD_RX = re.compile(r'\bin\b')
 PAREN_RX = re.compile(r'[()]')
+
+
+def _quote_blind(view):
+    """`view` (same length) with every char inside '...' and "..." (the quotes too) and every backslash-escaped
+    char outside them made a space: the list-mark depth counts only the shell's own parentheses. A $( inside "..." is
+    a real substitution: its ( ) stay and quoting starts over inside it (a stack of contexts). One linear pass, no
+    regex (Viktor 50142 R4: a quoted ) inside a $( ), echo ':)' or printf '%s' ')', closed it early)."""
+    out, i, n = list(view), 0, len(view)
+    stack = [['top', 0]]          # 'top' | 'sub' (a $( inside "...", with its own paren depth) | "'" | '"'
+    while i < n:
+        c, ctx = view[i], stack[-1]
+        if ctx[0] in ('top', 'sub'):
+            if c == '\\':
+                out[i:i + 2] = ' ' * len(out[i:i + 2])
+                i += 2
+                continue
+            if c == "'" or c == '"':
+                stack.append([c, 0])
+                out[i] = ' '
+            elif ctx[0] == 'sub' and c == '(':
+                ctx[1] += 1
+            elif ctx[0] == 'sub' and c == ')':
+                if ctx[1]:
+                    ctx[1] -= 1
+                else:
+                    stack.pop()       # this ) closes the $( of the "..." around it
+        elif ctx[0] == "'":
+            out[i] = ' '
+            if c == "'":
+                stack.pop()
+        else:                         # inside "..."
+            if c == '$' and view.startswith('$(', i):
+                stack.append(['sub', 0])
+                i += 2
+                continue
+            out[i] = ' '
+            if c == '\\' and i + 1 < n:
+                out[i + 1] = ' '
+                i += 2
+                continue
+            if c == '"':
+                stack.pop()
+        i += 1
+    return ''.join(out)
 # The same R1, its second shape: a message heredoc line "  then curl -s -X PUT ..." read as a card PUT (main lets it
 # through). then / elif / else at a start is a prefix word only after an `if` earlier in the command, and do only after
 # a for / while / until / select (a real multi-line `if x<newline>then curl ...` has its if); else its first letter
@@ -718,19 +766,20 @@ def _unmark_lists(view):
         pass
     lim = c.start() if c and last_in and c.start() < last_in.start() else len(view)
     state = {'pos': 0, 'depth': 0}
+    blind = _quote_blind(view)
 
     def mark(m):
         close = m.end() - 1
         # A stray ) (a smiley ":)", a quoted ")", an "a)" list) closes nothing: the depth never goes below 0, else a
         # later $(: 1)curl would sit at depth 0 again (Viktor r3).
         d = state['depth']
-        for p in PAREN_RX.finditer(view, state['pos'], close):
+        for p in PAREN_RX.finditer(blind, state['pos'], close):
             d = d + 1 if p.group() == '(' else max(0, d - 1)
         state['pos'] = close + 1
         if m.start() < lim and d == 0:
             state['depth'] = 0
             return m.group(0)[:-1] + ' '
-        state['depth'] = max(0, d - 1)  # the kept ) closes a parenthesis
+        state['depth'] = max(0, d - 1) if blind[close] == ')' else d  # a kept, unquoted ) closes a parenthesis
         return m.group(0)
     view = LIST_MARK_RX.sub(mark, view)
     f_if, f_loop = IF_RX.search(view), LOOP_RX.search(view)

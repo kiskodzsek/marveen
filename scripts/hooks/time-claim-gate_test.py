@@ -1025,11 +1025,48 @@ def numbered_list_in_a_message_is_no_case_arm(root):
                                            + ' -d {"comment":"Viktor 14:30: kész"} 3) szólj.' + "'", 0),
         'msg-second-list-after-mark-at-depth-2': (amsg + "'Jegyzet ((lásd 1) x) után: 2) szólj 3) curl -s -X PUT "
                                                   + url + ' -d {"comment":"Viktor 14:30: kész"}' + "'", 0),
+        # Viktor 50142 R4 (his indep9 shapes): a quoted ) inside the $( ) of an env value closes nothing; the depth
+        # counts only the shell's own parentheses, so the real ) after the number is no list mark (bash runs the curl)
+        'envsubst-quoted-smiley': (amsg + "'kész :)'\nT=$(echo ':)' 1) " + put, 2),
+        'envsubst-printf-paren': (amsg + "'1) ok'\nT=$(printf '%s' ')'; echo 1) " + put, 2),
+        'envsubst-dq-paren': (amsg + "'kész'\nT=$(echo \")\" 1) " + put, 2),
+        'envsubst-escaped-paren': (amsg + "'kész'\nT=$(echo \\) 1) " + put, 2),
+        # a quoted ( does not open one either: the list after it stays a list
+        'msg-quoted-open-paren-then-list': (amsg + "'Nézd: \"(\" Lépések: 1) curl -s -X PUT " + url
+                                            + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        # round-5 mutation holes: a $( ) nested in a "..." $( ) keeps its own depth (the list after it stays a list),
+        # and a kept, quoted mark inside a $( ) closes no level (the real ) after it is still kept: bash runs the curl)
+        'msg-dq-nested-subst-then-list': (amsg + '"x $(echo $(echo a) )" ' + "'Lépések: 1) curl -s -X PUT " + url
+                                          + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'", 0),
+        'envsubst-quoted-kept-mark': (amsg + "'kész'\nT=$(echo ' 1)' 1) " + put, 2),
     }
     bad = [label for label, (cmd, want) in cases.items()
            if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
     for b in bad:
         print('  r1:', b)
+    return not bad
+
+
+@case
+def quote_blind_view_counts_only_the_shells_own_parentheses(root):
+    # Viktor 50142 R4, the round-5 view: inside '...' and "..." and after a backslash every char is a space; a $( in
+    # "..." is a real substitution (its parentheses stay, quoting starts over in it, its ) returns to the "..."), and
+    # a \" does not end a "..." (round-5 mutation holes M5, M9: checked on the view itself)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tcg_view', root['hook'])
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    want = {
+        '"a $(b) c)" d)': '   $(b)     d)',
+        '"a \\" b)" c)': '          c)',
+        '"$(echo $(echo a) )" x)': ' $(echo $(echo a) )  x)',
+        "echo ' 1)' 1)": 'echo       1)',
+        'a \\) b)': 'a    b)',
+        '"$(echo ")") x)" y)': ' $(echo    )     y)',
+    }
+    bad = [k for k, v in want.items() if g._quote_blind(k) != v or len(g._quote_blind(k)) != len(k)]
+    for b in bad:
+        print('  view:', repr(b), '->', repr(g._quote_blind(b)))
     return not bad
 
 
