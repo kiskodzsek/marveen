@@ -33,6 +33,8 @@ def make_root(tmp):
 
 def run(hook, tool, tool_input=None, now='18:14', raw=None, cwd=None, errlog=None):
     env = {'PATH': '/usr/bin:/bin', 'TIME_CLAIM_GATE_NOW': now, 'HOOK_ERRLOG_PATH': errlog or os.devnull}
+    if os.environ.get('TZ'):  # Viktor 49949 (3): the gate runs in the test's zone, so TZ=UTC measures the gate too
+        env['TZ'] = os.environ['TZ']
     body = {'tool_name': tool, 'tool_input': tool_input}
     if cwd:
         body['cwd'] = cwd
@@ -342,6 +344,96 @@ def closing_stamp_after_a_marked_deadline_word(root):
     return (all(run(h, 'Bash', {'command': j(v)}, now='22:04')[0] == 0
                 for v in ('27/28 **deadline** ' + s, '27/28 _határidő_: ' + s, '27/28 `until` ' + s))
             and run(h, 'Bash', {'command': j('27/28 **kész** ' + s)}, now='22:04')[0] == 2)
+
+
+@case
+def round2_key_shapes_outside_a_posted_object_pass(root):
+    # Viktor 49949 R1 (8 overblocks of round 1): a bare "comment:" / "content:" counts only as an object-literal key
+    # (after { or a comma), a subscript only on the posted dict, an adjacent literal only before a closing mark. A
+    # title text, the comment's own middle, a shell comment, a YAML heredoc, a markdown list line, a git message,
+    # another dict, and the next shell word pass; the comment itself is clean.
+    h = root['hook']
+    s = _tail('').strip()
+    clean = KANBAN + " -d '{\"content\":\"1 ok\"}'"
+    py = "python3 - <<'P'\nimport json, urllib.request\n{}\nurllib.request.urlopen(urllib.request.Request(" \
+         "'http://localhost:3420/api/kanban/abc/comments', json.dumps(body).encode()))\nP"
+    allow = [
+        PUT + " -d '" + json.dumps({'title': "9 Re comment: 'átnézve " + s + "' marad", 'comment': '1 ok'},
+                                   ensure_ascii=False) + "'",
+        py.format("body = {'content': '3 átírva: comment: \"vázlat " + s + "\" helyett végleges'}"),
+        '# comment: "vázlat ' + s + '"\n' + clean,
+        "cat > notes.yml <<'EOF'\ncomment: \"9 jegyzet " + s + "\"\nEOF\n" + clean,
+        "cat > plan.md <<'EOF'\n- content: \"9 terv " + s + "\"\nEOF\n" + clean,
+        'git commit -m "content: \'rendrakás ' + s + '\'" && ' + clean,
+        py.format("meta = {}\nmeta['content'] = '9 cache " + s + "'\nbody = {'content': '1 ok'}"),
+        'echo comment="1 ok" "más ' + s + '" >> log.txt\n' + clean,
+    ]
+    bad = [c for c in allow if run(h, 'Bash', {'command': c}, now='22:04')[0] != 0]
+    for c in bad:
+        print('  round2 overblock:', c[:90].replace('\n', ' | '))
+    return not bad
+
+
+@case
+def round2_closing_stamp_shapes_that_block(root):
+    # Viktor 49949 new fail-opens: a hyphen-word before the stamp (stand-by) is no deadline, a call in a concatenation,
+    # jq's .comment = "...", a Python triple-quoted value, a JS template literal, and a chain of adjacent literals.
+    h = root['hook']
+    s = _tail('').strip()
+    py = "python3 - <<'P'\nimport json, urllib.request\n{}\nurllib.request.urlopen(urllib.request.Request(" \
+         "'http://localhost:3420/api/kanban/abc/comments', json.dumps(body).encode()))\nP"
+    block = [
+        KANBAN + " -d '" + json.dumps({'content': '1 szerver stand-by ' + s}) + "'",
+        py.format("n = 27\nbody = {'content': 'kész ' + str(n) + ' " + s + "'}"),
+        "jq -n '.comment = \"2 kész " + s + "\"' | curl -s -X PUT http://localhost:3420/api/kanban/abc --data-binary @-",
+        py.format("body = {'content': \x27\x27\x2727/28 kész " + s + "\x27\x27\x27}"),
+        "node -e 'fetch(\"http://localhost:3420/api/kanban/abc/comments\", {method: \"POST\", "
+        "body: JSON.stringify({content: `27/28 kész " + s + "`})})'",
+        py.format("body = {'content': '1'" + " 'a'" * 40 + " ' " + s + "'}"),
+        "python3 - <<'P'\nimport requests\nbody = {}\nbody['comment'] = '27/28 kész " + s + "'\n"
+        "requests.post('http://localhost:3420/api/kanban/abc/comments', json=body)\nP",
+    ]
+    bad = [c for c in block if run(h, 'Bash', {'command': c}, now='22:04')[0] != 2]
+    for c in bad:
+        print('  round2 fail-open:', c[:90].replace('\n', ' | '))
+    return not bad
+
+
+@case
+def zoned_rows_hold_under_utc_and_tokyo(root):
+    # Viktor 49949 (3): the zone branch with the gate in another machine zone (TZ passed by run()), as on a UTC CI
+    # runner and far east; the stamps and today's date are computed in that zone.
+    import time as _t
+    h = root['hook']
+    saved = os.environ.get('TZ')
+    ok = True
+    try:
+        for zone in ('UTC', 'Asia/Tokyo'):
+            os.environ['TZ'] = zone
+            _t.tzset()
+            d = datetime.date.fromtimestamp(_t.time())
+            ts = _t.mktime((d.year, d.month, d.day, 22, 6, 0, 0, 0, -1))
+            off = _t.localtime(ts).tm_gmtoff // 60
+            utc = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+            sign = '+' if off >= 0 else '-'
+            zoned = f'({d.isoformat()}T22:06:00{sign}{abs(off) // 60:02d}:{abs(off) % 60:02d})'
+            block = [f'({d.isoformat()} 22:06)', zoned, f'({utc:%Y-%m-%dT%H:%M:%S}Z)', f'({utc:%Y-%m-%d %H:%M} utc)']
+            allow = [f'({d.isoformat()} 21:00)', f'({utc - datetime.timedelta(hours=2):%Y-%m-%dT%H:%M}Z)']
+
+            def j(stamp):
+                return KANBAN + " -d '" + json.dumps({'content': '27/28 kész ' + stamp}) + "'"
+            got_b = [run(h, 'Bash', {'command': j(x)}, now='22:04')[0] for x in block]
+            got_a = [run(h, 'Bash', {'command': j(x)}, now='22:04')[0] for x in allow]
+            if got_b != [2] * len(block) or got_a != [0] * len(allow):
+                print('  zone', zone, 'block rc', got_b, 'allow rc', got_a)
+                ok = False
+    finally:
+        if saved is None:
+            os.environ.pop('TZ', None)
+        else:
+            os.environ['TZ'] = saved
+        _t.tzset()
+    return ok
 
 
 @case

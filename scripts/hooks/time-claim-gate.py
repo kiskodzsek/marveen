@@ -210,7 +210,8 @@ MARKER_RX = re.compile(
 DEADLINE_AFTER_RX = re.compile(r'\s?-?\s?(?:ig|ra|re)(?!\w)|\s+óráig(?!\w)', re.I)
 DEADLINE_BEFORE_RX = re.compile(r'(?<!\w)(?:határidő|határidővel|deadline|until|by)[:\s]+$', re.I)
 # Rule 7 only (Viktor 49939 dl-bold-deadline): the same words in markdown marks (**deadline** (stamp)).
-DEADLINE_TAIL_RX = re.compile(r'(?<!\w)[*_`~]*(?:határidő|határidővel|deadline|until|by)[*_`~]*[:\s]+$', re.I)
+# Round 2 (Viktor 49949 dl-standby-word): a hyphen before the word ("stand-by") is not a deadline either.
+DEADLINE_TAIL_RX = re.compile(r'(?<![\w-])[*_`~]*(?:határidő|határidővel|deadline|until|by)[*_`~]*[:\s]+$', re.I)
 # Inter-agent message, memory and daily-log writes (placeholder rule only, see SCOPE).
 API_WRITE_RX = re.compile(r'(?<![\w-])(?:[a-z]+-msg|msg-close)\.sh(?![\w-])|/api/(?:messages|memories|daily-log)')
 # Rule 3: the heading at the start of a daily-log payload's "content" value. The rest of the heading line (up to a
@@ -238,16 +239,29 @@ COMMENT_HEAD_NOT_STAMP_RX = re.compile(r'-[^\W\d_]|[ \t]+(?:után|előtt|terv\w*
 # comment= keyword (dict(...), a kwarg). The value runs to its first unescaped closing quote, one unit per char
 # (linear: no value can overlap the next key's quote).
 # Viktor 49939 item 2: a Python subscript (body['content'] = ...), a bare key (a JS object or jq, content: "..."),
-# and an f-, r-, b- or u-prefixed Python literal (f'{n}/28 ...').
-_TAIL_KEY = (r'(?:(?P<k>["\'])(?:content|comment)(?P=k)\s*:|\[(?P<k2>["\'])(?:content|comment)(?P=k2)\]\s*='
-             r'|(?<![\w.$-])(?:content|comment)\s*[=:])\s*(?:[rRbBfFuU]{1,2})?')
+# and an f-, r-, b- or u-prefixed Python literal (f'{n}/28 ...'). Round 2 (Viktor 49949 R1, 8 overblocks: a YAML
+# line, a git message, a shell comment, "comment:" inside another text): a bare key counts only as an object-literal
+# key, right after { or a comma; a subscript only when the same name is what the command posts (json.dumps(body),
+# json=body, data=body, see POSTED_RX), so meta['content'] passes; jq's .comment = "..." (Viktor fo-jq-dot-assign)
+# counts after a quote, a pipe, a paren or a blank.
+_TAIL_KEY = (r'(?:(?P<k>["\'])(?:content|comment)(?P=k)\s*:'
+             r'|(?P<sub>\[)(?P<k2>["\'])(?:content|comment)(?P=k2)\]\s*='
+             r'|[{,]\s*(?:content|comment)\s*:|(?<![\w.$-])(?:content|comment)\s*='
+             r'|(?<=[\'"|(\s])\.(?:content|comment)\s*\|?=)\s*(?:[rRbBfFuU]{1,2})?')
+# The value forms after a key, in one alternation (one scan of the text, round 2: five separate regexes cost about
+# 1.5x per byte): a Python triple-quoted value first (Viktor 49949 fo-py-triple-quote; a lone quote inside it is one
+# unit, so the scan stays linear), then "...", '...' and a JS template literal (fo-js-template). Groups v1..v5.
+VALUE_GROUPS = ('v1', 'v2', 'v3', 'v4', 'v5')
 COMMENT_VALUE_RXS = (
-    re.compile(_TAIL_KEY + r'"(?P<v>(?:[^"\\]|\\[\s\S])*)"'),
-    re.compile(_TAIL_KEY + r"'(?P<v>(?:[^'\\]|\\[\s\S])*)'"),
+    re.compile(_TAIL_KEY + r"(?:'''(?P<v1>(?:[^'\\]|\\[\s\S]|'(?!''))*)'''"
+               r'|"""(?P<v2>(?:[^"\\]|\\[\s\S]|"(?!""))*)"""'
+               r'|"(?P<v3>(?:[^"\\]|\\[\s\S])*)"'
+               r"|'(?P<v4>(?:[^'\\]|\\[\s\S])*)'"
+               r'|`(?P<v5>(?:[^`\\]|\\[\s\S])*)`)'),
     # Inside a double-quoted -d the shell turns \\ into a JSON backslash and \" into a JSON quote, so a JSON escape
     # is \\ followed by \\, \" or a plain char, and a lone backslash with a plain char (\n) is one too. Viktor 49939
     # dq-escquote-before-stamp: the old unit list read \\ then stopped at the \" of an escaped \\\" quote.
-    re.compile(r'\\"(?:content|comment)\\"\s*:\s*\\"(?P<v>(?:[^"\\]|\\\\(?:\\\\|\\"|[^\\])|\\[^"\\])*)\\"'),
+    re.compile(r'\\"(?:content|comment)\\"\s*:\s*\\"(?P<v1>(?:[^"\\]|\\\\(?:\\\\|\\"|[^\\])|\\[^"\\])*)\\"'),
 )
 # The stamp at the very end of the value, once the trailing whitespace, dots, markdown marks and a stray backslash
 # are stripped (_value_end): "(YYYY-MM-DD HH:MM)", seconds and a fraction optional, a T allowed, and a time zone
@@ -261,8 +275,17 @@ COMMENT_TAIL_RX = re.compile(
 # A value built by concatenation, 'x' + ' (stamp)' (Viktor 49927 py-concat): the last literal of the chain counts,
 # also across a name ('x ' + n + ' (stamp)', Viktor 49939 concat-var-mid) and for adjacent literals ('x' ' (stamp)',
 # py-implicit-concat).
-CONCAT_RX = re.compile(r'(?:\s*\+\s*(?:[A-Za-z_][\w.]*\s*\+\s*)*|[ \t]+)'
-                       r'(?:"(?P<d>(?:[^"\\]|\\[\s\S])*)"|\'(?P<s>(?:[^\'\\]|\\[\s\S])*)\')')
+# Round 2 (Viktor 49949): a call in the chain (+ str(n) +, fo-concat-call-mid), and an adjacent literal only when a
+# closing , } ) ] + or a further literal follows it (ob-adjacent-shell-arg: echo comment="1 ok" "more" glued the next
+# shell word; a chain's last literal still needs the closing mark, time-adjacent-many).
+_CONCAT_LIT = r'(?:"(?P<{0}>(?:[^"\\]|\\[\s\S])*)"|\'(?P<{1}>(?:[^\'\\]|\\[\s\S])*)\')'
+CONCAT_RX = re.compile(r'\s*\+\s*(?:[A-Za-z_][\w.]*(?:\([^()\'"\n]*\))?\s*\+\s*)*' + _CONCAT_LIT.format('d', 's')
+                       + r'|[ \t]+' + _CONCAT_LIT.format('d2', 's2') + r'(?=\s*[,})\]+\'"])')
+# A subscript key counts only when its name is what the command posts (Viktor 49949 ob-other-dict-subscript).
+POSTED_FMT = r'(?:json\.dumps\(\s*|(?<![\w.])(?:json|data)\s*=\s*){}(?!\w)'
+# The subscripted name, read back from at most 64 chars before the [ (the key branch is anchored on the [, so the
+# scan does not start a name match at every word).
+SUB_NAME_RX = re.compile(r'(?<![\w.])([A-Za-z_]\w*)\Z')
 # Trailing chars after the stamp that do not end the comment's own text: whitespace, dots, markdown marks, a no-break
 # space, a stray backslash, an escaped quote, and (Viktor 49939 item 3) ! ? ; ] , a variation selector, and any
 # format char (zero-width space), emoji or symbol (TAIL_STRIP_CATS).
@@ -525,12 +548,17 @@ def comment_tail_findings(text, now):
         for mv in rx.finditer(text):
             if len(out) >= MAX_TIMES_PER_LINE:
                 return out
-            v, vstart, pos = mv.group('v'), mv.start('v'), mv.end()
+            if mv.groupdict().get('sub'):
+                mn = SUB_NAME_RX.search(text, max(0, mv.start() - 64), mv.start())
+                if not mn or not re.search(POSTED_FMT.format(re.escape(mn.group(1))), text):
+                    continue
+            vg = next(g for g in VALUE_GROUPS if mv.groupdict().get(g) is not None)
+            v, vstart, pos = mv.group(vg), mv.start(vg), mv.end()
             while True:  # 'x' + ' (stamp)': the last literal of a concatenation
                 mc = CONCAT_RX.match(text, pos)
                 if not mc:
                     break
-                grp = 'd' if mc.group('d') is not None else 's'
+                grp = next(g for g in ('d', 's', 'd2', 's2') if mc.group(g) is not None)
                 v, vstart, pos = mc.group(grp), mc.start(grp), mc.end()
             end = _value_end(v)
             tail = v[max(0, end - 120):end]
