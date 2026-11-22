@@ -32,6 +32,7 @@ Exit: 0 table written (whatever it shows), 2 usage / prepare error, 3 not sandbo
 import concurrent.futures
 import json
 import os
+import re
 import shutil
 import socket
 import statistics
@@ -161,16 +162,32 @@ def run_one(py, gate, data, env, root, key):
     return dt, rc, bool(detail), detail
 
 
+def write_probe_places(root):
+    """Where the self-check tries to write: the ROOT's parent and the caller's HOME (both outside a root-* copy)."""
+    places = [os.path.dirname(os.path.abspath(root))]
+    home = os.environ.get('HOME', '')
+    if os.path.isabs(home):
+        places.append(home)
+    return places
+
+
 def self_check(root):
-    """None when sandboxed, else the reason."""
-    outside = os.path.join(os.path.dirname(os.path.abspath(root)), '.gate-timing-escape-test')
-    try:
-        with open(outside, 'w') as fh:
-            fh.write('x')
-        os.unlink(outside)
+    """None when sandboxed, else the reason. The write probe (Viktor 50112 R1): a fresh random name, created with
+    O_CREAT | O_EXCL | O_NOFOLLOW (so an existing file, directory or symlink at a fixed name is never written through
+    or removed), in each of write_probe_places(); any success = not sandboxed, and only that own new file is removed.
+    A parent that is merely read-only no longer passes: HOME is tried too."""
+    for place in write_probe_places(root):
+        name = os.path.join(place, '.gate-timing-escape-' + os.urandom(8).hex())
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            continue
+        os.close(fd)
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
         return 'a write outside ROOT succeeded'
-    except OSError:
-        pass
     s = socket.socket()
     s.settimeout(1)
     try:
@@ -193,6 +210,14 @@ def cmd_run(root, workers, size, only, py):
     if why:
         print('probe: NOT SANDBOXED (' + why + '); run it through: probe.py all', file=sys.stderr)
         return 3
+    # the sandbox allows writes under ROOT: ROOT=/ or a directory that is not a fresh root-* copy would give the gates
+    # a wide write right (Viktor 50112 R1; `all` always makes a new root-<sha8>-<time>)
+    if root == '/' or not os.path.basename(root).startswith('root-') or not os.path.isdir(root):
+        print('probe: ROOT must be a root-* directory made by probe.py all: ' + root, file=sys.stderr)
+        return 2
+    if workers < 1 or size < 1:
+        print('probe: --workers and --size must be at least 1', file=sys.stderr)
+        return 2
     for d in ('tmp', 'tg', 'memfm', 'claude-config', 'agents', 'email-approvals', 'errlog'):
         os.makedirs(os.path.join(root, d), exist_ok=True)
     hooks = os.path.join(root, 'scripts', 'hooks')
@@ -246,65 +271,152 @@ def cmd_run(root, workers, size, only, py):
             half = run_one(py, gate, payload(root, j[1], j[2], mk(half_body)), env, root, 'ch')
             fh.write(json.dumps({'confirm': True, 'gate': j[0], 'tool': j[2], 'ctx': j[3], 'unit': j[4],
                                  't_full': round(full[0], 4), 'rc_full': full[1], 't_half': round(half[0], 4),
-                                 'rc_half': half[1]}, ensure_ascii=False) + '\n')
+                                 'rc_half': half[1], 'crash_full': full[2], 'crash_half': half[2],
+                                 'err': full[3] or half[3]}, ensure_ascii=False) + '\n')
     print(f'probe: {len(jobs)} cases, {len(slow)} confirmed alone, {time.time() - t_start:.0f} s -> {out}')
     return 0
 
 
+def _cell(v):
+    """One table cell or detail fragment: a | or a newline in a gate name, unit or error text must not shift a cell or
+    start a forged row (Viktor 50112 R3). The | becomes a broken bar (a backslash escape is GFM only)."""
+    return str(v).replace('\r', ' ').replace('\n', ' ').replace('|', '\u00a6')
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v  # v == v: not NaN
+
+
+def _key(r):
+    return tuple(str(r[k]) for k in ('gate', 'tool', 'ctx', 'unit'))
+
+
+def _failed(rc):
+    """'odd' for an rc that is no verdict (not 0, 2 or a timeout), 'timeout', or None."""
+    if rc == 'timeout':
+        return 'timeout'
+    return None if rc in (0, 2) else 'odd'
+
+
 def cmd_table(path):
-    rows, conf, meta, info = [], {}, {}, {}
-    with open(path, encoding='utf-8') as fh:
+    """The per-gate table. Every line is checked on its own (Viktor 50112 R3): one that is not JSON, not an object, or
+    misses a key is skipped and counted on a visible SKIPPED line, never a traceback. A failure of the confirm rerun
+    (rc not 0/2, timeout, crash) and of a BASELINE run counts in the row's rc / crash / timeout cells and has a
+    detail line, so nothing that failed is hidden behind a fast first run."""
+    rows, conf, meta, info, skipped = [], {}, {}, {}, 0
+    with open(path, encoding='utf-8', errors='replace') as fh:
         lines = fh.readlines()
     for line in lines:
-        r = json.loads(line)
-        if r.get('meta'):
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+        except ValueError:
+            skipped += 1
+            continue
+        if not isinstance(r, dict):
+            skipped += 1
+        elif r.get('meta'):
             info = r
         elif r.get('confirm'):
-            conf[(r['gate'], r['tool'], r['ctx'], r['unit'])] = r
+            if all(k in r for k in ('gate', 'tool', 'ctx', 'unit')) and _num(r.get('t_full')) and _num(r.get('t_half')):
+                conf[_key(r)] = r
+            else:
+                skipped += 1
         elif 'excluded' in r or 'unmapped' in r:
-            meta[r['gate']] = r
-        else:
+            if 'gate' in r:
+                meta[str(r['gate'])] = r
+            else:
+                skipped += 1
+        elif all(k in r for k in ('gate', 'tool', 'ctx', 'unit', 'rc')) and _num(r.get('t')):
             rows.append(r)
+        else:
+            skipped += 1
     by = {}
     for r in rows:
-        by.setdefault(r['gate'], []).append(r)
-    out = [f"Gate run time, {info.get('cases')} cases, {info.get('size')} bytes per case, "
-           f"{info.get('workers')} parallel, {info.get('version')} ({info.get('python')}); budget {BUDGET_S:g} s; "
-           'worst = alone rerun when confirmed (ratio = full / half size).', '',
+        by.setdefault(str(r['gate']), []).append(r)
+    gconf = {}
+    for k, c in conf.items():
+        gconf.setdefault(k[0], []).append(c)
+    out = [f"Gate run time, {_cell(info.get('cases'))} cases, {_cell(info.get('size'))} bytes per case, "
+           f"{_cell(info.get('workers'))} parallel, {_cell(info.get('version'))} ({_cell(info.get('python'))}); "
+           f"budget {BUDGET_S:g} s; worst = alone rerun when confirmed (ratio = full / half size).", '',
            '| gate | tools | cases | baseline ms | median ms | worst s | worst case (tool/ctx/unit) | ratio | '
            '> 1 s | rc not 0/2 | crash / fail-open | timeout |', '|---|---|---|---|---|---|---|---|---|---|---|---|']
-    order = []
+    order, base_fail = [], []
     for g, rs in by.items():
-        base = [r['t'] for r in rs if r['unit'] == 'BASELINE']
+        base = [r for r in rs if r['unit'] == 'BASELINE']
         real = [r for r in rs if r['unit'] != 'BASELINE']
-        worst = max(real, key=lambda r: r['t'])
-        c = conf.get((g, worst['tool'], worst['ctx'], worst['unit']))
-        wt = c['t_full'] if c else worst['t']
-        ratio = f"{c['t_full'] / c['t_half']:.1f}" if c and c['t_half'] > 0 else ''
-        over = sum(1 for r in real if (conf.get((g, r['tool'], r['ctx'], r['unit'])) or {}).get('t_full', r['t'])
-                   > BUDGET_S)
-        odd = sum(1 for r in real if r['rc'] not in (0, 2, 'timeout'))
+        cs = gconf.get(g, [])
         tools = ','.join(sorted({str(r['tool']).replace('mcp__plugin_telegram_telegram__', 'tg:') for r in rs}))
-        label = (str(worst['tool']).replace('mcp__plugin_telegram_telegram__', 'tg:') + '/' + worst['ctx'] + '/'
+        bad_base = [(r, _failed(r['rc'])) for r in base if _failed(r['rc']) or r.get('crash')]
+        if bad_base:
+            base_fail.append((g, bad_base))
+        conf_rcs = [c.get(k) for c in cs for k in ('rc_full', 'rc_half') if k in c]
+        odd = (sum(1 for r in real if _failed(r['rc']) == 'odd') + sum(1 for x in conf_rcs if _failed(x) == 'odd')
+               + sum(1 for _, f in bad_base if f == 'odd'))
+        tmo = (sum(1 for r in real if r['rc'] == 'timeout') + sum(1 for x in conf_rcs if x == 'timeout')
+               + sum(1 for _, f in bad_base if f == 'timeout'))
+        crash = (sum(1 for r in real if r.get('crash')) + sum(1 for c in cs if c.get('crash_full') or c.get('crash_half'))
+                 + sum(1 for r, _ in bad_base if r.get('crash')))
+        base_ms = f"{1000 * statistics.median(r['t'] for r in base):.0f}" if base else '-'
+        if not real:
+            order.append((0, f"| {_cell(g)} | {_cell(tools)} | 0 | {base_ms} | - | - | - | | 0 | {odd} | {crash} | "
+                             f"{tmo} |"))
+            continue
+
+        def eff(r):
+            c = conf.get(_key(r))
+            return c['t_full'] if c else r['t']
+        worst = max(real, key=eff)
+        c = conf.get(_key(worst))
+        wt = eff(worst)
+        ratio = f"{c['t_full'] / c['t_half']:.1f}" if c and c['t_half'] > 0 else ''
+        over = sum(1 for r in real if eff(r) > BUDGET_S)
+        label = (str(worst['tool']).replace('mcp__plugin_telegram_telegram__', 'tg:') + '/' + str(worst['ctx']) + '/'
                  + json.dumps(worst['unit'], ensure_ascii=False))
-        order.append((wt, f"| {g} | {tools} | {len(real)} | {1000 * statistics.median(base):.0f} | "
-                          f"{1000 * statistics.median(r['t'] for r in real):.0f} | {wt:.2f} | {label} | {ratio} | "
-                          f"{over} | {odd} | {sum(r['crash'] for r in real)} | "
-                          f"{sum(1 for r in real if r['rc'] == 'timeout')} |"))
-    out += [line for _, line in sorted(order, reverse=True)]
+        order.append((wt, f"| {_cell(g)} | {_cell(tools)} | {len(real)} | {base_ms} | "
+                          f"{1000 * statistics.median(r['t'] for r in real):.0f} | {wt:.2f} | {_cell(label)} | {ratio} | "
+                          f"{over} | {odd} | {crash} | {tmo} |"))
+    out += [line for _, line in sorted(order, key=lambda x: x[0], reverse=True)]
     for g, m in sorted(meta.items()):
-        out.append(f"| {g} | - | - | - | - | - | {'EXCLUDED: ' + m['excluded'] if 'excluded' in m else 'UNMAPPED: fed as Bash'} | | | | | |")
+        why = 'EXCLUDED: ' + str(m['excluded']) if 'excluded' in m else 'UNMAPPED: fed as Bash'
+        out.append(f"| {_cell(g)} | - | - | - | - | - | {_cell(why)} | | | | | |")
+    if skipped:
+        out += ['', f'SKIPPED {skipped} line(s) of {_cell(path)}: not JSON, not an object, or a missing key.']
     fails = {}
     for r in rows:
         if r.get('err'):
-            fails.setdefault((r['gate'], r['err']), []).append(r)
-    if fails:
+            fails.setdefault((str(r['gate']), str(r['err'])), []).append(r)
+    conf_bad = [(k, c) for k, c in sorted(conf.items()) if c.get('err') or c.get('crash_full') or c.get('crash_half')
+                or _failed(c.get('rc_full', 0)) or _failed(c.get('rc_half', 0))]
+    if fails or base_fail or conf_bad:
         out += ['', 'Crash / fail-open details (gate: detail -- cases, example tool/ctx/unit):']
         for (g, d), rs in sorted(fails.items()):
             ex = rs[0]
-            out.append(f"- {g}: {d} -- {len(rs)}, e.g. {ex['tool']}/{ex['ctx']}/{json.dumps(ex['unit'], ensure_ascii=False)}"
-                       f" ({ex['bytes']} bytes), units: {', '.join(sorted({json.dumps(r['unit'], ensure_ascii=False) for r in rs}))}")
+            units = ', '.join(sorted({json.dumps(r['unit'], ensure_ascii=False) for r in rs}))
+            out.append(_cell(f"- {g}: {d} -- {len(rs)}, e.g. {ex['tool']}/{ex['ctx']}/"
+                             f"{json.dumps(ex['unit'], ensure_ascii=False)} ({ex.get('bytes')} bytes), units: {units}"))
+        for k, c in conf_bad:
+            out.append(_cell(f"- {k[0]}: confirm rerun of {k[1]}/{k[2]}/{json.dumps(c['unit'], ensure_ascii=False)}"
+                             f": full rc {c.get('rc_full')}, half rc {c.get('rc_half')}"
+                             + (f", {c['err']}" if c.get('err') else '')))
+        for g, bad in base_fail:
+            out.append(_cell(f"- {g}: BASELINE failed -- " + ', '.join(
+                f"{r['tool']}/{r['ctx']} rc {r['rc']}" + (' crash' if r.get('crash') else '') for r, _ in bad)))
     return '\n'.join(out)
+
+
+def resolve_rev(repo, rev):
+    """The full sha of the commit <rev> names, or None. A rev starting with - would be read as an option by git
+    archive (--output=<path>, --remote=<url>, --prefix=../; Viktor 50112 R2), so it is refused, and git only ever
+    gets the verified sha after this."""
+    if not rev or rev.startswith('-'):
+        return None
+    p = subprocess.run(['git', '-C', repo, 'rev-parse', '--verify', '--quiet', '--end-of-options', rev + '^{commit}'],
+                       capture_output=True, text=True)
+    sha = p.stdout.strip()
+    return sha if p.returncode == 0 and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', sha) else None
 
 
 def main(argv):
@@ -322,29 +434,45 @@ def main(argv):
             args.append(argv[i])
             i += 1
     only = set(filter(None, opts['--only'].split(',')))
+    try:
+        workers, size = int(opts['--workers']), int(opts['--size'])
+    except ValueError:
+        print('probe: --workers and --size take a whole number', file=sys.stderr)
+        return 2
     cmd = args[0] if args else ''
     if cmd == 'prepare' and len(args) == 4:
         repo, rev, root = args[1:]
-        if os.path.exists(root) and os.listdir(root):
+        sha = resolve_rev(repo, rev)
+        if not sha:
+            print('probe: not a commit (or starts with -): ' + rev, file=sys.stderr)
+            return 2
+        if os.path.lexists(root) and not os.path.isdir(root):
+            print('probe: root is not a directory: ' + root, file=sys.stderr)
+            return 2
+        if os.path.isdir(root) and os.listdir(root):
             print('probe: root not empty: ' + root, file=sys.stderr)
             return 2
         os.makedirs(root, exist_ok=True)
-        a = subprocess.run(['git', '-C', repo, 'archive', rev, 'scripts'], capture_output=True)
+        a = subprocess.run(['git', '-C', repo, 'archive', sha, 'scripts'], capture_output=True)
         if a.returncode:
             print('probe: git archive failed: ' + a.stderr.decode()[:200], file=sys.stderr)
             return 2
         subprocess.run(['tar', '-x', '-C', root], input=a.stdout, check=True)
         return 0
     if cmd == 'run' and len(args) == 2:
-        return cmd_run(os.path.realpath(args[1]), int(opts['--workers']), int(opts['--size']), only, opts['--python'])
+        return cmd_run(os.path.realpath(args[1]), workers, size, only, opts['--python'])
     if cmd == 'table' and len(args) == 2:
-        print(cmd_table(args[1]))
+        try:
+            print(cmd_table(args[1]))
+        except OSError as ex:
+            print('probe: cannot read ' + args[1] + ': ' + ex.__class__.__name__, file=sys.stderr)
+            return 2
         return 0
     if cmd == 'all' and len(args) == 4:
         repo, rev, work = args[1:]
-        sha = subprocess.run(['git', '-C', repo, 'rev-parse', rev], capture_output=True, text=True).stdout.strip()
+        sha = resolve_rev(repo, rev)
         if not sha:
-            print('probe: unknown rev ' + rev, file=sys.stderr)
+            print('probe: not a commit (or starts with -): ' + rev, file=sys.stderr)
             return 2
         # realpath: the sandbox's (subpath ROOT) matches the resolved path, so a work dir behind a symlink (the
         # macOS temp dir /var/folders is /private/var/folders) would deny every write of the run.
@@ -357,6 +485,9 @@ def main(argv):
                              os.path.abspath(__file__), 'run', root] + extra).returncode
         if rc:
             return rc
+        if not os.path.isfile(os.path.join(root, 'results.jsonl')):
+            print('probe: the sandboxed run wrote no results.jsonl (is --python a Python?)', file=sys.stderr)
+            return 2
         table = cmd_table(os.path.join(root, 'results.jsonl'))
         table = f'Tree: {sha} ({rev})\n\n' + table
         with open(os.path.join(os.path.abspath(work), 'table-' + sha[:8] + '.md'), 'w', encoding='utf-8') as fh:

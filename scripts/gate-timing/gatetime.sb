@@ -7,7 +7,8 @@
 ;; - file writes only under (param "ROOT") (the copy) and /dev/null, /dev/tty, /dev/fd;
 ;; - no network at all (no localhost: the dashboard has a restart API, and a notifier would reach Telegram);
 ;; - a signal only to a process of this same sandbox;
-;; - launchctl, osascript and open cannot start; the dashboard token cannot be read.
+;; - launchctl, osascript and open cannot start; the dashboard token cannot be read, nor the content of the
+;;   oauth token (and copies), vault.json, any .credentials.json and the login keychains.
 ;; probe.py run refuses to start unless a write outside ROOT, a localhost connect and the token read all fail.
 (version 1)
 (allow default)
@@ -30,3 +31,10 @@
   (literal "/usr/bin/open"))
 
 (deny file-read* (literal "/Users/klodel/marveen/store/.dashboard-token"))
+;; Viktor 50112 (optional, taken): no gate reads these, so their content stays unreadable in the run; file-read-data,
+;; not file-read*, so a stat still works. The oauth token's prefix also covers its .bak-* and .verified copies.
+(deny file-read-data
+  (regex #"^/Users/klodel/marveen/store/\.claude-oauth-token")
+  (literal "/Users/klodel/marveen/store/vault.json")
+  (regex #"/\.credentials\.json$")
+  (regex #"^/Users/[^/]+/Library/Keychains/"))
