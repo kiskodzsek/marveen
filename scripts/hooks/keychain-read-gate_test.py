@@ -2285,6 +2285,24 @@ def script_cases():
             # ... and an interpreter's glob word on such a data line is read as on main (main blocks it: the 00c714ea
             # glob reading of a script word; only the command position is quoted, a lean kept, not added)
             ("cat > notes.md <<'X'\necho python3 ./meas*.py | bash\nX", d),
+            # Viktor 49984 (card 0196e1ee): a heredoc `source` / `.` reads from /dev/stdin, a pipeline the heredoc's line
+            # leaves open after a | (bash on a later line, or after a backslash-newline), an unquoted delimiter's body
+            # $( ) or backtick (the shell runs it when it expands the body), a data command piped to a shell, and a
+            # runner before the shell (bash ran each fed glob, work/0196e1ee-r8)
+            ("source /dev/stdin <<X\necho ./meas*.py | bash\nX", d),
+            (". /dev/stdin <<X\ncat ./meas?re.py | bash\nX", d),
+            ("cat <<'X' |\necho ./meas*.py | bash\nX\nbash", d),
+            ("cat <<'X' |\n./meas*.py\nX\nbash", d),
+            ("cat <<'X' |\necho ./meas*.py | bash\nX\ntee /dev/null |\nbash", d),
+            ("cat <<'X' \\\n| bash\necho ./meas*.py | bash\nX", d),
+            ('cat > notes.md <<X\n$(echo ./meas*.py | bash)\nX', d),
+            ('cat >> notes.md <<X\n`echo ./meas*.py | bash`\nX', d),
+            ("grep -c sh <<'X' | bash\necho ./meas*.py | bash\nX", d),
+            ("env bash <<'X'\necho ./meas*.py | bash\nX", d),
+            ("sudo -u a sh <<'X'\necho ./meas*.py | bash\nX", d),
+            ("{ bash; } <<'X'\necho ./meas*.py | bash\nX", d),  # a group on the line: the whole line is read
+            # past _HD_MAX_NEXT open lines the body is read as a shell's (fail-closed, a lean)
+            ("cat <<'X' |\necho ./meas*.py | bash\nX\n" + 'cat |\n' * 9 + 'grep x', d),
             # card 0196e1ee (Viktor 43793 LOW/INFO 2, each passed main 749bffd9 and bash ran the fed script,
             # work/0196e1ee): a glob or a brace in the fed text, a path run directly, a reader PIPE_SHELL_RX did not see,
             # a fed text that makes its words itself, and a loop / if / case / function feeding the pipe
@@ -3306,6 +3324,20 @@ def script_cases():
             ("cat > notes.md <<'X'\nx\necho ./meas?re.py | bash\nX", d),
             ('cat > notes.md <<X\necho ./meas*.py | bash\nX', d),
             ("cat > /dev/null <<'X'\necho ./{measure,zz}.py | bash\nX", d),
+            # Viktor 49984 L1b (main ALLOW, bash and zsh run nothing: data): a printf brace in a data heredoc, a shell
+            # word elsewhere on the heredoc's line (an argument of a data command, a command after a ;, another
+            # heredoc), a fed line that only prints the glob, and an open pipeline into a non-shell
+            ("cat > notes.md <<'X'\nprintf '%s\\n' ./{measure,zz}.py | sh\nX", d),
+            ("cat >> notes.md <<X\nprintf '%s\\n' ./{measure,zz}.py | sh\nX", d),
+            ("tee notes.md <<'X' >/dev/null\nprintf '%s\\n' ./{measure,zz}.py | sh\nX", d),
+            ("cat > notes.md <<\\X\nprintf '%s\\n' ./{measure,zz}.py | sh\nX", d),
+            ("grep -c sh <<'X'\necho ./meas*.py | bash\nX", d),
+            ("cat > notes.md <<'X'; echo hi | bash\necho ./meas*.py | bash\nX", d),
+            ("cat > notes.md <<'A'; bash <<'B'\necho ./meas*.py | bash\nA\necho hi\nB", d),
+            ("echo 'echo ./meas*.py' | bash", d),
+            ("echo 'cat ./meas?re.py' | bash", d),
+            ("cat <<'X' |\necho ./meas*.py | bash\nX\ngrep x", d),
+            ("echo hi | bash; cat > notes.md <<'X'\necho ./meas*.py | bash\nX", d),
             # card 0196e1ee: a reader of the pipe that runs no code from it, a glob into a non-shell, a quoted direct path
             # (the file named so does not exist), a function / loop that prints a harmless line, a substitution into a
             # non-shell, a benign script fed to a $var reader
