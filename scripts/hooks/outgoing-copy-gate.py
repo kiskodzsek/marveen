@@ -381,11 +381,41 @@ def _mask_subshell_markers(cmd: str) -> str:
     return "".join(out)
 
 
-def _segments_tokens(cmd: str, strict: bool = False):
-    """[[token, ...], ...] szegmensenkent -- quote-tudatosan, poziciot orizve. strict: the HDSTRICT1122 cut."""
+# LONGTOK1122 (card bbc6bad4 round 3, Viktor 50311 B1): shlex builds every token one character at a time
+# (self.token + nextchar on an attribute, which CPython cannot extend in place), so ONE long token costs time
+# quadratic in its length: 'sendmail a@b.hu ' + 1 MB of 'w' 9.1 s (main 9.8 s), and the same for a 1 MB quoted
+# string with spaces, a 1 MB operator run, 1 MB of newlines (masked to ';'). The approval gate's hook timeout is
+# 10 s, and a timed-out hook lets the command through. So on the send-detection path a token run longer than
+# _LONG_TOKEN (a run of characters with no whitespace outside quotes: an upper bound of every shlex token in it)
+# skips shlex: the command counts as a send when a sender name stands ANYWHERE in it (_LONG_TOKEN_SENDERS, wider
+# than every shape _head_is_send knows, unanchored). The error leans to an extra audit, never a miss; a long
+# command with no sender name is no send, as in the segmenter. Below the bound shlex stays (a 32 KiB token
+# ~0.01 s, a 1 MB command of 32 KiB tokens ~0.25 s). Python only: the JS twin tokenizes in linear time (0.07 s).
+_LONG_TOKEN = 32 * 1024
+_TOKEN_RUN = re.compile(r"""(?:[^ \t\r\n'"\\]|\\.|'[^']*'?|"(?:[^"\\]|\\.)*"?)+""", re.S)
+_LONG_TOKEN_SENDERS = re.compile(
+    r"send\.py|api\.resend\.com|sendmail|msmtp|swaks|smtplib|sendMail\s*\(|SMTP\s*\(|sendEmail|mail\.send"
+    r"|graph-mail", re.I
+)
+
+
+class _LongToken(ValueError):
+    """A token run past _LONG_TOKEN: the caller decides on _LONG_TOKEN_SENDERS instead of the segments."""
+
+
+def _longest_token_run(text: str) -> int:
+    return max((m.end() - m.start() for m in _TOKEN_RUN.finditer(text)), default=0)
+
+
+def _segments_tokens(cmd: str, strict: bool = False, bound: bool = False):
+    """[[token, ...], ...] szegmensenkent -- quote-tudatosan, poziciot orizve. strict: the HDSTRICT1122 cut.
+    bound: raise _LongToken instead of running shlex on a token run past _LONG_TOKEN (LONGTOK1122)."""
     import shlex
     text = _strict_heredoc_cut(cmd) if strict else _loose_heredoc_cut(cmd)
-    lex = shlex.shlex(_mask_subshell_markers(text),
+    masked = _mask_subshell_markers(text)
+    if bound and len(masked) > _LONG_TOKEN and _longest_token_run(masked) > _LONG_TOKEN:
+        raise _LongToken("token run past %d characters" % _LONG_TOKEN)
+    lex = shlex.shlex(masked,
                       posix=True, punctuation_chars="();|&")
     lex.whitespace_split = True
     segments, cur = [], []
@@ -547,7 +577,7 @@ def wrapper_depth_hit(cmd: str) -> bool:
     # send on its own (`sendmail x; sudo x9 true`), that send is the reason,
     # and the ordinary wording must stay (Samu, #1523 review).
     try:
-        segments = _segments_tokens(cmd)
+        segments = _segments_tokens(cmd, bound=True)
     except ValueError:
         return False
     heads = [h for toks in segments for h in _command_heads(toks)]
@@ -557,7 +587,9 @@ def wrapper_depth_hit(cmd: str) -> bool:
 
 def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
     try:
-        segments = _segments_tokens(cmd)
+        segments = _segments_tokens(cmd, bound=True)
+    except _LongToken:
+        return bool(_LONG_TOKEN_SENDERS.search(cmd))
     except ValueError:
         # Parse-hiba (pl. lezaratlan idezojel): nem tudunk poziciot mondani.
         # Konzervativ visszaeses: csak akkor auditalunk, ha eros kuldes-literal
@@ -575,7 +607,9 @@ def send_only_by_strict_heredoc(cmd: str, _depth: int = 0) -> bool:
     if '<<' not in cmd:
         return False
     try:
-        segments = _segments_tokens(cmd, strict=True)
+        segments = _segments_tokens(cmd, strict=True, bound=True)
+    except _LongToken:
+        return bool(_LONG_TOKEN_SENDERS.search(cmd))
     except ValueError:
         return bool(_FALLBACK_LITERALS.search(cmd))
     return any(_segment_is_send(toks, _depth) for toks in segments)
@@ -1132,6 +1166,9 @@ _HTTP_CHANNEL_TARGETS = (
     ("Telegram API", re.compile(
         r"^(https?://)?api\.telegram\.org/bot[^/\s]+/(send|edit)\w*/?(\?\S*)?$", re.I)),
 )
+# LONGTOK1122: a covered channel named anywhere in the command (wider than _HTTP_CHANNEL_TARGETS, unanchored).
+_HTTP_CHANNEL_LITERAL = re.compile(
+    r"api\.marveen\.io|/feed/posts|/mentions/|discord(?:app)?\.com/api|api\.telegram\.org", re.I)
 # Only the prose a human reads. ids, chat ids, parse modes and urls stay out:
 # auditing them would block on tokens nobody reads as text.
 _HTTP_TEXT_FIELDS = ("title", "content", "text", "caption", "message")
@@ -1139,9 +1176,11 @@ _HTTP_TEXT_FIELDS = ("title", "content", "text", "caption", "message")
 
 def _http_channel_segment(cmd: str):
     """(label, tokens) of the first curl segment that SENDS to a covered
-    human-facing HTTP channel, or (None, None)."""
+    human-facing HTTP channel, or (None, None). Raises _LongToken (LONGTOK1122): the caller decides."""
     try:
-        segments = _segments_tokens(cmd)
+        segments = _segments_tokens(cmd, bound=True)
+    except _LongToken:
+        raise
     except ValueError:
         return None, None
     for toks in segments:
@@ -1181,7 +1220,21 @@ def http_channel_gate(cmd: str) -> None:
     """Exit 2 on a copy problem or an unreadable body, exit 0 when clean.
     RETURNS (does not exit) when the command is not a covered HTTP send, so
     the caller's other arms still run."""
-    label, toks = _http_channel_segment(cmd)
+    try:
+        label, toks = _http_channel_segment(cmd)
+    except _LongToken:
+        # LONGTOK1122: no segments past the token bound. A covered channel named anywhere in the command fails
+        # closed, as an unreadable body does here; without one it is no covered send.
+        hit = _HTTP_CHANNEL_LITERAL.search(cmd)
+        if not hit:
+            return
+        sys.stderr.write(
+            f"KIMENO-SZOVEG KAPU (HTTP-csatorna, {hit.group(0)}): TILTVA, mert a kimeno szoveget nem tudtam "
+            f"megvizsgalni.\nOk: a parancsban egy {_LONG_TOKEN // 1024} KiB-nal hosszabb, szokoz nelkuli (vagy "
+            "idezett) token all, ennyit a kapu nem bont szavakra.\n\n"
+            "Vizsgalhato alak: a szoveg fajlban, @/abszolut/ut.json, vagy idezett heredoc "
+            "(--data-binary @- <<'JSON').\n")
+        sys.exit(2)
     if label is None:
         return
     try:
@@ -1439,12 +1492,15 @@ EMAIL_TOOL_RE = re.compile(
 _IA_TARGET = re.compile(r"^(https?://)?[^/\s]*/api/messages/?(\?\S*)?$", re.I)
 _IA_DATA_FLAGS = ("-d", "--data", "--data-binary", "--data-raw", "--data-ascii", "--json")
 _IA_SUBST = re.compile(r"\$\(|`|\$\{?\w")
+_IA_LITERAL = re.compile(r"/api/messages", re.I)  # LONGTOK1122: the target named anywhere (wider than _IA_TARGET)
 
 
 def _ia_segment(cmd: str):
-    """Tokens of the curl segment that POSTs to /api/messages, or None."""
+    """Tokens of the curl segment that POSTs to /api/messages, or None. Raises _LongToken (LONGTOK1122)."""
     try:
-        segments = _segments_tokens(cmd)
+        segments = _segments_tokens(cmd, bound=True)
+    except _LongToken:
+        raise
     except ValueError:
         return None
     for toks in segments:
@@ -1556,10 +1612,19 @@ def _ia_payload(cmd: str, toks):
 def inter_agent_homoglyph_gate(cmd: str) -> None:
     """Exit 2 on a homoglyph, exit 0 otherwise (loudly when unreadable).
     Only called for a command that is NOT an email send."""
-    toks = _ia_segment(cmd)
-    if toks is None:
-        sys.exit(0)
-    text, unreadable = _ia_payload(cmd, toks)
+    try:
+        toks = _ia_segment(cmd)
+    except _LongToken:
+        # LONGTOK1122: no segments past the token bound. With /api/messages named anywhere, the WHOLE command is
+        # checked for mixed-script words (an extra block is possible, a missed lookalike is not); without it,
+        # no inter-agent message.
+        if not _IA_LITERAL.search(cmd):
+            sys.exit(0)
+        text, unreadable = cmd, None
+    else:
+        if toks is None:
+            sys.exit(0)
+        text, unreadable = _ia_payload(cmd, toks)
     if unreadable:
         msg = ("outgoing-copy-gate (inter-agent, homoglifa): a torzs NEM vizsgalhato -- "
                f"{unreadable}. Az uzenet ATMENT, homoglifa-ellenorzes NELKUL. "

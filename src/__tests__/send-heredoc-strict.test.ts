@@ -11,6 +11,17 @@ import { gateDecision, isSendInvocation, sendOnlyByStrictHeredoc, strictHeredocC
 // conformance test); this file pins what is NOT shared: the hard-gate's deny kind and its way-out message, the known
 // twin divergence on a comment, and the run time on 1 MB inputs (Viktor 50205 point 2: under 2 s on both gates).
 
+// Viktor 50311 I2: the 2 s bounds are CPU seconds of the gate (python time.process_time, node process.cpuUsage), not
+// wall time. Wall time failed once in a sandbox under load 3.3 (6.7 s for the whole it, the shapes 2.0 s each, the
+// same bytes on the previous head), a red CI run that costs credit and says nothing about the gate. A quadratic
+// regression still shows: it is CPU the gate itself burns.
+function cpuSeconds(fn: () => unknown): number {
+  const t0 = process.cpuUsage()
+  fn()
+  const d = process.cpuUsage(t0)
+  return (d.user + d.system) / 1e6
+}
+
 const ROOT = join(__dirname, '..', '..')
 const GATE_PY = join(ROOT, 'scripts', 'hooks', 'outgoing-copy-gate.py')
 
@@ -37,7 +48,7 @@ spec = importlib.util.spec_from_file_location("gate", ${JSON.stringify(GATE_PY)}
 g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
 v, t = [], []
 for c in json.load(open(sys.argv[1])):
-    t0 = time.perf_counter(); v.append(bool(g.is_send_invocation(c))); t.append(time.perf_counter() - t0)
+    t0 = time.process_time(); v.append(bool(g.is_send_invocation(c))); t.append(time.process_time() - t0)
 print(json.dumps({"verdicts": v, "seconds": t}))
 `, cmds)
   return JSON.parse(out.trim())
@@ -111,11 +122,7 @@ describe('HDSTRICT1122: 1 MB inputs stay under 2 s on both gates (Viktor 50205 p
   ]
 
   it('the JS hard-gate', () => {
-    for (const s of shapes) {
-      const t0 = performance.now()
-      isSendInvocation(s)
-      expect((performance.now() - t0) / 1000).toBeLessThan(2)
-    }
+    for (const s of shapes) expect(cpuSeconds(() => isSendInvocation(s))).toBeLessThan(2)
   })
 
   it('the python copy gate', () => {
@@ -134,13 +141,56 @@ describe('HDSTRICT1122: 1 MB inputs stay under 2 s on both gates (Viktor 50205 p
 
   it('a send line before 1 MB of unclosed openers: both gates see the send, under 2 s', () => {
     for (const s of sendFirst) {
-      const t0 = performance.now()
-      expect(isSendInvocation(s)).toBe(true)
-      expect((performance.now() - t0) / 1000).toBeLessThan(2)
+      let v = false
+      expect(cpuSeconds(() => { v = isSendInvocation(s) })).toBeLessThan(2)
+      expect(v).toBe(true)
     }
     const { verdicts, seconds } = pySend(sendFirst)
     expect(verdicts).toEqual([true, true])
     for (const s of seconds) expect(s).toBeLessThan(2)
+  })
+})
+
+// LONGTOK1122 (card bbc6bad4 round 3, Viktor 50311 B1): shlex is quadratic in the length of ONE token, so a long
+// word after a send ('sendmail a@b.hu ' + 1 MB of 'w': 9.1 s, main 9.8 s) ran past the approval gate's 10 s hook
+// timeout. Past a 32 KiB token run the python send check skips shlex and decides on a sender name anywhere in the
+// command (an extra audit, never a miss). The JS twin tokenizes in linear time and keeps its exact reading.
+describe('LONGTOK1122: a long token after a send stays under 2 s on the python gate, and still counts', () => {
+  const W = 'w'.repeat(1_000_000)
+  const T32 = 'w'.repeat(32 * 1024)
+  const cases: Array<[string, string, boolean]> = [
+    ['a long word after the send', 'sendmail a@b.hu ' + W, true],
+    ['the same word after echo', 'echo ' + W, false],
+    ['a 1 MB quoted string with spaces', "echo '" + 'w '.repeat(500_000) + "'", false],
+    ['a 1 MB double-quoted string with spaces', 'echo "' + 'w '.repeat(500_000) + '"', false],
+    ['a 1 MB quoted string with spaces after the send', "sendmail -t a@b.hu '" + 'w '.repeat(500_000) + "'", true],
+    ['a 1 MB operator run', 'echo ' + ';'.repeat(1_000_000), false],
+    ['1 MB of newlines (masked to an operator run)', 'echo\n' + '\n'.repeat(1_000_000), false],
+    ['graph-mail send with a long argument', 'graph-mail send --to a@b.hu ' + 'w'.repeat(40_000), true],
+    ['a shell -c string with a long word', "bash -c 'sendmail a@b.hu " + 'w'.repeat(40_000) + "'", true],
+    ['31 tokens just under the bound after the send', 'sendmail a@b.hu ' + Array(31).fill(T32).join(' '), true],
+    ['31 tokens just under the bound after echo', 'echo ' + Array(31).fill(T32).join(' '), false],
+    ['a long heredoc body line is cut before the bound is read', "cat > n.md <<'E'\n" + W + '\nE', false],
+    // the loose cut takes the quoted '<<E' for an opener and drops the next line, the strict pass keeps it (bash runs
+    // it): the bound is read on the strict text too, and the sender name decides there as well
+    ['a long token on a line only the strict pass keeps', "echo 'x <<E'\nsendmail a@b.hu " + 'w'.repeat(40_000) + '\nE\n', true],
+  ]
+
+  it('every shape: the verdict, and under 2 s of CPU', () => {
+    const { verdicts, seconds } = pySend(cases.map((c) => c[1]))
+    cases.forEach(([name, , want], i) => {
+      expect([name, verdicts[i]]).toEqual([name, want])
+      expect([name, seconds[i] < 2]).toEqual([name, true])
+    })
+  })
+
+  it('below the bound the quoted mention is content (exact reading); above it, an audit by design', () => {
+    const mention = (n: number) => "echo 'sendmail' " + 'w'.repeat(n)
+    expect(pySend([mention(30_000), mention(40_000)]).verdicts).toEqual([false, true])
+    // a long command of SHORT tokens keeps the exact reading: the bound is the longest token run, not the length
+    expect(pySend(["echo 'sendmail' " + 'w '.repeat(20_000)]).verdicts).toEqual([false])
+    // the known twin divergence past the bound: the JS twin keeps reading positions
+    expect(isSendInvocation(mention(40_000))).toBe(false)
   })
 })
 

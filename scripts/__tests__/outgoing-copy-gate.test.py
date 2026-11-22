@@ -414,6 +414,66 @@ def main():
                                                 tool="mcp__outlook__send-mail"), rules_file=active)
         check("renamed server send-mail with em dash blocks (exit 2)", code, 2)
 
+        # --- bbc6bad4 round 3 (Viktor 50311 I1): rows his surviving mutants asked for --------------------------
+        def bash(cmd):
+            return {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        snd = "send" + "mail"
+        # E15: every heredoc body of a send is audited, not only the first one (a mutant that kept the first body
+        # alone let the em dash of the second through).
+        two = (f"{snd} -t a@b.hu <<'A'\n{CLEAN_HU_OK}\nA\n"
+               f"{snd} -t c@d.hu <<'B'\n{CLEAN_HU_OK} — mégis.\nB")
+        code, out, err = run_hook(bash(two), rules_file=active)
+        check("E15: the em dash only in the SECOND heredoc body of a send blocks (exit 2)", code, 2)
+        code, out, err = run_hook(bash(two.replace(" — mégis.", "")), rules_file=active)
+        check("E15: both bodies clean passes (exit 0)", code, 0)
+        ia = "curl -s -X POST http://localhost:3420/api/messages -H 'Content-Type: application/json' --data-binary @- "
+        # C07: an UNQUOTED heredoc body with a shell substitution is not read as the message (the shell rewrites it
+        # first): a loud pass naming the reason, not a silent homoglyph check of the raw text.
+        code, out, err = run_hook(bash(ia + '<<JSON\n{"from":"kernel","to":"klodel","content":"$(date) ok"}\nJSON'),
+                                  rules_file=active)
+        check("C07: unquoted heredoc + substitution on /api/messages passes (exit 0)", code, 0)
+        check_true("C07: ... and says why (NEM idezett)", "NEM idezett" in out, out)
+        code, out, err = run_hook(bash(ia + "<<'JSON'\n{\"from\":\"kernel\",\"to\":\"klodel\",\"content\":\"$(date) ok\"}\nJSON"),
+                                  rules_file=active)
+        check_true("C07: the QUOTED heredoc with the same text is read (no warning)", "NEM idezett" not in out, out)
+        # C04: an empty heredoc body is a body (invalid JSON), not "no heredoc".
+        code, out, err = run_hook(bash(ia + "<<'JSON'\n\nJSON"), rules_file=active)
+        check_true("C04: an empty heredoc body is reported as invalid JSON, not as a missing heredoc",
+                   "nem ervenyes JSON" in out and "heredoc nelkul" not in out, out)
+
+        # --- LONGTOK1122 (Viktor 50311 B1): a token run past 32 KiB, the whole hook process -------------------
+        # The approval gate's hook timeout is 10 s and a timed-out hook lets the command through; on the previous
+        # head 'sendmail a@b.hu ' + 1 MB of 'w' took 9.1 s in is_send_invocation alone, and the echo shape 12.7 s
+        # through the HTTP and inter-agent arms. 10 s of wall time per process is the acceptance bound (measured
+        # 0.03-0.27 s on the fixed head); 3 s of the hook's own CPU (RUSAGE_CHILDREN, load-proof) is the regression
+        # guard: one arm left unbounded burns 6-9 s of CPU on the 1 MB shapes.
+        import resource as _resource
+        import time as _time
+        w1m = "w" * 1_000_000
+        long_rows = [
+            ("send + 1 MB word blocks (unreadable body)", f"{snd} a@b.hu {w1m}", 2, None),
+            ("echo + 1 MB word passes", "echo " + w1m, 0, None),
+            ("echo + 1 MB quoted string with spaces passes", "echo '" + "w " * 500_000 + "'", 0, None),
+            ("Telegram API + 40 KB token fails closed", "curl -s https://api.telegram.org/botX/sendMessage -d 'text="
+             + "w" * 40_000 + "'", 2, "api.telegram.org"),
+            ("/api/messages + 40 KB token + lookalike blocks", ia.replace("--data-binary @- ", "-d '")
+             + '{"content":"' + "w " * 40_000 + " kаrtya\"}'", 2, "homoglifa"),
+            ("/api/messages + 40 KB clean token passes", ia.replace("--data-binary @- ", "-d '")
+             + '{"content":"' + "w " * 40_000 + "\"}'", 0, None),
+        ]
+        for name, cmd, want, needle in long_rows:
+            ru0 = _resource.getrusage(_resource.RUSAGE_CHILDREN)
+            t0 = _time.perf_counter()
+            code, out, err = run_hook(bash(cmd), rules_file=active)
+            wall = _time.perf_counter() - t0
+            ru1 = _resource.getrusage(_resource.RUSAGE_CHILDREN)
+            cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
+            check(f"LONGTOK1122: {name}", code, want)
+            check_true(f"LONGTOK1122: {name} -- under 10 s", wall < 10, f"{wall:.2f} s")
+            check_true(f"LONGTOK1122: {name} -- under 3 s of hook CPU", cpu < 3, f"{cpu:.2f} s")
+            if needle:
+                check_true(f"LONGTOK1122: {name} -- names {needle}", needle in err, err[:200])
+
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
         sys.exit(1)
