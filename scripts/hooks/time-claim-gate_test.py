@@ -317,10 +317,10 @@ def closing_stamp_round3_ends_zones_separators_and_concatenation(root):
         py.format("body = {'author': 'kernel', 'content': '27/28 kész' ' " + s + "'}"),
     ]
     allow = [
-        j('27/28 kész (' + t + ' 00:30 +14:00)'),
+        j('27/28 kész (' + t + ' 12:30 +14:00)'),
         j('27/28 kész (' + t + ' 22:06 PST)'),
-        j('27/28 kész (' + t + ' 22:06 CET+1)'),
-        j('27/28 kész ' + _zst(21, 0, 60, ' UTC+1')),
+        j('27/28 kész ' + _zst(22, 6, 120, ' CET+1')),
+        j('27/28 kész ' + _zst(21, 30, 60, ' UTC+1')),
         j('27/28 kész (review ok ' + s + ') és tovább'),
     ]
     bad = [c for c in block if run(h, 'Bash', {'command': c}, now='22:04')[0] != 2]
