@@ -13,9 +13,45 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     Write: tool_input.content; Edit: new_string; MultiEdit: every edits[].new_string.
     Only NEW lines are judged: a line already in the file (Write) or in old_string (Edit) passes, so
     rewriting a report with yesterday's undated lines in it does not trip the gate.
-  - Bash, only when the command text contains "/api/kanban/" and "/comments" (a card comment). The command
-    text is judged (inline heredoc / -d payload); a `--data-binary @file`, `--data @file` or `-d @file`
-    payload is read too when it is a regular file of at most 64 KB.
+  - Bash, a card comment: the command text contains "/api/kanban/" and "/comments" or "/move" (the "comment"
+    field of a move, where the kanban-waiting gate puts the VÁR line; Dave 49788), or a PUT to /api/kanban/
+    (`-X PUT`, `-sX PUT`, `--request PUT`, `method='PUT'` in any case, `request[s].put(` (that module's
+    top-level put only; httpx.put and a Session's put are not seen),
+    `.request('PUT'`) that carries a comment key (JSON, escaped, a Python dict key or `['comment']` subscript,
+    `.comment |=`, or bare after `{` `,` `(` `.` or at an indented line start as jq / JS write it; in the
+    command or a data file;
+    src/web/routes/kanban.ts stores it like a move) and is not itself a message, memory or log write (that
+    exclusion holds only when no real curl segment of the command has /api/kanban/ as its own URL and a PUT,
+    so a kanban PUT next to a message close or a memory write is still judged; Viktor 49831 L8). The
+    command text is judged (inline heredoc / -d payload); a `--data-binary @file`, `--data @file`,
+    `--json @file` or `-d @file` payload, and a `< file` stdin redirect when curl reads stdin (`@-`), are read
+    too when they are regular files of at most 64 KB (at most MAX_SHELL_TARGETS distinct ones); a `<b>` /
+    `<notes.md>` in a text (the name ends right at `>`) is not a stdin redirect (L11; so `<f.json>out` with no
+    space is not read either, Viktor 49831 I7).
+    Known limits of the card path (Viktor 49811, 49824; the same on /comments): a body on stdin (pipe) is not in
+    the command text; a url-var (the URL from a variable, no literal /api/kanban/) is not seen; a relfile (a
+    relative @file after a cd) is resolved against the payload cwd only; curl -T (an upload file) is not read;
+    rule 4's opening stamp is read in plain JSON or a Python dict, not escaped inside a double-quoted -d, and as
+    HH:MM only, not with seconds ("Kernel 12:30:00:", an ISO stamp ...T12:30:00+01:00; the same on main);
+    a jq shorthand key (`{$comment}`, a variable named comment) is not seen as a comment key; prose: a PUT
+    description edit or card text that writes "(comment: ...", ", comment: ..." or ".comment = ..." next to a
+    plan time is read as a comment key and overblocks (the safe side; text cannot be told from jq, Viktor 49831);
+    the same for an indented "  comment: ..." line in a description text, and for a title-edit PUT next to a
+    message that quotes the "comment": key (the key search reads the whole command, Viktor 49836); and a
+    message or memory that quotes a kanban PUT after a backtick, a ( or a ; or at a line start (a heredoc line
+    "x=a 'b c' curl -sX PUT ...") with a plan time in it is judged as a card (the segment search reads quoted text
+    too: imitating shell quoting in a hook hid real PUTs twice, Viktor 49845 L13, 49870); send the quote in its own
+    command, or write it without those marks.
+    envvalue: an env prefix before curl whose value holds a $( ) with ; | or parentheses inside (T=$(date | tr a b)
+    curl, T=$(printf %s $(date)) curl, A=$(( (1+2) )) curl) is not read as a curl segment, so next to a message or
+    memory write that PUT is not judged as a card (alone it is; Viktor 49858, the same on every earlier head).
+    smuggle (Viktor 49901, his indep7 labels; Klodel 49904 raised the named cap for them): next to a message or
+    memory write, a card PUT whose curl the segment regex does not see is not judged as a card (alone it is):
+    name-cont-env-dq and cmd-name-cont (a line continuation inside a VAR name or the curl word), bs-cmd-name and
+    quoted-cmd-name (a backslash before curl, "curl"), kw-then, kw-do, kw-brace, kw-bang (curl right after then, do, { or !),
+    redir-prefix (2>/dev/null before curl), hdr-charset-semicolon (a ; inside a quoted header), data-multiline-url-last
+    (a multi-line -d with the kanban URL after it), env-apiword-first and hdr-apiword-first (/api/messages or
+    /api/memories in an env value or a header before the kanban URL). The same on 201485cc; pinned by a test row.
   - Bash that writes a shared/*.md through the shell (Radar 39251: `cat >> .../shared/hibanaplo.md <<'EOF'`
     wrote a future time unseen): a `>` / `>>` / `>|` redirect or a `tee [-a]` whose target resolves to a
     shared/*.md. The command text (the heredoc body) is judged; lines already in a target file pass, like
@@ -36,7 +72,7 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     a deadline in the body is not judged, and a message that names the endpoint and quotes a heading is not a
     log write. A heading line that names another date (MM-DD, YYYY-MM-DD) passes.
   - Rule 4, card comments only (Dave 39858, 2026-11-13): the comment's own opening time, at the START of a
-    payload's "content" value (after at most 30 characters with no digit, e.g. an author name: "Kernel 08:48",
+    payload's "content" (or a move's / PUT's "comment", Viktor 49811 L1) value (after at most 30 characters with no digit, e.g. an author name: "Kernel 08:48",
     "Klodel (13:12, date)", "2026-11-13 08:46 - ..."), must not be later than the current minute, with or without
     a marker word. Dave's "2026-11-13 08:46 - #1289 ..." went in at 08:44 because its line has no marker word, so
     rule 2 never looked at it. Measured read-only on store/claudeclaw.db kanban_comments since 2026-11-11: 962
@@ -112,6 +148,7 @@ an unparseable value is ignored. Nothing else is read from the environment.
 Tests: python3 -I scripts/hooks/time-claim-gate_test.py
 """
 import datetime
+import itertools
 import json
 import os
 import re
@@ -157,8 +194,16 @@ HEADING_RX = re.compile(r'"content"\s*:\s*"\s*#{1,6}[ \t]*([01]?\d|2[0-3]):([0-5
 # Rule 4: the opening time of a card comment's "content" value. Group 1: the no-digit prefix (an author name);
 # groups 2-4: an optional date written right before the time; 5-6: the time.
 COMMENT_HEAD_RX = re.compile(
-    r'"content"\s*:\s*"([^"\n\\\d]{0,30}?)(?:(?:(\d{4})-)?(\d{2})-(\d{2})(?:[ \t]{1,3}|[ \t]?,[ \t]{0,2}|T))?'
+    r'"(?:content|comment)"\s*:\s*"([^"\n\\\d]{0,30}?)(?:(?:(\d{4})-)?(\d{2})-(\d{2})(?:[ \t]{1,3}|[ \t]?,[ \t]{0,2}|T))?'
     r'([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?!:\d)')
+# The same two in a Python dict ('content': '...'), as json.dump in a heredoc or python3 -c writes the payload
+# (Klodel 49904 (2), Viktor 49906: rule 3 and rule 4 passed there on every earlier head). Same groups.
+HEADING_PY_RX = re.compile(HEADING_RX.pattern.replace('"', "'"))
+COMMENT_HEAD_PY_RX = re.compile(COMMENT_HEAD_RX.pattern.replace('"', "'"))
+
+
+def _heads(rx, rx_py, text):
+    return itertools.chain(rx.finditer(text), rx_py.finditer(text))
 # Right after the time: a suffix ("23:50-es", "08:00-kor") or a plan word; the time is not the comment's stamp.
 COMMENT_HEAD_NOT_STAMP_RX = re.compile(r'-[^\W\d_]|[ \t]+(?:után|előtt|terv\w*)(?!\w)', re.I)
 # Rule 5, the send path (retro R1, card 028205dd): an inter-agent message, a close result or a daily-log entry.
@@ -173,8 +218,9 @@ SEND_PLAN_LINE_RX = re.compile(
 SEND_ESTIMATE_BEFORE_RX = re.compile(r'(?:~|(?<!\w)kb\.?[ \t]*|(?<!\w)körülbelül[ \t]+|(?<!\w)nem[ \t]+)$', re.I)
 # Right after the time: a UTC stamp ("16:13:16Z"), not the install's clock.
 UTC_AFTER_RX = re.compile(r'(?::[0-5]\d)?Z(?!\w)')
-STDIN_FILE_RX = re.compile(r'(?<![<\d])<[ \t]*[\'"]?([^\s\'";|&<>()]+)')
-DATA_FILE_RX = re.compile(r'(?<![\w-])(?:--data-binary|--data|-d)(?:\s+|=)?[\'"]?@([^\s\'";|&<>()]+)')
+# not a <b> / <notes.md> tag or autolink in a text: a name that ends right at > is not a redirect
+STDIN_FILE_RX = re.compile(r'(?<![<\d])<[ \t]*[\'"]?(?![^\s\'";|&<>()]*>)([^\s\'";|&<>()]+)')
+DATA_FILE_RX = re.compile(r'(?<![\w-])(?:--data-binary|--data|--json|-d)(?:\s+|=)?[\'"]?@([^\s\'";|&<>()]+)')
 # Shell writes (Radar 39251). ">>f", "> 'f'", ">| f"; "2>&1" has no path and does not match. tee takes every
 # non-option word up to the next shell operator.
 REDIRECT_RX = re.compile(r'>>?\|?[ \t]*[\'"]?([^\s\'";|&<>()]+)')
@@ -255,7 +301,7 @@ def heading_findings(text, now):
     """[(line_no, token, 'heading')] for a daily-log heading time later than the current minute (rule 3)."""
     out = []
     limit = now.hour * 60 + now.minute + SLACK_MIN
-    for m in HEADING_RX.finditer(text):
+    for m in _heads(HEADING_RX, HEADING_PY_RX, text):
         if len(out) >= MAX_TIMES_PER_LINE:
             break
         if _other_day(m.group(3), now):
@@ -295,7 +341,7 @@ def typed_heading_findings(text, now):
     """[(line_no, token, 'heading-typed')] for a daily-log heading with a typed time of today (rule 6): the heading
     time is "{{NOW}}", which the dashboard fills in at the write. A heading that names another day passes."""
     out = []
-    for m in HEADING_RX.finditer(text):
+    for m in _heads(HEADING_RX, HEADING_PY_RX, text):
         if len(out) >= MAX_TIMES_PER_LINE:
             break
         if _other_day(m.group(3), now):
@@ -362,7 +408,7 @@ def comment_head_findings(text, now):
     """[(line_no, token, 'card-head')] for a card comment's opening time later than the current minute (rule 4)."""
     out = []
     limit = now.hour * 60 + now.minute + SLACK_MIN
-    for m in COMMENT_HEAD_RX.finditer(text):
+    for m in _heads(COMMENT_HEAD_RX, COMMENT_HEAD_PY_RX, text):
         if len(out) >= MAX_TIMES_PER_LINE:
             break
         if m.group(3) and _date_is_other(m.group(2), m.group(3), m.group(4), now) is not False:
@@ -383,6 +429,75 @@ def _json_text(text):
     \\uXXXX escape is its character -- json.dumps writes "M\\u00e9rve", and "x\\nlefutott" hid the marker behind the
     letter n. A \\" stays as it is: the heading and comment-stamp patterns read the JSON string's end from it."""
     return JSON_U_RX.sub(lambda m: chr(int(m.group(1), 16)), text.replace('\\n', '\n').replace('\\t', '\t'))
+
+
+PUT_RX = re.compile(r'(?:(?<![\w-])-[A-Za-z]*X|--request)(?:[ \t]|\\\r?\n)*[\'"]?PUT\b'
+                    r'|(?<![\w-])method[\'"]?[ \t]*[:=][ \t]*[\'"](?i:put)[\'"]'
+                    r'|(?<![\w.])request[s]\.put\(|\.request\([ \t]*[\'"]PUT[\'"]')
+# A real curl command segment (not a PUT quoted inside a message text): it starts at a line start or after
+# ; & | ( or a backtick, and runs to the next unescaped newline / ; & | (a backslash-newline continues it).
+# The env value (VAR=... before curl) is read unit by unit, first fit wins: $(( )) and $( ) with no ( ) or backtick
+# inside (T=$(date) curl ...), $'...' and "..." with their \x escapes, '...', all three also over lines, a \x escape
+# (also a backslash-newline: bash joins the lines; Viktor 49870 old gaps S-sq-nl, S-esc-nl), then any other char
+# but whitespace, ; & | ( backtick or a bare backslash (a quote that is no unit is a plain char, as on 4314d041;
+# the bare-backslash exclusion only matters at the very end of a command, the escape unit comes first).
+# Viktor 49858 V1: A='x(y)', A="(x)", A=a\(b, A=$'x(y)', N=$((1+2)) before curl are segments.
+# The value is read atomically (lookahead + backreference, Python 3.9 has no possessive quantifier): no backtracking
+# into it, so no unit split can blow up (round-5 mutants 22, 25, 26). The VAR=value chain always matches and the
+# curl is an optional group (a match counts only with it): a chain with no curl after it is consumed, and the search
+# does not restart at a ( ` ; inside its quotes or escapes (Viktor 49870 L14: a failing chain was re-read from every
+# inner start to the line end, 120 KB 24.6 s). No unit holds the word curl, so a curl inside a quote or a $( ) is
+# not swallowed: the quote is read as a plain char, the value stops at the inner start, and that start is searched.
+# Nor does a unit hold a segment start followed by VAR= (Viktor 49884 L15: a quote the shell does not read as one,
+# echo "(x='a" ; T='b c' curl ..., opened at x= and closed inside the real T='b c', swallowing the real ;); and an
+# escape inside "..." or $'...' does not take a newline that VAR= follows (Viktor 49887: a line continuation or a
+# comment ending in a backslash before the real line). A backslash-newline between the start and VAR= needs no own
+# branch: the newline is itself a start, so the last one before VAR= stops the unit (per char in '...', by the last
+# escape's lookahead in "..." and $'...'). A repeated backslash-newline in these lookaheads re-read the rest of a
+# backslash-newline run at every step (Viktor 49898 L16: 60 KB 18.7 s), so they stay [ \t]* (linear).
+# A bare escape outside quotes does not take a newline that VAR= or a curl (also with a path) follows (Viktor 49901
+# L17: a comment ending in a backslash, "# step 1;b=c\", then a real PUT with no env prefix: the shell runs the PUT,
+# the comment's backslash continues nothing, but the escape took the newline and the value ran on through curl).
+# In a real continuation (b=c\ newline curl) the shell joins the word; reading a segment there only overblocks.
+_START_VAR = r'[;&|(`\n][ \t]*\w+='
+_UNIT_GUARD = r'(?!curl\b|' + _START_VAR + r')'
+_QUOTED_ESC = r'\\(?:[^\n]|\n(?![ \t]*\w+=))'
+_BARE_ESC = r'\\(?:[^\n]|\n(?![ \t]*(?:\w+=|(?:[^\s;&|(`]*/)?curl\b)))'
+_ENV_UNIT = (r'\$\(\((?:' + _UNIT_GUARD + r'[^;&|()`\n])*\)\)|\$\((?:' + _UNIT_GUARD + r'[^;&|()`\n])*\)'
+             r'|\$\'(?:' + _UNIT_GUARD + r'(?:[^\'\\]|' + _QUOTED_ESC + r'))*\'|\'(?:' + _UNIT_GUARD + r'[^\'])*\''
+             r'|"(?:' + _UNIT_GUARD + r'(?:[^"\\]|' + _QUOTED_ESC + r'))*"'
+             r'|' + _BARE_ESC + r'|[^\s;&|(`\\]')
+
+
+def _env_assign(name):
+    return r'\w+=(?=(?P<' + name + r'>(?:' + _ENV_UNIT + r')*))(?P=' + name + r')'
+
+
+CURL_SEG_RX = re.compile(r'(?:^|[;&|(`])[ \t]*(?:' + _env_assign('v1') + r'[ \t]+)*(?:' + _env_assign('v2') + r')?'
+                         r'(?P<curl>(?:[^\s;&|(`]*/)?curl\b(?:[^\n;&|\\]|\\[\s\S])*)?', re.M)
+# The comment key as JSON writes it, escaped inside a double-quoted -d, as a Python dict key, or bare (jq).
+COMMENT_KEY_RX = re.compile(r'(?:(?<![\w-])\\?[\'"]comment\\?[\'"]\]?|(?:(?<=[{,(.])|(?<=[{,(][ \t])|(?m:^)[ \t]+)comment)'
+                            r'[ \t]*\|?[:=]')
+
+
+def _seg_url_is_kanban(seg):
+    # the curl's own URL is the first /api/ in its segment; a kanban PUT quoted in a memory body comes later
+    i = seg.find('/api/')
+    return i >= 0 and seg.startswith('/api/kanban/', i)
+
+
+def _data_paths(cmd, cwd):
+    """The absolute paths of the `@file` data files a curl command reads (a relative one against an absolute cwd)."""
+    out = []
+    stdin = STDIN_FILE_RX.findall(cmd) if '@-' in cmd else []  # curl reads stdin only for @-
+    for ref in list(dict.fromkeys(DATA_FILE_RX.findall(cmd) + stdin))[:MAX_SHELL_TARGETS]:
+        path = os.path.expanduser(ref)
+        if not os.path.isabs(path):
+            if not (isinstance(cwd, str) and os.path.isabs(cwd)):
+                continue
+            path = os.path.join(cwd, path)
+        out.append(path)
+    return out
 
 
 def judged_texts(tool_name, ti, cwd):
@@ -406,16 +521,26 @@ def judged_texts(tool_name, ti, cwd):
         cmd = ti.get('command')
         if not isinstance(cmd, str):
             return []
-        card = '/api/kanban/' in cmd and '/comments' in cmd
+        # A card comment, also the "comment" field of a /move (Dave 49788, card 00c714ea: a placeholder time in a
+        # move comment went out with HTTP 200, the same text on /comments was blocked; the kanban-waiting gate makes
+        # everyone write the VÁR line into the move). PUT /api/kanban/<id> stores a "comment" field the same way
+        # (src/web/routes/kanban.ts storeMoveComment); such a PUT counts only when it carries "comment", in the
+        # command or a data file it reads, so a title or description edit keeps its plan times.
+        card = '/api/kanban/' in cmd and ('/comments' in cmd or '/move' in cmd)
+        if not card and '/api/kanban/' in cmd and PUT_RX.search(cmd) and (not API_WRITE_RX.search(cmd) or any(
+                m.group('curl') and _seg_url_is_kanban(m.group(0)) and PUT_RX.search(m.group(0))
+                for m in CURL_SEG_RX.finditer(cmd))):
+            card = bool(COMMENT_KEY_RX.search(cmd)) or any(
+                'comment' in b and COMMENT_KEY_RX.search(b) for b in (_read_small(p) or '' for p in _data_paths(cmd, cwd)))
         if not card and not API_WRITE_RX.search(cmd):
             targets = _shell_shared_md_targets(cmd, cwd)
             if not targets:
                 return []
             return [('command ', cmd, frozenset().union(*(_existing_lines(t) for t in targets)), False, False, False, False)]
-        refs = DATA_FILE_RX.findall(cmd)
-        if not card:
-            # A message body can come from a file on stdin: agent-msg.sh kernel klodel - < body.txt
-            refs += STDIN_FILE_RX.findall(cmd)[:MAX_SHELL_TARGETS]
+        refs = list(dict.fromkeys(DATA_FILE_RX.findall(cmd)))[:MAX_SHELL_TARGETS]
+        # A message or card body can come from a file on stdin: agent-msg.sh kernel klodel - < body.txt
+        if not card or '@-' in cmd:  # a card body from stdin only when curl reads it (@-)
+            refs += list(dict.fromkeys(STDIN_FILE_RX.findall(cmd)))[:MAX_SHELL_TARGETS]
         po = not card  # message / memory / daily log: placeholder rule only
         hd = not card and DAILY_LOG in cmd  # rules 3 and 6: the daily-log heading
         sp = not card and bool(SEND_PATH_RX.search(cmd))  # rule 5: message, close result, daily log

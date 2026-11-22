@@ -112,6 +112,528 @@ def allow_message_reads_and_clean_sends(root):
             and run(h, 'Bash', {'command': 'python3 x.py 2>&1 | bash scripts/agent-msg.sh a b -'})[0] == 0)
 
 
+MOVE = 'curl -s -X POST http://localhost:3420/api/kanban/abc/move -H "Content-Type: application/json"'
+
+
+@case
+def block_move_comment_placeholder(root):
+    # Dave 49788, card 00c714ea, the move comment that went out with HTTP 200 (verbatim, today's date in place of
+    # 2026-11-21 so the case holds on any day): the /move "comment" field is a card comment too.
+    text = ('Mérőkör fut: work/00c714ea-r8 (teszt, neg, 6 mutáns, replay). (' + TODAY.isoformat() + ' 19:2x)')
+    body = json.dumps({'status': 'waiting', 'comment': text})
+    h = root['hook']
+    return (run(h, 'Bash', {'command': MOVE + " --data-binary @- <<'J'\n" + body + "\nJ"}, now='19:30')[0] == 2
+            and run(h, 'Bash', {'command': MOVE + " -d '" + body + "'"}, now='19:30')[0] == 2)
+
+
+@case
+def block_move_comment_future_and_from_data_file(root):
+    # The card rules, not only the placeholder: a future measured time, and a body read from a data file.
+    body = os.path.join(root['dir'], 'move.json')
+    with open(body, 'w', encoding='utf-8') as fh:
+        json.dump({'status': 'waiting', 'comment': 'VÁR: Dave - a review-ra, mérve 18:30'}, fh)
+    return run(root['hook'], 'Bash', {'command': MOVE + ' --data-binary @' + body}, now='18:14')[0] == 2
+
+
+@case
+def allow_move_clean_and_without_comment(root):
+    h = root['hook']
+    return (run(h, 'Bash', {'command': MOVE + ' -d \'{"status":"done"}\''})[0] == 0
+            and run(h, 'Bash', {'command': MOVE + " -d '" + json.dumps(
+                {'status': 'waiting', 'comment': 'VÁR: Dave - a review-ra, mérve 18:12'}) + "'"}, now='18:14')[0] == 0)
+
+
+PUT = 'curl -s -X PUT http://localhost:3420/api/kanban/abc -H "Content-Type: application/json"'
+
+
+@case
+def block_put_card_comment_placeholder_inline_and_data_file(root):
+    # PUT /api/kanban/<id> stores its "comment" field like a move (src/web/routes/kanban.ts storeMoveComment).
+    body = os.path.join(root['dir'], 'put.json')
+    with open(body, 'w', encoding='utf-8') as fh:
+        json.dump({'status': 'waiting', 'comment': 'VÁR: Dave - mérve 19:2x'}, fh)
+    h = root['hook']
+    return (run(h, 'Bash', {'command': PUT + " -d '" + json.dumps({'comment': 'kész, mérve 19:2x'}) + "'"}, now='19:30')[0] == 2
+            and run(h, 'Bash', {'command': PUT + ' --data-binary @' + body}, now='19:30')[0] == 2)
+
+
+@case
+def allow_put_card_edit_without_comment_keeps_plan_times(root):
+    # A title or description edit is not a comment: a plan time in it passes, as before.
+    return run(root['hook'], 'Bash', {'command': PUT + " -d '" + json.dumps(
+        {'description': 'Deploy éjjel, 23:00 után; határidő 22:30.'}) + "'"}, now='18:14')[0] == 0
+
+
+@case
+def allow_put_card_edit_without_comment_is_not_judged_as_a_comment(root):
+    # Without "comment" the PUT is not a card comment: a near-future "mérve" time that the card rule blocks
+    # (card_comment_keeps_the_future_rule) passes in a description edit, inline and from a data file.
+    body = os.path.join(root['dir'], 'put-desc.json')
+    with open(body, 'w', encoding='utf-8') as fh:
+        json.dump({'description': 'mérve 18:30'}, fh)
+    h = root['hook']
+    return (run(h, 'Bash', {'command': PUT + " -d '" + json.dumps({'description': 'mérve 18:30'}) + "'"}, now='18:14')[0] == 0
+            and run(h, 'Bash', {'command': PUT + ' --data-binary @' + body}, now='18:14')[0] == 0)
+
+
+KB = 'http://localhost:3420/api/kanban/abc'
+
+
+def _ph(text='kész 19:2x'):
+    return json.dumps({'comment': text})
+
+
+@case
+def block_move_and_put_comment_opening_stamp_ahead(root):
+    # Viktor 49811 L1: rule 4 (the comment's own opening time) reads a move's / PUT's "comment" value too; no
+    # marker word needed. The same text on /comments was blocked already.
+    h = root['hook']
+    body = json.dumps({'status': 'waiting', 'comment': 'Viktor 18:44 VÁR: Dave - delta'})
+    return (run(h, 'Bash', {'command': MOVE + " -d '" + body + "'"}, now='18:14')[0] == 2
+            and run(h, 'Bash', {'command': PUT + " -d '" + body + "'"}, now='18:14')[0] == 2
+            and run(h, 'Bash', {'command': MOVE + " -d '" + json.dumps(
+                {'status': 'waiting', 'comment': 'Viktor 18:10 VÁR: Dave - delta'}) + "'"}, now='18:14')[0] == 0)
+
+
+@case
+def block_put_method_shapes(root):
+    # Viktor 49811 L2 and I1 (M04, M05, M18): every way curl takes PUT, quoted, glued, tabbed, continued.
+    h = root['hook']
+    cmds = ["curl -s -X 'PUT' " + KB, 'curl -s -X "PUT" ' + KB, "curl -s -X'PUT' " + KB, 'curl -s --request "PUT" ' + KB,
+            'curl -s -XPUT ' + KB, 'curl -s --request PUT ' + KB, 'curl -s -X\tPUT ' + KB,
+            'curl -s -X \\\nPUT ' + KB, 'curl -s --request \\\n  PUT ' + KB]
+    return all(run(h, 'Bash', {'command': c + " -d '" + _ph() + "'"}, now='19:30')[0] == 2 for c in cmds)
+
+
+@case
+def block_put_comment_key_shapes(root):
+    # Viktor 49811 L2: the comment key escaped in a double-quoted -d, as a Python dict key, bare in jq.
+    h = root['hook']
+    return (run(h, 'Bash', {'command': PUT + ' -d "{\\"comment\\":\\"kész 19:2x\\"}"'}, now='19:30')[0] == 2
+            and run(h, 'Bash', {'command': "python3 -c \"import json; print(json.dumps({'comment': 'kész 19:2x'}))\" | "
+                                           + PUT + ' -d @-'}, now='19:30')[0] == 2
+            and run(h, 'Bash', {'command': "jq -n '{comment: \"kész 19:2x\"}' | " + PUT + ' -d @-'}, now='19:30')[0] == 2)
+
+
+@case
+def block_put_relative_data_file_and_stdin_redirect(root):
+    # I1 (M09, M17): a relative @file against the payload cwd; P5: a `< file` stdin body; P4: --json @file.
+    with open(os.path.join(root['dir'], 'put-rel.json'), 'w', encoding='utf-8') as fh:
+        fh.write(_ph())
+    h = root['hook']
+    return (run(h, 'Bash', {'command': PUT + ' -d @put-rel.json'}, now='19:30', cwd=root['dir'])[0] == 2
+            and run(h, 'Bash', {'command': PUT + ' -d @- < put-rel.json'}, now='19:30', cwd=root['dir'])[0] == 2
+            and run(h, 'Bash', {'command': MOVE + ' --json @put-rel.json'}, now='19:30', cwd=root['dir'])[0] == 2)
+
+
+@case
+def allow_comment_key_outside_a_card_comment(root):
+    # I1 overblock side (M06, M12, M21): a comment key in a kanban call that stores no comment, and a PUT to
+    # another API, is not a card comment; a near-future "mérve" time that the card rule blocks passes there.
+    h = root['hook']
+    body = " -d '" + json.dumps({'title': 'x', 'comment': 'mérve 18:30'}) + "'"
+    return all(run(h, 'Bash', {'command': c + body}, now='18:14')[0] == 0 for c in (
+        'curl -s -X POST http://localhost:3420/api/kanban',
+        'curl -s -X POST http://localhost:3420/api/kanban/abc/archive',
+        'curl -s -X PATCH ' + KB,
+        'curl -s -X PUT http://localhost:3420/api/agents/abc'))
+
+
+@case
+def put_many_data_file_args_judged_once(root):
+    # Viktor 49811 L3: 51000 `-d @g` (a 4 KB file with the comment key) took 24 s on 8ade408e, over the 10 s hook
+    # limit; the data files are deduplicated and capped (MAX_SHELL_TARGETS), so it is one read.
+    g = os.path.join(root['dir'], 'g.json')
+    with open(g, 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'comment': 'VÁR: Dave - ' + 'x' * 4000}))
+    import time
+    t = time.monotonic()
+    code = run(root['hook'], 'Bash', {'command': PUT + (' -d @' + g) * 51000}, now='19:30')[0]
+    took = time.monotonic() - t
+    # The same without a comment key (a description edit): the comment check must not read the file 51000 times.
+    d = os.path.join(root['dir'], 'd.json')
+    with open(d, 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'description': 'x' * 4000}))
+    t = time.monotonic()
+    code2 = run(root['hook'], 'Bash', {'command': PUT + (' -d @' + d) * 51000}, now='19:30')[0]
+    if not (code == 0 and code2 == 0 and took < 3.0 and time.monotonic() - t < 3.0):
+        return False
+    # Counted, not timed (a 4 KB read is too cheap to time): the comment check reads each data file once, at most
+    # MAX_SHELL_TARGETS of them, however often the command names it.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tcg_count', root['hook'])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    reads, orig = [], mod._read_small
+    mod._read_small = lambda p: reads.append(p) or orig(p)
+    names = [os.path.join(root['dir'], f'n{i}.json') for i in range(mod.MAX_SHELL_TARGETS + 5)]
+    for p in names:
+        with open(p, 'w', encoding='utf-8') as fh:
+            fh.write('{}')
+    mod.judged_texts('Bash', {'command': PUT + (' -d @' + d) * 500 + ''.join(' -d @' + p for p in names)}, root['dir'])
+    return reads.count(d) == 1 and len(set(reads)) <= mod.MAX_SHELL_TARGETS
+
+
+@case
+def block_put_combined_switch_and_code_method(root):
+    # Viktor 49824 L4: curl's combined short switches (-sX, -fsSX); L5: a PUT from code (python urllib
+    # method='PUT', node fetch method:'PUT') with a comment key.
+    h = root['hook']
+    py = ("python3 -c \"import json, urllib.request as u; u.urlopen(u.Request('" + KB + "', data=json.dumps("
+          "{'comment': 'kész 19:2x'}).encode(), method='PUT'))\"")
+    node = "node -e \"fetch('" + KB + "', {method: 'PUT', body: JSON.stringify({comment: 'kész 19:2x'})})\""
+    return all(run(h, 'Bash', {'command': c}, now='19:30')[0] == 2 for c in (
+        'curl -sX PUT ' + KB + " -d '" + _ph() + "'", 'curl -fsSX PUT ' + KB + " -d '" + _ph() + "'", py, node))
+
+
+@case
+def block_put_stdin_redirects_deduplicated(root):
+    # Viktor 49824 L6: 21 identical `< same.json` must not fill MAX_SHELL_TARGETS and hide the next, bad file.
+    with open(os.path.join(root['dir'], 'same.json'), 'w', encoding='utf-8') as fh:
+        fh.write(_ph('VÁR: Dave - delta'))
+    with open(os.path.join(root['dir'], 'bad.json'), 'w', encoding='utf-8') as fh:
+        fh.write(_ph())
+    cmd = PUT + ' -d @-' + ' < same.json' * 21 + ' < bad.json'
+    return run(root['hook'], 'Bash', {'command': cmd}, now='19:30', cwd=root['dir'])[0] == 2
+
+
+@case
+def allow_no_overblock_on_lt_text_desc_word_and_quoted_put(root):
+    # Viktor 49824 L7 (all passed on the parent): a "<b>" / "<notes.md>" in a comment is not a stdin file when
+    # curl does not read stdin (no @-); "comment:" as a word in a description is not a key; a message, a close
+    # result or a memory that quotes a kanban PUT is judged on its own path, not as a card comment.
+    for name in ('b', 'notes.md'):
+        with open(os.path.join(root['dir'], name), 'w', encoding='utf-8') as fh:
+            fh.write('mérve 19:2x\n')
+    h = root['hook']
+    lt = [MOVE + " -d '" + json.dumps({'status': 'waiting', 'comment': 'VÁR: Dave - a <b> rész'}) + "'",
+          MOVE + " -d '" + json.dumps({'status': 'waiting', 'comment': 'VÁR: Dave - lásd <notes.md>'}) + "'"]
+    quoted = 'curl -X PUT ' + KB + ' -d {"comment": "mérve 18:40"}'
+    others = [PUT + " -d '" + json.dumps({'description': 'Review comment: mérve 18:40'}) + "'",
+              "bash scripts/agent-msg.sh kernel klodel 'példa: " + quoted + "'",
+              "bash tools/msg-close.sh 'példa: " + quoted + "' 77",
+              API + "memories -d '" + json.dumps({'agent_id': 'kernel', 'content': 'példa: ' + quoted}) + "'"]
+    # without @- curl does not read stdin: a `< file` holding a comment key does not make a description edit a comment
+    with open(os.path.join(root['dir'], 'c.json'), 'w', encoding='utf-8') as fh:
+        fh.write(_ph('ok'))
+    lt.append(PUT + " -d '" + json.dumps({'description': 'mérve 19:50'}) + "' < c.json")
+    return (all(run(h, 'Bash', {'command': c}, now='19:30', cwd=root['dir'])[0] == 0 for c in lt)
+            and all(run(h, 'Bash', {'command': c}, now='18:14')[0] == 0 for c in others))
+
+
+@case
+def block_put_next_to_message_close_memory_or_log_write(root):
+    # Viktor 49831 L8 (a regression of 49824 R3): a real kanban PUT with a comment was let through whenever the same
+    # command also closed a message or wrote a memory / the daily log, a common closing step. Only a curl segment
+    # whose own URL is /api/kanban/ counts, so the quoted PUTs of the test above still pass.
+    bad4 = json.dumps({'status': 'done', 'comment': 'Kernel 18:44: kész'})
+    bad2 = json.dumps({'status': 'done', 'comment': 'Kész, mérve 18:44'})
+    with open(os.path.join(root['dir'], 'put4.json'), 'w', encoding='utf-8') as fh:
+        fh.write(bad4)
+    h = root['hook']
+    mem = json.dumps({'agent_id': 'kernel', 'content': 'Kártya lezárva.', 'category': 'warm'})
+    log = json.dumps({'agent_id': 'kernel', 'content': '## {{NOW}} -- Kártya\nok'})
+    cmds = ["curl -s -X PUT http://localhost:3420/api/messages/77 -d '{\"status\":\"done\"}' && "
+            + PUT + " -d '" + bad4 + "'",
+            'curl -sX PUT ' + KB + " -d '" + bad2 + "' && bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel"
+            + ' "Kártya kész."',
+            'curl -sX PUT ' + KB + " -d '" + bad2 + "'\n" + API + "memories --data-binary @- <<'JSON'\n" + mem + '\nJSON',
+            'curl -sX PUT ' + KB + ' --data-binary @put4.json && ' + API + "daily-log --data-binary @- <<'JSON'\n"
+            + log + '\nJSON']
+    clean = ("curl -s -X PUT http://localhost:3420/api/messages/77 -d '{\"status\":\"done\"}' && "
+             + PUT + " -d '" + json.dumps({'status': 'done', 'comment': 'Kernel 18:10: kész'}) + "'")
+    return (all(run(h, 'Bash', {'command': c}, now='18:14', cwd=root['dir'])[0] == 2 for c in cmds)
+            and run(h, 'Bash', {'command': clean}, now='18:14')[0] == 0)
+
+
+@case
+def put_segment_shapes_next_to_a_message_close(root):
+    # The curl segment of L8 in the shapes a real command has: an env prefix (NO_PROXY=... curl), a backtick
+    # substitution, and a multi-line curl whose -X PUT is on a backslash-continued line. And the other side: a
+    # kanban GET (its segment has no PUT) next to a message close is not a card PUT; the close keeps the send path,
+    # where a "mérve" 30 minutes ahead passes (the card rule would block it).
+    h = root['hook']
+    bad = " -d '" + json.dumps({'status': 'done', 'comment': 'Kész, mérve 18:44'}) + "'"
+    close = " && curl -s -X PUT http://localhost:3420/api/messages/77 -d '{\"status\":\"done\"}'"
+    blocks = ['NO_PROXY=localhost curl -sX PUT ' + KB + bad + close,
+              'r=`curl -sX PUT ' + KB + bad + '`' + close,
+              'curl -s ' + KB + ' \\\n  -X PUT \\\n  -H "Content-Type: application/json"' + bad + close]
+    read_then_close = ('curl -s ' + KB + ' -o card.json && curl -s -X PUT http://localhost:3420/api/messages/77 -d \''
+                       + json.dumps({'status': 'done', 'result': 'kész (comment: mérve 18:44)'}) + "'")
+    return (all(run(h, 'Bash', {'command': c}, now='18:14')[0] == 2 for c in blocks)
+            and run(h, 'Bash', {'command': read_then_close}, now='18:14')[0] == 0)
+
+
+@case
+def known_limit_message_quoting_a_card_put_is_a_card(root):
+    # Viktor 49836 L13 -> 49845 Known limit: a backtick, a ( or a ; inside a quoted text or a heredoc body counts as a
+    # curl segment start, so a message that quotes a kanban PUT next to a plan time is judged as a card (overblock,
+    # the safe side). Two shell-quoting parsers hid real PUTs (prop6, prop7), so the gate does not imitate quoting.
+    h = root['hook']
+    put = "curl -sX PUT " + KB + " -d '{\"comment\":\"VÁR: Dave\"}'"
+    plan = 'Következő mérés 14:00-kor.'
+    bad4 = json.dumps({'status': 'done', 'comment': 'Kernel 12:30: kész'})
+    hdr = " -H 'Content-Type: application/json' --data-binary @- <<'JSON'\n"
+    cmds = ["bash /Users/klodel/marveen/scripts/agent-msg.sh viktor dave - <<'EOF'\nJavaslat: `" + put + "`\n" + plan + '\nEOF',
+            "bash /Users/klodel/marveen/scripts/agent-msg.sh viktor klodel - <<'EOF'\nLelet: `curl -sX PUT " + KB
+            + " -d '" + bad4 + "'` átment a kapun.\nEOF",
+            API + 'memories' + hdr + json.dumps({'agent_id': 'viktor', 'category': 'warm', 'content':
+                'Tanulság: a kártya-PUT (curl -sX PUT ' + KB + ' -d {"comment":"..."}) is komment. ' + plan},
+                ensure_ascii=False) + '\nJSON',
+            API + 'messages' + hdr + json.dumps({'from': 'viktor', 'to': 'dave', 'content':
+                'Lépések: kártya lezárása; curl -sX PUT ' + KB + ' -d {"comment":"VÁR"}. ' + plan},
+                ensure_ascii=False) + '\nJSON']
+    return all(run(h, 'Bash', {'command': c}, now='12:00')[0] == 2 for c in cmds)
+
+
+@case
+def block_put_in_a_live_substitution_next_to_a_message(root):
+    # The other side of L13: in double quotes a $( ) and a backtick still run (bash executes them), so a card PUT
+    # there, next to a message write, is a real card PUT.
+    with open(os.path.join(root['dir'], 'put4.json'), 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'status': 'done', 'comment': 'Kernel 18:44: kész'}))
+    h = root['hook']
+    msg = ' && bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel "Kártya kész."'
+    cmds = ['r="$(curl -sX PUT ' + KB + ' --data-binary @put4.json)"' + msg,
+            # (inline: a data file glued to the closing backtick, @put4.json`, is not read; an old data-file limit)
+            'r="`curl -sX PUT ' + KB + ' -d {\\"comment\\":\\"Kész, mérve 18:44\\"}`"' + msg,
+            # not right after an assignment (that is a segment through the env-prefix rule anyway)
+            'echo "kártya: $(curl -sX PUT ' + KB + ' --data-binary @put4.json)"' + msg,
+            'echo "kártya: `curl -sX PUT ' + KB + ' -d {\\"comment\\":\\"Kész, mérve 18:44\\"}`"' + msg,
+            # a real card PUT AFTER a quoted message heredoc: the heredoc body ends at its terminator
+            "bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel - <<'EOF'\nKártya kész.\nEOF\ncurl -sX PUT " + KB
+            + ' --data-binary @put4.json']
+    return all(run(h, 'Bash', {'command': c}, now='18:14', cwd=root['dir'])[0] == 2 for c in cmds)
+
+
+@case
+def curl_segment_assign_token_is_linear(root):
+    # Viktor 49836 L12: the value class of an env prefix held ( and the backtick, both segment starts, so a long
+    # "(a=(a=..." or "`a=`a=..." token rescanned from every start: 100 KB took 15.6 s on e4c1d631 (hook limit 10 s).
+    # Viktor 49845: under 2 s.
+    import time
+    tail = '\n-X PUT /api/kanban/x\nbash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel x\n'
+    texts = [unit * (100 * 1024 // len(unit) + 1) for unit in ('(a=', '`a=')]
+    # Viktor 49858 (the four 300 KB shapes of his value-class mutants) and the round-5 value units: a quote, an
+    # escape, an arithmetic $((
+    texts += ['$(a=' * 75000, 'a=a ' * 75000, 'a=' + '$' * 300000, 'a' + '=a' * 150000,
+              'a=\\(' * 75000, "(a='" * 75000, '(a="' * 75000, '(a=$((' * 50000]
+    # Each env-value char has one unit only: a bare $ before ' or a plain ' / " / backslash that could also open a
+    # quote or an escape unit backtracks exponentially (mutants 22, 25, 26 of round 5: over 8 s on these short runs)
+    texts += ["a=" + "$'a'" * 30, "a=" + "'a'" * 30, 'a=' + '\\a' * 400]
+    # Viktor 49870 L14: a VAR=value chain with no curl after it was re-read from every ( ` ; inside its escapes and
+    # quotes to the line end (120 KB 24.6 s on 201485cc); his four units, W07, W12, and quotes over lines, 300 KB each
+    for unit in (' A=$H\\(A=$H', "$'\\(`A=$H\\(\\'", "$'|;$((A=$H\\'", ' a=\\(a=b', ' a=' + '\\(' * 8, ' a=x"y(a="',
+                 ";a='(a=\n", ' a=\\\n', "(a='curl\n", ' a="(curl"', ' a="\\"(a="', ' a="\\\\(a="', "$'\\'(a=",
+                 '"\\"' + '\\"', ' a="(\n', "'\"(x=a", "\"'(x='\"", ' a="\\\n', '; \\\n'):
+        texts.append(unit * (300 * 1000 // len(unit)))
+    # Viktor 49898 L16: one quoted value of backslash-newlines (with or without a blank after each) after (a=; a
+    # repeated backslash-newline in the start + VAR= lookahead re-read the rest of the run (60 KB 18.7 s on c0454a1d)
+    for quote in ('"', "'", "$'"):
+        for unit in ('\\\n', '\\\n '):
+            texts.append('(a=' + quote + unit * (300 * 1000 // len(unit)))
+    for text in texts:
+        t = time.monotonic()
+        run(root['hook'], 'Bash', {'command': text + tail}, now='19:30')
+        if time.monotonic() - t > 2.0:
+            return False
+    return True
+
+
+@case
+def block_put_after_a_command_substitution_assignment(root):
+    # Viktor 49846: the L12 fix must keep a curl after VAR=$( ... ) (e4c1d631 blocked it, his U1 class let it
+    # through next to a message): the env value takes a $( ) as one unit, spaces inside included.
+    with open(os.path.join(root['dir'], 'put4.json'), 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'status': 'done', 'comment': 'Kernel 18:44: kész'}))
+    msg = ' && bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel "Kártya kész."'
+    cmds = ['T=$(date) curl -sX PUT ' + KB + ' --data-binary @put4.json' + msg,
+            'NOW=$(date +%H:%M) A=$HOME curl -sX PUT ' + KB + ' --data-binary @put4.json' + msg]
+    # Viktor 49858 V1: the env values that e4c1d631 read and the bare-paren class lost (quoted, arithmetic, an escape,
+    # an ANSI-C quote, a quoted backtick), and lower-case names (his V16 test gap)
+    for pre in ('N=$((1+2)) ', "A='x(y)' ", 'A="(x)" ', 'A=a\\(b ', "A=$'x(y)' ", 'T=$((10#08)) ', "A='a`b' ",
+                "A='a b' ", 't=$(date) ', 'h=1 ',
+                # Viktor 49870: escapes with no cap (W06, five), a quote with a backslash in it (M23's real PUT), a
+                # quote over a line, a backslash-newline (bash and zsh run the curl after each), a quote holding curl
+                'A=a\\(b\\(c ', 'A=a\\(b\\)c\\;d ', 'A=\\a\\b\\c\\d\\e ', 'A="a\\"b" ', 'A="a\\\\" ',
+                "A='a\nb' ", 'A=a\\\nb ', 'A=x"y z"w ', 'A="curl" ',
+                # an escape inside "..." and $'...' and a newline inside them (bash and zsh: one word, the curl runs)
+                'A="a\\\\ b" ', "A=$'a\\' b' ", 'A="a\nb" ', "A=$'a\nb' ", 'A="a\\\nb c" '):
+        cmds.append(pre + 'curl -sX PUT ' + KB + ' --data-binary @put4.json' + msg)
+    return all(run(root['hook'], 'Bash', {'command': c}, now='18:14', cwd=root['dir'])[0] == 2 for c in cmds)
+
+
+@case
+def block_put_more_method_and_comment_key_shapes(root):
+    # Viktor 49831 L9: requests.put(, a lowercase fetch method 'put' (Fetch upper-cases it), http.client
+    # request('PUT'; L10: a bare key at an indented line start (multi-line JS), jq .comment |=, b['comment'] =.
+    h = root['hook']
+    c = "'Kész, mérve 18:44'"
+    cmds = ["python3 -c \"import requests; requests.put('" + KB + "', json={'status': 'done', 'comment': " + c + "})\"",
+            "node -e \"fetch('" + KB + "', {method: 'put', body: JSON.stringify({status: 'done', comment: " + c + "})})\"",
+            "python3 -c \"import http.client, json; k = http.client.HTTPConnection('localhost', 3420); k.request('PUT', "
+            "'/api/kanban/abc', body=json.dumps({'comment': " + c + "}))\"",
+            "node - <<'JS'\nconst c = " + c + ";\nfetch('" + KB + "', {\n  method: 'PUT',\n  body: JSON.stringify({\n"
+            "    status: 'done',\n    comment: c,\n  }),\n});\nJS",
+            "jq '.comment |= \"Kész, mérve 18:44\"' base.json | curl -sX PUT " + KB + ' --data-binary @-',
+            "python3 -c \"import json, urllib.request as u; b = {'status': 'done'}; b['comment'] = " + c
+            + "; u.urlopen(u.Request('" + KB + "', data=json.dumps(b).encode(), method='PUT'))\""]
+    return all(run(h, 'Bash', {'command': x}, now='18:14')[0] == 2 for x in cmds)
+
+
+@case
+def allow_html_tag_in_a_stdin_herestring_body(root):
+    # Viktor 49831 L11: with @- a "<b>" in the text was read as a `< b` stdin file (here holding a placeholder).
+    with open(os.path.join(root['dir'], 'b'), 'w', encoding='utf-8') as fh:
+        fh.write('trap 19:2x\n')
+    body = json.dumps({'status': 'done', 'comment': 'a <b>fontos</b> rész kész'})
+    return run(root['hook'], 'Bash', {'command': 'curl -sX PUT ' + KB + " --data-binary @- <<< '" + body + "'"},
+               now='19:30', cwd=root['dir'])[0] == 0
+
+
+@case
+def allow_assignment_chain_with_no_curl_and_known_limit_subst(root):
+    # A VAR=value chain is consumed even with no curl after it (Viktor 49870 L14); only a match with the curl group is a
+    # segment, so a kanban URL and -XPUT in assignments next to a message are no card PUT. Known limit (all heads): a
+    # $( ) holding a pipe or nested parentheses is no env unit, so that PUT next to a message is not judged as a card.
+    with open(os.path.join(root['dir'], 'put4.json'), 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'status': 'done', 'comment': 'Kernel 18:44: kész'}))
+    msg = ' && bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel "Kártya kész."'
+    cmds = ['A=' + KB + ' B=-sXPUT --data-binary @put4.json' + msg,
+            'T=$(date | tr a b) curl -sX PUT ' + KB + ' --data-binary @put4.json' + msg]
+    return all(run(root['hook'], 'Bash', {'command': c}, now='18:14', cwd=root['dir'])[0] == 0 for c in cmds)
+
+
+@case
+def known_limits_next_to_a_write_are_pinned(root):
+    # Klodel 49904 / 49907 (the named fail-open cap, Viktor 49901 indep7): the "smuggle" Known limit of the
+    # docstring. Next to a message / memory write such a card PUT is not seen as a curl segment, so it is not judged
+    # as a card (ALLOW); alone it is (BLOCK). A fix that closes one fails this row: then drop it from the docstring.
+    url = 'http://localhost:3420/api/kanban/abc123'
+    msg = ("curl -s -X POST http://localhost:3420/api/messages -H 'Content-Type: application/json' "
+           """-d '{"from":"kernel","to":"klodel","content":"Kész."}'""")
+    mem = ("curl -s -X POST http://localhost:3420/api/" + "memories -H 'Content-Type: application/json' "
+           """-d '{"agent_id":"kernel","content":"jegyzet","category":"hot"}'""")
+    bs, nl, fut = '\\', '\n', 'Kernel 12:30: kész'
+    body = """-d '{"comment":\"""" + fut + """\"}'"""
+
+    def put(pre='', name='curl'):
+        return pre + name + ' -s -X PUT ' + url + " -H 'Content-Type: application/json' " + body
+    shapes = {  # label: (the shape alone, the write next to it)
+        'name-cont-env-dq': ('T' + bs + nl + '="b c" ' + put(), nl + msg),
+        'cmd-name-cont': (put(name='cu' + bs + nl + 'rl'), nl + msg),
+        'hdr-charset-semicolon': ("curl -s -X PUT -H 'Content-Type: application/json; charset=utf-8' " + body + ' ' + url,
+                                  nl + msg),
+        'data-multiline-url-last': ("curl -s -X PUT -H 'Content-Type: application/json' -d '{" + nl + '  "comment": "'
+                                    + fut + '"' + nl + "}' " + url, nl + msg),
+        'env-apiword-first': (put(pre='R="ld /api/messages" '), ''),
+        'hdr-apiword-first': ("curl -s -X PUT -H 'X-Ref: /api/" + "memories' " + url + ' ' + body, nl + mem),
+        'kw-then': ('if true; then ' + put() + '; fi', nl + msg),
+        'kw-do': ('for i in 1; do ' + put(pre='T="b c" ') + '; done', nl + msg),
+        'kw-brace': ('{ ' + put() + '; }', nl + mem),
+        'kw-bang': ('! ' + put(), nl + msg),
+        'redir-prefix': ('2>/dev/null ' + put(), nl + msg),
+        'quoted-cmd-name': (put(name='"curl"'), nl + msg),
+        'bs-cmd-name': (put(name=bs + 'curl'), nl + msg),
+    }
+    h, d = root['hook'], root['dir']
+    for label, (shape, write) in shapes.items():
+        if run(h, 'Bash', {'command': shape + write}, now='12:00', cwd=d)[0] != 0:
+            return False
+        alone = shape.replace('/api/messages', '/x').replace('/api/' + 'memories', '/x')
+        if run(h, 'Bash', {'command': alone}, now='12:00', cwd=d)[0] != 2:
+            return False
+    return True
+
+
+@case
+def frequent_shapes_block(root):
+    # Klodel 49904 (2), Viktor 49906: the shapes agents really write keep blocking (gate 12:00, times 12:30 / 12:3x),
+    # among them rule 4 and rule 3 in a Python dict (json.dump in a heredoc and in python3 -c), new in this PR.
+    url = 'http://localhost:3420/api/kanban/abc'
+    api = 'http://localhost:3420/api/'
+    iso = TODAY.isoformat() + 'T12:30'
+    cj = " -H 'Content-Type: application/json' "
+
+    def py_heredoc(path, body):
+        return ("python3 - <<'PY'\nimport json\njson.dump(" + repr(body) + ", open('p.json', 'w'))\nPY\n"
+                'curl -s -X POST ' + api + path + cj + '--data-binary @p.json')
+
+    def py_c(path, body):
+        return ('python3 -c "import json,sys; json.dump(' + repr(body) + ', sys.stdout)" | curl -s -X POST '
+                + api + path + cj + '--data-binary @-')
+    card = {'author': 'kernel', 'content': 'Kernel 12:30: kész'}
+    log = {'agent_id': 'kernel', 'content': '## 12:30 -- teszt'}
+    cmds = ["bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel - <<'TXT'\nmérve 12:3x, kész\nTXT",
+            'curl -s -X POST ' + url + '/comments' + cj + "--data-binary @- <<'JSON'\n"
+            + '{"author":"kernel","content":"Kernel 12:30: kész"}\nJSON',
+            'curl -s -X POST ' + url + '/move' + cj + """-d '{"status":"waiting","comment":"Kernel 12:30: VÁR"}'""",
+            'curl -s -X PUT ' + url + cj + """-d '{"comment":"Kernel 12:30: kész"}'""",
+            'curl -s -X POST ' + api + 'daily-log' + cj + "--data-binary @- <<'JSON'\n"
+            + '{"agent_id":"kernel","content":"## 12:30 -- x"}\nJSON',
+            'curl -s -X PUT ' + api + 'memories/12' + cj + "--data-binary @- <<'JSON'\n" + '{"content":"mérve 12:3x"}\nJSON',
+            py_heredoc('kanban/abc/comments', card), py_c('kanban/abc/comments', card),
+            py_heredoc('daily-log', log), py_c('daily-log', log),
+            py_heredoc('kanban/abc/move', {'status': 'waiting', 'comment': 'VÁR, mérve 12:30'}),
+            "python3 -c \"import json, urllib.request as u; u.urlopen(u.Request('" + url
+            + "', data=json.dumps({'comment': 'kész 12:3x'}).encode(), method='PUT'))\"",
+            'curl -s -X POST ' + url + '/move' + cj + """-d '{"status":"waiting","comment":"Kernel """ + iso + """+01:00: VÁR"}'""",
+            'curl -s -X POST ' + url + '/comments' + cj + """-d '{"author":"kernel","content":"mérve """ + iso + """:00+01:00"}'"""]
+    h, d = root['hook'], root['dir']
+    past = [py_c('kanban/abc/comments', {'author': 'kernel', 'content': 'Kernel 11:30: kész'}),
+            py_heredoc('daily-log', {'agent_id': 'kernel', 'content': '## {{NOW}} -- teszt'})]
+    return (all(run(h, 'Bash', {'command': c}, now='12:00', cwd=d)[0] == 2 for c in cmds)
+            and all(run(h, 'Bash', {'command': c}, now='12:00', cwd=d)[0] == 0 for c in past))
+
+
+@case
+def block_real_put_after_a_quote_the_shell_does_not_open(root):
+    # Viktor 49884 L15: a quote the shell does not read as one (inside another quote, in a heredoc text), right after
+    # a segment start and VAR=, was opened by the regex and closed inside the real PUT's quoted env value, so the
+    # consumed chain swallowed the real ; or line start. A unit never holds a segment start followed by VAR=.
+    with open(os.path.join(root['dir'], 'put4.json'), 'w', encoding='utf-8') as fh:
+        fh.write(json.dumps({'status': 'done', 'comment': 'Kernel 18:44: kész'}))
+    put = 'curl -sX PUT ' + KB + ' --data-binary @put4.json'
+    am = 'bash /Users/klodel/marveen/scripts/agent-msg.sh kernel klodel '
+    msg = ' && ' + am + '"Kártya kész."'
+    cmds = ["echo \"(x='a\" ; T='b c' " + put + msg, "echo '(x=\"a' ; T=\"b c\" " + put + msg,
+            am + "\"Kész (x=Kernel's fix)\" ; T='a b' " + put, am + "\"Kész (x=Kernel's fix)\" && T='a b' " + put,
+            am + "- <<'EOF'\nok (x=it's done\nEOF\nT='a b' " + put, am + "- <<'EOF'\nok (x=\"quote\nEOF\nT=\"a b\" " + put,
+            "echo \"(x='a\" ; A=1 T='b c' " + put + msg, "echo \"`x='a\" ; T='b c' " + put + msg,
+            # Viktor 49887: a backslash-newline between the start and VAR=, a comment ending in a backslash
+            "echo '(x=\"a' ; \\\nT=\"b c\" " + put + msg, "echo '(x=\"a' && \\\nT=\"b c\" " + put + msg,
+            "# jegyzet (x=\"a \\\nT=\"b c\" " + put + msg, "# jegyzet (x=$'a \\\nT=$'b c' " + put + msg,
+            "# jegyzet (x=\"a \\\n  T=\"b c\" " + put + msg, "# jegyzet (x=$'a \\\n\tT=$'b c' " + put + msg,
+            # Viktor 49901 L17: a comment ending in a backslash, then a real PUT with no env prefix
+            '# lepes 1;b=c\\\n' + put + msg, '# jegyzet (x=a\\\n' + put + '\n' + am + '"Kész."',
+            '# jegyzet (x="a\\\n' + put + '\n' + am + '"Kész."', '# lepes 1;b=c\\\n' + put + '\n' + am + '"Kész."',
+            '# lepes 1 && b=c\\\n' + put + msg, '# note (x=a\\\n/usr/bin/' + put + msg,
+            # the swallowed comment's /api/messages would be the segment's first URL: VAR= and blanks stop it too
+            '# lepes 1;b=/api/messages\\\nT=1 ' + put + msg, '# lepes 1;b=/api/messages\\\n  ' + put + msg,
+            am + "- <<'EOF'\nok (x=\"idézet\nEOF\ntrue && \\\nT=\"a b\" " + put]
+    return all(run(root['hook'], 'Bash', {'command': c}, now='18:14', cwd=root['dir'])[0] == 2 for c in cmds)
+
+
+@case
+def curl_segment_scan_is_linear(root):
+    # Viktor 49831: the new curl-segment regex on 300 KB commands (his first draft took over 60 s on 300 000 '&').
+    import time
+    h = root['hook']
+    k = 'http://localhost:3420/api/kanban/abc'
+    cmds = ['&' * 300000 + ' curl -X PUT ' + k + ' /api/messages',
+            ('curl -s http://localhost:3420/api/messages/77 ; ') * 6000 + 'curl -sX PUT ' + k + " -d '{\"comment\":\"ok\"}'",
+            'curl -sX PUT ' + k + ' ' + '\\\n -H x ' * 40000 + " -d '{\"comment\":\"ok\"}' && curl /api/messages",
+            '&/' * 150000 + ' curl -X PUT ' + k + ' /api/' + 'memories',
+            ';A=' * 100000 + 'curl -X PUT ' + k + ' /api/' + 'memories',
+            '(' * 300000 + 'curl -X PUT ' + k + ' /api/' + 'memories']
+    for c in cmds:
+        t = time.monotonic()
+        run(h, 'Bash', {'command': c}, now='19:30')
+        if time.monotonic() - t > 3.0:
+            return False
+    return True
+
+
 @case
 def card_comment_keeps_the_future_rule(root):
     # The message scope is narrower; a card comment is judged by both rules as before.
