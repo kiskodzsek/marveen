@@ -431,6 +431,67 @@ expect('non-Bash tool passes', run({'tool_name': 'Read', 'tool_input': {'file_pa
 expect('malformed stdin fails open', (subprocess.run([sys.executable, '-I', GATE], input='not json',
                                                      capture_output=True, text=True).returncode, ''), 0)
 
+# --- INTERNAL ERROR (Viktor 50057 follow-up): verdict() crashes, then only the raw creation regexes decide --------
+# No input crashes verdict() today (Viktor: 0 ERR on the probes), so a wrapper runs the real main() with verdict()
+# (and, for the last rows, creates_repo()) replaced by a raising function; stdin, stderr, the log and the exit code
+# are the real ones.
+CRASH_WRAP = '''import importlib.util, sys
+spec = importlib.util.spec_from_file_location('rcg', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+def boom(*a, **k):
+    raise RuntimeError('injected')
+m.verdict = boom
+if sys.argv[2] == 'both':
+    m.creates_repo = boom
+sys.exit(m.main())
+'''
+
+
+def crash_run(payload, mode='verdict'):
+    d = tempfile.mkdtemp(prefix='rcg-crash-')
+    log = os.path.join(d, 'hook-errors.log')
+    p = subprocess.run([sys.executable, '-I', '-c', CRASH_WRAP, GATE, mode], input=json.dumps(payload),
+                       capture_output=True, text=True, timeout=20,
+                       env={'PATH': '/usr/bin:/bin', 'LEDGER_DB_PATH': '/nonexistent/claudeclaw.db',
+                            'HOOK_ERRLOG_PATH': log})
+    logged = open(log).read() if os.path.exists(log) else ''
+    return p.returncode, p.stderr, logged
+
+
+def crash_expect(name, got, want_rc, want_log):
+    rc, err, logged = got
+    if rc != want_rc or want_log not in logged:
+        FAILS.append(f'{name}: rc={rc}, want {want_rc}; log has {want_log!r}: {want_log in logged}; stderr={err[:200]!r}')
+    else:
+        print(f'ok   {name}')
+
+
+def bash_payload(cmd):
+    return {'tool_name': 'Bash', 'tool_input': {'command': cmd, 'description': ''}}
+
+
+crash_expect('NEG internal error + a raw creation blocks', crash_run(bash_payload(CREATE)), 2, 'blocked (raw creation)')
+crash_expect('NEG internal error + a creation only in a message heredoc body blocks (no dropping on a crash)',
+             crash_run(bash_payload(f"bash scripts/agent-msg.sh k v - <<'E'\n{CREATE}\nE")), 2, 'blocked (raw creation)')
+crash_expect('NEG internal error + an approved creation blocks (the approval line is not read on a crash)',
+             crash_run(bash_payload(f'{CREATE}  # {OK_LINE}')), 2, 'blocked (raw creation)')
+crash_expect('NEG internal error + an MCP create tool blocks',
+             crash_run({'tool_name': 'mcp__github__create_repository', 'tool_input': {'name': 'x'}}), 2,
+             'blocked (raw creation)')
+crash_expect('internal error + a harmless command is allowed and logged', crash_run(bash_payload('git status')), 0,
+             'internal error, allowed')
+crash_expect('internal error + another MCP tool is allowed', crash_run({'tool_name': 'mcp__github__get_me',
+                                                                          'tool_input': {}}), 0, 'allowed')
+crash_expect('internal error + a non-dict tool_input is allowed', crash_run({'tool_name': 'Bash', 'tool_input': 'x'}), 0,
+             'allowed')
+crash_expect('internal error + a non-string command is not judged (as verdict) and is allowed',
+             crash_run({'tool_name': 'Bash', 'tool_input': {'command': [CREATE]}}), 0, 'allowed')
+crash_expect('internal error in the fallback too: allowed, never exit 1', crash_run(bash_payload(CREATE), 'both'), 0,
+             'internal error, allowed')
+r = crash_run(bash_payload(CREATE))
+expect('the internal-error block message names the cause', (0 if 'belső hibára' in r[1] else 1, r[1]), 0)
+
 if FAILS:
     print('\nFAILED:\n' + '\n'.join(FAILS))
     sys.exit(1)

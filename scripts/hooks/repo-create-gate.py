@@ -39,8 +39,9 @@ SCOPE OF THE MATCH (Viktor 40095 L2/L3): this stops an accidental model error, n
   Overblocks on purpose: open-quote opener, dq-arg spans heredoc text, unquoted body arith next to a sink, a
   never-closing quoted word.
 
-CONTRACT (hook-exit-code-invariant): exit 2 = block, exit 0 = allow, never exit 1. Malformed stdin or an internal
-error allows (fail OPEN) and is recorded in store/hook-errors.log through hook_errlog.
+CONTRACT (hook-exit-code-invariant): exit 2 = block, exit 0 = allow, never exit 1. Malformed stdin allows. An internal
+error is recorded in store/hook-errors.log through hook_errlog; then only the linear creation regexes run on the raw
+command (an MCP call: its tool name), a hit blocks, anything else allows (fallback_creates, Viktor 50057).
 Tests: python3 -I scripts/hooks/repo-create-gate_test.py
 """
 import json
@@ -621,6 +622,29 @@ def arm_watchdog():
     signal.setitimer(signal.ITIMER_REAL, watchdog_s())
 
 
+REASON_INTERNAL = ('REPO-KAPU / REPO-CREATE-GATE: a kapu belső hibára futott, és a nyers parancsban repó-létrehozás '
+                   'áll, ezért blokkol (a jóváhagyás-sort ilyenkor nem olvassa). / The gate hit an internal error and the '
+                   'raw command creates a repository, so it blocks.')
+
+
+def fallback_creates(payload):
+    """After an internal error in verdict() (Viktor 50057, a LOW follow-up of card 3b05ae69): only the linear
+    creation regexes, on the RAW command (no heredoc dropping, no referenced files, no approval line) or, for an MCP
+    call, the tool name. Fully fail-closed would stop every Bash call of the fleet on a crash; fully fail-open let
+    a creation through whenever any part of the judgment crashed. A hit blocks, anything else stays allowed (and
+    logged)."""
+    if not isinstance(payload, dict):
+        return False
+    tool = payload.get('tool_name')
+    if not isinstance(tool, str):
+        return False
+    ti = payload.get('tool_input')
+    if tool == 'Bash':
+        cmd = ti.get('command') if isinstance(ti, dict) else None
+        return isinstance(cmd, str) and creates_repo(cmd)
+    return tool.startswith('mcp__') and bool(MCP_CREATE_RX.search(tool))
+
+
 def main():
     arm_watchdog()
     try:
@@ -631,11 +655,19 @@ def main():
         reason = verdict(payload)
     except Exception as ex:  # a crashing gate must not become a silent exit 1
         try:
+            blocked = fallback_creates(payload)
+        except Exception:
+            blocked = False
+        try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import hook_errlog
-            hook_errlog.report('repo-create-gate', 'internal error, allowed', ex)
+            hook_errlog.report('repo-create-gate', 'internal error, %s' % ('blocked (raw creation)' if blocked
+                                                                           else 'allowed'), ex)
         except Exception:
             pass
+        if blocked:
+            sys.stderr.write(REASON_INTERNAL + '\n')
+            return 2
         return 0
     if reason:
         sys.stderr.write(reason + '\n')
