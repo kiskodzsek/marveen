@@ -32,7 +32,12 @@ SCOPE OF THE MATCH (Viktor 40095 L2/L3): this stops an accidental model error, n
   createForAuthenticatedUser / createInOrg / createUsingTemplate / createFork and "POST /user/repos", a trailing
   slash on the REST path, and every regular file of at most 64 KB that the command names in any position
   (./mk.py, npx tsx x.ts, source x.sh, @payload, < file). Not covered on purpose: aliases, variables holding
-  "repo", line continuations, oversize commands or files.
+  "repo", line continuations, oversize files. A command over 256 KB is searched for a creation past the cut too.
+  Known limits of the heredoc sink (Viktor 50057 probe labels; detail at heredocs()): file-md-then, a sink file
+  that a later command runs (sh-stdin `sh < n.md`, cat-pipe-sh `cat n.md | sh`, eval-cat), is not followed.
+  Neither is a program given with -c / -e that itself reads stdin (python3 -c "exec(...stdin...)" next to a sink word).
+  Overblocks on purpose: open-quote opener, dq-arg spans heredoc text, unquoted body arith next to a sink, a
+  never-closing quoted word.
 
 CONTRACT (hook-exit-code-invariant): exit 2 = block, exit 0 = allow, never exit 1. Malformed stdin or an internal
 error allows (fail OPEN) and is recorded in store/hook-errors.log through hook_errlog.
@@ -81,23 +86,48 @@ MAX_TEXT = 256 * 1024
 MAX_FILES = 20
 
 
-# A heredoc, left to right: <<-?[ \t]*(['"]?)(\w+)\1[^\n]*\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$) (re.S). Searched that way
-# it is quadratic (card 3b05ae69, Viktor 50005/50006: a real create command padded with `cat <<E` lines to 160 KB took
-# 21 s, past the 10 s hook timeout, and a timed-out hook does not block): every opener without a closing line reads
-# to the end. heredocs() gives the same matches in linear time: each opener once (HEREDOC_OPEN_RX), the closing line
-# from an index of the lines that are a bare word. As in the regex, an unquoted word whose full form never closes is
-# tried shorter (<<EOF closes at a line E), the body never closes on the line right after the opener, and a match
-# that starts inside the previous one does not count.
-HEREDOC_OPEN_RX = re.compile(r'<<-?[ \t]*([\'"]?)(\w+)\1[^\n]*\n')
-WORD_LINE_RX = re.compile(r'[ \t]*(\w+)[ \t]*')
+# A heredoc, where bash sees one. The old left-to-right regex
+#   <<-?[ \t]*(['"]?)(\w+)\1[^\n]*\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)   (re.S)
+# was quadratic (card 3b05ae69, Viktor 50005/50006: a real create command padded with `cat <<E` lines to 160 KB took
+# 21 s, past the 10 s hook timeout, and a timed-out hook does not block), and it closed the body where bash does not:
+# a body dropped into a sink that bash runs as commands lets a creation through (Kernel 50035, Viktor 50036; each
+# measured ALLOW on main and run by bash): B1 an empty body (bash closes on the line right after the opener, the regex
+# never did), B2 a delimiter word that is not a plain or a plainly quoted \w+ (<<E'X', <<"E"X, <<E-1: bash's word is
+# EX / E-1, the regex took E), B3 a here-string (<<<E: the regex read a heredoc from its second <), B4/B7 an opener
+# inside quotes, also a quote opened on an earlier line, B5 an opener in a comment, B6 an opener line continued by a
+# backslash.
+# heredocs() walks the command once, as bash quotes it: single, double and $'...' quotes, backslash escapes, $( ),
+# ( ) and backticks (also inside double quotes), $(( )), $[ ] and ${ } (no opener inside), a # comment at a word
+# start, <<< skipped. An opener counts only outside quotes and comments, its word must end the bash word
+# (HEREDOC_OPEN_RX), the rest of its line must end outside a quote, and the closing line is the bare word (<<- after
+# leading tabs only, as bash; Viktor 50057 R1: a closing line with spaces around the word closed a body bash keeps
+# reading), from an index of the word lines, the line right after the opener included. Where the walk cannot follow
+# bash it accepts no further heredoc, so every later body is judged as commands, which can only block more: an
+# unterminated quote or context; an opener line that ends inside a quote, or whose rest holds $( or a backtick or ends
+# in a backslash; a second << on an opener line (R2: bash reads both bodies in turn); a << whose word is no plain or
+# plainly quoted \w+, or that never closes; an unquoted body with a backslash-newline; and after a body that closes
+# only on a shorter word (<<EOF at a line E, kept from the regex: bash reads that body on to the end and expands it).
+# Viktor 50057 classes: a body is no sink when an interpreter reads it from stdin (stdin_interpreter: sh -s, a shell
+# with no script operand, python3 -, /dev/stdin); a $( ) or backtick around the opener is read from the walk's stack.
+# Known limits and overblocks: see the module docstring (Viktor 50057 wants them in its first 80 lines).
+HEREDOC_OPEN_RX = re.compile(r'<<-?[ \t]*([\'"]?)(\w+)\1(?=[ \t;&|)<>\n])[^\n]*\n')
+WORD_LINE_RX = re.compile(r'(\t*)(\w+)')  # bash: << closes on the bare word, <<- after leading tabs only
+NORMAL_STOP_RX = re.compile(r'\$\(\(|\$\[|\$\{|\$\(|\$\'|[\\\'"#`()]|<<')
+DQ_STOP_RX = re.compile(r'\$\(\(|\$\[|\$\{|[\\"`]|\$\(')
+ARITH_STOP_RX = re.compile(r'[()]')
+BRACKET_STOP_RX = re.compile(r'\$\[|\]')
+PARAM_STOP_RX = re.compile(r'\$\{|\$\(|[\\\'"`}]')
+DOLLAR_SQ_STOP_RX = re.compile(r"[\\']")
+WORD_START = ' \t\n;&|()'
 
 
 class _Heredoc:
     """The parts of a heredoc match executed_text() uses (start, end, the whole text, the delimiter)."""
-    __slots__ = ('_s', '_e', '_text', '_delim')
+    __slots__ = ('_s', '_e', '_text', '_delim', '_quoted', '_wrapped')
 
-    def __init__(self, s, e, text, delim):
-        self._s, self._e, self._text, self._delim = s, e, text, delim
+    def __init__(self, s, e, text, delim, quoted=True, wrapped=False):
+        self._s, self._e, self._text, self._delim, self._quoted = s, e, text, delim, quoted
+        self._wrapped = wrapped
 
     def start(self):
         return self._s
@@ -108,9 +138,16 @@ class _Heredoc:
     def group(self, n=0):
         return self._text if n == 0 else self._delim
 
+    def quoted(self):
+        return self._quoted
+
+    def wrapped(self):
+        """The opener stood inside a $( ) or a backtick substitution (its output is a command's text)."""
+        return self._wrapped
+
 
 def heredocs(cmd):
-    """The non-overlapping heredoc matches of the left-to-right pattern above, in order, in linear time."""
+    """The heredocs bash would read in `cmd`, in order, non-overlapping, in linear time (see above)."""
     if '<<' not in cmd:
         return []
     import bisect
@@ -119,33 +156,154 @@ def heredocs(cmd):
     for ln in lines:
         starts.append(p)
         p += len(ln) + 1
-    closers = {}
+    closers, tabbed = {}, {}  # a bare-word line (closes << and <<-), a tab-led word line (closes <<- only)
     for i, ln in enumerate(lines):
         m = WORD_LINE_RX.fullmatch(ln)
         if m:
-            closers.setdefault(m.group(1), []).append(i)
-    lengths = sorted({len(w) for w in closers}, reverse=True)
-    out, pos = [], 0
-    for c in re.finditer(r'(?=<<)', cmd):
-        at = c.start()
-        if at < pos:
-            continue
-        o = HEREDOC_OPEN_RX.match(cmd, at)
-        if not o:
-            continue
+            tabbed.setdefault(m.group(2), []).append(i)
+            if not m.group(1):
+                closers.setdefault(m.group(2), []).append(i)
+    lengths = sorted({len(w) for w in tabbed}, reverse=True)
+
+    def closing(at, o):
+        """(end, delimiter) of the body opened by match `o` at `at`, or None when no line closes it."""
         word = o.group(2)
         opener_line = bisect.bisect_right(starts, at) - 1
+        index = tabbed if cmd.startswith('<<-', at) else closers
         tries = [word] if o.group(1) else [word[:k] for k in lengths if k <= len(word)]
         for d in tries:
-            rows = closers.get(d)
+            rows = index.get(d)
             if not rows:
                 continue
-            j = bisect.bisect_left(rows, opener_line + 2)
+            j = bisect.bisect_left(rows, opener_line + 1)
             if j < len(rows):
-                end = starts[rows[j]] + len(lines[rows[j]])
-                out.append(_Heredoc(at, end, cmd[at:end], d))
-                pos = end
-                break
+                return starts[rows[j]] + len(lines[rows[j]]), d
+        return None
+
+    # The walk keeps a stack of contexts: 'B' the command level, 'S' a $( ) and 'P' a ( ) inside it, '`' a backtick
+    # substitution (these four read commands, so a quote, a comment or an opener counts there), and the quotes "'",
+    # '"' and "$'". A $( or a backtick inside double quotes opens a command context again, as in bash.
+    out, n, i, stack = [], len(cmd), 0, ['B']
+    pending, limit = None, n  # an accepted opener waits until its line ends outside a quote
+    last_one = False  # the pending body closes only on a shorter word: bash reads on to the end, nothing more
+    while i < n:
+        top = stack[-1]
+        if top in ('A', 'a', '[', '{'):
+            # arithmetic $(( )) / $[ ] and parameter expansion ${ }: no opener inside (bash reads 1<<E there as a shift
+            # or as text); a $( or a quote in ${ } opens its context again
+            rx = ARITH_STOP_RX if top in ('A', 'a') else BRACKET_STOP_RX if top == '[' else PARAM_STOP_RX
+            m = rx.search(cmd, i, limit if pending else n)
+            if not m:
+                return out  # unterminated, or not closed on the opener line: accept nothing more
+            tok = m.group(0)
+            if tok == '(':
+                stack.append('a')
+                i = m.end()
+            elif tok == ')':
+                stack.pop()
+                i = m.end() + (1 if top == 'A' and cmd.startswith(')', m.end()) else 0)
+            elif tok in ('$[', '${'):
+                stack.append(tok[1])
+                i = m.end()
+            elif tok in (']', '}'):
+                stack.pop()
+                i = m.end()
+            elif tok == '\\':
+                i = m.end() + 1
+            elif tok == '$(':
+                stack.append('S')
+                i = m.end()
+            else:  # a quote or a backtick inside ${ }
+                stack.append(tok)
+                i = m.end()
+            continue
+        if top == "'":
+            j = cmd.find("'", i)
+            if j < 0 or (pending and j >= limit):
+                return out  # unterminated, or the opener line ends inside a quote: accept nothing more
+            stack.pop()
+            i = j + 1
+            continue
+        if top in ('"', "$'"):
+            m = (DQ_STOP_RX if top == '"' else DOLLAR_SQ_STOP_RX).search(cmd, i)
+            if not m or (pending and m.start() >= limit):
+                return out
+            tok = m.group(0)
+            if tok == '\\':
+                i = m.end() + 1
+            elif tok == '$(':
+                stack.append('S')
+                i = m.end()
+            elif tok == '`':
+                stack.append('`')
+                i = m.end()
+            elif tok in ('$((', '$[', '${'):
+                stack.append('A' if tok == '$((' else tok[1])
+                i = m.end()
+            else:
+                stack.pop()
+                i = m.end()
+            continue
+        m = NORMAL_STOP_RX.search(cmd, i, limit if pending else n)
+        if not m:
+            if pending:
+                out.append(pending)
+                if last_one:
+                    return out
+                i, pending, limit = pending.end(), None, n
+                continue
+            break
+        tok, s = m.group(0), m.start()
+        if tok == '\\':
+            i = s + 2
+        elif tok in ("'", '"', "$'"):
+            stack.append(tok)
+            i = m.end()
+        elif tok in ('$((', '$[', '${'):
+            stack.append('A' if tok == '$((' else tok[1])
+            i = m.end()
+        elif tok == '$(':
+            stack.append('S')
+            i = m.end()
+        elif tok == '(':
+            stack.append('P')
+            i = m.end()
+        elif tok == ')':
+            if top in ('S', 'P'):
+                stack.pop()
+            i = m.end()
+        elif tok == '`':
+            if top == '`':
+                stack.pop()
+            else:
+                stack.append('`')
+            i = m.end()
+        elif tok == '#':
+            if s == 0 or cmd[s - 1] in WORD_START:
+                j = cmd.find('\n', s)
+                i = j if j >= 0 else n
+            else:
+                i = s + 1
+        elif cmd.startswith('<<<', s):
+            i = s + 3
+        elif pending:
+            return out  # a second << on the opener line: bash reads both bodies in turn, the walk does not follow
+        else:
+            o = HEREDOC_OPEN_RX.match(cmd, s)
+            c = closing(s, o) if o else None
+            if not c:
+                # bash reads a heredoc here too (a word that is no plain or plainly quoted \w+, or one that never
+                # closes: the body runs to the end, unquoted it is expanded): not followed, accept nothing more
+                return out
+            end, d = c
+            i, limit = o.end(2) + len(o.group(1)), o.end() - 1
+            rest = cmd[i:limit]
+            if '`' in rest or '$(' in rest or rest.rstrip(' \t').endswith('\\'):
+                return out  # a substitution or a continued line after the opener: not followed, accept nothing more
+            if not o.group(1) and '\\\n' in cmd[o.end():end]:
+                return out  # an unquoted body joins a backslash-newline: bash may close on the joined line
+            pending = _Heredoc(s, end, cmd[s:end], d, bool(o.group(1)), 'S' in stack or '`' in stack)
+            last_one = d != o.group(2)
     return out
 # A heredoc body is dropped ONLY when it goes into a known sink that does not execute it (Viktor 40174 MEDIUM: the
 # earlier denylist of interpreter heads let `cat <<EOF | bash`, `sh -c "$(cat <<EOF ...)"` and `tee mk.sh <<EOF;
@@ -168,7 +326,9 @@ CURL_RX = re.compile(r'(?<![\w-])curl\b')
 DASH_API_RX = re.compile(r'/api/(?:messages|kanban)\b')
 FILE_SINK_REV_RX = re.compile(r'[ \t]*[\'"]?(?:dm|txt|nosj|lnosj|gol)\.[^\s\'";|&<>()]+[\'"]?[ \t]*'
                               r'(?:>{1,2}[ \t]*tac|(?:a-[ \t]+)?eet)(?![\w-])')
-OPENER_RISK_RX = re.compile(r'\||\$\(|`|&&|;')
+# Anything after the opener that ends the command or starts another one keeps the body: | ; & (also a lone & that
+# backgrounds, B8), ( (also <( and >( process substitution, B8b) and a backtick (Kernel 50035 follow-up).
+OPENER_RISK_RX = re.compile(r'[|;&(`]')
 MSG_SH_RX = re.compile(MSG_SH + r'$')
 MSG_SEG_RX = re.compile(MSG_SH + r'(?![\w.-])')
 
@@ -184,8 +344,51 @@ def _first_then(first_rx, then_rx, text, sep='\n'):
     return False
 
 
+# Viktor 50057 probe class (a): an interpreter that reads its commands from stdin (sh -s, bash -s, ksh -s, a shell with
+# no script operand, python3 -, perl -, ... /dev/stdin) runs the body; a sink word after it is only an argument.
+SHELLS = frozenset(('sh', 'bash', 'ksh', 'zsh', 'dash', 'mksh', 'yash', 'csh', 'tcsh', 'fish'))
+INTERPRETERS = frozenset(('python', 'perl', 'ruby', 'node', 'nodejs', 'deno', 'bun', 'php', 'lua', 'tclsh', 'osascript'))
+SEG_PREFIX = frozenset(('sudo', 'env', 'command', 'exec', 'nohup', 'time', 'nice', 'builtin', '!', '{', '('))
+# an option that takes the next word as its argument (so that word is no script operand)
+OPT_ARG = frozenset(('-o', '+o', '-O', '+O', '-W', '-X', '-I', '-M', '-r', '--require', '--rcfile', '--init-file'))
+
+
+def stdin_interpreter(seg):
+    """True when the segment's command is an interpreter that reads its program from stdin (the heredoc body)."""
+    words = seg.replace('(', ' ( ').split()
+    i = 0
+    while i < len(words) and (words[i] in SEG_PREFIX or re.match(r'\w+=', words[i])):
+        i += 1
+    if i >= len(words):
+        return False
+    name = re.sub(r'[\d.]+$', '', words[i].strip('\'"').rsplit('/', 1)[-1])
+    if name not in SHELLS and name not in INTERPRETERS:
+        return False
+    skip = False
+    for w in words[i + 1:]:
+        w = w.strip('\'"')
+        if skip:
+            skip = False
+            continue
+        if w == '--':
+            continue
+        if w in ('-', '/dev/stdin'):
+            return True
+        if w in OPT_ARG:
+            skip = True
+            continue
+        if w[:1] in ('-', '+') and len(w) > 1:
+            if name in SHELLS and not w.startswith('--') and 's' in w[1:]:
+                return True
+            continue
+        return False  # the first operand is the script file
+    return True  # no script operand: the program comes from stdin
+
+
 def is_sink(seg):
-    """The former SINK_RX.search(seg), in linear time (see above)."""
+    """The former SINK_RX.search(seg), in linear time (see above); never when an interpreter reads the body."""
+    if stdin_interpreter(seg):
+        return False
     if MSG_SINK_RX.search(seg) or _first_then(GIT_COMMIT_RX, STDIN_MSG_RX, seg) \
             or _first_then(CURL_RX, DASH_API_RX, seg):
         return True
@@ -197,8 +400,8 @@ def executed_text(cmd):
     """The command with the bodies of heredocs that go into a known non-executing sink removed (is_sink): a message,
     a commit message or a notes file that talks about creating a repository is not a creation (measured: 5 of 8 hits
     on 7 days of real calls were such texts). Every other heredoc body is kept and judged. Nothing is dropped when the
-    opener line pipes or substitutes (|, $(, `, &&, ;), or when the command runs any script other than a message
-    wrapper (a file written by this very command does not exist yet when the hook reads it)."""
+    opener line pipes, substitutes or chains after the opener (| ; & ( `), or when the command runs any script other
+    than a message wrapper (a file written by this very command does not exist yet when the hook reads it)."""
     bodies = heredocs(cmd)
     if not bodies:
         return cmd
@@ -223,9 +426,13 @@ def executed_text(cmd):
         last = re.split(r'&&|\|\||;', head)[-1]
         # an UNCLOSED $( or ` before the opener wraps the heredoc (sh -c "$(cat <<EOF"); a closed one, like a
         # -H "Authorization: Bearer $(cat token)" header, does not
-        wrapped = last.count('$(') > last.count(')') or last.count('`') % 2 == 1
+        # Viktor 50057 class (c): the walk's own stack decides (a quoted ")" or a case pattern fooled the count); the
+        # count stays as a second test, so nothing the count kept is dropped
+        wrapped = m.wrapped() or last.count('$(') > last.count(')') or last.count('`') % 2 == 1
+        # B9 (Kernel 50035 follow-up): bash expands an UNQUOTED heredoc body, so a $( ) or a backtick in it runs
         safe = (is_sink(last) and not wrapped and '|' not in last
-                and not OPENER_RISK_RX.search(opener_rest))
+                and not OPENER_RISK_RX.search(opener_rest)
+                and (m.quoted() or not ('$(' in m.group(0) or '`' in m.group(0))))
         out.append('<<' + m.group(2) + '\n' + m.group(2) if safe else m.group(0))
         pos = m.end()
     out.append(cmd[pos:])
@@ -372,9 +579,12 @@ def verdict(payload):
         cmd = ti.get('command')
         if not isinstance(cmd, str):
             return None
+        # Viktor 50057 class (g): a creation past the MAX_TEXT cut is still searched (the linear regexes on the rest,
+        # from 1 KB before the cut, so a creation across it is seen), and blocks without the approval line
+        over = len(cmd) > MAX_TEXT and creates_repo(cmd[MAX_TEXT - 1024:])
         cmd = cmd[:MAX_TEXT]
         files = referenced_files(cmd, payload.get('cwd'))
-        if not any(creates_repo(t) for t in [executed_text(cmd)] + files):
+        if not over and not any(creates_repo(t) for t in [executed_text(cmd)] + files):
             return None
         desc = ti.get('description') if isinstance(ti.get('description'), str) else ''
         return None if has_approval([cmd, desc] + files) else REASON
