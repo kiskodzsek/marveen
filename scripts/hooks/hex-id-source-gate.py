@@ -71,6 +71,12 @@ SEND_PREFIX_REV_RX = re.compile(r'(?:(?=(/[^\s;&|()`\'"{]*))\1)?["\']?(?:\s+(?:[
                                 r'(?:\Z|[;&|\n(`{]|\s(?:' + '|'.join(k[::-1] for k in _SEND_KEYWORDS) +
                                 r')(?![\w.-]))')
 PATH_STOP_RX = re.compile(r'[\s;&|()`\'"{]')
+_TERM_REV_RX = re.compile(r'\s*(?:\Z|[;&|\n(`{]|\s(?:' + '|'.join(k[::-1] for k in _SEND_KEYWORDS) + r')(?![\w.-]))')
+_WS_RX = re.compile(r'\s+')
+_WORDCH_RX = re.compile(r'[\w-]+')
+_NONSPACE_RX = re.compile(r'\S+')
+_WORD_RX = re.compile(r'\w+')
+_DIGITS_RX = re.compile(r'\d+')
 
 
 def send_script_in(cmd):
@@ -78,19 +84,73 @@ def send_script_in(cmd):
     # A NAME right after '/' takes the whole path run back to its first PATH_STOP char (the group is atomic), so two
     # such NAMEs with no PATH_STOP char between them end the path at the same place and get the same answer: the later
     # one is skipped, else 'agent-msg.sh/' x N re-reads the word N times (independent probe hx2, card 3b05ae69).
+    # SEND_PREFIX_REV_RX is matched by hand, with every reversed position answered once for the whole command
+    # (Viktor r2, independent probe hx3): the regex walked back over every option / assignment / duration word from
+    # each NAME ('v=/agent-msg.sh ' x N, 150 KB: 13 s), and a slash NAME re-read its path run after a non-slash NAME.
+    # memo[p]: does the tail (?:\s+WORD)*\s*TERM match at reversed position p.
     rev = None
-    prev_slash_start = -1
+    n = len(cmd)
+    memo = {}
+    slash_from = -1
+    slash_q = 0
+
+    def word_ends(p):
+        ws = _WS_RX.match(rev, p)
+        if not ws:
+            return ()
+        r = ws.end()
+        ends = []
+        wd = _WORDCH_RX.match(rev, r)
+        if wd:
+            ends.extend(j + 1 for j in range(r + 1, wd.end()) if rev[j] == '-')
+        ns = _NONSPACE_RX.match(rev, r)
+        if ns:
+            i = rev.find('=', r, ns.end())
+            while i >= 0:
+                w = _WORD_RX.match(rev, i + 1)
+                if w:
+                    ends.extend(range(i + 2, w.end() + 1))
+                i = rev.find('=', i + 1, ns.end())
+        for d0 in ((r, r + 1) if r < n and rev[r] in 'smh' else (r,)):
+            d = _DIGITS_RX.match(rev, d0)
+            if d:
+                ends.extend(range(d0 + 1, d.end() + 1))
+        return ends
+
+    def tail(p0):
+        stack = [p0]
+        while stack:
+            p = stack[-1]
+            if p in memo:
+                stack.pop()
+                continue
+            if _TERM_REV_RX.match(rev, p):
+                memo[p] = True
+                stack.pop()
+                continue
+            ends = word_ends(p)
+            todo = [q for q in ends if q not in memo]
+            if todo:
+                stack.extend(todo)
+                continue
+            memo[p] = any(memo[q] for q in ends)
+            stack.pop()
+        return memo[p0]
+
     for m in SEND_NAME_RX.finditer(cmd):
         start = m.start()
-        slash = start > 0 and cmd[start - 1] == '/'
-        if slash and prev_slash_start >= 0 and not PATH_STOP_RX.search(cmd, prev_slash_start, start):
-            prev_slash_start = start
-            continue
         if rev is None:
             rev = cmd[::-1]
-        if SEND_PREFIX_REV_RX.match(rev, len(cmd) - start):
+        q = n - start
+        if start > 0 and cmd[start - 1] == '/':
+            # the atomic path run: back to the first PATH_STOP char; the same for every slash NAME of the same run
+            if slash_from < 0 or PATH_STOP_RX.search(cmd, slash_from, start):
+                s = PATH_STOP_RX.search(rev, q + 1)
+                slash_q = s.start() if s else n
+            slash_from = start
+            q = slash_q
+        if tail(q) or (q < n and rev[q] in '"\'' and tail(q + 1)):
             return True
-        prev_slash_start = start if slash else -1
     return False
 API_RX = re.compile(r'/api/(messages|kanban)\b')
 API_WRITE_RX = re.compile(r'-X\s*(POST|PUT|PATCH)\b|--request\s*(POST|PUT|PATCH)\b|--data(-binary|-raw|-urlencode)?\b'

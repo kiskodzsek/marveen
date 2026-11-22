@@ -110,6 +110,17 @@ def timed(cmd, budget=3.0):
     dt = time.monotonic() - t0
     return (rc, err) if dt < budget else (-2, 'took %.1f s (budget %.1f s)' % (dt, budget))
 
+
+def wfile(path, text):
+    """Write text to path and close it (an expression, for the lambdas below; no unclosed-file warning)."""
+    with open(path, 'w') as fh:
+        return fh.write(text)
+
+
+def hx3(head, unit, size=300 * 1024):
+    """Viktor's probe_hx3 fill(): head + unit repeated to about size bytes, then a plain send with an invented hex."""
+    return head + unit * max(1, (size - len(head)) // len(unit)) + '\n./scripts/agent-msg.sh klodel dave "id 3f9a2c7e"'
+
 CASES = [
     # blocked
     ('invented sha in agent-msg', lambda: run(MSG + '"sha256 c7ab0f53aa11bb22cc33dd44ee55ff66"'), 2),
@@ -162,7 +173,7 @@ CASES = [
         fresh(lambda: run(MSG + '"ab12cd34ef"'))), 0),
     ('log: a send without hex needs no transcript', lambda: (lambda r: (0 if r[0] == 0 and r[2] == '' else 9, r[1]))(
         fresh(lambda: run(MSG + '"semmi"', records=None))), 0),
-    ('log: capped at 1 MiB', lambda: (open(FOLOG, 'w').write('x' * (1 << 20)),
+    ('log: capped at 1 MiB', lambda: (wfile(FOLOG, 'x' * (1 << 20)),
                                       run('', raw='not json'), (0 if os.path.getsize(FOLOG) == 1 << 20 else 9, ''))[2], 0),
     ('no hex at all', lambda: run(MSG + '"semmi"'), 0),
 ]
@@ -366,6 +377,23 @@ CASES += [
      lambda: timed("echo 'x " + 'agent-msg.sh/' * (300000 // 13) + "' ; " + CARD_PUT + ' ab12cd34ef"}\''), 2),
     ('T6b 300 KB of kernel-msg.sh/ chained in one word, then a send with an invented hex, blocks in time',
      lambda: timed("echo 'x " + 'kernel-msg.sh/' * (300000 // 14) + "' ; " + MSG + '"ab12cd34ef"'), 2),
+    # Viktor 50106 R1b (his probe_hx3 TIME shapes, verbatim): the tail re-read every option / assignment / duration word
+    # from each NAME, and a non-slash NAME reset the slash memo (quadratic on 33628c75: 150 KB took 1.8-13.6 s). 300 KB
+    # of the unit, then a plain send with an invented hex on the next line: main's verdict (block), in time.
+    ('T7 alt-slash-dash, 300 KB, then a send with an invented hex, blocks in time',
+     lambda: timed(hx3('echo ', 'agent-msg.sh/agent-msg.sh-')), 2),
+    ('T7 alt-slash-eq, 300 KB, then a send with an invented hex, blocks in time',
+     lambda: timed(hx3('echo ', 'agent-msg.sh/agent-msg.sh=')), 2),
+    ('T7 alt-slash-dot-path, 300 KB, then a send with an invented hex, blocks in time',
+     lambda: timed(hx3('echo /p', '/agent-msg.sh.agent-msg.sh')), 2),
+    ('T7 assign-slash-words, 300 KB, then a send with an invented hex, blocks in time',
+     lambda: timed(hx3('echo ', 'v=/agent-msg.sh ')), 2),
+    ('T7 assign-chain-words, 300 KB, then a send with an invented hex, blocks in time',
+     lambda: timed(hx3('echo ', 'v=x/agent-msg.sh/agent-msg.sh/kernel-msg.sh ')), 2),
+    ('T7 option-assign-tab, 300 KB, then a send with an invented hex, blocks in time',
+     lambda: timed(hx3('echo ', '-o\tv=/agent-msg.sh\t')), 2),
+    ('T7 duration-assign, 300 KB, then a send with an invented hex, blocks in time',
+     lambda: timed(hx3('echo ', '5s v=/agent-msg.sh 30 ')), 2),
     # the command positions the backward match must keep (each also as main's left-to-right search said)
     ('P1 keyword start: then <script>', lambda: run('if true; then bash scripts/agent-msg.sh k v "ab12cd34ef"; fi'), 2),
     ('P2 assignments, a duration and options before the script',
@@ -378,19 +406,19 @@ CASES += [
     # the second cd starts at the newline although the '{' before it ends the first cd's word (random diff, seed 3)
     ('P8 a cd after a word ending in { still adds its directory', lambda: (
         os.makedirs(os.path.join(TMP, 'sub8'), exist_ok=True),
-        open(os.path.join(TMP, 'sub8', 'm8.txt'), 'w').write('fej ab12cd34ef'),
+        wfile(os.path.join(TMP, 'sub8', 'm8.txt'), 'fej ab12cd34ef'),
         run('cd x{ \n cd sub8\n' + MSG + '- < m8.txt'))[-1], 2),
     ('P9 a cd whose start char lies inside the previous cd word is no cd (as main\'s finditer)', lambda: (
         os.makedirs(os.path.join(TMP, 'sub9'), exist_ok=True),
-        open(os.path.join(TMP, 'sub9', 'm9.txt'), 'w').write('fej ab12cd34ef'),
+        wfile(os.path.join(TMP, 'sub9', 'm9.txt'), 'fej ab12cd34ef'),
         run('cd x{ cd sub9\n' + MSG + '- < m9.txt'))[-1], 0),
     ('P10 a cd at the very start adds its directory', lambda: (
         os.makedirs(os.path.join(TMP, 'sub10'), exist_ok=True),
-        open(os.path.join(TMP, 'sub10', 'm10.txt'), 'w').write('fej ab12cd34ef'),
+        wfile(os.path.join(TMP, 'sub10', 'm10.txt'), 'fej ab12cd34ef'),
         run('cd sub10 && ' + MSG + '- < m10.txt'))[-1], 2),
     ('P11 then cd adds its directory', lambda: (
         os.makedirs(os.path.join(TMP, 'sub11'), exist_ok=True),
-        open(os.path.join(TMP, 'sub11', 'm11.txt'), 'w').write('fej ab12cd34ef'),
+        wfile(os.path.join(TMP, 'sub11', 'm11.txt'), 'fej ab12cd34ef'),
         run('if true; then cd sub11 && ' + MSG + '- < m11.txt; fi'))[-1], 2),
     ('P12 a heredoc piped into a shell by path is a send', lambda: run(
         "cat <<'X' | /bin/bash\n" + MSG + '"fej ab12cd34ef"\nX'), 2),
@@ -401,7 +429,7 @@ CASES += [
         'A=1 scripts/agent-msg.sh k v "ab12cd34ef"'), 2),
     ('P15 a cd right after ; adds its directory', lambda: (
         os.makedirs(os.path.join(TMP, 'sub15'), exist_ok=True),
-        open(os.path.join(TMP, 'sub15', 'm15.txt'), 'w').write('fej ab12cd34ef'),
+        wfile(os.path.join(TMP, 'sub15', 'm15.txt'), 'fej ab12cd34ef'),
         run('true;cd sub15 && ' + MSG + '- < m15.txt'))[-1], 2),
     ('P16 a << AFTER the | into a shell on the same line does not make the shell read the heredoc (as main)',
      lambda: run("echo x | bash -c 'cat' <<'X'\n" + MSG + '"fej ab12cd34ef"\nX'), 0),
@@ -414,6 +442,21 @@ CASES += [
      lambda: run('echo a/agent-msg.sh;b/agent-msg.sh k v "ab12cd34ef"'), 2),
     ('P20 a { glued before a path is a start char, not part of the path (as main)',
      lambda: run('echo x{a/agent-msg.sh k v "ab12cd34ef"'), 2),
+    # Kernel round 3 mutation run (work/hexlin-1122/r3/mut-hx3.log): six surviving mutants of the hand-matched send
+    # prefix were real test holes. Each row is a shrunk witness where main's SEND_SCRIPT_RX and the head agree and
+    # the mutant does not (work/hexlin-1122/r3/shrink_survivors.py). All values are made up.
+    ('MUT-M1 a lone "-" word before a NAME is not an option-word prefix (as main)',
+     lambda: run('- send-and-close.sh k v "ab12cd34ef"'), 0),
+    ('MUT-M4 an assignment word with a second "=" before a NAME is still a prefix (as main)',
+     lambda: run('a== agent-msg.sh k v "ab12cd34ef"'), 2),
+    ('MUT-M5 a duration word with an s/m/h unit before a NAME is a prefix (as main)',
+     lambda: run('3m kernel-msg.sh k v "ab12cd34ef"'), 2),
+    ('MUT-M10 a NAME right after a bare slash at the start is a send (as main)',
+     lambda: run('/msg-close.sh "fej ab12cd34ef" 48854'), 2),
+    ('MUT-M13 a tab between an empty assignment and a NAME is whitespace (as main)',
+     lambda: run('A=\tagent-msg.sh k v "ab12cd34ef"'), 2),
+    ('MUT-M15 a multi-char word glued before an assignment prefix still ends at a word start (as main)',
+     lambda: run('pa= send-stamped.sh k v "ab12cd34ef"'), 2),
 ]
 
 
