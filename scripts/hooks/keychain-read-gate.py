@@ -5447,7 +5447,9 @@ def lexer_normalise(view, cls, a, b):
 #     before), or an earlier data-heredoc command. The first other command ends the walk: nothing after it is blanked;
 #   - no alias, function, eval, source, PATH=, hash, trap ... in the CODE of the text (REDEF_RX on code characters
 #     only: the prose of a body or a quoted argument cannot define anything; a source in a JSON body blocked);
-#   - agent-msg.sh only as this repo's script, a relative path only when no step before it is a cd.
+#   - agent-msg.sh only as this repo's script, a relative path ours from every directory the shell may be in there:
+#     the cwd, an absolute `cd` target (card c6c67dde), and after any join but && also where a cd that failed left
+#     it; a relative cd target or `cd -` makes it not known.
 # The body is blanked for the script-path rules only; hits() still reads the whole text, and every $( ) outside the
 # body is read as its own command (lexer_view extras).
 STEP_RX = re.compile(r'(?:cd[ \t]+[\w./-]+|true|echo|git[ \t]+add(?:[ \t]+[\w./-]+)+)[ \t]*')
@@ -5455,13 +5457,16 @@ ONE_LETTER_ASSIGN_RX = re.compile(r'[A-Za-z]=')
 STEP_SEP_RX = re.compile(r'[ \t]*(?:&&|\|\||;|\||\n)[ \t\n]*')
 
 
-def _agent_msg_is_ours(path, cwd, moved):
+def _agent_msg_is_ours(path, cwd, moved, dirs=None):
     """path (the recipient word) names this repo's agent-msg.sh: absolute, or relative to cwd when nothing before it
-    may have moved the shell."""
+    may have moved the shell. dirs (lexer_data_spans' cd walk, card c6c67dde): every directory the shell may be in
+    there; a relative path must name ours from each of them (empty: none known)."""
     if not os.path.isabs(path):
-        if not cwd or moved:
-            return False
-        path = os.path.join(cwd, path)
+        if dirs is None:
+            if not cwd or moved:
+                return False
+            dirs = (cwd,)
+        return bool(dirs) and all(os.path.realpath(os.path.join(d, path)) == AGENT_MSG for d in dirs)
     return os.path.realpath(path) == AGENT_MSG
 
 
@@ -5532,7 +5537,13 @@ def lexer_data_spans(cmd, cwd, lx):
         return []
     tops = [s for s in lx['segments'] if s['depth'] == 0 and s['frame'] == 'top']
     spans = []
-    moved = False
+    # card c6c67dde (Klodel 09:24, `cd /Users/klodel/marveen; bash scripts/agent-msg.sh ... <<'MSG'` blocked on a path
+    # in the message): not "a cd moved the shell somewhere", but where it may be. here: the directories the next
+    # command may run in (None: not known); back: the ones a cd that may have failed leaves, which come back after
+    # any join but && (`cd /a && x; y`: y runs in the old one when the cd failed). Only an absolute cd target is
+    # followed (a relative one may go through CDPATH, `cd -` to OLDPWD): another cd makes it not known, as before.
+    here = {cwd} if cwd else None
+    back = set()
     prev_end = 0  # where the command before ends (a heredoc command: its terminator line)
     for seg in tops:
         # the steps are joined by &&, ||, ;, | or newlines, as on the regex path: a `cd x &` runs in the background
@@ -5540,6 +5551,9 @@ def lexer_data_spans(cmd, cwd, lx):
         # (a heredoc's `end` is past its terminator line's newline: that newline is the join)
         if prev_end and not (STEP_SEP_RX.fullmatch(sep) or (cmd[prev_end - 1] == '\n' and not sep.strip(' \t\n'))):
             break
+        if prev_end and sep.strip(' \t\n') != '&&':
+            here = None if here is None or back is None else here | back
+            back = set()
         hs = [h for h in lx['heredocs'] if seg['start'] <= h['op'] < seg['end']]
         if hs:
             h = hs[0]
@@ -5550,7 +5564,8 @@ def lexer_data_spans(cmd, cwd, lx):
             if line_end < 0 or cmd[h['opEnd']:line_end].strip() or h['bodyStart'] != line_end + 1:
                 break
             rec = DATA_RECIPIENT_RX.match(cmd[seg['start']:h['op']] + ' ')
-            if not rec or (rec.group('msg') is not None and not _agent_msg_is_ours(rec.group('msg'), cwd, moved)):
+            if not rec or (rec.group('msg') is not None
+                           and not _agent_msg_is_ours(rec.group('msg'), cwd, True, here or frozenset())):
                 break
             spans.append((h['bodyStart'], h['bodyEnd']))
             prev_end = h['end']
@@ -5558,7 +5573,10 @@ def lexer_data_spans(cmd, cwd, lx):
         text = cmd[seg['start']:seg['end']]
         prev_end = seg['end']
         if STEP_RX.fullmatch(text):
-            moved = moved or text.startswith('cd')
+            if text.startswith('cd'):
+                target = text.split()[1]
+                back = None if back is None or here is None else back | here
+                here = {target} if target.startswith('/') else None
             continue
         if ONE_LETTER_ASSIGN_RX.match(text) and len(shell_lex.words(cmd, lx, seg)) == 1:
             continue

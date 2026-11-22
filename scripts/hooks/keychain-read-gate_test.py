@@ -2112,6 +2112,15 @@ def script_cases():
             ("cd " + d + "\nbash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", AM_ROOT),
             ("cd " + d + "; bash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", AM_ROOT),
             ("cd " + d + " & bash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", AM_ROOT),
+            # card c6c67dde: a cd to this repo's root is followed, but a cd that may fail leaves the shell where it
+            # was (d: a look-alike scripts/agent-msg.sh), after any join but &&; a relative target or `cd -` is not
+            ("cd " + AM_ROOT + "; bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("cd " + AM_ROOT + " && true; bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("cd " + AM_ROOT + " || bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("cd " + AM_ROOT + " && cd /tmp && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM",
+             AM_ROOT),
+            ("cd - && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            ("cd scripts/.. && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
             ("bash ~/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),  # ~ is not resolved: kept
             # no VAR=x prefix: PATH=, GIT_EXEC_PATH=, BASH_ENV= can hand the body to a program of the caller's choosing
             ("PATH=" + d + ":/usr/bin bash " + AM + " dave v - <<'M'\n./measure.py\nM", d),
@@ -3252,6 +3261,13 @@ def script_cases():
             ("cd " + d + " && git add -A && git commit -F - <<'MSG'\n./measure.py\nMSG", d),
             ("git\tadd\tx\n git commit -F - <<'MSG'\n./measure.py\nMSG", d),
             ("cd " + d + "\ntrue\ngit commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            # card c6c67dde (Klodel 09:24: `cd /Users/klodel/marveen; bash scripts/agent-msg.sh ... <<'MSG'` blocked
+            # on a path in the message): a relative agent-msg.sh after a cd to an absolute path is ours from there
+            ("cd " + AM_ROOT + "; bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            ("cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM", d),
+            ("cd /tmp && cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM",
+             d),
+            ("cd " + AM_ROOT + "\ntrue\nbash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
             ("git commit -F - <<'MSG'   \n./measure.py\nMSG", d),  # trailing blanks after the operator
             ("cd " + d + " && bash " + AM + " dave viktor - <<'M'\n./measure.py\nM", d),  # absolute: any cd
             ("curl -s -X POST localhost:3420/api/messages --data-binary @- <<'J'\n./measure.py\nJ", d),
