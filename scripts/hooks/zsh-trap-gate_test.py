@@ -391,6 +391,69 @@ def backtick_glued_to_a_word_closes_its_sequence(_):
             and blocks('echo a`b`c; for f in x $V; do :; done', 'ZSH-CSAPDA (szóbontás)'))
 
 
+# ---- round 2 (Viktor 50179, independent probe indep12) ----------------------------------------------------------
+
+@case
+def closed_prefix_value_options_cmdvar_after_prefix_eqsplit_and_procsub_redirect(_):
+    # closed in round 2: sudo -u / nice -n values, a variable as the command after nohup / command, $=V in rm,
+    # and a process substitution after a redirect no longer eats the next command's first word
+    rm, cv, sp, eq = 'RM-VALTOZO-KAPU', 'ZSH-CSAPDA (változó mint parancs)', 'ZSH-CSAPDA (szóbontás)', 'ZSH-CSAPDA (='
+    return (blocks(r'sudo -u root rm -rf $S', rm) and blocks(r'nice -n 10 rm -rf $S/tmp', rm)
+            and blocks(r'env -u HOME -C /tmp rm -rf $S', rm) and blocks(r'rm -rf $=D/cache', rm)
+            and blocks(r'rm -rf $~D', rm)
+            and blocks(r'HJ="bash heavy-job.sh --fast"; nohup $HJ > job.log 2>&1 &', cv)
+            and blocks(r'G="git -C repo status"; command $G', cv)
+            and blocks(r'cat < <(ls); rm -rf $S', rm) and blocks(r'cat < <(ls); for x in $FILES; do :; done', sp)
+            and blocks(r'sort < <(ls) ; echo ===X', eq) and blocks('x > >(cat)\nrm -rf $S', rm)
+            and passes(r'G="git x"; command -v $G') and passes(r'sudo -u root ls $S')
+            and passes(r'nice -n 10 rm -rf "${S:?}/tmp"') and passes(r'echo $=D')
+            and passes(r'HJ=(a b); nohup $HJ') and passes(r'cat < <(ls); echo ok')
+            and passes(r'diff <(ls a) <(ls b); rm -rf "${S:?}"'))
+
+
+@case
+def deep_message_counts_parser_levels(_):
+    # Viktor 50179 INFO: a quoted $( ) counts two levels, so the message says parser levels
+    m = gate.findings('echo ' + '"$(' * 40, ZSH)
+    return bool(m) and m[0].startswith('ZSH-CSAPDA (mélység)') and 'két szintnek' in m[0]
+
+
+# KNOWN-LIMIT rows: each pins today's behaviour of a documented Known limit (the docstring names the label);
+# the input is the indep12 probe's, verbatim. A later fix turns its row red on purpose.
+KNOWN_LIMIT_INPUTS = [
+    ('bt-escaped-inner-rm', 'x=`echo \\`rm -rf $S\\``'),
+    ('dq-bt-escaped-inner-rm', 'x="`echo \\`rm -rf $S/build\\``"'),
+    ('bt-escaped-inner-for', 'y=`echo \\`for f in $FILES; do echo $f; done\\``'),
+    ('arith-cmdsub-rm', 'echo $(( $(rm -rf $S; echo 1) + 1 ))'),
+    ('dq-arith-cmdsub-rm', 'echo "$(( $(rm -rf $S/tmp; echo 1) ))"'),
+    ('dparen-cmd-arith-cmdsub-rm', '(( n = $(rm -rf $S; echo 3) )) && echo $n'),
+    ('brace-default-cmdsub-rm', 'echo ${OUT:-$(rm -rf $S)}'),
+    ('dq-brace-default-bt-rm', 'echo "${OUT:-`rm -rf $S`}"'),
+    ('brace-default-cmdsub-setsplit', 'echo ${R:-$(set -- $SPEC; echo $1)}'),
+    ('dq-brace-default-cmdsub-eq', 'echo "${R:-$(echo === done)}"'),
+    ('dollar-dparen-fallback-rm', 'echo $((rm -rf $S); echo done)'),
+    ('dparen-start-subshell-rm', '((rm -rf $S) ; echo done)'),
+    ('dq-case-subst-rm', 'x="$(case a in a) echo a;; esac; rm -rf $S)"'),
+    ('bt-heredoc-tail-rm', 'x=`cat <<EOF\nhi\nEOF`\nrm -rf $S'),
+    ('dollar-bracket-shift-tail-rm', 'echo $[1<<2]\nrm -rf $S'),
+]
+DATA_LINE = 'line 000000 some ordinary data text, no traps here\n'
+KNOWN_LIMIT_INPUTS += [
+    ('time-data-heredoc-300k-tail-rm', "cat > out.txt <<'EOF'\n" + DATA_LINE * 6000 + 'EOF\nrm -rf $S'),
+    ('time-1mb-tail-rm', "cat > out.txt <<'EOF'\n" + DATA_LINE * 20000 + 'EOF\nrm -rf $S'),
+]
+
+
+@case
+def known_limit_rows_pin_todays_allow(_):
+    ok = True
+    for label, cmd in KNOWN_LIMIT_INPUTS:
+        if gate.findings(cmd, ZSH):
+            print(f'  KNOWN-LIMIT {label}: blocks now (the documented limit changed)')
+            ok = False
+    return ok and len(KNOWN_LIMIT_INPUTS) == 17
+
+
 def main():
     failed = 0
     for fn in CASES:

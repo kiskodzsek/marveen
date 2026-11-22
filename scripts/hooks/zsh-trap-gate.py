@@ -48,6 +48,14 @@ and a double quote nests through read_dq ("$(( "$(( ... : match_paren and read_d
 shared depth. A command nested deeper than MAX_DEPTH (64; Kernel's 26069 real Bash commands reach 6 at most)
 blocks with MSG_DEEP instead of running into Python's recursion limit (about 330 levels, 1 KB of `$(`), which was an
 internal error = a silent allow.
+Known limits (Viktor 50179, independent probe indep12, all as on main, LOW; each pinned by a KNOWN-LIMIT test
+row): read but not as code: bt-escaped-inner-rm, dq-bt-escaped-inner-rm, bt-escaped-inner-for (an escaped inner
+backtick), arith-cmdsub-rm, dq-arith-cmdsub-rm, dparen-cmd-arith-cmdsub-rm (a substitution inside arithmetic),
+brace-default-cmdsub-rm, dq-brace-default-bt-rm, brace-default-cmdsub-setsplit, dq-brace-default-cmdsub-eq (a
+substitution in a ${V:-...} default), dollar-dparen-fallback-rm, dparen-start-subshell-rm (zsh's (( )) command
+fallback), dq-case-subst-rm (a case pattern paren in a quoted substitution); not read: bt-heredoc-tail-rm (a
+heredoc end inside backticks), dollar-bracket-shift-tail-rm ($[ ... << ] read as a heredoc), and past the
+256 KB cut (MAX_COMMAND) the tail is not judged: time-data-heredoc-300k-tail-rm, time-1mb-tail-rm.
 Inside a backtick sequence a backtick closes the word it is glued to (`a`b`: before, a glued closing backtick opened
 a new nested sequence).
 Tests: python3 -I scripts/hooks/zsh-trap-gate_test.py
@@ -81,6 +89,12 @@ XARGS_VALUE_OPTS |= {'--max-args', '--max-procs', '--max-lines', '--max-chars', 
                      '--process-slot-var'}
 # Viktor 41371 INFO 2: BSD xargs -S replsize takes its value in the next word
 XARGS_VALUE_OPTS.add('-S')
+# The prefix words' options that take the next word as their value (indep12: sudo -u root rm ..., nice -n 10 rm ...)
+PRECMD_VALUE_OPTS = {'sudo': {'-u', '-g', '-h', '-p', '-C', '-D', '-U', '-T', '-r', '-t', '--user', '--group', '--host',
+                              '--prompt', '--close-from', '--chdir', '--other-user', '--command-timeout', '--role',
+                              '--type'},
+                     'nice': {'-n', '--adjustment'}, 'env': {'-u', '--unset', '-C', '--chdir', '-S', '--split-string'},
+                     'caffeinate': {'-t', '-w'}}
 PRECMD = {'sudo', 'command', 'builtin', 'exec', 'nocorrect', 'noglob', 'nohup', 'env', 'nice', 'caffeinate'}
 DECLARERS = {'typeset', 'local', 'declare', 'export', 'readonly', 'integer', 'float'}
 OPERATORS = [';;', ';&', ';|', '&&', '||', '|&', '&!', '&|', ';', '|', '&']
@@ -384,6 +398,9 @@ class Parser:
             if s.startswith('<(', i) or s.startswith('>(', i):
                 j = self.parse_seq(i + 2, ')')
                 i = j
+                # a process substitution after a redirect IS its target (cat < <(ls)); left pending, the redirect
+                # took the next command's first word (indep12 procsub-redirect-then-rm: `; rm -rf $S` lost its rm)
+                redirect_next = False
                 continue
             if s.startswith('<<<', i):
                 redirect_next = True
@@ -567,6 +584,12 @@ def starts_with_var(word):
     kind, text = word.parts[0]
     if kind == 'var':
         return text
+    if kind == 'lit':
+        # zsh's unbraced flag forms ($=V split, $~V glob, $^V rc-expand) are parsed as a literal (indep12
+        # rm-eqsplit-unbraced: rm -rf $=D/cache)
+        m = re.match(r'\$[=~^]+[A-Za-z_][A-Za-z0-9_]*', text)
+        if m:
+            return m.group(0)
     if kind == 'dq':
         m = re.match(r'\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*])', text)
         if m:
@@ -588,8 +611,8 @@ MSG_MOD = ('ZSH-CSAPDA (modifier): {f!r} -- zsh-ban a $VAR: utáni betű history
 MSG_EQ = ('ZSH-CSAPDA (=-kibontás): {f!r} -- a zsh az =-jellel kezdődő szót parancsnévként oldja fel ("{nf} not '
           'found"), a parancs és ami utána jön NEM fut le. Elválasztónak idézve: echo "=== X ===" vagy echo \'--- X\'; '
           'összehasonlításra [ a = b ] vagy [[ a == b ]].')
-MSG_DEEP = ('ZSH-CSAPDA (mélység): a parancs {d}-nél több szinten ágyaz egymásba $( ), backtick, <( ), =( ) vagy '
-            'idézőjeles részt; a kapu ennyit nem elemez végig (a valódi parancsok néhány szintet használnak). Bontsd '
+MSG_DEEP = ('ZSH-CSAPDA (mélység): a parancs {d}-nél több elemzési szinten ágyaz egymásba $( ), backtick, <( ), =( ) '
+            'vagy idézőjeles részt (egy idézőjelen belüli $( ) két szintnek számít); a kapu ennyit nem elemez végig (a valódi parancsok néhány szintet használnak). Bontsd '
             'lépésekre vagy írd szkriptfájlba.')
 MSG_RM = ('RM-VALTOZO-KAPU: {f!r} -- rm -r változóval kezdődő úton: üres vagy elírt változónál a cwd vagy a / törlődik. '
           'Írd: rm -rf -- "${{S:?}}/alut" (a :? megáll, ha S üres), vagy kiírt abszolút úttal.')
@@ -599,6 +622,18 @@ def shell_is_zsh(env):
     sh = env.get('CLAUDE_CODE_SHELL') or env.get('SHELL') or ''
     base = os.path.basename(sh.strip())
     return base == '' or 'zsh' in base
+
+
+def skip_prefix_args(words, j):
+    """Past a prefix word at j (sudo, nice, env, ..., or a keyword): its options, the value of the ones that take one
+    (PRECMD_VALUE_OPTS), and VAR=x words. Returns the index of the next word."""
+    vo = PRECMD_VALUE_OPTS.get(words[j].plain(), ())
+    j += 1
+    while j < len(words) and ((words[j].plain() or '').startswith('-')
+                              or (words[j].parts and words[j].parts[0][0] == 'lit'
+                                  and ASSIGN_RX.match(words[j].text()))):
+        j += 2 if words[j].plain() in vo else 1
+    return j
 
 
 def findings(command, env=None):
@@ -636,6 +671,18 @@ def findings(command, env=None):
             name = bare_var(head_word, allow_dq=True)
             if name and 'ws' in assigns.get(name, ()) and 'array' not in assigns.get(name, ()):
                 out.append(MSG_CMDVAR.format(f=s[head_word.start:words[min(k + 1, len(words) - 1)].end][:120]))
+            # ... also after prefix words (indep12 nohup-cmdvar, command-cmdvar: nohup $HJ, command $G); command -v /
+            # -V only looks the name up, it runs nothing
+            e2 = k
+            while e2 < len(words) and not flags[e2] and words[e2].plain() in PRECMD:
+                if words[e2].plain() == 'command' and e2 + 1 < len(words) and words[e2 + 1].plain() in ('-v', '-V'):
+                    e2 = len(words)
+                    break
+                e2 = skip_prefix_args(words, e2)
+            if e2 != k and e2 < len(words) and not flags[e2]:
+                name = bare_var(words[e2], allow_dq=True)
+                if name and 'ws' in assigns.get(name, ()) and 'array' not in assigns.get(name, ()):
+                    out.append(MSG_CMDVAR.format(f=s[head_word.start:words[min(e2 + 1, len(words) - 1)].end][:120]))
             # 1. for x in $V / set -- $V
             items = []
             if head == 'for' and k + 1 < len(words):
@@ -685,11 +732,7 @@ def findings(command, env=None):
                     j += 2 if o in XARGS_VALUE_OPTS else 1
                 continue
             if pw in PRECMD or pw in KEYWORDS:
-                j += 1
-                while j < len(words) and ((words[j].plain() or '').startswith('-')
-                                          or (words[j].parts and words[j].parts[0][0] == 'lit'
-                                              and ASSIGN_RX.match(words[j].text()))):
-                    j += 1
+                j = skip_prefix_args(words, j)
                 continue
             break
         # Viktor 41294 LOW 2: "\\rm" (the alias-bypass habit) is rm too: a name of only literal/escaped parts
