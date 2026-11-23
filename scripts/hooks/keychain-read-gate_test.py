@@ -1291,6 +1291,27 @@ def script_git_cases():
             # KNOWN-LIMIT pipe-into-shell-with-script (an over-block, the safe side): the pipeline-into-a-shell reading
             # takes what a pipe prints as the shell's code even when the shell runs a script file
             (f"cd {d} && printf '%s\\n' 'HANDOFF.md x' | bash {d}/ok.sh", 2),
+            # round 4 (Viktor 50741 A): a subcommand word in the first operand position is no script; the next
+            # operand is (bun run / x / exec / test, deno run / test, tsx watch, node inspect)
+            (f'bun run {d}/helper.cjs', 2), (f'bun run --silent {d}/helper.cjs', 2), (f'bun run --hot {d}/helper.cjs', 2),
+            (f'bun x {d}/helper.cjs', 2), (f'bun test {d}/helper.cjs', 2), (f'bun exec {d}/helper.cjs', 2),
+            (f'deno run {d}/helper.cjs', 2), (f'deno run -A {d}/helper.cjs', 2), (f'tsx watch {d}/helper.cjs', 2),
+            (f'node inspect {d}/helper.cjs', 2), (f'cd {d} && bun run ./helper.cjs', 2),
+            # controls: the file after the script is its argument; a second subcommand word is an operand
+            (f'bun run {d}/ok.js {d}/helper.cjs', 0), (f'tsx watch {d}/ok.js {d}/helper.cjs', 0),
+            (f'node inspect {d}/ok.js {d}/helper.cjs', 0),
+            # after an option the gate does not know, a subcommand word may still be the first operand (--frob may take
+            # x): the file after it is run (round-4 mutation: a first-operand-only skip passed it)
+            (f'node --frob x inspect {d}/helper.cjs', 2), (f'bun --frob x run {d}/helper.cjs', 2),
+            # round 4 (Viktor 50741 B): a shell's +option is an option (+o / +O take a value)
+            (f'bash +x {H}', 2), (f'bash +e {H}', 2), (f'sh +e {H}', 2), (f'bash +o posix {H}', 2),
+            (f'zsh +o nomatch {H}', 2), (f'bash +O extglob {H}', 2), (f'bash +o posix {d}/ok.sh {H}', 0),
+            # round 4 (Viktor 50741, old): a shell's lone `-` is its `--` (bash(1)): the next word is the script
+            (f'bash - {H}', 2), (f'sh - {H}', 2), (f'bash -x - {H}', 2), (f'bash - {d}/ok.sh {H}', 0),
+            # KNOWN-LIMIT git-rules-on-argument-files: `python3 -m runpy f` (a module runs its argument file)
+            (f'python3 -m runpy {H}', 0),
+            # KNOWN-LIMIT find-exec-computed-name: find computes the name it runs; the file keeps the main rules
+            (f'find {d} -name hc.sh -exec bash {{}} \\;', 0),
         ]
         for cmd, want in rows:
             n += 1

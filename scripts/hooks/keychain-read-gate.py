@@ -14,8 +14,10 @@ interpreter, a substitution), so a cat text run through a file the command write
 keeps the main rules; node-options-quoted: a preload file in a quoted or `=` NODE_OPTIONS value is not read.
 Round 3 (Viktor 50674): they read a file in a RUN position only (the script operand, a preload or rc file, source,
 a stdin redirect, a fed cat, a pipe word, a direct path). git-rules-on-argument-files: a script that runs its own
-argument file (`bash runner.sh f`, runner.sh runs "$1") hands f the main rules only; env-prefix-run-file: BASH_ENV=f
-and ENV=f before a shell are not read (main too); dash-c-argument (an over-block): after a -c payload the payload
+argument file (`bash runner.sh f`, runner.sh runs "$1") hands f the main rules only, and so does `python3 -m runpy f`
+(a module runs its argument file); env-prefix-run-file: BASH_ENV=f
+and ENV=f before a shell are not read (main too); find-exec-computed-name: `find D -name x.sh -exec bash {} \\;` runs
+a name find computes, so x.sh keeps the main rules; dash-c-argument (an over-block): after a -c payload the payload
 view reads the next word as a command word, so `bash -c '...' f` judges f by them; a python heredoc body naming a
 file may also judge it (the body is code, a file name in it can be exec'd: fail-closed); pipe-into-shell-with-script
 (an over-block): what a pipe prints into a shell is read as its code even when the shell runs a script file.
@@ -3812,13 +3814,18 @@ SHELL_RC_OPTS = frozenset(('--rcfile', '--init-file'))
 SHELL_NOARG_LONG = frozenset(('--login', '--norc', '--noprofile', '--posix', '--verbose', '--noediting',
                               '--restricted', '--debugger', '--dump-strings', '--', '--version', '--help'))
 _SHELL_OPT_RX = re.compile(r'[-+][A-Za-z]+')
+# card 8d8298c7 round 4 (Viktor 50741 A): a subcommand word in an operand position is no script: the script is the
+# next operand (`bun run F`, `bun run --silent F`, `deno run -A F`, `tsx watch F`, `node inspect F`)
+RUN_SUBCOMMANDS = {'bun': frozenset(('run', 'x', 'exec', 'test')), 'deno': frozenset(('run', 'test')),
+                   'tsx': frozenset(('watch',)), 'node': frozenset(('inspect',)), 'nodejs': frozenset(('inspect',))}
 
 
 def run_option(name, w, python):
     """(kind, attached run file) of an option word before the script: kind 'zero' (no argument), 'val' (the next word
     is its argument, not run), 'valrun' (the next word is a file it runs), 'code' (inline code: no script file) or
     'ambig' (not known)."""
-    if w == '--':
+    if w == '--' or (w == '-' and name.lower() in SHELL_NAMES):
+        # round 4 (Viktor 50741): a shell's lone `-` is its `--` (bash(1)): `bash - F` runs F
         return 'zero', None
     opt, eq, val = w.partition('=')
     if NODE_NAMES_RX.fullmatch(name):
@@ -4671,6 +4678,13 @@ def interp_groups(text, expanded=False):
         # (a substitution, a variable, a glob, a brace) before the script is found: every word is run (fail-closed)
         run, need, nxt = set(), 1, None
         run_all = expanded
+        # round 4 (Viktor 50741): a shell's +x / +o posix / +O extglob is an option like its -x / -o / -O (the walk
+        # called run_option for a `-` word only, so `bash +x F` took +x for the script); a shell's lone `-` is `--`
+        shell = name.lower() in SHELL_NAMES
+        # a subcommand word is skipped at ANY operand while the script is not found: after an option the gate does not
+        # know (`node --frob x inspect F`), --frob may take x and make inspect the first operand (fail-closed; `bun run
+        # run F` over-blocks, the safe side)
+        sub_words = RUN_SUBCOMMANDS.get(name.lower(), frozenset())
         i = 0
         while i < len(words):
             w = words[i]
@@ -4682,7 +4696,7 @@ def interp_groups(text, expanded=False):
                 elif in_redir:
                     if not in_redir.group(1):
                         nxt = ('valrun', i + 1)  # `< f`: its target is read as code (the REDIRECT_RX reading too)
-                elif w.startswith('-') and w != '-':
+                elif (w.startswith('-') and (w != '-' or shell)) or (shell and len(w) > 1 and w[0] == '+'):
                     kind, att = run_option(name, w, python)
                     if att:
                         run.add(att)
@@ -4695,7 +4709,9 @@ def interp_groups(text, expanded=False):
                         nxt = (kind, i + 1)  # the NEXT word only (the walk below may skip it: python -W x)
                 elif w:
                     taken = nxt[0] if nxt and nxt[1] == i else None
-                    if taken == 'valrun':
+                    if taken is None and w in sub_words:
+                        pass  # round 4: the subcommand word (bun run, tsx watch): the script is the next operand
+                    elif taken == 'valrun':
                         run.add(w)
                     elif taken is None:
                         run.add(w)
@@ -4729,7 +4745,8 @@ def interp_groups(text, expanded=False):
                     groups += [[c] for c in module_files(shell_unquote(raw))]
                 stopped = True
                 break
-            if w == '-' or (SHELL_CODE_FLAG_RX if name in SHELL_NAMES else CODE_FLAG_RX).fullmatch(w):
+            if (w == '-' and name.lower() not in SHELL_NAMES) or (
+                    SHELL_CODE_FLAG_RX if name in SHELL_NAMES else CODE_FLAG_RX).fullmatch(w):
                 stopped = True
                 break
             # an output redirection's target is written, not run (`python3 x.py > out.txt`; card 15896271): a file
