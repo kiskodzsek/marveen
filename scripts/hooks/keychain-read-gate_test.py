@@ -1308,7 +1308,23 @@ def script_git_cases():
             (f'zsh +o nomatch {H}', 2), (f'bash +O extglob {H}', 2), (f'bash +o posix {d}/ok.sh {H}', 0),
             # round 4 (Viktor 50741, old): a shell's lone `-` is its `--` (bash(1)): the next word is the script
             (f'bash - {H}', 2), (f'sh - {H}', 2), (f'bash -x - {H}', 2), (f'bash - {d}/ok.sh {H}', 0),
-            # KNOWN-LIMIT git-rules-on-argument-files: `python3 -m runpy f` (a module runs its argument file)
+            # round 5 (Viktor 50854, measured with the real binaries): a preload after the code switch runs too
+            (f'cd {d} && node -e 1 -r ./helper.cjs', 2), (f'cd {d} && node -p 1 --require ./helper.cjs', 2),
+            (f'cd {d} && node -e 1 --import ./helper.mjs', 2), (f'cd {d} && bun -e 1 --preload ./helper.mjs', 2),
+            (f'cd {d} && node --eval 1 --import=./helper.mjs', 2), (f'cd {d} && node --print 1 --loader=./helper.mjs', 2),
+            (f'cd {d} && node -pe 1 -r ./helper.cjs', 2), (f'cd {d} && node -e 1 x -- -r ./helper.cjs', 2),
+            (f'bun --preload {d}/helper.mjs {d}/ok.js', 2), (f'cd {d} && bun --preload=./helper.mjs ./ok.js', 2),
+            (f'cd {d} && node -e 1 -r ./ok.js -r ./helper.cjs', 2), (f'cd {d} && node -p 1 -r ./ok.js --import=./helper.mjs', 2),
+            # round 5 (Kernel, old: f93dd6bc and main too): a preload file with a glob is globbed off the first operand
+            # too (only a group's lead was globbed); a quoted glob is no glob (bash keeps the *)
+            (f'cd {d} && node -e 1 -r ./help*.cjs', 2), (f'cd {d} && node -r ./ok.js -r ./help*.cjs ./ok.js', 2),
+            (f'cd {d} && node --require=./help*.cjs ./ok.js', 2), (f'cd {d} && node -r ./help*.cjs ./ok.js', 2),
+            (f"cd {d} && node -e 1 -r './help*.cjs'", 0),
+            # controls: a clean preload file; after the code a plain file is an argument (above); a dangling -r
+            (f'cd {d} && node -e 1 -r ./ok.js', 0), (f'cd {d} && node -p 1 --require ./ok.js', 0),
+            (f'cd {d} && node -e 1 x -r', 0), (f'cd {d} && node -e 1 ./helper.cjs', 0),
+            # KNOWN-LIMIT git-rules-on-argument-files: runpy runs a module named by its argument (`cd D && python3 -m
+            # runpy evil` runs D/evil.py; with a path it does not run, Viktor 50854); the gate reads no module argument
             (f'python3 -m runpy {H}', 0),
             # KNOWN-LIMIT find-exec-computed-name: find computes the name it runs; the file keeps the main rules
             (f'find {d} -name hc.sh -exec bash {{}} \\;', 0),

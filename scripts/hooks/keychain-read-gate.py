@@ -13,9 +13,11 @@ KNOWN-LIMIT row): cat-fed-indirect: they read a file the command runs or feeds t
 interpreter, a substitution), so a cat text run through a file the command writes first (`cat f > g; bash g`)
 keeps the main rules; node-options-quoted: a preload file in a quoted or `=` NODE_OPTIONS value is not read.
 Round 3 (Viktor 50674): they read a file in a RUN position only (the script operand, a preload or rc file, source,
-a stdin redirect, a fed cat, a pipe word, a direct path). git-rules-on-argument-files: a script that runs its own
-argument file (`bash runner.sh f`, runner.sh runs "$1") hands f the main rules only, and so does `python3 -m runpy f`
-(a module runs its argument file); env-prefix-run-file: BASH_ENV=f
+a stdin redirect, a fed cat, a pipe word, a direct path). Round 5 (Viktor 50854): a preload after a node-family code
+switch (`node -e 1 -r f`) is a RUN position too, and a RUN word with a glob is globbed off the first operand as well. git-rules-on-argument-files: a script that runs its own
+argument file (`bash runner.sh f`, runner.sh runs "$1") hands f the main rules only, and so does runpy with a module
+name (`cd D && python3 -m runpy evil` runs D/evil.py; a path, `python3 -m runpy D/evil.py`, does not run: measured,
+Viktor 50854); env-prefix-run-file: BASH_ENV=f
 and ENV=f before a shell are not read (main too); find-exec-computed-name: `find D -name x.sh -exec bash {} \\;` runs
 a name find computes, so x.sh keeps the main rules; dash-c-argument (an over-block): after a -c payload the payload
 view reads the next word as a command word, so `bash -c '...' f` judges f by them; a python heredoc body naming a
@@ -3808,7 +3810,8 @@ def _argv_option(w, python):
 # the next word or not: then the next TWO operands are run (either may be the script). Every other word is an argument
 # the script reads: the main rules only (Known limit git-rules-on-argument-files).
 NODE_NAMES_RX = re.compile(r'node(?:js)?|bun|deno|tsx|ts-node', re.I)
-RUN_PRELOAD_OPTS = frozenset(('-r', '--require', '--import', '--loader', '--experimental-loader'))
+# round 5 (Viktor 50854): bun's --preload too (it reached only the unknown-option branch before)
+RUN_PRELOAD_OPTS = frozenset(('-r', '--require', '--import', '--loader', '--experimental-loader', '--preload'))
 NODE_VALUE_OPTS = frozenset(('-C', '--conditions', '--input-type', '--title', '--env-file', '--inspect-port'))
 SHELL_RC_OPTS = frozenset(('--rcfile', '--init-file'))
 SHELL_NOARG_LONG = frozenset(('--login', '--norc', '--noprofile', '--posix', '--verbose', '--noediting',
@@ -3818,6 +3821,40 @@ _SHELL_OPT_RX = re.compile(r'[-+][A-Za-z]+')
 # next operand (`bun run F`, `bun run --silent F`, `deno run -A F`, `tsx watch F`, `node inspect F`)
 RUN_SUBCOMMANDS = {'bun': frozenset(('run', 'x', 'exec', 'test')), 'deno': frozenset(('run', 'test')),
                    'tsx': frozenset(('watch',)), 'node': frozenset(('inspect',)), 'nodejs': frozenset(('inspect',))}
+
+
+def node_preloads_after(words, all_words, i):
+    """round 5 (Viktor 50854, measured with the real binaries: `node -e 1 -r p.cjs`, `node -e 1 --import p.mjs`,
+    `bun -e 1 --preload p.mjs` run p): after a node-family code switch (-e, --eval, -p, --print) the walk stops, but a
+    preload option after it still runs its file. Returns (files, unread): (file, raw word) of every preload option
+    in words[i + 1:], separate or with `=`; unread is True when such a file word may vanish or change before it runs (a
+    substitution or a variable: the caller runs every word, fail-closed). A file word with a glob or a brace outside
+    quotes is a run pattern (see run_pattern_group). The words after a `--` are scanned too (an over-block, the safe
+    side)."""
+    files, unread = [], False
+    j = i + 1
+    while j < len(words):
+        opt, eq, val = words[j].partition('=')
+        k = j if eq else j + 1
+        if opt in RUN_PRELOAD_OPTS and k < len(words):
+            raw = all_words[k]
+            if '$' in raw or '`' in raw:
+                unread = True
+            files.append((strip_quotes(val) if eq else words[k], raw))
+            j = k
+        j += 1
+    return files, unread
+
+
+def run_pattern_group(w, raw):
+    """round 5 (found by Kernel, old: f93dd6bc and main too): a RUN word with a glob or a brace outside quotes (`node -r
+    ./ok.js -r ./h*.cjs m.js`, `node --require=./h*.cjs m.js`, `node -e 1 -r ./h*.cjs`) was marked run-all, but only a
+    group's lead is globbed (script_paths), so a pattern off the first operand was never looked up. Its own lead group
+    (globbed and run, as the pipe-word groups) or None. An option's `=` value is the word."""
+    if '$' in raw or '`' in raw or not unquoted_pattern(raw):
+        return None
+    v = w.partition('=')[2] if w.startswith('-') else w
+    return ScriptGroup([v], lead=frozenset([v]), expand=True) if v else None
 
 
 def run_option(name, w, python):
@@ -4693,6 +4730,9 @@ def interp_groups(text, expanded=False):
                 in_redir = SRC_REDIR_RX.match(w)
                 if '$' in raw_w or '`' in raw_w or unquoted_pattern(raw_w):
                     run_all = True
+                    pg = run_pattern_group(w, raw_w)  # round 5: a pattern off the lead is globbed too
+                    if pg is not None:
+                        groups.append(pg)
                 elif in_redir:
                     if not in_redir.group(1):
                         nxt = ('valrun', i + 1)  # `< f`: its target is read as code (the REDIRECT_RX reading too)
@@ -4705,6 +4745,12 @@ def interp_groups(text, expanded=False):
                         need += 1
                     elif kind == 'code':
                         need = 0
+                        if NODE_NAMES_RX.fullmatch(name):  # round 5: `node -p 1 --require F` runs F
+                            pre, unread = node_preloads_after(words, all_words, i)
+                            run_all = run_all or unread
+                            run.update(f for f, _ in pre)
+                            group += [f for f, _ in pre]
+                            groups += [g for g in (run_pattern_group(f, r) for f, r in pre) if g]
                     elif kind in ('val', 'valrun'):
                         nxt = (kind, i + 1)  # the NEXT word only (the walk below may skip it: python -W x)
                 elif w:
@@ -4747,6 +4793,12 @@ def interp_groups(text, expanded=False):
                 break
             if (w == '-' and name.lower() not in SHELL_NAMES) or (
                     SHELL_CODE_FLAG_RX if name in SHELL_NAMES else CODE_FLAG_RX).fullmatch(w):
+                if NODE_NAMES_RX.fullmatch(name) and not run_all:  # round 5: `node -e 1 -r F` runs F
+                    pre, unread = node_preloads_after(words, all_words, i)
+                    run_all = unread
+                    run.update(f for f, _ in pre)
+                    group += [f for f, _ in pre]
+                    groups += [g for g in (run_pattern_group(f, r) for f, r in pre) if g]
                 stopped = True
                 break
             # an output redirection's target is written, not run (`python3 x.py > out.txt`; card 15896271): a file
