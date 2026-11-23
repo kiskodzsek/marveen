@@ -644,6 +644,12 @@ def main():
               _g.is_send_invocation(_flat + "cat <<E\nx\nE\n"), False)
         check("SENDFANOUT1123: a one-level eval with a send still reads the send, not the budget",
               _g.is_send_invocation("eval 'true # ((x\nsendmail a@b.c'"), True)
+        # Round 6 (Viktor 50403 I4 P13): the strict heredoc pass reads from the budget too. One reading (no # or
+        # backslash-newline: only A) of a heredoc command reads it twice, loose and strict; without one, once.
+        for _c, _reads in (("cat <<E\nx\nE", 2), ("echo hi", 1)):
+            _g.is_send_invocation(_c)
+            check("SENDFANOUT1123: %r reads its %d characters %d time(s) from the budget" % (_c, len(_c), _reads),
+                  _g._FANOUT_BUDGET + 2 * len(_c) - _g._fanout_left[0], _reads * len(_c))
 
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)

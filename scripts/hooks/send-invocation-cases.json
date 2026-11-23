@@ -1246,6 +1246,41 @@
       "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): ansic-escaped-quote",
       "cmd": "echo $'it\\'s'\nsendmail a@b.hu\necho it\\'s",
       "expected": false
+    },
+    {
+      "name": "EVALREC1123 (Viktor 50403 I4 P14): eval inside eval is read too",
+      "cmd": "eval eval sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "EVALREC1123 (Viktor 50403 I4 P14): eval inside a bash -c string is read too",
+      "cmd": "bash -c 'eval sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50403 L1-L3, old: main and the round 4 head miss it too): ev-depth4",
+      "cmd": "eval 'eval '\\''eval '\\''\\'\\'''\\''eval '\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\''sendmail a@b.hu'\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\'''\\''\\'\\'''\\'''\\'''",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50403 L1-L3, old: main and the round 4 head miss it too): ev-c-mix4",
+      "cmd": "bash -c 'eval '\\''bash -c '\\''\\'\\'''\\''eval '\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\''sendmail a@b.hu'\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\'''\\''\\'\\'''\\'''\\'''",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50403 L1-L3, old: main and the round 4 head miss it too): ev-c-mix4b",
+      "cmd": "eval 'bash -c '\\''eval '\\''\\'\\'''\\''bash -c '\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\''sendmail a@b.hu'\\''\\'\\'''\\''\\'\\''\\'\\'''\\'''\\''\\'\\'''\\'''\\''\\'\\'''\\'''\\'''",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50403 L1-L3, old: main and the round 4 head miss it too): builtin-eval",
+      "cmd": "builtin eval sendmail a@b.hu",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50403 L1-L3, old: main and the round 4 head miss it too): eval-ansic",
+      "cmd": "eval $'sendmail a@b.hu'",
+      "expected": false
     }
   ]
 }

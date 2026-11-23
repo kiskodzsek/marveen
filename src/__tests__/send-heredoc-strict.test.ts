@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { gateDecision, isSendInvocation, sendOnlyByStrictHeredoc, strictHeredocCut, buildHeredocStrictMsg, looseHeredocCut, HEREDOC_RE } from '../../scripts/email-send-gate.mjs'
+import { gateDecision, isSendInvocation, sendInReading, sendOnlyByStrictHeredoc, strictHeredocCut, buildHeredocStrictMsg, looseHeredocCut, HEREDOC_RE } from '../../scripts/email-send-gate.mjs'
 
 // HDSTRICT1122 (card bbc6bad4, Viktor 50205 / 50220): the loose heredoc cut of both mail gates could drop a command
 // bash runs; the strict second pass only ADDS sends. The shared verdicts live in send-invocation-cases.json (the
@@ -67,6 +67,26 @@ describe('HDSTRICT1122: the hard-gate deny for a send only the strict heredoc pa
     expect(gateDecision('Bash', { command: emptyBody })).toEqual({ deny: true, kind: 'heredoc-strict' })
     expect(gateDecision('Bash', { command: 'sendmail -t a@b.hu <<E\nx\nE' })).toEqual({ deny: true })
     expect(gateDecision('Bash', { command: "cat <<'EOF' > n.md\nsendmail is how it worked\nEOF" })).toEqual({ deny: false })
+  })
+
+  // SENDFANOUT1123 (round 6): every outside entry starts with a full read budget. A call that spent it must not leave
+  // the next call audited: a stale budget would make every later small command a send (or turn the heredoc-strict
+  // deny into the plain one, the hook's second looseSendInvocation call).
+  it('SENDFANOUT1123: each outside entry refills the read budget, a spent one does not leak into the next call', () => {
+    const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`')
+    let spent = 'true # (( x\n'.repeat(Math.floor((20 * 1024) / 12)) + 'true'
+    for (let i = 0; i < 3; i++) spent = 'eval "' + esc(spent) + '"'
+    const small = 'cat <<E\nx\nE'
+    expect(isSendInvocation(spent), 'the budget is spent').toBe(true)
+    expect(sendInReading(small, 0, 'A'), 'sendInReading after a spent budget').toBe(false)
+    expect(isSendInvocation(spent)).toBe(true)
+    expect(sendOnlyByStrictHeredoc(small), 'sendOnlyByStrictHeredoc after a spent budget').toBe(false)
+    // 700 KB of harmless "# ((" lines and a heredoc, no sender: four readings, each with its strict pass, are past the
+    // budget (8 x 700 KB > 3 MiB + 2 x 700 KB), so the gate denies; the hook's second, loose-only call reads 700 KB
+    // once inside a fresh budget and finds no loose send, so the kind is the heredoc-strict one (a stale budget
+    // would make it the plain deny). The wording past the budget is the heredoc-strict one today (the safe side).
+    const pad = ': abcdefg # (( x\n'.repeat(Math.floor((700 * 1024) / 18))
+    expect(gateDecision('Bash', { command: pad + 'cat <<E\nx\nE' })).toEqual({ deny: true, kind: 'heredoc-strict' })
   })
 
   it('the message names the way out: the text from a file, not a heredoc', () => {

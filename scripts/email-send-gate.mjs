@@ -423,13 +423,13 @@ function headIsSend(toks, depth) {
   if (SENDER_PROG.test(prog)) return true
   if (WRAPPER_SHELL.test(prog) && depth < 3) {
     for (let i = 0; i < rest.length; i++) {
-      if (rest[i] === '-c' && rest[i + 1] && isSendInvocation(rest[i + 1], depth + 1)) return true
+      if (rest[i] === '-c' && rest[i + 1] && isSend(rest[i + 1], depth + 1)) return true
     }
   }
   // EVALREC1123 (Viktor 50388 M2): eval runs its joined arguments as a command line -- see the python twin
   if (prog === 'eval' && depth < 3) {
     const args = rest[0] === '--' ? rest.slice(1) : rest
-    if (args.length && isSendInvocation(args.join(' '), depth + 1)) return true
+    if (args.length && isSend(args.join(' '), depth + 1)) return true
   }
   if (PYTHON.test(prog) || NODEISH.test(prog)) {
     for (let i = 0; i < rest.length; i++) {
@@ -470,7 +470,28 @@ export function buildWrapperDepthMsg() {
   )
 }
 
+// SENDFANOUT1123 (card 64d10325 round 6, Viktor 50403 J1): the twin of the python budget (see _FANOUT_BUDGET in
+// outgoing-copy-gate.py). Every reading of a wrapper shell's -c string and of an eval runs every reading again, so the
+// readings multiply with the depth: three levels of eval, each level of "true # (( x << y" lines, then a send, took
+// 11.6 s at 600 KB on the round 5 head (main 3.4 s), past the 10 s hook timeout, and a timed-out hook lets the command
+// through. So one top-level call may read 3 MiB plus twice the command across all readings, strict passes and depths
+// (one reading and its strict pass, what main reads, always fit); past it the command counts as a send (fail-closed:
+// an extra audit, never a miss). Only the outside entries (depth 0) refill it; the recursion goes through isSend.
+const FANOUT_BUDGET = 3 * 1024 * 1024
+let fanoutLeft = 0
+
+function refill(cmd, depth) {
+  if (depth === 0) fanoutLeft = FANOUT_BUDGET + 2 * cmd.length
+}
+
 function looseSendInvocation(cmd, depth = 0, mode = 'A') {
+  refill(cmd, depth)
+  return loose(cmd, depth, mode)
+}
+
+function loose(cmd, depth, mode) {
+  fanoutLeft -= cmd.length
+  if (fanoutLeft < 0) return true // SENDFANOUT1123: the read budget is spent, audit
   let segments
   try {
     segments = segmentsTokens(cmd, false, mode)
@@ -485,7 +506,14 @@ function looseSendInvocation(cmd, depth = 0, mode = 'A') {
 // HDSTRICT1122: the strict heredoc cut alone (see STRICT_OPEN_RE). A parse error of the strict text falls back like
 // the loose pass (the legacy patterns): a deny, never a miss.
 export function sendOnlyByStrictHeredoc(cmd, depth = 0, mode = 'A') {
+  refill(cmd, depth)
+  return strict(cmd, depth, mode)
+}
+
+function strict(cmd, depth, mode) {
   if (!cmd.includes('<<')) return false
+  fanoutLeft -= cmd.length
+  if (fanoutLeft < 0) return true // SENDFANOUT1123
   let segments
   try {
     segments = segmentsTokens(cmd, true, mode)
@@ -508,11 +536,17 @@ export function sendModes(cmd) {
 }
 
 export function sendInReading(cmd, depth = 0, mode = 'A') {
-  return looseSendInvocation(cmd, depth, mode) || sendOnlyByStrictHeredoc(cmd, depth, mode)
+  refill(cmd, depth)
+  return loose(cmd, depth, mode) || strict(cmd, depth, mode)
 }
 
 export function isSendInvocation(cmd, depth = 0) {
-  return sendModes(cmd).some((m) => sendInReading(cmd, depth, m))
+  refill(cmd, depth)
+  return isSend(cmd, depth)
+}
+
+function isSend(cmd, depth) {
+  return sendModes(cmd).some((m) => loose(cmd, depth, m) || strict(cmd, depth, m))
 }
 
 export function buildHeredocStrictMsg() {

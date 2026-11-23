@@ -54,6 +54,12 @@ send-invocation-cases.json, which the conformance test binds to this list):
     <<"EOF" in a subshell, a <<E"O"F delimiter: no heredoc cut reads them, an apostrophe in the body opens a quote
     (the heredoc-strict class, next to card c5c87fbd);
   ansic-escaped-quote: an escaped quote in $'...' (it\\'s) shifts the quote tracking.
+Known limits of the eval / -c recursion (Viktor 50403 L1-L3, old: main and the round 4 head miss them too; pinned
+the same way):
+  ev-depth4, ev-c-mix4, ev-c-mix4b: a fourth level of eval / bash -c is past the shared depth bound (3) and not read;
+  builtin-eval: `builtin eval` is not unwrapped; eval-ansic: an eval argument in $'...' is not decoded.
+Past the SENDFANOUT1123 read budget a harmless deeply nested command counts as a send (an overblock, the safe side;
+e.g. 1 MB of three-level eval with a # and a (( per line in the JS twin).
 
 Contract: PreToolUse. Reads the hook payload on stdin, exit 0 = allow,
 exit 2 = block (stderr goes back to the model).
@@ -784,7 +790,8 @@ _MULTI_READING_MAX = 256 * 1024
 # 0.14 s on main, past the 10 s hook timeout (a timed-out hook lets the command through). So one top-level call has a
 # budget of characters it may read across all readings and depths (3 MiB plus twice the command: one reading and its
 # strict heredoc pass, what main reads, always fit); past it the command counts as a send (an extra audit, never a
-# miss). The JS twin reads the same input in 0.5 s and has no budget.
+# miss). The JS twin has the same budget (round 6, Viktor 50403 J1: without it three levels of eval took 11.6 s at
+# 600 KB in node).
 _FANOUT_BUDGET = 3 * 1024 * 1024
 _fanout_left = [0]
 

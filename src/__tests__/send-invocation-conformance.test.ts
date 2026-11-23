@@ -98,8 +98,58 @@ describe('send-invocation conformance: both gates agree with the shared contract
   it('every KNOWN-LIMIT row of the shared list is named in the first 80 lines of the python module', () => {
     const head = readFileSync(GATE_PY, 'utf-8').split('\n').slice(0, 80).join('\n')
     const labels = CASES.cases.filter((c) => c.name.startsWith('KNOWN-LIMIT ')).map((c) => c.name.split(': ').pop()!)
-    expect(labels.length).toBe(10)
+    expect(labels.length).toBe(15)
     for (const l of labels) expect(head, `docstring names ${l}`).toContain(l)
+  })
+
+  // Round 6 (Viktor 50403 J1): the SENDFANOUT1123 read budget in both twins. Shapes from Viktor's fan_time.py: every
+  // level of eval holds "# ((" lines, so every reading runs at every level. No sender in the harmless rows; the
+  // calibration (agents/kernel/work/occc-r6-1123/calib.txt, calib_py.txt) shows which mutant each row catches.
+  const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`')
+  const nest = (inner: string, n: number) => {
+    let s = inner
+    for (let i = 0; i < n; i++) s = 'eval "' + esc(s) + '"'
+    return s
+  }
+  const lines = (unit: string, kb: number) => unit.repeat(Math.floor((kb * 1024) / unit.length)) + 'true'
+
+  it('SENDFANOUT1123: both twins keep a harmless one-level eval inside the budget, and audit a three-level one', () => {
+    const within = nest(lines('true # (( x\n', 20), 1) // a 3 KiB budget audits it (P12 and its JS twin)
+    const past = nest(lines('true # (( x\n', 20), 3) // a budget refilled per reading or per level reads it (JS)
+    const pv = pythonVerdicts([within, past])
+    expect(isSendInvocation(within), 'JS, one level, 20 KB').toBe(false)
+    expect(pv[0][0], 'python, one level, 20 KB').toBe(false)
+    expect(isSendInvocation(past), 'JS, three levels, 20 KB: the budget is spent').toBe(true)
+    expect(pv[1][0], 'python, three levels, 20 KB: the budget is spent').toBe(true)
+  })
+
+  it('SENDFANOUT1123: the JS twin stays under the hook timeout on the J1 shapes, fail-closed', () => {
+    // 600 KB of three-level eval with a heredoc opener per line, then a send: 11.6 s on the round 5 head (the 10 s
+    // hook timed out and let it through), main 3.4 s; with the budget ~0.2 s
+    const hd = nest(lines('true # (( x << y\n', 600), 3) + '; sendmail a@b.c'
+    let t = Date.now()
+    expect(isSendInvocation(hd), 'JS, 600 KB eval chain then a send').toBe(true)
+    expect(Date.now() - t, 'JS ms, 600 KB eval chain').toBeLessThan(2000)
+    // a harmless 1 MB three-level eval: past the budget it counts as a send (an overblock, Known limits); the python
+    // twin decides it on its 32 KiB long-token bound instead (no sender literal: not a send)
+    const big = nest(lines('true # (( x\n', 1024), 3)
+    t = Date.now()
+    expect(isSendInvocation(big), 'JS, harmless 1 MB eval chain').toBe(true)
+    expect(Date.now() - t, 'JS ms, 1 MB eval chain').toBeLessThan(2000)
+    // the strict heredoc pass reads from the budget too: a harmless 64 KB one-level eval with a heredoc opener per
+    // line is past it only with the strict reads counted (128 KB is past it without them)
+    expect(isSendInvocation(nest(lines('true # (( x << y\n', 64), 1)), 'JS, 64 KB eval with heredoc openers').toBe(true)
+    // the strict pass checks the budget itself: one reading (no #), a heredoc opener per line, one level of eval. The
+    // reads are loose, eval loose, eval strict, strict, eval loose, eval strict (about 6 x 900 KB); only the last
+    // one is past 3 MiB + 2 x 900 KB, and it is a strict pass (calib_m8.txt: a send from 800 to 1000 KB,
+    // not one without that check)
+    expect(isSendInvocation("eval '" + lines('true x << y\n', 900) + "'"), 'JS, 900 KB, the last read is strict')
+      .toBe(true)
+    // one reading and its strict pass always fit (the budget is 3 MiB plus twice the command): a flat 4 MiB command
+    // with no sender, also with a heredoc, is not audited (the python twin pins the same in its own test)
+    const flat = (': ' + 'abcdefg '.repeat(12) + '\n').repeat(Math.floor((4 * 1024 * 1024) / 99))
+    expect(isSendInvocation(flat), 'JS, flat 4 MiB').toBe(false)
+    expect(isSendInvocation(flat + 'cat <<E\nx\nE\n'), 'JS, flat 4 MiB with a heredoc').toBe(false)
   })
 
   it('the shared list is non-trivial in both directions', () => {
