@@ -24,13 +24,15 @@ ORIGIN="$TMP/origin.git"
 CLONE="$TMP/clone"
 CALLS="$TMP/vitest-calls.log"
 ENVLOG="$TMP/vitest-env.log"
-export NPX_CALLS="$CALLS" VT_ENV="$ENVLOG"
+CFGLOG="$TMP/vitest-cfg.log"
+export NPX_CALLS="$CALLS" VT_ENV="$ENVLOG" VT_CFG="$CFGLOG"
 make_vitest() { # the shim lives in the clone's node_modules/.bin, where the gate looks for it
   mkdir -p "$CLONE/node_modules/.bin"
   cat > "$CLONE/node_modules/.bin/vitest" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$NPX_CALLS"
 echo "GIT_DIR=${GIT_DIR:-} GIT_INDEX_FILE=${GIT_INDEX_FILE:-} GIT_WORK_TREE=${GIT_WORK_TREE:-}" >> "$VT_ENV"
+echo "COUNT=${GIT_CONFIG_COUNT:-} K0=${GIT_CONFIG_KEY_0:-} V0=${GIT_CONFIG_VALUE_0-unset} K1=${GIT_CONFIG_KEY_1:-} PARAMS=${GIT_CONFIG_PARAMETERS:-} K10=${GIT_CONFIG_KEY_10-unset} ASK=${GIT_ASKPASS-unset} SSHASK=${SSH_ASKPASS-unset} GLOBAL=${GIT_CONFIG_GLOBAL-unset} SYSTEM=${GIT_CONFIG_SYSTEM-unset} NOSYS=${GIT_CONFIG_NOSYSTEM-unset} OLDCFG=${GIT_CONFIG-unset}" >> "$VT_CFG"
 exit "${NPX_RC:-0}"
 EOF
   chmod +x "$CLONE/node_modules/.bin/vitest"
@@ -158,6 +160,62 @@ ENV_SHA="$(git -C "$CLONE" rev-parse HEAD)"
     | GIT_DIR="$CLONE/.git" GIT_INDEX_FILE="$CLONE/.git/index" GIT_WORK_TREE="$CLONE" NPX_RC=0 bash scripts/git-hooks/related-tests-gate.sh origin x ) >"$TMP/push.out" 2>&1 \
   && pass "the gate ran with GIT_* set" || fail "gate failed under GIT_*: $(cat "$TMP/push.out")"
 [ -s "$ENVLOG" ] && ! grep -v '^GIT_DIR= GIT_INDEX_FILE= GIT_WORK_TREE=$' "$ENVLOG" | grep -q . && pass "vitest saw no GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE" || fail "vitest inherited a GIT_* variable: $(cat "$ENVLOG")"
+
+echo "== the pusher's injected git config never reaches vitest (card 64d10325 push, Klodel 50552)"
+: > "$CFGLOG"; new_branch cfgdrop
+echo "print('c')" > "$CLONE/scripts/hooks/cfg-gate.py"; git_q add -A && git_q commit -qm "hook cfg"
+CFG_SHA="$(git -C "$CLONE" rev-parse HEAD)"
+( cd "$CLONE" && echo "refs/heads/cfgdrop $CFG_SHA refs/heads/cfgdrop 0000000000000000000000000000000000000000" \
+    | GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= GIT_CONFIG_KEY_1=core.pager \
+      GIT_CONFIG_VALUE_1=cat GIT_CONFIG_PARAMETERS="'credential.helper'=''" NPX_RC=0 \
+      GIT_CONFIG_KEY_10=credential.helper GIT_CONFIG_VALUE_10= GIT_ASKPASS=/tmp/askpass.sh SSH_ASKPASS=/tmp/sshask \
+      GIT_CONFIG_GLOBAL=/tmp/g.cfg GIT_CONFIG_SYSTEM=/tmp/s.cfg GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG=/tmp/o.cfg \
+      bash scripts/git-hooks/related-tests-gate.sh origin x ) >"$TMP/push.out" 2>&1 \
+  && pass "the gate ran with the push_pr.py config variables set" || fail "gate failed under GIT_CONFIG_*: $(cat "$TMP/push.out")"
+CLEAN='COUNT= K0= V0=unset K1= PARAMS= K10=unset ASK=unset SSHASK=unset GLOBAL=unset SYSTEM=unset NOSYS=unset OLDCFG=unset'
+[ -s "$CFGLOG" ] && ! grep -vxF "$CLEAN" "$CFGLOG" | grep -q . \
+  && pass "vitest saw no injected git config, config file, KEY_10 or askpass (Viktor 50628 L1, I2, I3)" \
+  || fail "vitest inherited git config: $(cat "$CFGLOG")"
+
+echo "== an exported compgen function does not keep the variables (Viktor 50628 P29)"
+: > "$CFGLOG"
+( cd "$CLONE" && compgen() { :; } && export -f compgen \
+    && echo "refs/heads/cfgdrop $CFG_SHA refs/heads/cfgdrop 0000000000000000000000000000000000000000" \
+    | GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= GIT_ASKPASS=/tmp/askpass.sh NPX_RC=0 \
+      bash scripts/git-hooks/related-tests-gate.sh origin x ) >"$TMP/push.out" 2>&1
+grep -q 'COUNT= K0= V0=unset' "$CFGLOG" && grep -q 'ASK=unset' "$CFGLOG" \
+  && pass "builtin compgen: the variables still go" || fail "compgen function kept them: $(cat "$CFGLOG")"
+
+echo "== 3000 KEY/VALUE pairs: one linear pass (Viktor 50628 I1: 249 s on the first round)"
+: > "$CFGLOG"
+MANY="$(i=0; while [ $i -lt 3000 ]; do printf 'GIT_CONFIG_KEY_%d=a.b GIT_CONFIG_VALUE_%d=c ' $i $i; i=$((i+1)); done)"
+T0=$SECONDS
+( cd "$CLONE" && echo "refs/heads/cfgdrop $CFG_SHA refs/heads/cfgdrop 0000000000000000000000000000000000000000" \
+    | env $MANY GIT_CONFIG_COUNT=3000 NPX_RC=0 bash scripts/git-hooks/related-tests-gate.sh origin x ) >"$TMP/push.out" 2>&1
+DT=$((SECONDS - T0))
+[ "$DT" -le 20 ] && grep -q 'COUNT= K0= V0=unset' "$CFGLOG" \
+  && pass "3000 pairs dropped in ${DT} s" || fail "3000 pairs: ${DT} s, $(head -c 200 "$CFGLOG")"
+
+echo "== a hook name git would quote is still a hook (Viktor 50628 L2 P38)"
+new_branch quoted
+ACC="$(printf '\303\241rv\303\255z')-gate"
+echo "print('q')" > "$CLONE/scripts/hooks/$ACC.py"; echo "// $ACC" > "$CLONE/src/__tests__/acc-named.test.ts"
+git_q add -A && git_q commit -qm "hook q"
+Q_SHA="$(git -C "$CLONE" rev-parse HEAD)"
+( cd "$CLONE" && echo "refs/heads/quoted $Q_SHA refs/heads/quoted 0000000000000000000000000000000000000000" \
+    | NPX_RC=1 bash scripts/git-hooks/related-tests-gate.sh origin x ) >"$TMP/push.out" 2>&1 \
+  && fail "a red test passed for an accented hook name" || pass "an accented hook name is gated (red test stops it)"
+: > "$CALLS"
+( cd "$CLONE" && echo "refs/heads/quoted $Q_SHA refs/heads/quoted 0000000000000000000000000000000000000000" \
+    | NPX_RC=0 bash scripts/git-hooks/related-tests-gate.sh origin x ) >"$TMP/push.out" 2>&1
+grep -q "acc-named.test.ts" "$CALLS" && pass "the test naming the accented hook ran (core.quotePath=false)" \
+  || fail "accented hook's named test missing: $(cat "$CALLS")"
+new_branch quoted2
+echo "print('q')" > "$CLONE/scripts/hooks/a\"b-gate.py"; git_q add -A && git_q commit -qm "hook q2"
+Q2_SHA="$(git -C "$CLONE" rev-parse HEAD)"
+( cd "$CLONE" && echo "refs/heads/quoted2 $Q2_SHA refs/heads/quoted2 0000000000000000000000000000000000000000" \
+    | NPX_RC=1 bash scripts/git-hooks/related-tests-gate.sh origin x ) >"$TMP/push.out" 2>&1 \
+  && fail "a red test passed for a hook name git quotes" || pass "a hook name git still quotes is gated"
 
 echo "== installer: a path with a space and a \$ stays one word (INFO 8)"
 WEIRD="$TMP/we ird \$HOME dir/repo"
