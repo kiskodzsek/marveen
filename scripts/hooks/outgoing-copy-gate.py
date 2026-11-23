@@ -58,6 +58,9 @@ Known limits of the eval / -c recursion (Viktor 50403 L1-L3, old: main and the r
 the same way):
   ev-depth4, ev-c-mix4, ev-c-mix4b: a fourth level of eval / bash -c is past the shared depth bound (3) and not read;
   eval-ansic: an eval argument in $'...' is not decoded. (The builtin eval case is closed: builtin is a wrapper, round 7.)
+Known limits of the substitution and expansion reading (card e00a44b0; SENDQSUB1123, SENDEMPTY1123; pinned the same way):
+  sq-default-word: an expansion's default word as the program (${x:-sendmail} a@b.hu; main misses it too);
+  sq-case-pattern: a case pattern's ) inside $( ) ends the body early (zsh and bash 5 run the rest, bash 3.2 does not).
 Past the SENDFANOUT1123 read budget a harmless deeply nested command counts as a send (an overblock, the safe side;
 e.g. 1 MB of three-level eval with a # and a (( per line in the JS twin).
 
@@ -123,7 +126,7 @@ _LOOSE_END = re.compile(r"\n(\w+)(?=\s|$)")
 def _loose_heredoc_cut(cmd: str) -> str:
     """_HEREDOC.sub(r"\\1", cmd), linear (LOOSELIN1122)."""
     out, last = [], 0
-    for nl, _q, stop in _loose_heredoc_spans(cmd):
+    for nl, _q, stop, _o in _loose_heredoc_spans(cmd):
         out.append(cmd[last:nl])
         last = stop
     out.append(cmd[last:])
@@ -134,13 +137,14 @@ def _loose_heredoc_first_body(cmd: str):
     """re.search(_HEREDOC) body (the text between the opener line's newline and the closing line's newline), or None
     when there is no match; linear. LINEXTRACT1122 (Viktor 50275 B1): _curl_payload_raw's `@-` branch used the same
     lazy regex directly (re.search with \\1 in place of \\2), quadratic on unclosed openers after a curl -d @-."""
-    for nl, q, _stop in _loose_heredoc_spans(cmd):
+    for nl, q, _stop, _o in _loose_heredoc_spans(cmd):
         return cmd[nl + 1:q - 1]
     return None
 
 
 def _loose_heredoc_spans(cmd: str):
-    """(opener line's newline, closing word's start, match end) of every _HEREDOC.finditer match, in order, linear."""
+    """(opener line's newline, closing word's start, match end, opener start) of every _HEREDOC.finditer match, in
+    order, linear."""
     import bisect
     ends: dict = {}
     for m in _LOOSE_END.finditer(cmd):
@@ -170,7 +174,7 @@ def _loose_heredoc_spans(cmd: str):
         if stop < 0:
             pos = m.start() + 1
             continue
-        yield nl, q, stop
+        yield nl, q, stop, m.start()
         pos = stop
 # HDSTRICT1122 (card bbc6bad4, Viktor 50205 / 50220): the _HEREDOC cut above can drop a command bash RUNS: an empty
 # body (the lazy .*? needs one body line, so it closes on a later delimiter line), a here-string (<<<E), an opener
@@ -246,6 +250,152 @@ def _strict_heredoc_cut(cmd: str) -> str:
             return ''.join(out)
         out.append(cmd[pos:m.end() - 1])
         pos = end.end()
+
+
+# SENDQSUB1123 (card e00a44b0, Kernel's bash oracle on main c9de126a): bash runs a command substitution inside double
+# quotes and in the body of a heredoc whose delimiter is unquoted, but the mask leaves quoted text alone (it is one
+# shlex token) and both heredoc cuts drop the body. So `echo "$(sendmail x)"`, `y="$(sendmail x)"`, `x "`sendmail x`"`,
+# `[[ "$(sendmail x)" ]]`, `x <<< "$(sendmail x)"` and `cat <<E` + newline + `$(sendmail x)` + newline + `E` were no
+# send in either twin, and email-approval-gate.py (which loads is_send_invocation) let them through with no approval.
+# Every 40 other-misses the oracle still found on main were this class. The fix only ADDS sends: is_send_invocation
+# also reads the body of every $( ) and backtick substitution bash runs, as a command line of its own (the depth
+# bound of the eval / -c recursion holds; past it a sender name in the body is a send). Found on two texts, each
+# with the heredoc bodies of one cut taken out (strict, loose): a quote-aware scan of the rest (a single-quoted and an
+# ANSI-C $'...' span is skipped, a double-quoted one is read, a backslash escapes), and a quote-blind scan of every
+# body whose delimiter is unquoted (quotes are literal there; a body under a quoted delimiter expands nothing). A
+# $( ) ends at its own ) with nested quotes, $( ) and ( ) followed on an explicit stack (no recursion: linear).
+# A comment inside $( ) is skipped to its newline, and a backtick body is read after bash's backslash removal (\$ \`
+# \\ \"). Known limits: a case pattern's ) inside $( ) ends the body early; a heredoc inside $( ) is not followed.
+# Mirrored in email-send-gate.mjs (substBodies); send-invocation-cases.json binds the two.
+_BT_UNESCAPE = re.compile(r'\\([$`\\"])')  # bash drops these backslashes before it runs a backtick body
+
+
+def _subst_close(t: str, j: int) -> int:
+    """Index of the ) that closes a $( whose body starts at j, len(t) when unclosed."""
+    n, st, prev = len(t), ["P"], "("  # P: inside $( or ( ; D: inside "
+    while j < n:
+        ch = t[j]
+        if ch == "\\":
+            j += 2
+            prev = "a"
+            continue
+        if ch == "#" and st[-1] == "P" and prev in " \t\n;&|(<>":  # a comment: its ) closes nothing
+            k = t.find("\n", j)
+            j = n if k < 0 else k
+            continue
+        prev = ch
+        if ch == "`":  # a backtick substitution: its body ends at the next unescaped backtick
+            j += 1
+            while j < n and t[j] != "`":
+                j += 2 if t[j] == "\\" else 1
+            j += 1
+            continue
+        if st[-1] == "D":
+            if ch == '"':
+                st.pop()
+            elif ch == "$" and t[j + 1:j + 2] == "(":
+                st.append("P")
+                j += 1
+            j += 1
+            continue
+        if ch == "'" or (ch == "$" and t[j + 1:j + 2] == "'"):
+            j = _squote_end(t, j)
+            continue
+        if ch == '"':
+            st.append("D")
+        elif ch == "(":
+            st.append("P")
+        elif ch == ")":
+            st.pop()
+            if not st:
+                return j
+        j += 1
+    return n
+
+
+def _squote_end(t: str, j: int) -> int:
+    """The index after a single-quoted span at j ('...' or $'...', whose backslash escapes), len(t) when unclosed."""
+    if t[j] == "$":
+        j += 2
+        while j < len(t) and t[j] != "'":
+            j += 2 if t[j] == "\\" else 1
+        return j + 1
+    k = t.find("'", j + 1)
+    return len(t) if k < 0 else k + 1
+
+
+def _subst_bodies(t: str, quotes: bool):
+    """The body of every $( ) and backtick substitution bash runs in t, in order. quotes=False: a heredoc body,
+    where a quote is a literal character."""
+    out, i, n, dq = [], 0, len(t), False
+    while i < n:
+        ch = t[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if quotes and not dq and (ch == "'" or (ch == "$" and t[i + 1:i + 2] == "'")):
+            i = _squote_end(t, i)
+            continue
+        if quotes and ch == '"':
+            dq = not dq
+            i += 1
+            continue
+        if ch == "`":
+            j = i + 1
+            while j < n and t[j] != "`":
+                j += 2 if t[j] == "\\" else 1
+            out.append(_BT_UNESCAPE.sub(r"\1", t[i + 1:min(j, n)]))
+            i = j + 1
+            continue
+        if ch == "$" and t[i + 1:i + 2] == "(":
+            j = _subst_close(t, i + 2)
+            out.append(t[i + 2:j])
+            i = j + 1
+            continue
+        i += 1
+    return out
+
+
+def _strict_heredoc_spans(cmd: str):
+    """(body start, body end, quoted delimiter) of every body _strict_heredoc_cut drops, in order (same walk)."""
+    pos = 0
+    while True:
+        m = _STRICT_OPEN.search(cmd, pos)
+        if not m:
+            return
+        opener = m.group(0)
+        line_start = cmd.rfind('\n', 0, m.start()) + 1
+        if not opener.endswith('\n') or opener.endswith('\\\n') \
+                or not _strict_prefix_ok(cmd[line_start:m.start()]):
+            pos = m.end()
+            continue
+        end = re.compile('^' + ('\\t*' if m.group(1) else '') + re.escape(m.group(3)) + '$', re.M).search(cmd, m.end())
+        if not end:
+            return
+        yield m.end(), end.start(), bool(m.group(2))
+        pos = end.end()
+
+
+def _subst_send(cmd: str, _depth: int) -> bool:
+    """SENDQSUB1123: a send in the body of a substitution bash runs that the segmenter reads as text."""
+    if "$(" not in cmd and "`" not in cmd:
+        return False
+    bodies = []
+    for cut, spans in ((_strict_heredoc_cut(cmd), _strict_heredoc_spans(cmd)),
+                       (_loose_heredoc_cut(cmd),
+                        ((nl + 1, q - 1, "'" in _LOOSE_OPEN.match(cmd, o).group(0))
+                         for nl, q, _s, o in _loose_heredoc_spans(cmd)))):
+        bodies += _subst_bodies(cut, True)
+        for a, b, quoted in spans:
+            if not quoted:
+                bodies += _subst_bodies(cmd[a:b], False)
+    for body in dict.fromkeys(bodies):  # the two cuts mostly give the same bodies: read each once
+        if _depth >= 3:
+            if _LONG_TOKEN_SENDERS.search(_dequoted(body)):
+                return True
+        elif is_send_invocation(body, _depth + 1):
+            return True
+    return False
 
 
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
@@ -632,6 +782,14 @@ _HEAD_DEPTH = 8
 # (`>`, `2>`) takes the next token, its target. Measured with bash (comment_fuzz.py, work/occ-other-1122): the
 # comment fix alone uncovered two such sends in the JS twin that a stray token after `#` used to over-audit.
 _REDIR = re.compile(r"^(?:\d+|\{\w+\})?(?:<<<|<<-?|<>|>>|>\||&>>|&>|<|>)(.*)$", re.S)
+# SENDEMPTY1123 (card e00a44b0): a word made only of parameter expansions before the command word -- `$x sendmail x`,
+# `$true sendmail x`, `${x} sendmail x`, `$x$y sendmail x` -- expands to nothing when the variables are unset, and bash
+# runs the next word; the gate took the expansion for the program (both twins, main too). It is stepped over like an
+# assignment: when it is not empty, the program it names is out of sight anyway, so reading the next word as the
+# program errs toward an extra audit only (`$PAGER sendmail` is audited). After shlex a quoted "$x" looks the same
+# and is stepped over too (bash runs an empty-named command there and fails): an over-audit, the safe side. Known
+# limit: an expansion whose default word is the sender (`${x:-sendmail} a@b.c`) is not read.
+_EXPANSION_WORD = re.compile(r"^(?:\$(?:[A-Za-z_][A-Za-z_0-9]*|[0-9@*#?$!-]|\{[^{}]*\}))+$")
 
 
 def _command_heads(toks, _d: int = 0):
@@ -644,6 +802,9 @@ def _command_heads(toks, _d: int = 0):
             continue
         r = _REDIR.match(toks[k])
         if r is None:
+            if _EXPANSION_WORD.match(toks[k]):  # SENDEMPTY1123
+                k += 1
+                continue
             break
         k += 1 if r.group(1) else 2
     toks = toks[k:]
@@ -815,7 +976,7 @@ def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
         if _LONG_TOKEN_SENDERS.search(_dequoted(cmd)):
             return True
         modes = modes[:1]
-    return any(_reading_send(cmd, _depth, m) for m in modes)
+    return any(_reading_send(cmd, _depth, m) for m in modes) or _subst_send(cmd, _depth)
 
 
 def _is_send_in_reading(cmd: str, _depth: int, mode: str) -> bool:

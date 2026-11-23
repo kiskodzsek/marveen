@@ -91,6 +91,19 @@ export const HEREDOC_RE = /(<<-?\s*'?(\w+)'?[^\n]*)\n[\s\S]*?\n\2(?=\s|$)/g
 const LOOSE_OPEN_RE = /<<-?\s*'?(\w+)/g
 const LOOSE_END_RE = /\n(\w+)(?=\s|$)/g
 export function looseHeredocCut(cmd) {
+  let out = ''
+  let last = 0
+  for (const [nl, , stop] of looseHeredocSpans(cmd)) {
+    out += cmd.slice(last, nl)
+    last = stop
+  }
+  return out + cmd.slice(last)
+}
+
+// [opener line's newline, closing word's start, match end, opener start] of every HEREDOC_RE match, in order, linear
+// (the walk looseHeredocCut used to do inline; SENDQSUB1123 also needs the bodies and their openers)
+function looseHeredocSpans(cmd) {
+  const spans = []
   const ends = new Map()
   for (const m of cmd.matchAll(LOOSE_END_RE)) {
     const at = m.index + 1
@@ -99,8 +112,6 @@ export function looseHeredocCut(cmd) {
     else ends.set(m[1], [at])
   }
   const lens = [...new Set([...ends.keys()].map((w) => w.length))].sort((a, b) => b - a)
-  let out = ''
-  let last = 0
   let nl = -1
   const open = new RegExp(LOOSE_OPEN_RE.source, 'g')
   for (;;) {
@@ -113,6 +124,7 @@ export function looseHeredocCut(cmd) {
       if (nl < 0) break // no newline left: no later opener can match either
     }
     let stop = -1
+    let q = -1
     const word = m[1]
     for (const n of lens) {
       if (n > word.length) continue
@@ -125,14 +137,13 @@ export function looseHeredocCut(cmd) {
         if (qs[mid] < nl + 2) lo = mid + 1
         else hi = mid
       }
-      if (lo < qs.length) { stop = qs[lo] + n; break }
+      if (lo < qs.length) { q = qs[lo]; stop = q + n; break }
     }
     if (stop < 0) { open.lastIndex = m.index + 1; continue }
-    out += cmd.slice(last, nl)
-    last = stop
+    spans.push([nl, q, stop, m.index])
     open.lastIndex = stop
   }
-  return out + cmd.slice(last)
+  return spans
 }
 // HDSTRICT1122 (card bbc6bad4, Viktor 50205 / 50220): HEREDOC_RE can drop a command bash RUNS (an empty body, a
 // here-string, an opener inside quotes, a <<- body with a tab-led end). isSendInvocation is (loose cut) OR (strict
@@ -193,6 +204,137 @@ export function strictHeredocCut(cmd) {
     pos = end.index + end[0].length
   }
 }
+
+// SENDQSUB1123 (card e00a44b0): a command substitution inside double quotes or in the body of a heredoc under an
+// unquoted delimiter is run by bash and was read as text by both twins; isSend also reads every such body as a
+// command line of its own. Full rationale and Known limits at _subst_send in outgoing-copy-gate.py (the python twin);
+// send-invocation-cases.json binds the two.
+function squoteEnd(t, j) {
+  if (t[j] === '$') {
+    j += 2
+    while (j < t.length && t[j] !== "'") j += t[j] === '\\' ? 2 : 1
+    return j + 1
+  }
+  const k = t.indexOf("'", j + 1)
+  return k < 0 ? t.length : k + 1
+}
+
+const BT_UNESCAPE_RE = /\\([$`\\"])/g // bash drops these backslashes before it runs a backtick body
+
+function substClose(t, j) {
+  const n = t.length
+  const st = ['P'] // P: inside $( or ( ; D: inside "
+  let prev = '('
+  while (j < n) {
+    const ch = t[j]
+    if (ch === '\\') { j += 2; prev = 'a'; continue }
+    if (ch === '#' && st[st.length - 1] === 'P' && ' \t\n;&|(<>'.includes(prev)) { // a comment: its ) closes nothing
+      const k = t.indexOf('\n', j)
+      j = k < 0 ? n : k
+      continue
+    }
+    prev = ch
+    if (ch === '`') {
+      j++
+      while (j < n && t[j] !== '`') j += t[j] === '\\' ? 2 : 1
+      j++
+      continue
+    }
+    if (st[st.length - 1] === 'D') {
+      if (ch === '"') st.pop()
+      else if (ch === '$' && t[j + 1] === '(') { st.push('P'); j++ }
+      j++
+      continue
+    }
+    if (ch === "'" || (ch === '$' && t[j + 1] === "'")) { j = squoteEnd(t, j); continue }
+    if (ch === '"') st.push('D')
+    else if (ch === '(') st.push('P')
+    else if (ch === ')') {
+      st.pop()
+      if (!st.length) return j
+    }
+    j++
+  }
+  return n
+}
+
+function substBodies(t, quotes) {
+  const out = []
+  const n = t.length
+  let i = 0
+  let dq = false
+  while (i < n) {
+    const ch = t[i]
+    if (ch === '\\') { i += 2; continue }
+    if (quotes && !dq && (ch === "'" || (ch === '$' && t[i + 1] === "'"))) { i = squoteEnd(t, i); continue }
+    if (quotes && ch === '"') { dq = !dq; i++; continue }
+    if (ch === '`') {
+      let j = i + 1
+      while (j < n && t[j] !== '`') j += t[j] === '\\' ? 2 : 1
+      out.push(t.slice(i + 1, Math.min(j, n)).replace(BT_UNESCAPE_RE, '$1'))
+      i = j + 1
+      continue
+    }
+    if (ch === '$' && t[i + 1] === '(') {
+      const j = substClose(t, i + 2)
+      out.push(t.slice(i + 2, j))
+      i = j + 1
+      continue
+    }
+    i++
+  }
+  return out
+}
+
+// [body start, body end, quoted delimiter] of every body strictHeredocCut drops, in order (the same walk)
+function strictHeredocSpans(cmd) {
+  const spans = []
+  let pos = 0
+  for (;;) {
+    STRICT_OPEN_RE.lastIndex = pos
+    const m = STRICT_OPEN_RE.exec(cmd)
+    if (!m) return spans
+    const opener = m[0]
+    const mEnd = m.index + opener.length
+    const lineStart = cmd.lastIndexOf('\n', m.index - 1) + 1
+    if (!opener.endsWith('\n') || opener.endsWith('\\\n') || !strictPrefixOk(cmd.slice(lineStart, m.index))) {
+      pos = mEnd
+      continue
+    }
+    const endRe = new RegExp('^' + (m[1] ? '\\t*' : '') + escapeRe(m[3]) + '$', 'gm')
+    endRe.lastIndex = mEnd
+    const end = endRe.exec(cmd)
+    if (!end) return spans
+    spans.push([mEnd, end.index, m[2] !== ''])
+    pos = end.index + end[0].length
+  }
+}
+
+// the python twin's _LONG_TOKEN_SENDERS on its _dequoted copy: what a body past the depth bound is searched for
+const SUBST_SENDERS_RE = /send\.py|api\.resend\.com|sendmail|msmtp|swaks|smtplib|sendMail\s*\(|SMTP\s*\(|sendEmail|mail\.send|graph-mail/i
+const DEQUOTE_RE = /\\\n|["'\\]/g
+
+function substSend(cmd, depth) {
+  if (!cmd.includes('$(') && !cmd.includes('`')) return false
+  const bodies = []
+  const loose = looseHeredocSpans(cmd).map(([nl, q, , o]) => {
+    LOOSE_OPEN_ONE_RE.lastIndex = o
+    return [nl + 1, q - 1, LOOSE_OPEN_ONE_RE.exec(cmd)[0].includes("'")]
+  })
+  for (const [cut, spans] of [[strictHeredocCut(cmd), strictHeredocSpans(cmd)], [looseHeredocCut(cmd), loose]]) {
+    // a loop, not push(...array): a spread of some 10^5 bodies overflows the call stack, and a hook that throws lets
+    // the command through
+    for (const x of substBodies(cut, true)) bodies.push(x)
+    for (const [a, b, quoted] of spans) if (!quoted) for (const x of substBodies(cmd.slice(a, b), false)) bodies.push(x)
+  }
+  for (const body of new Set(bodies)) { // the two cuts mostly give the same bodies: read each once
+    if (depth >= 3) {
+      if (SUBST_SENDERS_RE.test(body.replace(DEQUOTE_RE, ''))) return true
+    } else if (isSend(body, depth + 1)) return true
+  }
+  return false
+}
+const LOOSE_OPEN_ONE_RE = new RegExp(LOOSE_OPEN_RE.source, 'y')
 const ENV_ASSIGN = /^[A-Za-z_][A-Za-z_0-9]*=/
 // KWSPLIT924: shell reserved words that put the NEXT word in command position.
 // Stripped only at the head of a segment, never used as separators -- see the
@@ -363,6 +505,9 @@ const HEAD_DEPTH = 8
 // SENDREDIR1122: a redirect before the command word is stepped over (an operator token alone takes its target);
 // see _REDIR in outgoing-copy-gate.py (the python twin).
 const REDIR = /^(?:\d+|\{\w+\})?(?:<<<|<<-?|<>|>>|>\||&>>|&>|<|>)(.*)$/s
+// SENDEMPTY1123: a word made only of parameter expansions before the command word is stepped over like an
+// assignment (`$x sendmail x` runs sendmail when $x is unset); see _EXPANSION_WORD in outgoing-copy-gate.py.
+const EXPANSION_WORD = /^(?:\$(?:[A-Za-z_][A-Za-z_0-9]*|[0-9@*#?$!-]|\{[^{}]*\}))+$/
 
 function commandHeads(toksIn, d = 0) {
   let toks = toksIn
@@ -370,7 +515,10 @@ function commandHeads(toksIn, d = 0) {
   while (k < toks.length) {
     if (ENV_ASSIGN.test(toks[k]) || CMD_POSITION_KEYWORDS.has(toks[k])) { k++; continue }
     const r = REDIR.exec(toks[k])
-    if (!r) break
+    if (!r) {
+      if (EXPANSION_WORD.test(toks[k])) { k++; continue } // SENDEMPTY1123
+      break
+    }
     k += r[1] ? 1 : 2
   }
   toks = toks.slice(k)
@@ -548,7 +696,7 @@ export function isSendInvocation(cmd, depth = 0) {
 }
 
 function isSend(cmd, depth) {
-  return sendModes(cmd).some((m) => loose(cmd, depth, m) || strict(cmd, depth, m))
+  return sendModes(cmd).some((m) => loose(cmd, depth, m) || strict(cmd, depth, m)) || substSend(cmd, depth)
 }
 
 export function buildHeredocStrictMsg() {
