@@ -118,8 +118,18 @@ EOF
   set +f
   # stdin from /dev/null: this loop reads the ref list on stdin and vitest must not eat it. The GIT_* variables
   # git sets for a hook are dropped, so a test that runs git in a temp directory cannot act on THIS repository
-  # (Viktor 41344 INFO 7).
-  if ! env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE node_modules/.bin/vitest run "$@" >&2 </dev/null; then
+  # (Viktor 41344 INFO 7). The git config the PUSHER's environment injects is dropped too (GIT_CONFIG_COUNT with its
+  # KEY_n / VALUE_n, GIT_CONFIG_PARAMETERS): push_pr.py sets credential.helper= that way, it outranks every config
+  # file a test sets up, and a test's control that expects the system / global helper to run went red under it
+  # (card 64d10325 push, Klodel 50552: pr-head.test.sh, 2 controls).
+  cfg_unset=()
+  while IFS= read -r v; do
+    [ -n "$v" ] && cfg_unset+=(-u "$v")
+  done <<CFG
+$(compgen -e | grep -E '^GIT_CONFIG_(COUNT|PARAMETERS|KEY_[0-9]+|VALUE_[0-9]+)$')
+CFG
+  if ! env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE ${cfg_unset[@]+"${cfg_unset[@]}"} \
+      node_modules/.bin/vitest run "$@" >&2 </dev/null; then
     refuse "the tests above failed on ${local_sha:0:8}; the push does not go." \
       "Fix them, commit, and push again (CI would go red on the same ones)."
   fi

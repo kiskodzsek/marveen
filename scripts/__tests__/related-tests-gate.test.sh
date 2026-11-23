@@ -24,13 +24,15 @@ ORIGIN="$TMP/origin.git"
 CLONE="$TMP/clone"
 CALLS="$TMP/vitest-calls.log"
 ENVLOG="$TMP/vitest-env.log"
-export NPX_CALLS="$CALLS" VT_ENV="$ENVLOG"
+CFGLOG="$TMP/vitest-cfg.log"
+export NPX_CALLS="$CALLS" VT_ENV="$ENVLOG" VT_CFG="$CFGLOG"
 make_vitest() { # the shim lives in the clone's node_modules/.bin, where the gate looks for it
   mkdir -p "$CLONE/node_modules/.bin"
   cat > "$CLONE/node_modules/.bin/vitest" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$NPX_CALLS"
 echo "GIT_DIR=${GIT_DIR:-} GIT_INDEX_FILE=${GIT_INDEX_FILE:-} GIT_WORK_TREE=${GIT_WORK_TREE:-}" >> "$VT_ENV"
+echo "COUNT=${GIT_CONFIG_COUNT:-} K0=${GIT_CONFIG_KEY_0:-} V0=${GIT_CONFIG_VALUE_0-unset} K1=${GIT_CONFIG_KEY_1:-} PARAMS=${GIT_CONFIG_PARAMETERS:-}" >> "$VT_CFG"
 exit "${NPX_RC:-0}"
 EOF
   chmod +x "$CLONE/node_modules/.bin/vitest"
@@ -158,6 +160,18 @@ ENV_SHA="$(git -C "$CLONE" rev-parse HEAD)"
     | GIT_DIR="$CLONE/.git" GIT_INDEX_FILE="$CLONE/.git/index" GIT_WORK_TREE="$CLONE" NPX_RC=0 bash scripts/git-hooks/related-tests-gate.sh origin x ) >"$TMP/push.out" 2>&1 \
   && pass "the gate ran with GIT_* set" || fail "gate failed under GIT_*: $(cat "$TMP/push.out")"
 [ -s "$ENVLOG" ] && ! grep -v '^GIT_DIR= GIT_INDEX_FILE= GIT_WORK_TREE=$' "$ENVLOG" | grep -q . && pass "vitest saw no GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE" || fail "vitest inherited a GIT_* variable: $(cat "$ENVLOG")"
+
+echo "== the pusher's injected git config never reaches vitest (card 64d10325 push, Klodel 50552)"
+: > "$CFGLOG"; new_branch cfgdrop
+echo "print('c')" > "$CLONE/scripts/hooks/cfg-gate.py"; git_q add -A && git_q commit -qm "hook cfg"
+CFG_SHA="$(git -C "$CLONE" rev-parse HEAD)"
+( cd "$CLONE" && echo "refs/heads/cfgdrop $CFG_SHA refs/heads/cfgdrop 0000000000000000000000000000000000000000" \
+    | GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= GIT_CONFIG_KEY_1=core.pager \
+      GIT_CONFIG_VALUE_1=cat GIT_CONFIG_PARAMETERS="'credential.helper'=''" NPX_RC=0 \
+      bash scripts/git-hooks/related-tests-gate.sh origin x ) >"$TMP/push.out" 2>&1 \
+  && pass "the gate ran with the push_pr.py config variables set" || fail "gate failed under GIT_CONFIG_*: $(cat "$TMP/push.out")"
+[ -s "$CFGLOG" ] && ! grep -v '^COUNT= K0= V0=unset K1= PARAMS=$' "$CFGLOG" | grep -q . \
+  && pass "vitest saw no GIT_CONFIG_COUNT / KEY_n / VALUE_n / PARAMETERS" || fail "vitest inherited git config: $(cat "$CFGLOG")"
 
 echo "== installer: a path with a space and a \$ stays one word (INFO 8)"
 WEIRD="$TMP/we ird \$HOME dir/repo"
