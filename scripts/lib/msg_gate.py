@@ -75,8 +75,9 @@ Rules:
    A question of fact is a request (card 8dd5c726, is_idea): "?" with mekkora, mennyi, mikor, hol, ...
    and no idea mark, conditional or choice form ("mennyiért adjuk?", "mennyit érne?" stay ideas).
    Known limits, by name: info-question-word-list, imperative-3sg-definite, imperative-2sg-short-d,
-   hat-het, modal-infinitive, comparative, indicative-decision (pinned: agent-msg-send-gate.test.sh,
-   "known limit", one row each). info-question-word-list: a question word off the list stays an idea;
+   hat-het, modal-infinitive, comparative, indicative-decision, imperative-2sg-bare-gy,
+   or-alternatives-without-comma (pinned: agent-msg-send-gate.test.sh, "known limit", one row each).
+   info-question-word-list: a question word off the list stays an idea;
    a plain question of fact meant as an idea ("milyen színű a borító?") passes as a request (Klodel's
    Kérés-kapu checks the brief). The choice is a verb form, so a decision asked in other words passes as
    a request too (Viktor 50775; measured: in Patrik's 30 days these shapes ask facts, "hol lehet
@@ -85,7 +86,9 @@ Rules:
    "csináld"; "mi a gond?" has the same shape); hat-het, a -hat/-het verb ("mennyiért adhatom el?");
    modal-infinitive, kell / lehet / szabad / illik with an infinitive ("melyik verziót lehet kiküldeni?");
    comparative ("melyik a jobb?", "melyik éri meg?", "mi a legjobb ár?"); indicative-decision ("melyik
-   borítóval indulunk?").
+   borítóval indulunk?"); imperative-2sg-bare-gy, the bare -gy ("hova tégy?": "egy", "vagy", "nagy",
+   "megy" end the same way); or-alternatives-without-comma, a choice of "X vagy Y" with no comma before
+   it ("melyik a jó: a kék vagy a piros?"; "vagy hol?" asks a fact).
    The message_id alone is ambiguous (measured: private and group chat both hold ids 10-999), so any
    ledger row with that id counts, but the IGEN must be in the chat where the quote was found.
    Measured 2026-11-13 on 30 days of Klodel's messages (9495): 752 hand out work, 623 of them name a
@@ -451,12 +454,22 @@ INFO_QUESTION = re.compile(_B + r'(?:mekkora|mennyi(?:be|t|re|ert|vel)?|hany(?:a
 # variants.py): the long forms turn 2 into ideas (the instrumental -ssal/-zzel: "prototípussal", "eszközzel"), -dd 1
 # ("group add"), the rest 0. The short -d after any other consonant ("kérd", "csináld") would turn 4 ("mi a gond?",
 # "majd"): Known limit imperative-2sg-short-d in the module header.
+# Round 4 (Viktor 50820: the bare 2nd person singular with an assimilated sign, and a choice of alternatives, read as
+# requests): the choice also takes
+# - the bare assimilated forms -zz, -ssz, -ss, -ts ("fűzz", "válassz", "fizess", "taníts") and -jj after a vowel
+#   ("fújj"; j joins the consonant class of the bare consonant + -j);
+# - ALTERNATIVES: "vagy" after a comma in the same sentence ("melyik a jó, a kék vagy a piros?", "mikor, holnap vagy
+#   jövő héten?").
+# Measured as in round 3 (work/keres-info-1123/r4/variants4.py, 126 '?' sentences that round 3 reads as requests): each
+# bare assimilated form and the comma + "vagy" turn 0 into ideas. The bare -gy would turn 13 ("egy", "vagy", "nagy",
+# "megy"), any "vagy" 5 ("vagy hol?"): Known limits imperative-2sg-bare-gy and or-alternatives-without-comma.
 CONDITIONAL = re.compile(_B + r'(?:volna|[a-z]{2,}n(?:a|e|ak|ek|am|em|al|el|ad|ed|atok|etek))'
                          r'(?![a-z0-9])')
 CHOICE = re.compile(_B + r'(?:(?:[a-z]{2,}(?:zz|ssz|ss|ts)|[a-z]+(?:j|gy|ddz))'
                     r'(?:uk|unk|onk|enk|ak|ek|am|em|on|en|atok|etek|al|el|ad|ed)'
-                    r'|[a-z]*[bcdfghklmnpqrstvwxyz]j|[a-z]+(?:dd|sd|zd|gyd))'
+                    r'|[a-z]*[bcdfghjklmnpqrstvwxyz]j|[a-z]+(?:dd|sd|zd|gyd)|[a-z]{2,}(?:zz|ssz|ss|ts))'
                     r'(?![a-z0-9])')
+ALTERNATIVES = re.compile(r',[^,?]*' + _B + r'vagy(?![a-z0-9])')
 
 
 def is_idea(sentence):
@@ -464,7 +477,8 @@ def is_idea(sentence):
         return True
     if '?' not in sentence:
         return False
-    return not (INFO_QUESTION.search(sentence) and not CONDITIONAL.search(sentence) and not CHOICE.search(sentence))
+    return not (INFO_QUESTION.search(sentence) and not CONDITIONAL.search(sentence) and not CHOICE.search(sentence)
+                and not ALTERNATIVES.search(sentence))
 
 
 def says_yes(folded):

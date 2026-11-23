@@ -154,6 +154,17 @@ rows = [
     ('111', '18134', 'in', 'Mennyit adjál érte?', 10110),
     ('111', '18135', 'in', 'Hova rakjad a logót?', 10120),
     ('111', '18136', 'in', 'Hány darabot csinálj belőle?', 10130),
+    ('111', '18137', 'in', 'Mikor fizess be?', 10140),
+    ('111', '18138', 'in', 'Melyik nyomdát válassz?', 10150),
+    ('111', '18139', 'in', 'Hány órát taníts be?', 10160),
+    ('111', '18140', 'in', 'Hány képet fűzz be?', 10170),
+    ('111', '18141', 'in', 'Mekkora lufit fújj fel?', 10180),
+    ('111', '18142', 'in', 'Melyik a jó, a kék vagy a piros?', 10190),
+    ('111', '18143', 'in', 'Mikor a kampány, holnap vagy jövő héten?', 10200),
+    ('111', '18144', 'in', 'Milyen ár a csomagra, 9990 vagy 12990?', 10210),
+    ('111', '18145', 'in', 'Hova tégy még egy képet?', 10220),
+    ('111', '18146', 'in', 'Melyik a jó: a kék vagy a piros?', 10230),
+    ('111', '18147', 'in', 'Hol tart a nyomda, Bence? Vagy mikor jön a csomag?', 10240),
 ]
 con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
                 "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
@@ -665,6 +676,33 @@ KERES-SZO-SZERINT: \"$q\" (TG $tg)"
   run klodel dave
   ok "keres r3: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
 done
+# card 8dd5c726 round 4 (Viktor 50820): the bare 2nd person singular with an assimilated sign (-ss, -ssz, -ts, -zz,
+# vowel + -jj) and a choice of alternatives after a comma stay ideas, one row per shape
+for pair in '18137|Mikor fizess be' '18138|Melyik nyomdát válassz' '18139|Hány órát taníts be' \
+            '18140|Hány képet fűzz be' '18141|Mekkora lufit fújj fel' '18142|Melyik a jó, a kék vagy a piros' \
+            '18143|Mikor a kampány, holnap vagy jövő héten' '18144|Milyen ár a csomagra, 9990 vagy 12990'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r4: choice stays an idea, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres r4: the refusal is the IGEN one ($tg)" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# known limits imperative-2sg-bare-gy and or-alternatives-without-comma (msg_gate.py header, Viktor 50820): pass as
+# requests; pinned, one row each
+for pair in '18145|Hova tégy még egy képet' '18146|Melyik a jó: a kék vagy a piros'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r4: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+done
+# a quote over two sentences: the comma of the first and the "vagy" of the next are no choice (ALTERNATIVES stops at
+# a "?"), so the fact question stays a request
+text "$WO
+KERES-SZO-SZERINT: \"Hol tart a nyomda, Bence? Vagy mikor jön a csomag\" (TG 18147)"
+run klodel dave
+ok "keres r4: a comma and a \"vagy\" in two sentences (TG 18147) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
 # Viktor 41430 INFO 1: a ledger path with ? # % keeps mode=ro and opens the right file; the connection is read-only
 mkdir -p "$SANDBOX/a?b#c%d" && cp "$SANDBOX/ledger.db" "$SANDBOX/a?b#c%d/ledger.db"
 text "$WO
