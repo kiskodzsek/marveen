@@ -4,12 +4,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 // @ts-expect-error -- plain .mjs hook script, no types
-import { gateDecision, isSendInvocation, sendOnlyByStrictHeredoc, strictHeredocCut, buildHeredocStrictMsg, looseHeredocCut, HEREDOC_RE } from '../../scripts/email-send-gate.mjs'
+import { gateDecision, isSendInvocation, sendInReading, sendOnlyByStrictHeredoc, strictHeredocCut, buildHeredocStrictMsg, looseHeredocCut, HEREDOC_RE } from '../../scripts/email-send-gate.mjs'
 
 // HDSTRICT1122 (card bbc6bad4, Viktor 50205 / 50220): the loose heredoc cut of both mail gates could drop a command
 // bash runs; the strict second pass only ADDS sends. The shared verdicts live in send-invocation-cases.json (the
-// conformance test); this file pins what is NOT shared: the hard-gate's deny kind and its way-out message, the known
-// twin divergence on a comment, and the run time on 1 MB inputs (Viktor 50205 point 2: under 2 s on both gates).
+// conformance test); this file pins what is NOT shared: the hard-gate's deny kind and its way-out message, the
+// opener-comment case both twins now see (SENDCOMMENT1122), and the run time on 1 MB inputs (Viktor 50205 point 2: under 2 s on both gates).
 
 // Viktor 50311 I2: the 2 s bounds are CPU seconds of the gate (python time.process_time, node process.cpuUsage), not
 // wall time. Wall time failed once in a sandbox under load 3.3 (6.7 s for the whole it, the shapes 2.0 s each, the
@@ -69,6 +69,26 @@ describe('HDSTRICT1122: the hard-gate deny for a send only the strict heredoc pa
     expect(gateDecision('Bash', { command: "cat <<'EOF' > n.md\nsendmail is how it worked\nEOF" })).toEqual({ deny: false })
   })
 
+  // SENDFANOUT1123 (round 6): every outside entry starts with a full read budget. A call that spent it must not leave
+  // the next call audited: a stale budget would make every later small command a send (or turn the heredoc-strict
+  // deny into the plain one, the hook's second looseSendInvocation call).
+  it('SENDFANOUT1123: each outside entry refills the read budget, a spent one does not leak into the next call', () => {
+    const esc = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`')
+    let spent = 'true # (( x\n'.repeat(Math.floor((20 * 1024) / 12)) + 'true'
+    for (let i = 0; i < 3; i++) spent = 'eval "' + esc(spent) + '"'
+    const small = 'cat <<E\nx\nE'
+    expect(isSendInvocation(spent), 'the budget is spent').toBe(true)
+    expect(sendInReading(small, 0, 'A'), 'sendInReading after a spent budget').toBe(false)
+    expect(isSendInvocation(spent)).toBe(true)
+    expect(sendOnlyByStrictHeredoc(small), 'sendOnlyByStrictHeredoc after a spent budget').toBe(false)
+    // 700 KB of harmless "# ((" lines and a heredoc, no sender: four readings, each with its strict pass, are past the
+    // budget (8 x 700 KB > 3 MiB + 2 x 700 KB), so the gate denies; the hook's second, loose-only call reads 700 KB
+    // once inside a fresh budget and finds no loose send, so the kind is the heredoc-strict one (a stale budget
+    // would make it the plain deny). The wording past the budget is the heredoc-strict one today (the safe side).
+    const pad = ': abcdefg # (( x\n'.repeat(Math.floor((700 * 1024) / 18))
+    expect(gateDecision('Bash', { command: pad + 'cat <<E\nx\nE' })).toEqual({ deny: true, kind: 'heredoc-strict' })
+  })
+
   it('the message names the way out: the text from a file, not a heredoc', () => {
     const msg = buildHeredocStrictMsg()
     expect(msg).toContain('TILTVA')
@@ -105,13 +125,14 @@ print(json.dumps([g._strict_heredoc_cut(c) for c in json.load(open(sys.argv[1]))
   })
 })
 
-describe('HDSTRICT1122: known twin divergence (not in the shared list; card e00a44b0)', () => {
-  it('opener-comment: the python twin misses a send after a commented opener line, the JS twin sees it', () => {
-    // shlex reads the comment over the newline, so the next line joins it; the JS tokenizer has no comment
-    // handling. Measured on main as well (pre-existing). Pinned here so a fix on either side shows up.
+describe('HDSTRICT1122: the opener-comment divergence is gone (SENDCOMMENT1122, card 64d10325)', () => {
+  it('opener-comment: both twins see a send after a commented opener line', () => {
+    // Until card 64d10325 the python twin missed it (shlex read the comment over the masked newline, so the next
+    // line joined it) while the JS twin saw it. The comment is now dropped line by line in both masks; the shape is
+    // also a shared row in send-invocation-cases.json.
     const cmd = "cat <<'E' # c\nE\nsendmail -t a@b.hu\n"
     expect(isSendInvocation(cmd)).toBe(true)
-    expect(pySend([cmd]).verdicts).toEqual([false])
+    expect(pySend([cmd]).verdicts).toEqual([true])
   })
 })
 
