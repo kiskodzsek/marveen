@@ -1,3 +1,14 @@
+// Known limits of the boot-time hook restore (card 47468cc1, Viktor 50557 / 50632; the same on main, not regressions):
+// - command-copy (E04): when the time-claim command's type command copy lives only in a user-extended Bash group (a
+//   hook of the user's own next to it), syncHookMatchers does not move it on purpose and the add branch counts it as
+//   present, so Write, Edit and MultiEdit carry no time-claim gate then.
+// - prompt-copies (E09, the I5 class): two type prompt copies with different timeouts (no command copy) settle in two
+//   boots: the first boot's timeout sync makes them equal, the second boot's dedupe merges them (the dedupe runs
+//   before the timeout sync); no gate is lost meanwhile.
+// - I3: a non-exact form whose basename the check does not find (an upper-case name, a glob, an escaped letter) is
+//   kept; the boot adds the template entry next to it.
+// - I4: a non-array PreToolUse or a null element in it throws at boot (flatMap over an object, null.hooks).
+// - I5: a same-command group with another timeout converges in two boots, not one.
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync, rmSync, watchFile, unwatchFile, realpathSync } from 'node:fs'
 import { readRemovedDefaultTasks, readScheduledTask } from './scheduled-tasks-io.js'
 import { approveScheduledTask } from './schedule-trust.js'
