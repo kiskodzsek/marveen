@@ -1199,6 +1199,7 @@ def script_git_cases():
         w('HANDOFF.md', f'# handoff\n- the shapes that ran the helper:\n```\ngit -C . {CR} approve < x\n'
                         f'git -c {CR}.helper={OK} fetch\n```\n')
         w('x.txt', 'data\n')
+        w('runner.sh', '#!/bin/sh\nbash "$1"\n', 0o755)
         w(os.path.join('scripts', 'gh-pr.mjs'), f"import {{ execFileSync }} from 'node:child_process'; "
                                                 f"execFileSync('git', ['{CR}', '{FL}'])\n")
         with open(prod, encoding='utf-8') as f:
@@ -1259,6 +1260,37 @@ def script_git_cases():
             # KNOWN-LIMIT cat-fed-indirect (Viktor 50625): a cat text run through a file the command writes first (it
             # does not exist when the gate reads the command) keeps the main rules (as on main)
             (f'cat {H} > {d}/g.sh; bash {d}/g.sh', 0),
+            # round 3 (Viktor 50674): git's rules for a RUN position only. (1) the script is the first operand after
+            # the interpreter's options; an option's argument is no operand; a file after it is the script's argument
+            (f'bash {d}/ok.sh {d}/HANDOFF.md', 0), (f'bash {d}/ok.sh {H}', 0),
+            (f'cd {d} && bash ok.sh "HANDOFF.md megirva; x" 1', 0), (f'cd {d} && bash ok.sh HANDOFF.md 2>&1 | tail -3', 0),
+            (f'python3 {d}/okword.py {H}', 0), (f'python3 -W error {d}/okword.py {H}', 0),
+            (f'python3 -W error {d}/hk.py', 2), (f'bash -o pipefail {H}', 2), (f'bash -o pipefail {d}/ok.sh {H}', 0),
+            (f'bash -x {H}', 2), (f'bash -- {H}', 2), (f'cd {d} && node ./ok.js ./helper.cjs', 0),
+            # inline code: no script file (node -e / --eval / -p)
+            (f'node -e 1 {d}/helper.cjs', 0), (f'node --eval 1 {d}/helper.cjs', 0), (f'node -p 1 {d}/helper.cjs', 0),
+            # an option the gate does not know: the next two operands are run (either may be the script)
+            (f'node --stack-size 99 {d}/helper.cjs', 2), (f'node --frob {d}/helper.cjs', 2),
+            (f'node --frob x {d}/helper.cjs', 2), (f'node --frob x y {d}/helper.cjs', 0),
+            # a word that may vanish or split before the script: every word is run
+            (f'cd {d} && bash $X ok.sh {H}', 2),
+            # (2) a preload or rc file runs, separate and with `=`; a stdin redirect; source / dot
+            (f'cd {d} && node --require=./helper.cjs ./ok.js', 2), (f'cd {d} && node --import=./helper.mjs ./ok.js', 2),
+            (f'cd {d} && node --loader=./helper.mjs ./ok.js', 2), (f'cd {d} && node -r ./helper.cjs ./ok.js', 2),
+            (f'cd {d} && node --experimental-loader ./helper.mjs ./ok.js', 2),
+            (f'bash --rcfile {H} {d}/ok.sh', 2), (f'bash --init-file {H} {d}/ok.sh', 2),
+            (f'bash {d}/ok.sh < {H}', 2), (f'source {H} x', 2),
+            # KNOWN-LIMIT env-prefix-run-file: BASH_ENV / ENV in the prefix are not read (main too, any rules)
+            (f'BASH_ENV={H} bash {d}/ok.sh', 0), (f'ENV={H} sh {d}/ok.sh', 0),
+            # (3) KNOWN-LIMIT git-rules-on-argument-files: a script that runs its own argument file (runner.sh runs
+            # "$1"); the argument gets the main rules only
+            (f'bash {d}/runner.sh {H}', 0), (f'source {d}/runner.sh {H}', 0), (f'. {d}/runner.sh {H}', 0),
+            # KNOWN-LIMIT dash-c-argument (an over-block, the safe side): after a -c payload the gate's payload view
+            # reads the next word as a command word, so `bash -c '...' f` judges f by git's rules (main: its rules)
+            (f"bash -c 'echo 1' {H}", 2),
+            # KNOWN-LIMIT pipe-into-shell-with-script (an over-block, the safe side): the pipeline-into-a-shell reading
+            # takes what a pipe prints as the shell's code even when the shell runs a script file
+            (f"cd {d} && printf '%s\\n' 'HANDOFF.md x' | bash {d}/ok.sh", 2),
         ]
         for cmd, want in rows:
             n += 1

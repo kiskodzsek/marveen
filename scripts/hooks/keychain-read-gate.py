@@ -12,6 +12,13 @@ Known limits of git's helper rules on a script file's text (card 8d8298c7, Vikto
 KNOWN-LIMIT row): cat-fed-indirect: they read a file the command runs or feeds to code (a pipe into an
 interpreter, a substitution), so a cat text run through a file the command writes first (`cat f > g; bash g`)
 keeps the main rules; node-options-quoted: a preload file in a quoted or `=` NODE_OPTIONS value is not read.
+Round 3 (Viktor 50674): they read a file in a RUN position only (the script operand, a preload or rc file, source,
+a stdin redirect, a fed cat, a pipe word, a direct path). git-rules-on-argument-files: a script that runs its own
+argument file (`bash runner.sh f`, runner.sh runs "$1") hands f the main rules only; env-prefix-run-file: BASH_ENV=f
+and ENV=f before a shell are not read (main too); dash-c-argument (an over-block): after a -c payload the payload
+view reads the next word as a command word, so `bash -c '...' f` judges f by them; a python heredoc body naming a
+file may also judge it (the body is code, a file name in it can be exec'd: fail-closed); pipe-into-shell-with-script
+(an over-block): what a pipe prints into a shell is read as its code even when the shell runs a script file.
 Known limits (card deede5e4, Viktor r2 point 4 and 49151; the full list is "Not seen" under Script files below):
 a relative script word whose directory or name comes from a value the gate does not bind passes unread: a
 `while read` loop (piped or from a file), `select`, an arithmetic `for ((..))` loop, cdable_vars, find -execdir
@@ -3506,11 +3513,14 @@ class ScriptGroup(list):
     value_unread_names() returns: every word globbed blocked 210 fleet commands (script-too-many, a glob naming more
     than MAX_LOOP_PATHS files: `node x.mjs "src/*.ts"`), measured."""
 
-    def __init__(self, words=(), lead=frozenset(), expand=False, zsh=True):
+    def __init__(self, words=(), lead=frozenset(), expand=False, zsh=True, run=None):
         super().__init__(words)
         self.lead = lead
         self.expand = expand  # the lead word as written has a glob or a brace outside quotes (unquoted_pattern)
         self.zsh = zsh  # card 0196e1ee: False for a word a pipe feeds a shell (decoded text, not the command's word)
+        # card 8d8298c7 round 3 (Viktor 50674): the words in a RUN position (the script operand, a preload or rcfile
+        # value); None: every word (the safe side: a group that does not say so is all run)
+        self.run = run
 
 
 def unquoted_pattern(raw):
@@ -3787,6 +3797,50 @@ def _argv_option(w, python):
         if ch not in PY_NOARG:
             return 0
     return 1
+
+
+# card 8d8298c7 round 3 (Viktor 50674): which words of an interpreter call are RUN, for git's helper rules. The script
+# is the first operand after the interpreter's options; an option's own argument is no operand (`python3 -W error
+# m.py`), except a preload or rc file, which runs too (node -r / --require / --import / --loader /
+# --experimental-loader, bash --rcfile / --init-file; separate or with `=`). An option the gate does not know may take
+# the next word or not: then the next TWO operands are run (either may be the script). Every other word is an argument
+# the script reads: the main rules only (Known limit git-rules-on-argument-files).
+NODE_NAMES_RX = re.compile(r'node(?:js)?|bun|deno|tsx|ts-node', re.I)
+RUN_PRELOAD_OPTS = frozenset(('-r', '--require', '--import', '--loader', '--experimental-loader'))
+NODE_VALUE_OPTS = frozenset(('-C', '--conditions', '--input-type', '--title', '--env-file', '--inspect-port'))
+SHELL_RC_OPTS = frozenset(('--rcfile', '--init-file'))
+SHELL_NOARG_LONG = frozenset(('--login', '--norc', '--noprofile', '--posix', '--verbose', '--noediting',
+                              '--restricted', '--debugger', '--dump-strings', '--', '--version', '--help'))
+_SHELL_OPT_RX = re.compile(r'[-+][A-Za-z]+')
+
+
+def run_option(name, w, python):
+    """(kind, attached run file) of an option word before the script: kind 'zero' (no argument), 'val' (the next word
+    is its argument, not run), 'valrun' (the next word is a file it runs), 'code' (inline code: no script file) or
+    'ambig' (not known)."""
+    if w == '--':
+        return 'zero', None
+    opt, eq, val = w.partition('=')
+    if NODE_NAMES_RX.fullmatch(name):
+        if opt in ('-p', '--print'):  # code to print: no script file (CODE_FLAG_RX has no p: perl -p is no code)
+            return 'code', None
+        if opt in RUN_PRELOAD_OPTS:
+            return ('zero', strip_quotes(val)) if eq else ('valrun', None)
+        if opt in NODE_VALUE_OPTS:
+            return ('zero', None) if eq else ('val', None)
+        return ('zero', None) if eq and opt.startswith('--') else ('ambig', None)
+    if name.lower() in SHELL_NAMES:
+        if opt in SHELL_RC_OPTS:
+            return ('zero', strip_quotes(val)) if eq else ('valrun', None)
+        if w in SHELL_NOARG_LONG:
+            return 'zero', None
+        if _SHELL_OPT_RX.fullmatch(w):
+            return ('val', None) if w[-1] in 'oO' else ('zero', None)
+        return 'ambig', None
+    if python:
+        kind = _argv_option(w, True)
+        return {1: ('zero', None), 2: ('val', None)}.get(kind, ('ambig', None))
+    return 'ambig', None
 
 
 def backtick_openers(text):
@@ -4613,9 +4667,40 @@ def interp_groups(text, expanded=False):
         group = ScriptGroup()
         stopped = False
         subst_seen = False
+        # card 8d8298c7 round 3: the run words (see run_option). An expanded text or a word that may vanish or split
+        # (a substitution, a variable, a glob, a brace) before the script is found: every word is run (fail-closed)
+        run, need, nxt = set(), 1, None
+        run_all = expanded
         i = 0
         while i < len(words):
             w = words[i]
+            if not run_all and need and not OUT_REDIR_RX.match(w):  # an output target: skipped by the walk below
+                raw_w = all_words[i]
+                in_redir = SRC_REDIR_RX.match(w)
+                if '$' in raw_w or '`' in raw_w or unquoted_pattern(raw_w):
+                    run_all = True
+                elif in_redir:
+                    if not in_redir.group(1):
+                        nxt = ('valrun', i + 1)  # `< f`: its target is read as code (the REDIRECT_RX reading too)
+                elif w.startswith('-') and w != '-':
+                    kind, att = run_option(name, w, python)
+                    if att:
+                        run.add(att)
+                        group.append(att)  # a `--require=f` file is judged (by the main rules too)
+                    if kind == 'ambig':
+                        need += 1
+                    elif kind == 'code':
+                        need = 0
+                    elif kind in ('val', 'valrun'):
+                        nxt = (kind, i + 1)  # the NEXT word only (the walk below may skip it: python -W x)
+                elif w:
+                    taken = nxt[0] if nxt and nxt[1] == i else None
+                    if taken == 'valrun':
+                        run.add(w)
+                    elif taken is None:
+                        run.add(w)
+                        need -= 1
+                    nxt = None
             if python and PY_ATTACHED_RX.match(w):
                 # -Wignore, -Xdev, -uWerror: the first of c/m/W/X in the cluster is W or X, so the rest is its
                 # argument, not a -c / -e / -m (CODE_FLAG_RX took -Wignore for a code flag and stopped the walk:
@@ -4677,6 +4762,8 @@ def interp_groups(text, expanded=False):
                     group.expand = unquoted_pattern(all_words[i]) and (cls is None or cls[m.end() - 1] == 'c')
                 group.append(w)
                 group += [f for f in forms if f and f != w and not f.startswith('-')]
+                if w in run:  # round 3: a run word's forms are run too
+                    run.update(f for f in forms if f)
                 # the script: the words after it are its arguments (see DATA_ARGV_RX). Only a plain word: an unset
                 # $X or a glob may vanish or become another file (`python3 $X m.py` runs m.py), and a word the
                 # window cut may be longer than what was read
@@ -4684,6 +4771,7 @@ def interp_groups(text, expanded=False):
                         clipped and i == len(all_words) - 1):
                     if python:
                         group.append(os.path.join(w, '__main__.py'))  # a directory runs its __main__.py
+                        run.add(os.path.join(w, '__main__.py'))
                     stopped = True
                     break
                 argv_data = False
@@ -4692,15 +4780,17 @@ def interp_groups(text, expanded=False):
             raise TooManyArgs(f'a parancs hosszabb a {ARGS_WINDOW} karakteres ablaknál')
         if not stopped and len(all_words) > MAX_ARGS:
             raise TooManyArgs(f'{len(all_words)} szó, MAX_ARGS {MAX_ARGS}')
+        group.run = None if run_all else frozenset(run)
         if group:
             groups.append(group)
     return groups
 
 
-def script_paths(cmd, cwd, normalised=None, extra=(), live=None, git_cat=False, cat_seen=None):
+def script_paths(cmd, cwd, normalised=None, extra=(), live=None, run_out=None):
     """The script files the command runs (resolved, existing regular files), at most MAX_SCRIPTS (an eleventh file
     or more than MAX_BASES directories returns MAX_SCRIPTS + 1 entries: the caller blocks). Raises TooManyArgs.
-    extra: more words to look up as files (a pipeline into a shell, card 74586987)."""
+    extra: more words to look up as files (a pipeline into a shell, card 74586987). run_out (card 8d8298c7 round 3):
+    a list the files of a RUN position are added to (ScriptGroup.run; a cat only when its text is fed to code)."""
     norm = normalise(cmd) if normalised is None else normalised
     # a for-loop variable keeps its $NAME here (Viktor deede5e4 r1 P2: `F=ok.py; for F in ev.py; do python3 $F`
     # read ok.py only): loop_word_paths reads every loop value AND every plain value assigned to the name
@@ -4746,11 +4836,20 @@ def script_paths(cmd, cwd, normalised=None, extra=(), live=None, git_cat=False, 
     # by the mutation round). The reader's eval reads the quoted and escaped forms too (`"eval"`, `\eval`)
     if INTERP_RX.search(text) or _hn_reader_rx().search(text):
         groups += [[m.group(1)] for m in REDIRECT_RX.finditer(text)]
-        # git_cat (card 8d8298c7 round 2): only a cat whose output can become code (CAT_FED_RX)
-        cat_ms = list((CAT_FED_RX if git_cat else CAT_RX).finditer(text))
-        if cat_ms and cat_seen is not None:
-            cat_seen.append(True)  # the caller's git walk is needed only then
-        for m in [*cat_ms, *HEADTAIL_RX.finditer(text)]:
+        # card 8d8298c7 round 2: a cat is run only when its output can become code (CAT_FED_RX); a cat next to an
+        # interpreter elsewhere (the fleet's HANDOFF.md read) is judged by the main rules only. head/tail: as before
+        cat_ms = list(CAT_RX.finditer(text))
+        fed = set()
+        if cat_ms and run_out is not None:
+            for m in CAT_FED_RX.finditer(text):
+                fed.update(strip_quotes(w) for w in (m.group(1) or m.group(2)).split())
+        for m in cat_ms:
+            cat_words = (m.group(1) or m.group(2)).split()
+            if len(cat_words) > MAX_ARGS:
+                raise TooManyArgs(f'cat: {len(cat_words)} szó, MAX_ARGS {MAX_ARGS}')
+            groups += [ScriptGroup([w], run=None if w in fed else frozenset())
+                       for w in (strip_quotes(x) for x in cat_words if not x.startswith('-'))]
+        for m in HEADTAIL_RX.finditer(text):
             cat_words = (m.group(1) or m.group(2)).split()
             if len(cat_words) > MAX_ARGS:
                 raise TooManyArgs(f'cat: {len(cat_words)} szó, MAX_ARGS {MAX_ARGS}')
@@ -4820,6 +4919,7 @@ def script_paths(cmd, cwd, normalised=None, extra=(), live=None, git_cat=False, 
         return [''] * (MAX_SCRIPTS + 1)
     out = []
     tries = [0]
+    cur_run = [True]  # round 3: the word being resolved stands in a run position
 
     def resolve(c):
         """Add the existing regular files word c names; True if there was one. None: past MAX_TRIES. Raises
@@ -4881,6 +4981,8 @@ def script_paths(cmd, cwd, normalised=None, extra=(), live=None, git_cat=False, 
                 found = True
                 if real not in out:
                     out.append(real)
+                if cur_run[0] and run_out is not None and real not in run_out:
+                    run_out.append(real)
         return found
 
     def resolve_glob(v):
@@ -5010,25 +5112,28 @@ def script_paths(cmd, cwd, normalised=None, extra=(), live=None, git_cat=False, 
                 group = [group.first]  # its words are the message
             elif group.over:
                 raise TooManyArgs(group.over)
-            else:
-                group = [group.first] + group.rest
+            else:  # round 3: agent-msg.sh runs; its words are arguments
+                group = ScriptGroup([group.first] + group.rest, run=frozenset([group.first]))
         if isinstance(group, SourceGroup):
             first = False
+            cur_run[0] = True  # the sourced file runs
             for f in group.firsts:
                 r = resolve(f)
                 if r is None:
                     return [''] * (MAX_SCRIPTS + 1)
                 first = first or r
-            if first:  # bash runs it and hands it the rest
+            if first:  # bash runs it and hands it the rest (round 3: arguments, the main rules)
                 if group.over:
                     raise TooManyArgs(group.over)
-                group = group.rest
+                group = ScriptGroup(group.rest, run=frozenset())
             else:
                 group = []
         # every word, not "the words before the first file": `pushd x && node -r /abs/ok.js m.js` runs m.js too
         # (Viktor 41756 LOW 2); measured, that exception spared 33 of the replay's rows only
         lead = getattr(group, 'lead', ()) if getattr(group, 'expand', False) else ()
+        runs = getattr(group, 'run', None)
         for c in group:
+            cur_run[0] = runs is None or c in runs
             if (resolve_word(c, getattr(group, 'zsh', True)) if c in lead else resolve(c)) is None:
                 return [''] * (MAX_SCRIPTS + 1)
         if len(out) > MAX_SCRIPTS:
@@ -6132,31 +6237,23 @@ def script_hits(cmd, cwd):
     if None in bounds:
         return found + ['wrapper-unread']
     try:
-        cat_seen = []
-        paths = script_paths(cmd, cwd, text, pipe_words, pipe_live, cat_seen=cat_seen)
+        run_paths = []  # card 8d8298c7 round 3: the files of a run position, from the same walk
+        paths = script_paths(cmd, cwd, text, pipe_words, pipe_live, run_out=run_paths)
         for t in dict.fromkeys(bounds[:1] + texts[1:] + bounds[1:]):
             if t == text:
                 continue
-            paths +=[p for p in script_paths(cmd, cwd, t, cat_seen=cat_seen) if p not in paths]
+            paths += [p for p in script_paths(cmd, cwd, t, run_out=run_paths) if p not in paths]
     except TooManyArgs as e:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
         return found + [f'script-too-many-args ({e})']
     except PathUnread as e:  # card deede5e4: a script word the gate cannot look up is not "no file" (fail-closed)
         return found + [f'script-path-unread ({e})']
     if len(paths) > MAX_SCRIPTS:  # not "check the first ten": an eleventh file would slip past (fail-closed)
         return found + ['script-too-many']
-    # card 8d8298c7 round 2 (Viktor 50625): git's helper rules for a file the command runs or feeds to code; a file only
-    # a cat reads next to an interpreter elsewhere (a HANDOFF.md) keeps the main rules. The second walk only when a cat
-    # added words (cat_seen); else every file is a run one
-    git_paths = paths
-    if cat_seen:  # a cat added words in the first walk (scanning every text here again doubled big inputs)
-        try:
-            git_paths = script_paths(cmd, cwd, text, pipe_words, pipe_live, git_cat=True)
-            for t in dict.fromkeys(bounds[:1] + texts[1:] + bounds[1:]):
-                if t == text:
-                    continue
-                git_paths += [p for p in script_paths(cmd, cwd, t, git_cat=True) if p not in git_paths]
-        except (TooManyArgs, PathUnread):  # the first walk read them: unreachable, but never fewer rules
-            git_paths = paths
+    # card 8d8298c7 rounds 2-3 (Viktor 50625, 50674): git's helper rules for a file the command RUNS or feeds to code
+    # (run_paths: the script operand, a preload / rc file, source, a redirect, a fed cat, a pipe word, a direct path);
+    # a file only read next to an interpreter (a cat elsewhere) or handed to a script as its argument (a report, a
+    # HANDOFF.md, a word of a quoted message) keeps the main rules (Known limit git-rules-on-argument-files)
+    git_paths = run_paths
     budget = script_budget()
     for path in paths:
         if time.monotonic() - T0 > budget:  # not "allow the rest": a timed-out hook would not block either
