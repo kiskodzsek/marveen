@@ -74,9 +74,18 @@ Rules:
    csináld, persze, rendben, hajrá, pontosan) that is not negated and does not end a question.
    A question of fact is a request (card 8dd5c726, is_idea): "?" with mekkora, mennyi, mikor, hol, ...
    and no idea mark, conditional or choice form ("mennyiért adjuk?", "mennyit érne?" stay ideas).
-   Known limit info-question-word-list: a question word off the list stays an idea; a plain question of
-   fact meant as an idea ("milyen színű a borító?") passes as a request (Klodel's Kérés-kapu checks the
-   brief); -ja/-je ("ki vigye?") is no choice form. Pinned: agent-msg-send-gate.test.sh, "known limit".
+   Known limits, by name: info-question-word-list, imperative-3sg-definite, imperative-2sg-short-d,
+   hat-het, modal-infinitive, comparative, indicative-decision (pinned: agent-msg-send-gate.test.sh,
+   "known limit", one row each). info-question-word-list: a question word off the list stays an idea;
+   a plain question of fact meant as an idea ("milyen színű a borító?") passes as a request (Klodel's
+   Kérés-kapu checks the brief). The choice is a verb form, so a decision asked in other words passes as
+   a request too (Viktor 50775; measured: in Patrik's 30 days these shapes ask facts, "hol lehet
+   szerkeszteni?", "mennyi kell utalni?"): imperative-3sg-definite -ja/-je ("ki vigye?", the indicative
+   of most fact questions); imperative-2sg-short-d, -d after a consonant other than d s z gy ts ("kérd",
+   "csináld"; "mi a gond?" has the same shape); hat-het, a -hat/-het verb ("mennyiért adhatom el?");
+   modal-infinitive, kell / lehet / szabad / illik with an infinitive ("melyik verziót lehet kiküldeni?");
+   comparative ("melyik a jobb?", "melyik éri meg?", "mi a legjobb ár?"); indicative-decision ("melyik
+   borítóval indulunk?").
    The message_id alone is ambiguous (measured: private and group chat both hold ids 10-999), so any
    ledger row with that id counts, but the IGEN must be in the chat where the quote was found.
    Measured 2026-11-13 on 30 days of Klodel's messages (9495): 752 hand out work, 623 of them name a
@@ -430,11 +439,23 @@ INFO_QUESTION = re.compile(_B + r'(?:mekkora|mennyi(?:be|t|re|ert|vel)?|hany(?:a
 # Both over-catch: the dative and adessive -nak/-nek, -nál/-nél ("a csomagnak", "a gépnél"), the indicative
 # "csináljuk" (we do it), a noun such as "hegyen", "hajón", "színe". An over-caught fact question stays an idea and
 # wants an IGEN, the side the rule had before this card (Viktor 50740: "A túlfogás ... ötlet marad, az a régi,
-# biztonságos oldal"). Not caught: the 3rd person definite imperative -ja/-je ("ki vigye?") and the bare -j
-# ("csinálj"): -ja/-je is the indicative of most fact questions ("hol tartja?"); Known limit in the module header.
+# biztonságos oldal"). Not caught: the 3rd person definite imperative -ja/-je ("ki vigye?"): it is the indicative of
+# most fact questions ("hol tartja?"); Known limit imperative-3sg-definite in the module header.
+# Round 3 (Viktor 50775: 2nd person singular, -ddz, a one-letter stem read as requests): the choice also takes
+# - the 2nd person singular long forms -jál/-jél, -jad/-jed ("kérjél", "küldjed"; also after the assimilated signs);
+# - the assimilated sign -ddz of a stem in -dz ("eddzük") and a one-letter stem before -j, -gy, -ddz ("igyunk",
+#   "együnk");
+# - the bare short forms: a consonant + -j ("kérj", "adj", "csinálj") and -dd, -sd, -zd, -gyd ("küldd", "tedd",
+#   "fizesd", "hozd", "hagyd"); -tsd ("tanítsd") ends in -sd (round-3 mutation: a -tsd alternative was equivalent).
+# Measured on the 129 '?' sentences of Patrik's 30 days that round 2 reads as requests (work/keres-info-1123/r3/
+# variants.py): the long forms turn 2 into ideas (the instrumental -ssal/-zzel: "prototípussal", "eszközzel"), -dd 1
+# ("group add"), the rest 0. The short -d after any other consonant ("kérd", "csináld") would turn 4 ("mi a gond?",
+# "majd"): Known limit imperative-2sg-short-d in the module header.
 CONDITIONAL = re.compile(_B + r'(?:volna|[a-z]{2,}n(?:a|e|ak|ek|am|em|al|el|ad|ed|atok|etek))'
                          r'(?![a-z0-9])')
-CHOICE = re.compile(_B + r'[a-z]{2,}(?:j|zz|ssz|ss|gy|ts)(?:uk|unk|onk|enk|ak|ek|am|em|on|en|atok|etek)'
+CHOICE = re.compile(_B + r'(?:(?:[a-z]{2,}(?:zz|ssz|ss|ts)|[a-z]+(?:j|gy|ddz))'
+                    r'(?:uk|unk|onk|enk|ak|ek|am|em|on|en|atok|etek|al|el|ad|ed)'
+                    r'|[a-z]*[bcdfghklmnpqrstvwxyz]j|[a-z]+(?:dd|sd|zd|gyd))'
                     r'(?![a-z0-9])')
 
 

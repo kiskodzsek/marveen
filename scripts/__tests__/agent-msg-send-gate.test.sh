@@ -132,6 +132,28 @@ rows = [
     ('111', '18114', 'in', 'Mikor küldjétek el a levelet?', 9910),
     ('111', '18111', 'in', 'Milyen színű a borító most?', 9810),
     ('111', '18112', 'in', 'Hova vigye a futár a csomagot?', 9820),
+    ('111', '18115', 'in', 'Mennyit kérj érte?', 9920),
+    ('111', '18116', 'in', 'Mennyit kérjél érte?', 9930),
+    ('111', '18117', 'in', 'Melyik képet küldd ki?', 9940),
+    ('111', '18118', 'in', 'Melyik képet küldjed ki?', 9950),
+    ('111', '18119', 'in', 'Hova tedd a logót?', 9960),
+    ('111', '18120', 'in', 'Mikor fizesd ki a nyomdát?', 9970),
+    ('111', '18121', 'in', 'Mikor eddzük be a modellt?', 9980),
+    ('111', '18122', 'in', 'Milyen bort igyunk a bemutatón?', 9990),
+    ('111', '18123', 'in', 'Hol együnk az egyeztetés után?', 10000),
+    ('111', '18124', 'in', 'Mikor hozd ki az új terméket?', 10010),
+    ('111', '18125', 'in', 'Melyik képet hagyd ki?', 10020),
+    ('111', '18126', 'in', 'Mikor tanítsd be az ügynököt?', 10030),
+    ('111', '18127', 'in', 'Mennyit adj érte?', 10040),
+    ('111', '18128', 'in', 'Hány darabot fizessél ki?', 10050),
+    ('111', '18129', 'in', 'Mikor csináld meg a borítót?', 10060),
+    ('111', '18130', 'in', 'Mennyiért adhatom el?', 10070),
+    ('111', '18131', 'in', 'Melyik verziót lehet kiküldeni?', 10080),
+    ('111', '18132', 'in', 'Melyik a jobb borító?', 10090),
+    ('111', '18133', 'in', 'Melyik borítóval indulunk?', 10100),
+    ('111', '18134', 'in', 'Mennyit adjál érte?', 10110),
+    ('111', '18135', 'in', 'Hova rakjad a logót?', 10120),
+    ('111', '18136', 'in', 'Hány darabot csinálj belőle?', 10130),
 ]
 con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
                 "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
@@ -608,14 +630,40 @@ KERES-SZO-SZERINT: \"$q\" (TG $tg)"
   ok "keres r2: choice/conditional stays an idea, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
   ok "keres r2: the refusal is the IGEN one ($tg)" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
 done
-# known limit info-question-word-list (msg_gate.py header): a plain question of fact meant as an idea, and the -ja/-je
-# imperative, pass as requests; pinned so a change of either side is seen
+# known limits info-question-word-list and imperative-3sg-definite (msg_gate.py header): a plain question of fact meant
+# as an idea, and the -ja/-je imperative, pass as requests; pinned so a change of either side is seen
 for pair in '18111|Milyen színű a borító most' '18112|Hova vigye a futár a csomagot'; do
   tg="${pair%%|*}"; q="${pair#*|}"
   text "$WO
 KERES-SZO-SZERINT: \"$q\" (TG $tg)"
   run klodel dave
   ok "keres r2: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+done
+# card 8dd5c726 round 3 (Viktor 50775: 2nd person singular, -ddz, a one-letter stem read as requests): the long and
+# the bare short 2nd person singular, -ddz and a one-letter stem before -gy stay ideas, one row per shape
+for pair in '18115|Mennyit kérj érte' '18116|Mennyit kérjél érte' '18117|Melyik képet küldd ki' \
+            '18118|Melyik képet küldjed ki' '18119|Hova tedd a logót' '18120|Mikor fizesd ki a nyomdát' \
+            '18121|Mikor eddzük be a modellt' '18122|Milyen bort igyunk a bemutatón' \
+            '18123|Hol együnk az egyeztetés után' '18124|Mikor hozd ki az új terméket' \
+            '18125|Melyik képet hagyd ki' '18126|Mikor tanítsd be az ügynököt' '18127|Mennyit adj érte' \
+            '18128|Hány darabot fizessél ki' '18134|Mennyit adjál érte' '18135|Hova rakjad a logót' \
+            '18136|Hány darabot csinálj belőle'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r3: choice stays an idea, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres r3: the refusal is the IGEN one ($tg)" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# known limits imperative-2sg-short-d, hat-het, modal-infinitive, comparative, indicative-decision (msg_gate.py header,
+# Viktor 50775): a decision asked in other words than a choice form passes as a request; pinned, one row each
+for pair in '18129|Mikor csináld meg a borítót' '18130|Mennyiért adhatom el' '18131|Melyik verziót lehet kiküldeni' \
+            '18132|Melyik a jobb borító' '18133|Melyik borítóval indulunk'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r3: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
 done
 # Viktor 41430 INFO 1: a ledger path with ? # % keeps mode=ro and opens the right file; the connection is read-only
 mkdir -p "$SANDBOX/a?b#c%d" && cp "$SANDBOX/ledger.db" "$SANDBOX/a?b#c%d/ledger.db"
