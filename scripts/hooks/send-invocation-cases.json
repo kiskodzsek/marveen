@@ -1286,6 +1286,176 @@
       "name": "KNOWN-LIMIT (Viktor 50403 L1-L3, old: main and the round 4 head miss it too): eval-ansic",
       "cmd": "eval $'sendmail a@b.hu'",
       "expected": false
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): a command substitution inside double quotes runs",
+      "cmd": "echo \"$(sendmail a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): in a quoted assignment value",
+      "cmd": "y=\"$(sendmail a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): a backtick inside double quotes",
+      "cmd": "x \"`sendmail a@b.hu`\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): in [[ ]]",
+      "cmd": "[[ \"$(sendmail a@b.hu)\" ]]",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): in a here-string",
+      "cmd": "x <<< \"$(sendmail a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): in a ${x:-...} default inside double quotes",
+      "cmd": "echo \"${x:-$(sendmail a@b.hu)}\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): an apostrophe inside double quotes opens nothing",
+      "cmd": "echo \"it's $(sendmail a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): a quoted ) inside the substitution closes nothing",
+      "cmd": "echo \"$(echo ')'; sendmail a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): a ) in a comment inside the substitution closes nothing",
+      "cmd": "echo \"$(true # c )\nsendmail a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): five nested backtick levels in double quotes: past the depth bound the sender name counts",
+      "cmd": "true \"`true \\\"\\`true \\\\\\\"\\\\\\`true \\\\\\\\\\\\\\\"\\\\\\\\\\\\\\`true \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\`sendmail a@b.hu\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\`\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\"\\\\\\\\\\\\\\`\\\\\\\\\\\\\\\"\\\\\\`\\\\\\\"\\`\\\"`\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): a nested backtick after bash's backslash removal",
+      "cmd": "echo \"`echo \\`sendmail a@b.hu\\``\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): in a heredoc body under an unquoted delimiter",
+      "cmd": "cat <<E\n$(sendmail a@b.hu)\nE",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): a backtick in a heredoc body",
+      "cmd": "cat <<E\n`sendmail a@b.hu`\nE",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): an apostrophe in a heredoc body is a literal",
+      "cmd": "cat <<E\nit's $(sendmail a@b.hu)\nE",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): control: inside single quotes nothing runs",
+      "cmd": "echo 'a \"$(sendmail a@b.hu)\" b'",
+      "expected": false
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): control: an escaped $( is text",
+      "cmd": "echo \"\\$(sendmail a@b.hu)\"",
+      "expected": false
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): control: a heredoc body under a quoted delimiter expands nothing",
+      "cmd": "cat <<'E'\n$(sendmail a@b.hu)\nE",
+      "expected": false
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): control: a message quoting substitutions in a quoted heredoc",
+      "cmd": "bash tools/kernel-msg.sh x - <<'MSG'\nquoted: echo \"$(sendmail a@b.hu)\" and `sendmail a@b.hu`\nMSG",
+      "expected": false
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): control: a harmless substitution in a header",
+      "cmd": "curl -H \"Authorization: Bearer $(cat t)\" http://x/y",
+      "expected": false
+    },
+    {
+      "name": "SENDEMPTY1123 (card e00a44b0): an unset variable before the command word",
+      "cmd": "$x sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDEMPTY1123 (card e00a44b0): a braced one",
+      "cmd": "${x} sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDEMPTY1123 (card e00a44b0): two joined",
+      "cmd": "$x$y sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDEMPTY1123 (card e00a44b0): after an assignment and a redirect",
+      "cmd": "x=1 $y >/dev/null sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "SENDEMPTY1123 (card e00a44b0): control: an expansion as an argument",
+      "cmd": "echo $x sendmail a@b.hu",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (card e00a44b0, old: main misses it too): sq-default-word",
+      "cmd": "${x:-sendmail} a@b.hu",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (card e00a44b0, zsh and bash 5 run the send, bash 3.2 does not): sq-case-pattern",
+      "cmd": "echo \"$(case x in x) sendmail a@b.hu;; esac)\"",
+      "expected": false
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0, Viktor 50993): the fleet mail client in a quoted assignment",
+      "cmd": "y=\"$(npx tsx /Users/klodel/marveen/scripts/graph-mail.ts send --to a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0, Viktor 50993): in an export value",
+      "cmd": "export Y=\"$(msmtp a@b.hu)\"",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0, Viktor 50993): in a local value inside a function",
+      "cmd": "f(){ local y=\"$(msmtp a@b.hu)\"; }; f",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0, Viktor 50993): in an array element",
+      "cmd": "a=(\"$(msmtp a@b.hu)\")",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0, Viktor 50993): in a case word",
+      "cmd": "case \"$(msmtp a@b.hu)\" in *) ;; esac",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0, Viktor 50993): in a [ -n ] test",
+      "cmd": "[ -n \"$(msmtp a@b.hu)\" ]",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0, Viktor 50993): in a for list",
+      "cmd": "for i in \"$(msmtp a@b.hu)\"; do :; done",
+      "expected": true
+    },
+    {
+      "name": "SENDQSUB1123 (card e00a44b0): a $( ) inside quotes inside the body is followed, so its ) closes nothing outside",
+      "cmd": "echo \"$(echo \"$(echo \")\")\" ; msmtp a@b.hu)\"",
+      "expected": true
     }
   ]
 }
