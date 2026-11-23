@@ -5551,7 +5551,8 @@ def lexer_data_spans(cmd, cwd, lx):
         # (a heredoc's `end` is past its terminator line's newline: that newline is the join)
         if prev_end and not (STEP_SEP_RX.fullmatch(sep) or (cmd[prev_end - 1] == '\n' and not sep.strip(' \t\n'))):
             break
-        if prev_end and sep.strip(' \t\n') != '&&':
+        join = sep.strip(' \t\n') if prev_end else ''
+        if prev_end and join != '&&':
             here = None if here is None or back is None else here | back
             back = set()
         hs = [h for h in lx['heredocs'] if seg['start'] <= h['op'] < seg['end']]
@@ -5575,12 +5576,19 @@ def lexer_data_spans(cmd, cwd, lx):
         if STEP_RX.fullmatch(text):
             if text.startswith('cd'):
                 target = text.split()[1]
+                was = here
                 back = None if back is None or here is None else back | here
                 # r2 (Viktor 50201 R1): bash's and zsh's cd is logical, a `..` steps back past a symlink (E/L/.. is E,
                 # not L's target's parent): the target as written (normpath) and the physical one (realpath in
                 # _agent_msg_is_ours) both, and the recipient must be ours from each (as cd_bases, deede5e4 r1 R1)
                 here = (None if not target.startswith('/') else
                         {os.path.normpath(target), target} if '..' in target.split('/') else {target})
+                # r3 (Viktor 50321 R2, fail-open since r1): after || the cd may not run (`true || cd /repo && x`: x
+                # runs where the shell was), after | it runs in a subshell in bash (zsh: in this shell): the shell
+                # may be in the old place or in the target, so the recipient must be ours from each; not known
+                # before = not known after
+                if '|' in join:  # ||, |, |&
+                    here = None if here is None or was is None else here | was
             continue
         if ONE_LETTER_ASSIGN_RX.match(text) and len(shell_lex.words(cmd, lx, seg)) == 1:
             continue
