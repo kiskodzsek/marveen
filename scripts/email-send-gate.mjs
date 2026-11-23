@@ -82,7 +82,119 @@ const SEND_PATTERNS = [
 // is KEPT -- only the body is cut. Without this, marker-first spellings
 // leaked the body into command position (FP), and dropping the intro
 // would have lost a heredoc-fed real sender (FN).
-const HEREDOC_RE = /(<<-?\s*'?(\w+)'?[^\n]*)\n[\s\S]*?\n\2(?=\s|$)/g
+export const HEREDOC_RE = /(<<-?\s*'?(\w+)'?[^\n]*)\n[\s\S]*?\n\2(?=\s|$)/g
+// LOOSELIN1122 (card bbc6bad4): cmd.replace(HEREDOC_RE, '$1') is quadratic on unclosed openers (the lazy body scans
+// from every opener to the end; main as well: 8000 "x <<Q<i>" lines 0.5 s, x4 per doubling, 120 000 past the hook
+// timeout). looseHeredocCut returns the SAME text in linear time: delimiter lines indexed once, a bisect per opener,
+// the \w+ group's backtracking to shorter words tried longest first. Rationale at _LOOSE_OPEN in
+// outgoing-copy-gate.py; send-heredoc-strict.test.ts compares it with HEREDOC_RE on generated strings.
+const LOOSE_OPEN_RE = /<<-?\s*'?(\w+)/g
+const LOOSE_END_RE = /\n(\w+)(?=\s|$)/g
+export function looseHeredocCut(cmd) {
+  const ends = new Map()
+  for (const m of cmd.matchAll(LOOSE_END_RE)) {
+    const at = m.index + 1
+    const list = ends.get(m[1])
+    if (list) list.push(at)
+    else ends.set(m[1], [at])
+  }
+  const lens = [...new Set([...ends.keys()].map((w) => w.length))].sort((a, b) => b - a)
+  let out = ''
+  let last = 0
+  let nl = -1
+  const open = new RegExp(LOOSE_OPEN_RE.source, 'g')
+  for (;;) {
+    const m = open.exec(cmd)
+    if (m === null) break
+    const wordEnd = m.index + m[0].length
+    if (nl < wordEnd) {
+      // reuse the newline found for an earlier opener on this line (many openers, one long line)
+      nl = cmd.indexOf('\n', wordEnd)
+      if (nl < 0) break // no newline left: no later opener can match either
+    }
+    let stop = -1
+    const word = m[1]
+    for (const n of lens) {
+      if (n > word.length) continue
+      const qs = ends.get(word.slice(0, n))
+      if (!qs) continue
+      let lo = 0
+      let hi = qs.length
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (qs[mid] < nl + 2) lo = mid + 1
+        else hi = mid
+      }
+      if (lo < qs.length) { stop = qs[lo] + n; break }
+    }
+    if (stop < 0) { open.lastIndex = m.index + 1; continue }
+    out += cmd.slice(last, nl)
+    last = stop
+    open.lastIndex = stop
+  }
+  return out + cmd.slice(last)
+}
+// HDSTRICT1122 (card bbc6bad4, Viktor 50205 / 50220): HEREDOC_RE can drop a command bash RUNS (an empty body, a
+// here-string, an opener inside quotes, a <<- body with a tab-led end). isSendInvocation is (loose cut) OR (strict
+// cut): the strict cut drops a body only where bash surely reads one, and in every doubtful case cuts nothing, so its
+// error leans to a deny (kind 'heredoc-strict', whose message gives the way out: the text from a file). Full rationale
+// and Known limits at _STRICT_OPEN in outgoing-copy-gate.py (the python twin); send-invocation-cases.json binds them.
+// Known limits of THIS twin: the opener-comment case the python twin misses, the JS twin SEES (its tokenizer has no
+// comment handling, so the next line's send stays a segment of its own; pinned in send-heredoc-strict.test.ts); a
+// backslash-newline at the start of a line the JS twin does NOT read as a line join (main as well: an old twin
+// divergence, card e00a44b0).
+const STRICT_OPEN_RE = /(?<![<\w])<<(-?)[ \t]*(['"]?)(\w+)\2(?=[ \t;&|)<>]|$)[^\n]*(?:\n|$)/gm
+
+function strictPrefixOk(prefix) {
+  let q = null
+  let depth = 0
+  let bt = false
+  let prev = ' '
+  for (let i = 0; i < prefix.length; i++) {
+    const ch = prefix[i]
+    if (q === "'") {
+      if (ch === "'") q = null
+    } else if (q === '"') {
+      if (ch === '\\') i++
+      else if (ch === '"') q = null
+      else if (ch === '`') bt = !bt
+      else if (ch === '$' && prefix[i + 1] === '(') { depth++; i++ }
+    } else if (ch === '\\') i++
+    else if (ch === "'" || ch === '"') q = ch
+    else if (ch === '#' && ' \t;&|()'.includes(prev)) return false
+    else if (ch === '`') bt = !bt
+    else if (ch === '(') depth++
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    prev = ch
+  }
+  return q === null && depth === 0 && !bt
+}
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+export function strictHeredocCut(cmd) {
+  let out = ''
+  let pos = 0
+  for (;;) {
+    STRICT_OPEN_RE.lastIndex = pos
+    const m = STRICT_OPEN_RE.exec(cmd)
+    if (!m) return out + cmd.slice(pos)
+    const opener = m[0]
+    const mEnd = m.index + opener.length
+    const lineStart = cmd.lastIndexOf('\n', m.index - 1) + 1
+    if (!opener.endsWith('\n') || opener.endsWith('\\\n') || !strictPrefixOk(cmd.slice(lineStart, m.index))) {
+      out += cmd.slice(pos, mEnd)
+      pos = mEnd
+      continue
+    }
+    const endRe = new RegExp('^' + (m[1] ? '\\t*' : '') + escapeRe(m[3]) + '$', 'gm')
+    endRe.lastIndex = mEnd
+    const end = endRe.exec(cmd)
+    if (!end) return out + cmd.slice(pos) // unclosed: bash reads the rest as this body; cut nothing, stop
+    out += cmd.slice(pos, mEnd - 1)
+    pos = end.index + end[0].length
+  }
+}
 const ENV_ASSIGN = /^[A-Za-z_][A-Za-z_0-9]*=/
 // KWSPLIT924: shell reserved words that put the NEXT word in command position.
 // Stripped only at the head of a segment, never used as separators -- see the
@@ -129,8 +241,8 @@ export function maskSubshellMarkers(cmd) {
 
 // Quote-aware tokenizer -> [[token, ...], ...] per segment. Throws on an
 // unbalanced quote (the caller falls back to the legacy content patterns).
-export function segmentsTokens(cmd) {
-  const s = maskSubshellMarkers(cmd.replace(HEREDOC_RE, '$1'))
+export function segmentsTokens(cmd, strict = false) {
+  const s = maskSubshellMarkers(strict ? strictHeredocCut(cmd) : looseHeredocCut(cmd))
   const segments = []
   let cur = []
   let tok = ''
@@ -270,7 +382,7 @@ export function buildWrapperDepthMsg() {
   )
 }
 
-export function isSendInvocation(cmd, depth = 0) {
+function looseSendInvocation(cmd, depth = 0) {
   let segments
   try {
     segments = segmentsTokens(cmd)
@@ -280,6 +392,33 @@ export function isSendInvocation(cmd, depth = 0) {
     return SEND_PATTERNS.some((re) => re.test(cmd))
   }
   return segments.some((toks) => segmentIsSend(toks, depth))
+}
+
+// HDSTRICT1122: the strict heredoc cut alone (see STRICT_OPEN_RE). A parse error of the strict text falls back like
+// the loose pass (the legacy patterns): a deny, never a miss.
+export function sendOnlyByStrictHeredoc(cmd, depth = 0) {
+  if (!cmd.includes('<<')) return false
+  let segments
+  try {
+    segments = segmentsTokens(cmd, true)
+  } catch {
+    return SEND_PATTERNS.some((re) => re.test(cmd))
+  }
+  return segments.some((toks) => segmentIsSend(toks, depth))
+}
+
+export function isSendInvocation(cmd, depth = 0) {
+  return looseSendInvocation(cmd, depth) || sendOnlyByStrictHeredoc(cmd, depth)
+}
+
+export function buildHeredocStrictMsg() {
+  return (
+    'TILTVA (governance hard-gate): a parancs egyik heredoc-torzseben egy sor levelkuldesnek latszik, es a kapu nem ' +
+    'tudja biztosan, hogy a bash torzskent olvassa-e (ures torzs, here-string, idezojelben vagy $( )-ben allo nyito, ' +
+    'backslash-es sorveg, lezaratlan torzs), ezert fail-closed. Ha ez szoveg, NEM kuldes: ird a szoveget fajlba ' +
+    '(Write), es onnan add at, ne heredocbol. Ha levelkuldes: sub-agentkent Bash-bol amugy sem kuldhetsz, a kimeno ' +
+    'emailt a fo-agens kuldi.'
+  )
 }
 
 // Outbound-shaped operations of the multiplexed manage_email tool. Each of
@@ -440,7 +579,10 @@ export function gateDecision(toolName, toolInput, isVerified = null) {
   }
   if (name === 'Bash') {
     const cmd = String(toolInput?.command ?? '')
-    if (isSendInvocation(cmd)) return wrapperDepthHit(cmd) ? { deny: true, kind: 'wrapper-depth' } : { deny: true }
+    if (isSendInvocation(cmd)) {
+      if (wrapperDepthHit(cmd)) return { deny: true, kind: 'wrapper-depth' }
+      return looseSendInvocation(cmd) ? { deny: true } : { deny: true, kind: 'heredoc-strict' }
+    }
   }
   return { deny: false }
 }
@@ -695,6 +837,7 @@ if (isInvokedDirectly()) {
     if (kind === 'unverified-recipient') deny(buildUnverifiedRecipientMsg(addresses ?? []))
     if (kind === 'draft-required') deny(buildDraftOnlyMsg(ownerName))
     if (kind === 'wrapper-depth') deny(buildWrapperDepthMsg())
+    if (kind === 'heredoc-strict') deny(buildHeredocStrictMsg())
     // Thread-scoped narrowing: only when the scaffold wired this agent's hook
     // command with the flag (capability-driven, regenerated on every spawn),
     // and only for the direct send_email tool. Bash send routes and

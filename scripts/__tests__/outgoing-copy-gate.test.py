@@ -414,6 +414,188 @@ def main():
                                                 tool="mcp__outlook__send-mail"), rules_file=active)
         check("renamed server send-mail with em dash blocks (exit 2)", code, 2)
 
+        # --- bbc6bad4 round 3 (Viktor 50311 I1): rows his surviving mutants asked for --------------------------
+        def bash(cmd):
+            return {"tool_name": "Bash", "tool_input": {"command": cmd}}
+        snd = "send" + "mail"
+        # E15: every heredoc body of a send is audited, not only the first one (a mutant that kept the first body
+        # alone let the em dash of the second through).
+        two = (f"{snd} -t a@b.hu <<'A'\n{CLEAN_HU_OK}\nA\n"
+               f"{snd} -t c@d.hu <<'B'\n{CLEAN_HU_OK} — mégis.\nB")
+        code, out, err = run_hook(bash(two), rules_file=active)
+        check("E15: the em dash only in the SECOND heredoc body of a send blocks (exit 2)", code, 2)
+        code, out, err = run_hook(bash(two.replace(" — mégis.", "")), rules_file=active)
+        check("E15: both bodies clean passes (exit 0)", code, 0)
+        ia = "curl -s -X POST http://localhost:3420/api/messages -H 'Content-Type: application/json' --data-binary @- "
+        # C07: an UNQUOTED heredoc body with a shell substitution is not read as the message (the shell rewrites it
+        # first): a loud pass naming the reason, not a silent homoglyph check of the raw text.
+        code, out, err = run_hook(bash(ia + '<<JSON\n{"from":"kernel","to":"klodel","content":"$(date) ok"}\nJSON'),
+                                  rules_file=active)
+        check("C07: unquoted heredoc + substitution on /api/messages passes (exit 0)", code, 0)
+        check_true("C07: ... and says why (NEM idezett)", "NEM idezett" in out, out)
+        code, out, err = run_hook(bash(ia + "<<'JSON'\n{\"from\":\"kernel\",\"to\":\"klodel\",\"content\":\"$(date) ok\"}\nJSON"),
+                                  rules_file=active)
+        check_true("C07: the QUOTED heredoc with the same text is read (no warning)", "NEM idezett" not in out, out)
+        # C04: an empty heredoc body is a body (invalid JSON), not "no heredoc".
+        code, out, err = run_hook(bash(ia + "<<'JSON'\n\nJSON"), rules_file=active)
+        check_true("C04: an empty heredoc body is reported as invalid JSON, not as a missing heredoc",
+                   "nem ervenyes JSON" in out and "heredoc nelkul" not in out, out)
+
+        # --- LONGTOK1122 (Viktor 50311 B1): a token run past 32 KiB, the whole hook process -------------------
+        # The approval gate's hook timeout is 10 s and a timed-out hook lets the command through; on the previous
+        # head 'sendmail a@b.hu ' + 1 MB of 'w' took 9.1 s in is_send_invocation alone, and the echo shape 12.7 s
+        # through the HTTP and inter-agent arms. 10 s of wall time per process is the acceptance bound (measured
+        # 0.03-0.27 s on the fixed head); 4 s of the hook's own CPU (RUSAGE_CHILDREN) is the regression guard: one arm
+        # left unbounded burns 6-9 s of CPU on the 1 MB shapes (Viktor 50318 I1: CPU time grows under load 6-10 too).
+        import resource as _resource
+        import time as _time
+        w1m = "w" * 1_000_000
+        long_rows = [
+            ("send + 1 MB word blocks (unreadable body)", f"{snd} a@b.hu {w1m}", 2, None),
+            ("echo + 1 MB word passes", "echo " + w1m, 0, None),
+            ("echo + 1 MB quoted string with spaces passes", "echo '" + "w " * 500_000 + "'", 0, None),
+            ("Telegram API + 40 KB token fails closed", "curl -s https://api.telegram.org/botX/sendMessage -d 'text="
+             + "w" * 40_000 + "'", 2, "api.telegram.org"),
+            ("/api/messages + 40 KB token + lookalike blocks", ia.replace("--data-binary @- ", "-d '")
+             + '{"content":"' + "w " * 40_000 + " kаrtya\"}'", 2, "homoglifa"),
+            # round 6 (Viktor 50350, Klodel 50352): the inter-agent arm fails closed past the bound
+            ("/api/messages + 40 KB clean token fails closed", ia.replace("--data-binary @- ", "-d '")
+             + '{"content":"' + "w " * 40_000 + "\"}'", 2, "KiB-nal hosszabb"),
+            # Viktor 50318 B2: the shell removes the quotes, so a split target is the target; the literals of the
+            # long-token arms are searched on a dequoted copy
+            ("split /api/messages + 40 KB token + lookalike blocks",
+             "curl -s -X POST localhost:3420/api/mess''ages -d '{\"content\":\"p\u0430ss\"}' " + "x" * 40_000,
+             2, "homoglifa"),
+            ("split Telegram API + 40 KB token fails closed",
+             "curl -s https://api.tele''gram.org/botX/sendMessage -d 'text=" + "w" * 40_000 + "'", 2, "api.telegram.org"),
+            ("/api/messages + 40 KB token + a lookalike only the shell joins (p, a, ss split by quotes)",
+             'curl -s -X POST localhost:3420/api/messages -H x p""\u0430""ss ' + "x" * 40_000, 2, "homoglifa"),
+            ("split /api/messages + lookalike, no long token (control: the exact reading)",
+             "curl -s -X POST localhost:3420/api/mess''ages -d '{\"content\":\"p\u0430ss\"}'", 2, "homoglifa"),
+        ]
+        for name, cmd, want, needle in long_rows:
+            ru0 = _resource.getrusage(_resource.RUSAGE_CHILDREN)
+            t0 = _time.perf_counter()
+            code, out, err = run_hook(bash(cmd), rules_file=active)
+            wall = _time.perf_counter() - t0
+            ru1 = _resource.getrusage(_resource.RUSAGE_CHILDREN)
+            cpu = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
+            check(f"LONGTOK1122: {name}", code, want)
+            check_true(f"LONGTOK1122: {name} -- under 10 s", wall < 10, f"{wall:.2f} s")
+            check_true(f"LONGTOK1122: {name} -- under 4 s of hook CPU", cpu < 4, f"{cpu:.2f} s")
+            if needle:
+                check_true(f"LONGTOK1122: {name} -- names {needle}", needle in err, err[:200])
+
+        # --- LONGTOK1122 round 6 (Viktor 50330 R1, 50350 R1a/R1b): what main reads and the long arm cannot -------
+        # Next to a long token every /api/messages command fails closed, whatever shape the body has; without the token
+        # (the control) the short arm reads it as main does. The way out the message names (a heredoc or an @file)
+        # passes a clean 40 KB body and blocks a lookalike in it: the bound does not count a heredoc body.
+        lk = os.path.join(tmp, "r6-lookalike.json")
+        with open(lk, "w", encoding="utf-8") as fh:
+            fh.write('{"to":"klodel","content":"p\u0430trik"}')
+        os.makedirs(os.path.join(tmp, "r6 sp"), exist_ok=True)
+        lk_sp = os.path.join(tmp, "r6 sp", "body.json")
+        with open(lk_sp, "w", encoding="utf-8") as fh:
+            fh.write('{"to":"klodel","content":"p\u0430trik"}')
+        big_clean = os.path.join(tmp, "r6-big-clean.json")
+        with open(big_clean, "w", encoding="utf-8") as fh:
+            fh.write('{"to":"klodel","content":"' + "w" * 40_000 + '"}')
+        h = "curl -s -X POST localhost:3420/api/messages -H 'Content-Type: application/json' "
+        jesc = "\\u0430"  # a JSON escape in the command text: six ASCII characters
+        r6_rows = [
+            ("inline -d with a JSON-escaped lookalike", h + "-d '{\"content\":\"p" + jesc + "trik\"}'", 2),
+            ("@file with a lookalike", h + "--data-binary @" + lk, 2),
+            ("@- heredoc with a JSON-escaped lookalike", h + "--data-binary @- <<'JSON'\n{\"content\":\"p" + jesc
+             + "trik\"}\nJSON", 2),
+            ("inline lookalike next to a decoy unreadable @ref", h + "-d '{\"content\":\"p\u0430trik, lasd -d @/nope/m.json\"}'",
+             2),
+            ("double-quoted @path with a space", h + "--data-binary \"@" + lk_sp + "\"", 2),
+            ("clean inline body", h + "-d '{\"content\":\"patrik\"}'", 0),
+        ]
+        for name, cmd, ctl in r6_rows:
+            for pad_name, pad in (("40 000 character token", " -H 'X-Pad: " + "x" * 40_000 + "'"),
+                                  ("32 769 character token", " -H X-Pad:" + "x" * (32_769 - 6)),
+                                  ("no long token (control)", "")):
+                full = cmd.replace(" -H 'Content-Type", pad + " -H 'Content-Type", 1) if pad else cmd
+                code, out, err = run_hook(bash(full), rules_file=active)
+                want = ctl if not pad else 2
+                check(f"LONGTOK1122 r6: {name}, {pad_name}", code, want)
+                if pad:
+                    check_true(f"LONGTOK1122 r6: {name}, {pad_name} -- names the bound", "KiB-nal hosszabb" in err,
+                               err[:200])
+        # the bound itself: 32 768 characters is still read (the short arm), 32 769 fails closed
+        code, out, err = run_hook(bash(h + "-d '{\"content\":\"patrik\"}' -H X-Pad:" + "x" * (32_768 - 6)),
+                                  rules_file=active)
+        check("LONGTOK1122 r6: a 32 768 character token is still read (clean passes)", code, 0)
+        # the way out the message names
+        code, out, err = run_hook(bash(h + "--data-binary @- <<'JSON'\n{\"content\":\"" + "w" * 40_000
+                                       + "\"}\nJSON"), rules_file=active)
+        check("LONGTOK1122 r6: a heredoc with a 40 KB clean word passes (the bound does not count it)", code, 0)
+        code, out, err = run_hook(bash(h + "--data-binary @- <<'JSON'\n{\"content\":\"" + "w" * 40_000
+                                       + " p\u0430trik\"}\nJSON"), rules_file=active)
+        check("LONGTOK1122 r6: a heredoc with a 40 KB word and a lookalike blocks", code, 2)
+        check_true("LONGTOK1122 r6: ... as a homoglyph, not as the bound", "VEGYES" in err, err[:200])
+        code, out, err = run_hook(bash(h + "--data-binary @" + big_clean), rules_file=active)
+        check("LONGTOK1122 r6: an @file with a 40 KB clean word passes", code, 0)
+
+        # --- KNOWN-LIMIT rows (Viktor 50375, independent probe e0b9f9deb31c): each pins today's exit 0 of a documented
+        # Known limit (the module docstring names the label and its word; main lets all 18 through too; follow-up card
+        # 474437df). The inputs are the probe's builders, verbatim. A later fix turns its row red on purpose: then drop
+        # the label here and in the docstring.
+        kl_hom = "H\u0435llo"
+        kl_u = "http://127.0.0.1:9/api/messages"
+        kl_hdr = "-H 'Content-Type: application/json'"
+
+        def kl_sq(x):
+            return "'" + x.replace("'", "'\\''") + "'"
+
+        def kl_body(content):
+            return json.dumps({"from": "viktor", "to": "klodel", "content": content}, ensure_ascii=False)
+
+        def kl_curl(rest, url=kl_u):
+            return "curl -s -X POST %s %s %s" % (url, kl_hdr, rest)
+        kl_mixed = kl_body(kl_hom + " vilag")
+        kl_line = kl_curl("-d " + kl_sq(kl_mixed))
+        kl_lp = ": %s; " % ("w" * 40000)
+        kl_dir = os.path.join(tmp, "known-limit")
+        os.makedirs(kl_dir, exist_ok=True)
+        with open(os.path.join(kl_dir, "nl.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"from":"viktor","to":"klodel","content":"Hel\n\u043b\u043e vilag"}\n')
+        known_limit_rows = [
+            ("hd-unclosed-short-mixed", kl_curl("--data-binary @- <<'JSON'\n" + kl_mixed)),
+            ("fakehd-quoted-short-mixed", "echo '<<E' >/dev/null\n" + kl_line + "\nE"),
+            ("fakehd-quoted-long-mixed", "echo '<<E' >/dev/null\n"
+             + kl_curl("-H 'X-Pad: %s' -d %s" % ("w" * 40000, kl_sq(kl_mixed))) + "\nE"),
+            ("fakehd-comment-mixed", "# <<E\n" + kl_line + "\nE"),
+            ("fakehd-arith-mixed", "echo $((1<<E)) >/dev/null\n" + kl_line + "\nE"),
+            ("fakehd-herestring-mixed", "cat <<<E >/dev/null\n" + kl_line + "\nE"),
+            ("tgt-bsnl-short-mixed", kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/mess\\\nages")),
+            ("tgt-dotseg-short-mixed", kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/./messages")),
+            ("tgt-dotseg-long-mixed", kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/./messages")),
+            ("KNOWN-K1-tgt-emptyvar-long-mixed",
+             kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/mess${E}ages")),
+            ("KNOWN-K2-tgt-ansic-long-mixed",
+             kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/mess$'\\x61'ges")),
+            ("KNOWN-K3-tgt-brace-long-mixed",
+             kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/mess{a,}ges")),
+            ("tgt-curlglob-long-mixed",
+             kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "'http://127.0.0.1:9/api/{messages}'")),
+            ("tgt-fragment-short-mixed", kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/messages#x")),
+            ("out-file-nlstrip-mixed", kl_curl("-d @nl.json")),
+            ("short-cluster-sd-mixed", "curl -sd %s %s" % (kl_sq(kl_mixed), kl_u)),
+            ("short-bash-c-mixed", "bash -c %s" % kl_sq(kl_curl("-d " + kl_sq(kl_mixed)))),
+            ("short-json-concat-mixed", "curl -s %s --json %s --json %s" % (
+                kl_u, kl_sq('{"from":"viktor","to":"klodel",'), kl_sq('"content":"' + kl_hom + '"}'))),
+        ]
+        kl_changed = []
+        for label, cmd in known_limit_rows:
+            code, out, err = run_hook(bash(cmd), rules_file=active, cwd=kl_dir)
+            if code != 0:
+                kl_changed.append(f"{label} (exit {code})")
+        check("KNOWN-LIMIT (Known limits, card 474437df): the 18 documented inputs still pass (exit 0); a changed "
+              "row means a limit was closed or moved", kl_changed, [])
+        check("KNOWN-LIMIT: the list has the 18 documented labels", len(known_limit_rows), 18)
+
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
         sys.exit(1)

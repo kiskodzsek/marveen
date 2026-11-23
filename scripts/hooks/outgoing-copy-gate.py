@@ -25,6 +25,23 @@ variable this hook cannot resolve), the gate BLOCKS. A send whose content cannot
 be inspected defeats the point of the gate, so "I could not read it" must not
 mean "let it through". The block message says how to make it inspectable.
 
+Known limits of the inter-agent lookalike arm (Viktor 50375, independent probe e0b9f9deb31c; main lets all 18
+through too, no regression; follow-up card 474437df; each pinned by a KNOWN-LIMIT row in
+scripts/__tests__/outgoing-copy-gate.test.py, the probe label and its word):
+  hd-unclosed-short-mixed: unclosed (an unclosed heredoc in a short command);
+  fakehd-quoted-short-mixed, fakehd-quoted-long-mixed, fakehd-comment-mixed: fakehd (a "<<" in quotes, in an echo
+    with apostrophes or in a comment looks like an opener and the real send falls into the cut text; the long one
+    with a 40 KB run as well); fakehd-arith-mixed: arith (an arithmetic <<); fakehd-herestring-mixed: herestring
+    (a <<< here-string);
+  target spellings: tgt-bsnl-short-mixed: bsnl (a backslash-newline in the target URL); tgt-dotseg-short-mixed,
+    tgt-dotseg-long-mixed: dotseg (/api/./messages); KNOWN-K1-tgt-emptyvar-long-mixed: emptyvar;
+    KNOWN-K2-tgt-ansic-long-mixed: ansic; KNOWN-K3-tgt-brace-long-mixed: brace (K1-K3: see the long-token arms
+    below); tgt-curlglob-long-mixed: curlglob (/api/{messages}); tgt-fragment-short-mixed: fragment
+    (/api/messages#x);
+  out-file-nlstrip-mixed: nlstrip (curl -d @file drops the newlines, two pieces join into one mixed word);
+  short-cluster-sd-mixed: cluster (a glued -sd); short-bash-c-mixed: bash (a bash -c string);
+  short-json-concat-mixed: concat (two --json joined).
+
 Contract: PreToolUse. Reads the hook payload on stdin, exit 0 = allow,
 exit 2 = block (stderr goes back to the model).
 """
@@ -72,6 +89,146 @@ import sys
 # sorrendnel a torzs parancsnak latszott (FP), (b) a bevezeto sor
 # eldobasa a heredoc-taplalt VALODI kuldot vesztette volna el (FN).
 _HEREDOC = re.compile(r"(<<-?\s*'?(\w+)'?[^\n]*)\n.*?\n\2(?=\s|$)", re.S)
+# LOOSELIN1122 (card bbc6bad4): _HEREDOC.sub is quadratic on unclosed openers -- the lazy body scans from every
+# opener to the end (main as well: 8000 "x <<Q<i>" lines 5.3 s, x4 per doubling; 120 000 of them run past the hook
+# timeout, and a timed-out hook lets the command through). _loose_heredoc_cut returns the SAME text as
+# _HEREDOC.sub(r"\1", cmd) in linear time: the delimiter lines are indexed once (a line whose whole leading \w-run is
+# the word, then whitespace or the end), and per opener a bisect finds the first one starting at least two characters
+# past the opener line's newline (the lazy .*? is followed by a newline of its own). The \w+ group backtracks to
+# shorter words, so prefixes are tried longest first, only at lengths some indexed word has. The regex stays as the
+# reference: send-heredoc-strict.test.ts compares the two on generated strings.
+_LOOSE_OPEN = re.compile(r"<<-?\s*'?(\w+)")
+_LOOSE_END = re.compile(r"\n(\w+)(?=\s|$)")
+
+
+def _loose_heredoc_cut(cmd: str) -> str:
+    """_HEREDOC.sub(r"\\1", cmd), linear (LOOSELIN1122)."""
+    out, last = [], 0
+    for nl, _q, stop in _loose_heredoc_spans(cmd):
+        out.append(cmd[last:nl])
+        last = stop
+    out.append(cmd[last:])
+    return "".join(out)
+
+
+def _loose_heredoc_first_body(cmd: str):
+    """re.search(_HEREDOC) body (the text between the opener line's newline and the closing line's newline), or None
+    when there is no match; linear. LINEXTRACT1122 (Viktor 50275 B1): _curl_payload_raw's `@-` branch used the same
+    lazy regex directly (re.search with \\1 in place of \\2), quadratic on unclosed openers after a curl -d @-."""
+    for nl, q, _stop in _loose_heredoc_spans(cmd):
+        return cmd[nl + 1:q - 1]
+    return None
+
+
+def _loose_heredoc_spans(cmd: str):
+    """(opener line's newline, closing word's start, match end) of every _HEREDOC.finditer match, in order, linear."""
+    import bisect
+    ends: dict = {}
+    for m in _LOOSE_END.finditer(cmd):
+        ends.setdefault(m.group(1), []).append(m.start(1))
+    lens = sorted({len(w) for w in ends}, reverse=True)
+    pos, nl = 0, -1
+    while True:
+        m = _LOOSE_OPEN.search(cmd, pos)
+        if m is None:
+            break
+        if nl < m.end(1):  # reuse the newline found for an earlier opener on this line (many openers, one long line)
+            nl = cmd.find("\n", m.end(1))
+            if nl < 0:
+                break  # no newline left: no later opener can match either
+        stop = q = -1
+        word = m.group(1)
+        for n in lens:
+            if n > len(word):
+                continue
+            qs = ends.get(word[:n])
+            if qs:
+                k = bisect.bisect_left(qs, nl + 2)
+                if k < len(qs):
+                    q = qs[k]
+                    stop = q + n
+                    break
+        if stop < 0:
+            pos = m.start() + 1
+            continue
+        yield nl, q, stop
+        pos = stop
+# HDSTRICT1122 (card bbc6bad4, Viktor 50205 / 50220): the _HEREDOC cut above can drop a command bash RUNS: an empty
+# body (the lazy .*? needs one body line, so it closes on a later delimiter line), a here-string (<<<E), an opener
+# inside quotes, a <<- body whose tab-led end bash takes. Measured with a bash oracle (agents/kernel/work/
+# occ-heredoc-1122/): 63 such misses in 80000 synthetic strings, 0 of Kernel's real commands. The fix only ADDS
+# sends: is_send_invocation is (loose cut) OR (strict cut), on the same segmenter. The strict cut drops a body only
+# where bash surely reads one: the opener is no part of <<< and not glued after a word char; its word is \w+ or
+# wholly quoted \w+; the opener's line prefix has no open quote, no comment and no open $( / ( / backtick; the
+# opener line does not end in a backslash; the body ends at the FIRST line that is exactly the word (after tabs for
+# <<-), an empty body included. In every doubtful case it cuts NOTHING (an unclosed body: nothing after it either),
+# so its error always leans to an extra audit. Linear: one opener per line, and the first unclosed body stops it.
+# Known limits: a comment on the opener line (opener-comment: shlex reads the comment over the newline, the next
+# line's send joins it; the comment class of card e00a44b0); a body text that looks like a send in a doubtful case
+# is audited (over-audit by design). Mirrored in email-send-gate.mjs (STRICT_OPEN_RE); send-invocation-cases.json
+# binds the two.
+_STRICT_OPEN = re.compile(r"(?<![<\w])<<(-?)[ \t]*(['\"]?)(\w+)\2(?=[ \t;&|)<>]|$)[^\n]*(?:\n|$)", re.M | re.A)  # re.A: \w as in JS
+
+
+def _strict_prefix_ok(prefix: str) -> bool:
+    """No open quote, no comment and no open $( / ( / backtick before a heredoc opener on its line."""
+    q, depth, bt, prev, i = None, 0, False, ' ', 0
+    while i < len(prefix):
+        ch = prefix[i]
+        if q == "'":
+            if ch == "'":
+                q = None
+        elif q == '"':
+            if ch == '\\':
+                i += 1
+            elif ch == '"':
+                q = None
+            elif ch == '`':
+                bt = not bt
+            elif ch == '$' and prefix[i + 1:i + 2] == '(':
+                depth += 1
+                i += 1
+        else:
+            if ch == '\\':
+                i += 1
+            elif ch in '\'"':
+                q = ch
+            elif ch == '#' and prev in ' \t;&|()':
+                return False
+            elif ch == '`':
+                bt = not bt
+            elif ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth = max(0, depth - 1)
+        prev = ch
+        i += 1
+    return q is None and depth == 0 and not bt
+
+
+def _strict_heredoc_cut(cmd: str) -> str:
+    """cmd with only the heredoc bodies bash surely reads cut out (the opener line kept), see HDSTRICT1122."""
+    out, pos = [], 0
+    while True:
+        m = _STRICT_OPEN.search(cmd, pos)
+        if not m:
+            out.append(cmd[pos:])
+            return ''.join(out)
+        opener = m.group(0)
+        line_start = cmd.rfind('\n', 0, m.start()) + 1
+        if not opener.endswith('\n') or opener.endswith('\\\n') \
+                or not _strict_prefix_ok(cmd[line_start:m.start()]):
+            out.append(cmd[pos:m.end()])
+            pos = m.end()
+            continue
+        end = re.compile('^' + ('\\t*' if m.group(1) else '') + re.escape(m.group(3)) + '$', re.M).search(cmd, m.end())
+        if not end:
+            out.append(cmd[pos:])  # unclosed: bash reads the rest as this body; cut nothing, stop
+            return ''.join(out)
+        out.append(cmd[pos:m.end() - 1])
+        pos = end.end()
+
+
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 # KWSPLIT924: shell reserved words that put the NEXT word in command position.
 # The segmenter splits on operators only, so `if true; then sendmail x; fi`
@@ -241,10 +398,59 @@ def _mask_subshell_markers(cmd: str) -> str:
     return "".join(out)
 
 
-def _segments_tokens(cmd: str):
-    """[[token, ...], ...] szegmensenkent -- quote-tudatosan, poziciot orizve."""
+# LONGTOK1122 (card bbc6bad4 round 3, Viktor 50311 B1): shlex builds every token one character at a time
+# (self.token + nextchar on an attribute, which CPython cannot extend in place), so ONE long token costs time
+# quadratic in its length: 'sendmail a@b.hu ' + 1 MB of 'w' 9.1 s (main 9.8 s), and the same for a 1 MB quoted
+# string with spaces, a 1 MB operator run, 1 MB of newlines (masked to ';'). The approval gate's hook timeout is
+# 10 s, and a timed-out hook lets the command through. So on the send-detection path a token run longer than
+# _LONG_TOKEN (a run of characters with no whitespace outside quotes: an upper bound of every shlex token in it)
+# skips shlex: the command counts as a send when a sender name stands ANYWHERE in it (_LONG_TOKEN_SENDERS, wider
+# than every shape _head_is_send knows, unanchored). The error leans to an extra audit, never a miss; a long
+# command with no sender name is no send, as in the segmenter. Below the bound shlex stays (a 32 KiB token
+# ~0.01 s, a 1 MB command of 32 KiB tokens ~0.25 s). Python only: the JS twin tokenizes in linear time (0.07 s).
+_LONG_TOKEN = 32 * 1024
+_TOKEN_RUN = re.compile(r"""(?:[^ \t\r\n'"\\]|\\.|'[^']*'?|"(?:[^"\\]|\\.)*"?)+""", re.S)
+_LONG_TOKEN_SENDERS = re.compile(
+    r"send\.py|api\.resend\.com|sendmail|msmtp|swaks|smtplib|sendMail\s*\(|SMTP\s*\(|sendEmail|mail\.send"
+    r"|graph-mail", re.I
+)
+
+
+# LONGTOK1122 round 2 (Viktor 50318 B1, B2): the shell removes quotes and backslashes before it runs a word, so a
+# split name (s"e"ndmail, send''mail, sendmai\l, se""nd.py, /api/mess''ages, api.tele''gram.org) is the program /
+# the target, and a literal search on the raw text missed it (be2bb57a's shlex joined it). The literals of the long-token
+# arms are searched on this copy: every quote and backslash dropped, a backslash-newline dropped as a pair. Linear.
+# Known limits of the long-token send arms (Viktor 50330 K1-K4; main misses them too, follow-up, not regressions):
+# K1 a piece that expands to nothing inside a name or host (send$''mail, send``mail, send$(:)mail, an empty
+#    variable): the dequoted copy does not join them; K2 ANSI-C escapes ($'\x73endmail', octal, with eval too; main's
+#    shlex does not read them either); K3 brace expansion (send{,}mail), a name built from variables, a glob
+#    (sendmai[l]); K4 a send that is recognized but audits a decoy text (echo --subject ... PAD; printf ... |
+#    sendmail; bash <<E with sendmail in a heredoc body that is code, not the letter). The inter-agent arm fails
+#    closed past the bound (round 6), so its /api/messages literal is the only thing read there.
+_DEQUOTE = re.compile(r"\\\n|[\"'\\]")
+
+
+def _dequoted(cmd: str) -> str:
+    return _DEQUOTE.sub("", cmd)
+
+
+class _LongToken(ValueError):
+    """A token run past _LONG_TOKEN: the caller decides on _LONG_TOKEN_SENDERS instead of the segments."""
+
+
+def _longest_token_run(text: str) -> int:
+    return max((m.end() - m.start() for m in _TOKEN_RUN.finditer(text)), default=0)
+
+
+def _segments_tokens(cmd: str, strict: bool = False, bound: bool = False):
+    """[[token, ...], ...] szegmensenkent -- quote-tudatosan, poziciot orizve. strict: the HDSTRICT1122 cut.
+    bound: raise _LongToken instead of running shlex on a token run past _LONG_TOKEN (LONGTOK1122)."""
     import shlex
-    lex = shlex.shlex(_mask_subshell_markers(_HEREDOC.sub(r"\1", cmd)),
+    text = _strict_heredoc_cut(cmd) if strict else _loose_heredoc_cut(cmd)
+    masked = _mask_subshell_markers(text)
+    if bound and len(masked) > _LONG_TOKEN and _longest_token_run(masked) > _LONG_TOKEN:
+        raise _LongToken("token run past %d characters" % _LONG_TOKEN)
+    lex = shlex.shlex(masked,
                       posix=True, punctuation_chars="();|&")
     lex.whitespace_split = True
     segments, cur = [], []
@@ -406,7 +612,7 @@ def wrapper_depth_hit(cmd: str) -> bool:
     # send on its own (`sendmail x; sudo x9 true`), that send is the reason,
     # and the ordinary wording must stay (Samu, #1523 review).
     try:
-        segments = _segments_tokens(cmd)
+        segments = _segments_tokens(cmd, bound=True)
     except ValueError:
         return False
     heads = [h for toks in segments for h in _command_heads(toks)]
@@ -416,12 +622,30 @@ def wrapper_depth_hit(cmd: str) -> bool:
 
 def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
     try:
-        segments = _segments_tokens(cmd)
+        segments = _segments_tokens(cmd, bound=True)
+    except _LongToken:
+        return bool(_LONG_TOKEN_SENDERS.search(_dequoted(cmd)))
     except ValueError:
         # Parse-hiba (pl. lezaratlan idezojel): nem tudunk poziciot mondani.
         # Konzervativ visszaeses: csak akkor auditalunk, ha eros kuldes-literal
         # all a szovegben -- igy egy fura, de valodi kuldes nem csuszik at
         # neman, a tipikus belso parancsok viszont nem kapnak hamis pozitivot.
+        return bool(_FALLBACK_LITERALS.search(cmd))
+    if any(_segment_is_send(toks, _depth) for toks in segments):
+        return True
+    return send_only_by_strict_heredoc(cmd, _depth)
+
+
+def send_only_by_strict_heredoc(cmd: str, _depth: int = 0) -> bool:
+    """The HDSTRICT1122 second pass alone: a send the strict heredoc cut exposes (call it after the loose pass said
+    no). A parse error of the strict text falls back like the loose one (strong literals): an extra audit, not a miss."""
+    if '<<' not in cmd:
+        return False
+    try:
+        segments = _segments_tokens(cmd, strict=True, bound=True)
+    except _LongToken:
+        return bool(_LONG_TOKEN_SENDERS.search(_dequoted(cmd)))
+    except ValueError:
         return bool(_FALLBACK_LITERALS.search(cmd))
     return any(_segment_is_send(toks, _depth) for toks in segments)
 
@@ -977,6 +1201,9 @@ _HTTP_CHANNEL_TARGETS = (
     ("Telegram API", re.compile(
         r"^(https?://)?api\.telegram\.org/bot[^/\s]+/(send|edit)\w*/?(\?\S*)?$", re.I)),
 )
+# LONGTOK1122: a covered channel named anywhere in the command (wider than _HTTP_CHANNEL_TARGETS, unanchored).
+_HTTP_CHANNEL_LITERAL = re.compile(
+    r"api\.marveen\.io|/feed/posts|/mentions/|discord(?:app)?\.com/api|api\.telegram\.org", re.I)
 # Only the prose a human reads. ids, chat ids, parse modes and urls stay out:
 # auditing them would block on tokens nobody reads as text.
 _HTTP_TEXT_FIELDS = ("title", "content", "text", "caption", "message")
@@ -984,9 +1211,11 @@ _HTTP_TEXT_FIELDS = ("title", "content", "text", "caption", "message")
 
 def _http_channel_segment(cmd: str):
     """(label, tokens) of the first curl segment that SENDS to a covered
-    human-facing HTTP channel, or (None, None)."""
+    human-facing HTTP channel, or (None, None). Raises _LongToken (LONGTOK1122): the caller decides."""
     try:
-        segments = _segments_tokens(cmd)
+        segments = _segments_tokens(cmd, bound=True)
+    except _LongToken:
+        raise
     except ValueError:
         return None, None
     for toks in segments:
@@ -1026,7 +1255,21 @@ def http_channel_gate(cmd: str) -> None:
     """Exit 2 on a copy problem or an unreadable body, exit 0 when clean.
     RETURNS (does not exit) when the command is not a covered HTTP send, so
     the caller's other arms still run."""
-    label, toks = _http_channel_segment(cmd)
+    try:
+        label, toks = _http_channel_segment(cmd)
+    except _LongToken:
+        # LONGTOK1122: no segments past the token bound. A covered channel named anywhere in the command fails
+        # closed, as an unreadable body does here; without one it is no covered send.
+        hit = _HTTP_CHANNEL_LITERAL.search(_dequoted(cmd))
+        if not hit:
+            return
+        sys.stderr.write(
+            f"KIMENO-SZOVEG KAPU (HTTP-csatorna, {hit.group(0)}): TILTVA, mert a kimeno szoveget nem tudtam "
+            f"megvizsgalni.\nOk: a parancsban egy {_LONG_TOKEN // 1024} KiB-nal hosszabb, szokoz nelkuli (vagy "
+            "idezett) token all, ennyit a kapu nem bont szavakra.\n\n"
+            "Vizsgalhato alak: a szoveg fajlban, @/abszolut/ut.json, vagy idezett heredoc "
+            "(--data-binary @- <<'JSON').\n")
+        sys.exit(2)
     if label is None:
         return
     try:
@@ -1284,12 +1527,15 @@ EMAIL_TOOL_RE = re.compile(
 _IA_TARGET = re.compile(r"^(https?://)?[^/\s]*/api/messages/?(\?\S*)?$", re.I)
 _IA_DATA_FLAGS = ("-d", "--data", "--data-binary", "--data-raw", "--data-ascii", "--json")
 _IA_SUBST = re.compile(r"\$\(|`|\$\{?\w")
+_IA_LITERAL = re.compile(r"/api/messages", re.I)  # LONGTOK1122: the target named anywhere (wider than _IA_TARGET)
 
 
 def _ia_segment(cmd: str):
-    """Tokens of the curl segment that POSTs to /api/messages, or None."""
+    """Tokens of the curl segment that POSTs to /api/messages, or None. Raises _LongToken (LONGTOK1122)."""
     try:
-        segments = _segments_tokens(cmd)
+        segments = _segments_tokens(cmd, bound=True)
+    except _LongToken:
+        raise
     except ValueError:
         return None
     for toks in segments:
@@ -1347,12 +1593,14 @@ def _curl_payload_raw(cmd: str, toks, all_flags: bool = False):
         if val.startswith("@") and not is_raw_flag:
             ref = val[1:]
             if ref == "-":
-                m = re.search(r"<<-?\s*'?(\w+)'?[^\n]*\n(.*?)\n\1(?=\s|$)", cmd, re.S)
-                if not m:
+                # LINEXTRACT1122: was re.search(r"<<-?\s*'?(\w+)'?[^\n]*\n(.*?)\n\1(?=\s|$)", cmd, re.S), the
+                # _HEREDOC pattern (quadratic on unclosed openers); the same first body, linear.
+                body = _loose_heredoc_first_body(cmd)
+                if body is None:
                     return None, "a torzs stdin-rol jon (@-), heredoc nelkul"
-                if not re.search(r"<<-?\s*'", cmd) and _IA_SUBST.search(m.group(2)):
+                if not re.search(r"<<-?\s*'", cmd) and _IA_SUBST.search(body):
                     return None, "a heredoc NEM idezett, es shell-behelyettesitest tartalmaz"
-                raw = m.group(2)
+                raw = body
             else:
                 path = os.path.expandvars(os.path.expanduser(_ia_resolve_local_vars(cmd, ref)))
                 if "$" in path:
@@ -1399,10 +1647,32 @@ def _ia_payload(cmd: str, toks):
 def inter_agent_homoglyph_gate(cmd: str) -> None:
     """Exit 2 on a homoglyph, exit 0 otherwise (loudly when unreadable).
     Only called for a command that is NOT an email send."""
-    toks = _ia_segment(cmd)
-    if toks is None:
-        sys.exit(0)
-    text, unreadable = _ia_payload(cmd, toks)
+    try:
+        toks = _ia_segment(cmd)
+    except _LongToken:
+        # LONGTOK1122: no segments past the token bound. With /api/messages named anywhere, the WHOLE command is
+        # checked for mixed-script words (an extra block is possible, a missed lookalike is not); without it,
+        # no inter-agent message.
+        if not _IA_LITERAL.search(_dequoted(cmd)):
+            sys.exit(0)
+        # LONGTOK1122 round 6 (Viktor 50330 R1, 50350; Klodel 50352): FAIL-CLOSED here, unlike the short arm. Without
+        # tokens this arm cannot read the body the way the short arm does (json.loads, the @file, the heredoc): rounds
+        # 4 and 5 searched the raw text and then decoded \u escapes and opened @files on their own, and each round let
+        # a new shape through that main blocks (a JSON escape, an @file, a decoy @ref, a quoted path). Measured
+        # 2026-11-22 over 43 241 inter-agent messages since 2026-10-12: none longer than 32 768 characters (the longest
+        # 22 789), so a block here costs no real traffic; the way out (a heredoc or an @file, which the bound does not
+        # count: heredoc bodies are cut before it is measured) is in the message.
+        sys.stderr.write(
+            "KIMENO-SZOVEG KAPU (inter-agent, homoglifa): TILTVA, mert az uzenetet nem tudtam megvizsgalni.\n"
+            f"Ok: a parancsban egy {_LONG_TOKEN // 1024} KiB-nal hosszabb, szokoz nelkuli (vagy idezett) token all, "
+            "ennyit a kapu nem bont szavakra, igy a torzset sem olvassa.\n\n"
+            "Vizsgalhato alak: idezett heredoc (--data-binary @- <<'JSON') vagy @/abszolut/ut.json, a hosszu "
+            "szoveg a torzsben.\n")
+        sys.exit(2)
+    else:
+        if toks is None:
+            sys.exit(0)
+        text, unreadable = _ia_payload(cmd, toks)
     if unreadable:
         msg = ("outgoing-copy-gate (inter-agent, homoglifa): a torzs NEM vizsgalhato -- "
                f"{unreadable}. Az uzenet ATMENT, homoglifa-ellenorzes NELKUL. "

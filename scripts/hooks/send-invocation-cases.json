@@ -590,6 +590,81 @@
       "name": "SENDWRAP924: reverse -- eight nested wrappers + a non-sender, inside the bound",
       "cmd": "nohup nohup nohup nohup nohup nohup nohup nohup echo sendmail",
       "expected": false
+    },
+    {
+      "name": "HDSTRICT1122 empty heredoc body, then a real send (bash runs it)",
+      "cmd": "cat <<E\nE\nsendmail -t a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 here-string <<<E is no heredoc opener: the send on the next line runs",
+      "cmd": "cat <<<E\nsendmail -t a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 heredoc opener inside double quotes is text: the send on the next line runs",
+      "cmd": "echo \"<<E\"\nsendmail -t a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 <<- body ends at the tab-led word, the send after it runs",
+      "cmd": "cat <<-E\nx\n\tE\nsendmail -t a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 doubtful, unclosed body: no strict cut, audited (over-audit by design)",
+      "cmd": "cat > n.md <<'EOF'\nsendmail -t a@b.hu is how it worked\n",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 doubtful, word not plain \\w+ (E-1): no cut, audited",
+      "cmd": "cat > n.md <<'E-1'\nsendmail -t a@b.hu is how it worked\nE-1",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 doubtful, opener inside $( ) closed on its line: no cut (bash runs the send)",
+      "cmd": "x $(<<E)\nsendmail -t a@b.hu\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 doubtful, opener line ends in a backslash: no strict cut, the body line is audited (over-audit by design)",
+      "cmd": "cat <<E \\\n> n.md\nsendmail -t a@b.hu is how it worked\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 a clean quoted heredoc body is still cut: notes text is no send",
+      "cmd": "cat <<'EOF' > n.md\nsendmail -t a@b.hu is how it worked\nEOF\necho done",
+      "expected": false
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P07): an opener line ending in a backslash joins the next line, whose send runs before the body",
+      "cmd": "cat <<E \\\n; sendmail a@b.c\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P11/J10): the same with an apostrophe in the body (the strict text does not parse: fallback)",
+      "cmd": "cat <<E \\\n; sendmail a@b.c\nit's\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P13): a <<- body ends only at a line that IS the word after tabs, not one that begins with it",
+      "cmd": "cat <<-E\n\tEx\ny <<F\n\tE\nsendmail a@b.c\nF",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P14): an opener inside an open double quote opens no heredoc, the send after the quote runs",
+      "cmd": "echo \"x <<E\n\"; sendmail a@b.c\nE",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P11/J10, strict-only): a here-string is no heredoc; a $'a\\'b' word the shell reads but shlex does not breaks only the strict text (the loose cut drops it): the fallback keeps the send",
+      "cmd": "cat <<<E\nsendmail a@b.c\necho $'a\\'b'\nE\n",
+      "expected": true
+    },
+    {
+      "name": "HDSTRICT1122 r2 (P14, strict-only): an opener inside an open double quote, the quote closes on the next line and the send runs; the loose cut hides it, the strict pass must not cut",
+      "cmd": "echo \"x <<E\n\"; sendmail a@b.c; echo \"\nE\n\"",
+      "expected": true
     }
   ]
 }
