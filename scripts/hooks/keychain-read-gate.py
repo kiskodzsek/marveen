@@ -3838,12 +3838,24 @@ def node_preloads_after(words, all_words, i):
         k = j if eq else j + 1
         if opt in RUN_PRELOAD_OPTS and k < len(words):
             raw = all_words[k]
-            if '$' in raw or '`' in raw:
+            if '$(' in raw or '`' in raw:  # round 6 (Viktor 50908 b): a substituted preload file cannot be read
+                raise TooManyArgs('node: az előtöltött fájl parancs-helyettesítés, nem olvasható')
+            if '$' in raw:
                 unread = True
             files.append((strip_quotes(val) if eq else words[k], raw))
             j = k
         j += 1
     return files, unread
+
+
+def subst_run_word(name, w, python, nxt, i, sub_words):
+    """round 6 (Viktor 50908 b): words[i] (w) stands where a file is run: an operand that may be the script (not a
+    subcommand word, not the value of an option that only takes one), a `valrun` option's value, or an option word
+    with an attached run file (`--require=$(...)`). The caller has seen a command substitution in it."""
+    taken = nxt[0] if nxt and nxt[1] == i else None
+    if w.startswith('-'):
+        return taken == 'valrun' or bool(run_option(name, w, python)[1])
+    return taken == 'valrun' or (taken is None and w not in sub_words)
 
 
 def run_pattern_group(w, raw):
@@ -4725,6 +4737,13 @@ def interp_groups(text, expanded=False):
         i = 0
         while i < len(words):
             w = words[i]
+            if (python or NODE_NAMES_RX.fullmatch(name)) and ('$(' in all_words[i] or '`' in all_words[i]) and (
+                    run_all or need or (nxt and nxt[1] == i)) and subst_run_word(name, w, python, nxt, i, sub_words):
+                # round 6 (Viktor 50908 b, old: main too; python found by Kernel): a command substitution as the file a
+                # node or python runs cannot be read (`node $(echo F)`, `node -r $(echo F) ok.js`, `python3 $(echo
+                # F)`): it blocks, as python -m with a substituted module name does. Once run_all is set the walk
+                # no longer knows the script's place, so every substituted operand counts (fail-closed).
+                raise TooManyArgs('node/python: a futtatott fájl parancs-helyettesítés, nem olvasható')
             if not run_all and need and not OUT_REDIR_RX.match(w):  # an output target: skipped by the walk below
                 raw_w = all_words[i]
                 in_redir = SRC_REDIR_RX.match(w)
@@ -4793,12 +4812,18 @@ def interp_groups(text, expanded=False):
                 break
             if (w == '-' and name.lower() not in SHELL_NAMES) or (
                     SHELL_CODE_FLAG_RX if name in SHELL_NAMES else CODE_FLAG_RX).fullmatch(w):
-                if NODE_NAMES_RX.fullmatch(name) and not run_all:  # round 5: `node -e 1 -r F` runs F
+                if NODE_NAMES_RX.fullmatch(name):  # round 5: `node -e 1 -r F` runs F
+                    # round 6 (Viktor 50908): also when run_all is already set (a variable before -e, or an expanded
+                    # text, which starts with it set): the -p branch above never asked, the -e branch did and skipped
                     pre, unread = node_preloads_after(words, all_words, i)
-                    run_all = unread
+                    run_all = run_all or unread
                     run.update(f for f, _ in pre)
                     group += [f for f, _ in pre]
                     groups += [g for g in (run_pattern_group(f, r) for f, r in pre) if g]
+                    if run_all:
+                        # a variable may vanish or split (`node -e 1 -r $UNSET ./F.cjs` runs ./F.cjs): every word
+                        # after the code switch joins the group (fail-closed)
+                        group += [x for x in words[i + 1:] if x]
                 stopped = True
                 break
             # an output redirection's target is written, not run (`python3 x.py > out.txt`; card 15896271): a file

@@ -1196,6 +1196,8 @@ def script_git_cases():
         w('helper.cjs', f"require('child_process').execFileSync('git', ['{CR}', '{FL}'])\n")
         w('helper.mjs', f"import {{ execFileSync }} from 'node:child_process'; execFileSync('git', ['{CR}', '{FL}'])\n")
         w('ok.js', "console.log(1)\n")
+        w('pre.env', 'NODE_OPTIONS=--require ./helper.cjs\n')  # round 6 KNOWN-LIMIT env-file-preload
+        w('bunfig.toml', 'preload = ["./helper.cjs"]\n')
         w('HANDOFF.md', f'# handoff\n- the shapes that ran the helper:\n```\ngit -C . {CR} approve < x\n'
                         f'git -c {CR}.helper={OK} fetch\n```\n')
         w('x.txt', 'data\n')
@@ -1323,6 +1325,32 @@ def script_git_cases():
             # controls: a clean preload file; after the code a plain file is an argument (above); a dangling -r
             (f'cd {d} && node -e 1 -r ./ok.js', 0), (f'cd {d} && node -p 1 --require ./ok.js', 0),
             (f'cd {d} && node -e 1 x -r', 0), (f'cd {d} && node -e 1 ./helper.cjs', 0),
+            # round 6 (Viktor 50908, measured: main, f93dd6bc and 4875fc95 all passed the -e forms, -p blocked): a variable
+            # before or in the preload after -e; the -e branch skipped the preloads once run_all was set (an expanded
+            # text starts with it set), and its later words never joined the group
+            (f'cd {d} && F=./helper.cjs; node -e 1 -r $F', 2), (f'cd {d} && F=./helper.cjs; node -e 1 -r "$F"', 2),
+            (f'cd {d} && node -e 1 -r $UNSET_ZZ ./helper.cjs', 2), (f'cd {d} && node $NOPE_ZZ -e 1 -r ./helper.cjs', 2),
+            (f'cd {d} && F=./helper.cjs; node -p 1 -r $F', 2),
+            # round 6 (Viktor 50908 b, old): a command substitution as a run file word cannot be read: it blocks (as
+            # python -m with a substituted module name); in the code text it is no file word
+            (f'cd {d} && node -e 1 -r $(echo ./helper.cjs)', 2), (f'cd {d} && node -p 1 -r $(echo ./helper.cjs)', 2),
+            (f'cd {d} && node $(echo ./helper.cjs)', 2), (f'cd {d} && node -r $(echo ./helper.cjs) ./ok.js', 2),
+            (f'cd {d} && node `echo ./helper.cjs`', 2), (f'cd {d} && node --require=$(echo ./helper.cjs) ./ok.js', 2),
+            # controls: a clean file through a variable; a substitution in the code text or as the script's argument
+            (f'cd {d} && F=./ok.js; node -e 1 -r $F', 0), (f'cd {d} && node -e "$(echo 1)"', 0),
+            (f'cd {d} && node ./ok.js $(echo x)', 0),
+            # round 6 (Kernel, old: main too): the same for python's script word; its arguments stay free
+            (f'cd {d} && python3 $(echo ./h.py)', 2), (f'cd {d} && python3 -I `echo ./h.py`', 2),
+            (f'cd {d} && python3 -c "$(echo 1)"', 0), (f'cd {d} && python3 ./okword.py $(echo x)', 0),
+            # KNOWN-LIMIT node-brace-option-word: bash brace-expands {-r,F} into two words; the gate reads one
+            (f'cd {d} && node -e 1 {{-r,./helper.cjs}}', 0),
+            # KNOWN-LIMIT env-file-preload: node --env-file=F reads NODE_OPTIONS (a --require) from F, bun reads a
+            # preload from bunfig.toml; the gate does not read these files (Viktor 50908 d, real binaries)
+            (f'cd {d} && node --env-file=pre.env -e 1', 0), (f'cd {d} && node -e 1 --env-file pre.env', 0),
+            (f'cd {d} && bun -e 1', 0),
+            # KNOWN-LIMIT launcher-eval-preload: npx / bunx start tsx with -e and a preload; the gate reads no launcher
+            (f'cd {d} && npx -y tsx -e 1 -r ./helper.cjs', 0), (f'cd {d} && npx --yes tsx --eval 1 --require ./helper.cjs', 0),
+            (f'cd {d} && bunx tsx -e 1 -r ./helper.cjs', 0),
             # KNOWN-LIMIT git-rules-on-argument-files: runpy runs a module named by its argument (`cd D && python3 -m
             # runpy evil` runs D/evil.py; with a path it does not run, Viktor 50854); the gate reads no module argument
             (f'python3 -m runpy {H}', 0),
