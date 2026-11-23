@@ -25,6 +25,23 @@ variable this hook cannot resolve), the gate BLOCKS. A send whose content cannot
 be inspected defeats the point of the gate, so "I could not read it" must not
 mean "let it through". The block message says how to make it inspectable.
 
+Known limits of the inter-agent lookalike arm (Viktor 50375, independent probe e0b9f9deb31c; main lets all 18
+through too, no regression; follow-up card 474437df; each pinned by a KNOWN-LIMIT row in
+scripts/__tests__/outgoing-copy-gate.test.py, the probe label and its word):
+  hd-unclosed-short-mixed: unclosed (an unclosed heredoc in a short command);
+  fakehd-quoted-short-mixed, fakehd-quoted-long-mixed, fakehd-comment-mixed: fakehd (a "<<" in quotes, in an echo
+    with apostrophes or in a comment looks like an opener and the real send falls into the cut text; the long one
+    with a 40 KB run as well); fakehd-arith-mixed: arith (an arithmetic <<); fakehd-herestring-mixed: herestring
+    (a <<< here-string);
+  target spellings: tgt-bsnl-short-mixed: bsnl (a backslash-newline in the target URL); tgt-dotseg-short-mixed,
+    tgt-dotseg-long-mixed: dotseg (/api/./messages); KNOWN-K1-tgt-emptyvar-long-mixed: emptyvar;
+    KNOWN-K2-tgt-ansic-long-mixed: ansic; KNOWN-K3-tgt-brace-long-mixed: brace (K1-K3: see the long-token arms
+    below); tgt-curlglob-long-mixed: curlglob (/api/{messages}); tgt-fragment-short-mixed: fragment
+    (/api/messages#x);
+  out-file-nlstrip-mixed: nlstrip (curl -d @file drops the newlines, two pieces join into one mixed word);
+  short-cluster-sd-mixed: cluster (a glued -sd); short-bash-c-mixed: bash (a bash -c string);
+  short-json-concat-mixed: concat (two --json joined).
+
 Contract: PreToolUse. Reads the hook payload on stdin, exit 0 = allow,
 exit 2 = block (stderr goes back to the model).
 """

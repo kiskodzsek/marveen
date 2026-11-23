@@ -538,6 +538,64 @@ def main():
         code, out, err = run_hook(bash(h + "--data-binary @" + big_clean), rules_file=active)
         check("LONGTOK1122 r6: an @file with a 40 KB clean word passes", code, 0)
 
+        # --- KNOWN-LIMIT rows (Viktor 50375, independent probe e0b9f9deb31c): each pins today's exit 0 of a documented
+        # Known limit (the module docstring names the label and its word; main lets all 18 through too; follow-up card
+        # 474437df). The inputs are the probe's builders, verbatim. A later fix turns its row red on purpose: then drop
+        # the label here and in the docstring.
+        kl_hom = "H\u0435llo"
+        kl_u = "http://127.0.0.1:9/api/messages"
+        kl_hdr = "-H 'Content-Type: application/json'"
+
+        def kl_sq(x):
+            return "'" + x.replace("'", "'\\''") + "'"
+
+        def kl_body(content):
+            return json.dumps({"from": "viktor", "to": "klodel", "content": content}, ensure_ascii=False)
+
+        def kl_curl(rest, url=kl_u):
+            return "curl -s -X POST %s %s %s" % (url, kl_hdr, rest)
+        kl_mixed = kl_body(kl_hom + " vilag")
+        kl_line = kl_curl("-d " + kl_sq(kl_mixed))
+        kl_lp = ": %s; " % ("w" * 40000)
+        kl_dir = os.path.join(tmp, "known-limit")
+        os.makedirs(kl_dir, exist_ok=True)
+        with open(os.path.join(kl_dir, "nl.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"from":"viktor","to":"klodel","content":"Hel\n\u043b\u043e vilag"}\n')
+        known_limit_rows = [
+            ("hd-unclosed-short-mixed", kl_curl("--data-binary @- <<'JSON'\n" + kl_mixed)),
+            ("fakehd-quoted-short-mixed", "echo '<<E' >/dev/null\n" + kl_line + "\nE"),
+            ("fakehd-quoted-long-mixed", "echo '<<E' >/dev/null\n"
+             + kl_curl("-H 'X-Pad: %s' -d %s" % ("w" * 40000, kl_sq(kl_mixed))) + "\nE"),
+            ("fakehd-comment-mixed", "# <<E\n" + kl_line + "\nE"),
+            ("fakehd-arith-mixed", "echo $((1<<E)) >/dev/null\n" + kl_line + "\nE"),
+            ("fakehd-herestring-mixed", "cat <<<E >/dev/null\n" + kl_line + "\nE"),
+            ("tgt-bsnl-short-mixed", kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/mess\\\nages")),
+            ("tgt-dotseg-short-mixed", kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/./messages")),
+            ("tgt-dotseg-long-mixed", kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/./messages")),
+            ("KNOWN-K1-tgt-emptyvar-long-mixed",
+             kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/mess${E}ages")),
+            ("KNOWN-K2-tgt-ansic-long-mixed",
+             kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/mess$'\\x61'ges")),
+            ("KNOWN-K3-tgt-brace-long-mixed",
+             kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/mess{a,}ges")),
+            ("tgt-curlglob-long-mixed",
+             kl_lp + kl_curl("-d " + kl_sq(kl_mixed), "'http://127.0.0.1:9/api/{messages}'")),
+            ("tgt-fragment-short-mixed", kl_curl("-d " + kl_sq(kl_mixed), "http://127.0.0.1:9/api/messages#x")),
+            ("out-file-nlstrip-mixed", kl_curl("-d @nl.json")),
+            ("short-cluster-sd-mixed", "curl -sd %s %s" % (kl_sq(kl_mixed), kl_u)),
+            ("short-bash-c-mixed", "bash -c %s" % kl_sq(kl_curl("-d " + kl_sq(kl_mixed)))),
+            ("short-json-concat-mixed", "curl -s %s --json %s --json %s" % (
+                kl_u, kl_sq('{"from":"viktor","to":"klodel",'), kl_sq('"content":"' + kl_hom + '"}'))),
+        ]
+        kl_changed = []
+        for label, cmd in known_limit_rows:
+            code, out, err = run_hook(bash(cmd), rules_file=active, cwd=kl_dir)
+            if code != 0:
+                kl_changed.append(f"{label} (exit {code})")
+        check("KNOWN-LIMIT (Known limits, card 474437df): the 18 documented inputs still pass (exit 0); a changed "
+              "row means a limit was closed or moved", kl_changed, [])
+        check("KNOWN-LIMIT: the list has the 18 documented labels", len(known_limit_rows), 18)
+
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
         sys.exit(1)
