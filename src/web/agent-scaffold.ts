@@ -1,3 +1,14 @@
+// Known limits of the boot-time hook restore (card 47468cc1, Viktor 50557 / 50632; the same on main, not regressions):
+// - command-copy (E04): when the time-claim command's type command copy lives only in a user-extended Bash group (a
+//   hook of the user's own next to it), syncHookMatchers does not move it on purpose and the add branch counts it as
+//   present, so Write, Edit and MultiEdit carry no time-claim gate then.
+// - prompt-copies (E09, the I5 class): two type prompt copies with different timeouts (no command copy) settle in two
+//   boots: the first boot's timeout sync makes them equal, the second boot's dedupe merges them (the dedupe runs
+//   before the timeout sync); no gate is lost meanwhile.
+// - I3: a non-exact form whose basename the check does not find (an upper-case name, a glob, an escaped letter) is
+//   kept; the boot adds the template entry next to it.
+// - I4: a non-array PreToolUse or a null element in it throws at boot (flatMap over an object, null.hooks).
+// - I5: a same-command group with another timeout converges in two boots, not one.
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync, rmSync, watchFile, unwatchFile, realpathSync } from 'node:fs'
 import { readRemovedDefaultTasks, readScheduledTask } from './scheduled-tasks-io.js'
 import { approveScheduledTask } from './schedule-trust.js'
@@ -272,10 +283,27 @@ export function upgradeLegacyHookCommands(
         if (!tplHook.command || isUnsafeHookCommand(tplHook.command)) continue
         const tplBn = _hookScriptBasename(tplHook.command)
         if (!tplBn) continue
+        const tplPath = tplHook.command.match(/\/[^\s'"]+\.(?:py|mjs|js|sh)\b/)?.[0]
         for (const existEntry of existEntries as HookEntry[]) {
           for (const existHook of existEntry.hooks ?? []) {
             if (!existHook.command) continue
             const existBn = _hookScriptBasename(existHook.command)
+            // An ensure*/inject* gate writes the fail-closed pythonHookCommand form (exit 2 when python3 is
+            // missing), often under its own matcher. That is no legacy command: rewriting it to the template's
+            // fail-open wrapper downgrades the gate, and syncHookMatchers then moved the group onto the
+            // template matcher, so its inject re-added it on the next boot (card 47468cc1: the time-claim
+            // gate's Telegram entry became one more "Write|Edit|MultiEdit|Bash" copy per dashboard boot, 47
+            // in every sub-agent by 2026-11-23).
+            // Only the EXACT fail-closed form of the template's own script path is left alone (Viktor 50546 B1): a
+            // probe head followed by another path, or by a trailing `|| true`, is still rewritten to the template.
+            if (existBn === tplBn && tplPath && existHook.command === pythonHookCommand(tplPath)) {
+              // ...but its timeout follows the template's (Viktor 50557 R14: a 1 s timeout can expire the gate)
+              if (tplHook.timeout != null && existHook.timeout !== tplHook.timeout) {
+                existHook.timeout = tplHook.timeout
+                changed = true
+              }
+              continue
+            }
             if (existBn === tplBn && existHook.command !== tplHook.command) {
               existHook.command = tplHook.command
               if (tplHook.timeout != null) existHook.timeout = tplHook.timeout
@@ -284,6 +312,32 @@ export function upgradeLegacyHookCommands(
           }
         }
       }
+    }
+  }
+  return changed
+}
+
+/**
+ * In-place collapse of hook groups that are identical within one event (compared with sorted keys). The first
+ * copy stays where it is; later copies are dropped. Two identical groups run the same command on the same tool
+ * calls, so dropping one changes no decision. Returns true if anything was removed.
+ *
+ * Exported for unit testing.
+ */
+export function dedupeIdenticalHookEntries(existingHooks: Record<string, unknown>): boolean {
+  let changed = false
+  for (const [event, entries] of Object.entries(existingHooks)) {
+    if (!Array.isArray(entries)) continue
+    const seen = new Set<string>()
+    const kept = entries.filter((e) => {
+      const key = sortedKeyJson(e)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    if (kept.length !== entries.length) {
+      existingHooks[event] = kept
+      changed = true
     }
   }
   return changed
@@ -329,6 +383,13 @@ export function syncHookMatchers(
         if (existCommands.length === 0) continue
         if (!existCommands.every((c) => tplCommands.has(c))) continue
         if (existEntry.matcher === tplEntry.matcher) continue
+        // Another group already carries these commands under the template matcher: re-matching this one only
+        // makes a duplicate of it (card 47468cc1). Leave it; it is someone else's group under its own matcher.
+        const covered = (existEntries as HookEntry[]).some((other) => other !== existEntry
+          && other?.matcher === tplEntry.matcher
+          // only a command hook covers (Viktor 50557 R18: a type "prompt" copy runs no gate)
+          && existCommands.every((c) => (other.hooks ?? []).some((h) => h.type === 'command' && h.command === c)))
+        if (covered) continue
         existEntry.matcher = tplEntry.matcher
         changed = true
       }
@@ -554,6 +615,9 @@ export function ensureAgentHooks(
     // Matcher pass: a widened template matcher (e.g. SessionStart gaining
     // `clear`) must reach agents whose command string is unchanged.
     if (syncHookMatchers(existingHooks, tplHooks)) changed = true
+    // Collapse groups that are identical (key order aside): the add pass only stops NEW copies, it never
+    // removes the ones an earlier boot left (card 47468cc1: 47 time-claim copies per sub-agent).
+    if (dedupeIdenticalHookEntries(existingHooks)) changed = true
     for (const [event, handlers] of Object.entries(tplHooks)) {
       if (!existingHooks[event]) {
         // Wholesale add of a missing event still has to respect the cross-scope
@@ -575,8 +639,11 @@ export function ensureAgentHooks(
         const tplEntries = handlers as HookEntry[]
         const existEntries = existingHooks[event] as HookEntry[]
         // Collect all command strings already present in this event's hook groups.
+        // Only a command hook counts as present (Viktor 50557 R17: a template command left under type "prompt"
+        // was never added back, and no command-type gate stayed on its matcher).
         const existingCommands = new Set(
-          existEntries.flatMap((e) => (e.hooks ?? []).map((h) => h.command).filter(Boolean)),
+          existEntries.flatMap((e) => (e.hooks ?? []).filter((h) => h.type === 'command').map((h) => h.command)
+            .filter(Boolean)),
         )
         for (const tplEntry of tplEntries) {
           // Add hooks that are missing AND safe to register (registration guard).
