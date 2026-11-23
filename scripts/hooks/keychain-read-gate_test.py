@@ -1284,6 +1284,9 @@ def script_cases():
         with open(os.path.join(d, 'phys', 'twin.py'), 'w', encoding='utf-8') as f:
             f.write("import subprocess\nsubprocess.run(['" + S + "', 'dump-keychain'])\n")
         os.symlink(os.path.join(d, 'phys', 'inner'), os.path.join(d, 'lnk'))
+        # card c6c67dde r2 (Viktor 50201 R1): amlnk -> this repo's scripts/; logically amlnk/.. is d (whose
+        # scripts/agent-msg.sh is the look-alike), physically it is this repo's root
+        os.symlink(os.path.join(AM_ROOT, 'scripts'), os.path.join(d, 'amlnk'))
         sub = os.path.join(d, 'sub')
         os.makedirs(sub)
         with open(os.path.join(sub, 'deep.py'), 'w', encoding='utf-8') as f:
@@ -2158,6 +2161,34 @@ def script_cases():
             ("cd " + d + "\nbash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", AM_ROOT),
             ("cd " + d + "; bash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", AM_ROOT),
             ("cd " + d + " & bash scripts/agent-msg.sh dave v - <<'M'\n./measure.py\nM", AM_ROOT),
+            # card c6c67dde: a cd to this repo's root is followed, but a cd that may fail leaves the shell where it
+            # was (d: a look-alike scripts/agent-msg.sh), after any join but &&; a relative target or `cd -` is not
+            ("cd " + AM_ROOT + "; bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("cd " + AM_ROOT + " && true; bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("cd " + AM_ROOT + " || bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("cd " + AM_ROOT + " && cd /tmp && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM",
+             AM_ROOT),
+            ("cd - && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            ("cd scripts/.. && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            # card c6c67dde r2 (Viktor 50201 R1, bash and zsh ran d's agent-msg.sh): cd is logical, a .. past a symlink
+            # steps back to where the link stands, not to its target's parent
+            ("cd " + d + "/amlnk/.. && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            ("cd " + d + "/amlnk/..; bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            ("cd " + d + "/amlnk/..\nbash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            # card c6c67dde r3 (Viktor 50321 R2, fail-open since r1): after || the cd may not run, after | it runs in
+            # a subshell (bash): bash ran d's look-alike in each but the && one (zsh: the || ones;
+            # work/c6c67dde-r3/truth), the shell may be where it was
+            ("true || cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("echo x || cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("true || cd " + AM_ROOT + "\nbash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("true || cd " + AM_ROOT + "; bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("true | cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            ("echo x | cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            # where the shell was is not known (a relative cd), so neither is it after `|| cd <abs>`
+            ("cd . || cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),
+            # a lean (main too): the cd runs here (false && true fails), the gate does not weigh the conditions
+            ("false && true || cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM",
+             d),
             ("bash ~/agent-msg.sh dave v - <<'M'\n" + d + "/measure.py\nM", d),  # ~ is not resolved: kept
             # no VAR=x prefix: PATH=, GIT_EXEC_PATH=, BASH_ENV= can hand the body to a program of the caller's choosing
             ("PATH=" + d + ":/usr/bin bash " + AM + " dave v - <<'M'\n./measure.py\nM", d),
@@ -3331,6 +3362,21 @@ def script_cases():
             ("cd " + d + " && git add -A && git commit -F - <<'MSG'\n./measure.py\nMSG", d),
             ("git\tadd\tx\n git commit -F - <<'MSG'\n./measure.py\nMSG", d),
             ("cd " + d + "\ntrue\ngit commit -F - <<'MSG'\n./measure.py\nMSG", d),
+            # card c6c67dde (Klodel 09:24: `cd /Users/klodel/marveen; bash scripts/agent-msg.sh ... <<'MSG'` blocked
+            # on a path in the message): a relative agent-msg.sh after a cd to an absolute path is ours from there
+            ("cd " + AM_ROOT + "; bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            ("cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM", d),
+            ("cd /tmp && cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM",
+             d),
+            ("cd " + AM_ROOT + "\ntrue\nbash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM", AM_ROOT),
+            # card c6c67dde r2: a .. with no symlink before it names the same directory either way
+            ("cd " + AM_ROOT + "/scripts/.. && bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM",
+             d),
+            # card c6c67dde r3: || or | before the cd, from this repo's root: ours wherever the shell is
+            ("true || cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM",
+             AM_ROOT),
+            ("true | cd " + AM_ROOT + " && bash scripts/agent-msg.sh dave viktor - <<'M'\n" + d + "/measure.py\nM",
+             AM_ROOT),
             ("git commit -F - <<'MSG'   \n./measure.py\nMSG", d),  # trailing blanks after the operator
             ("cd " + d + " && bash " + AM + " dave viktor - <<'M'\n./measure.py\nM", d),  # absolute: any cd
             ("curl -s -X POST localhost:3420/api/messages --data-binary @- <<'J'\n./measure.py\nJ", d),

@@ -271,7 +271,16 @@ SUP_PPID="$(ps -o ppid= -p "${SUP:-0}" 2>/dev/null | tr -d ' ')"
 SUP_SID_OTHER="$( [ -n "$SUP" ] && [ "$(ps -o pgid= -p "$SUP" | tr -d ' ')" != "$(ps -o pgid= -p $$ | tr -d ' ')" ] && echo yes)"
 pkill -TERM -P "$CALLER" 2>/dev/null; kill -TERM "$CALLER" 2>/dev/null; wait "$CALLER" 2>/dev/null
 check "detached: the supervisor is not the caller's child (ppid 1) and not in its process group" "$(ok "$SUP_PPID" = 1 -a "$SUP_SID_OTHER" = yes)" "sup=$SUP ppid=$SUP_PPID"
-for _ in 1 2 3 4 5 6; do [ -e "$SB/d2" ] && break; sleep 1; done
+# Wait for the supervisor's rc file too, not only the job's marker: the job writes d2, and the supervisor writes rc
+# only after its next poll (up to HEAVY_JOB_POLL later) and the EXIT trap. Breaking on d2 alone read an empty rc
+# whenever d2 landed just before a check tick (a loaded machine: two failed pre-push gates on 11-23; reproduced by
+# shifting the job's end, agents/kernel/work/memgate-flake-1123/race-sweep.txt; a third failure on a quiet machine
+# inside the gate's parallel vitest run). The EXIT trap releases the lock before it writes rc, so the lock check below
+# is covered too. The run dir is looked up again while it is missing (a slow start under load). Bounded at about 20 s.
+for _ in $(seq 1 67); do
+  [ -n "$r2" ] || r2="$(ls -1dt "$SB/store/heavy-jobs/"*-d2-* 2>/dev/null | head -1)"
+  [ -e "$SB/d2" ] && [ -n "$r2" ] && [ -e "$r2/rc" ] && break; sleep 0.3
+done
 check "detached: the caller is killed mid-run, the job still finishes" "$(ok -e "$SB/d2" -a "$(cat "$r2/rc" 2>/dev/null)" = 0)" "rc=$(cat "$r2/rc" 2>/dev/null) $(tail -3 "$SB/store/heavy-job.log")"
 check "detached: the lock is released after it" "$(ok ! -e "$SB/store/.heavy-job.lock")"
 
