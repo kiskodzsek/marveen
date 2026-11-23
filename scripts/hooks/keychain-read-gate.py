@@ -18,7 +18,14 @@ switch (`node -e 1 -r f`) is a RUN position too, and a RUN word with a glob is g
 argument file (`bash runner.sh f`, runner.sh runs "$1") hands f the main rules only, and so does runpy with a module
 name (`cd D && python3 -m runpy evil` runs D/evil.py; a path, `python3 -m runpy D/evil.py`, does not run: measured,
 Viktor 50854); python-subst-script-word (round 6, main too): a command substitution in python's script word is read
-as printing nothing (`python3 $(echo ./h.py)` judges no file; node's blocks); env-prefix-run-file: BASH_ENV=f
+as printing nothing (`python3 $(echo ./h.py)` judges no file; node's blocks); node-brace-option-word (round 6,
+Viktor 50908 c): bash brace-expands `{-r,./F.cjs}` into two words, the gate reads one (`node -e 1 {-r,./F.cjs}`);
+env-file-preload (round 6, d): `node --env-file=F` reads NODE_OPTIONS (a --require) from F and bun a preload from
+bunfig.toml, neither file is read; launcher-eval-preload (round 6, e): npx / bunx start tsx with -e and a preload
+(`npx -y tsx -e 1 -r ./F.cjs`), a launcher's arguments are not read; node-file-resolution (main too, follow-up card
+9ac4bbdb, Viktor 50979 (2)): node runs a word past its literal path (`node ./bad2` runs bad2.js, a folder its index.js,
+a bare `-r name` from node_modules) and NODE_OPTIONS (prefix, export, env) or an --env-file preload is not read;
+env-prefix-run-file: BASH_ENV=f
 and ENV=f before a shell are not read (main too); find-exec-computed-name: `find D -name x.sh -exec bash {} \\;` runs
 a name find computes, so x.sh keeps the main rules; dash-c-argument (an over-block): after a -c payload the payload
 view reads the next word as a command word, so `bash -c '...' f` judges f by them; a python heredoc body naming a
