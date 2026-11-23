@@ -1165,6 +1165,83 @@ def _eval_nest(cmd, k):
     return cmd
 
 
+def script_git_cases():
+    """Card 8d8298c7 (Viktor 50515 MEDIUM, 50542): a script FILE's text is judged by git's helper rules too, and the
+    one exemption, this tree's scripts/gh-pr.mjs named by an absolute literal path, opens nothing else. The scripts
+    are written to a temp dir from fragments (the subcommand pair never stands whole in this file); nothing runs."""
+    import shutil
+    import tempfile
+    CR, FL, OK = 'cred' + 'ential', 'fi' + 'll', 'osx' + 'keychain'
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(HOOK)))
+    prod = os.path.realpath(os.path.join(repo, 'scripts', 'gh-pr.mjs'))
+    fails, n = [], 0
+    with tempfile.TemporaryDirectory() as d0:
+        d = os.path.realpath(d0)
+
+        def w(name, body, mode=0o644):
+            path = os.path.join(d, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(body)
+            os.chmod(path, mode)
+            return path
+        w('h.sh', f'#!/bin/sh\nprintf "protocol=https\\nhost=github.com\\n\\n" | git {CR} {FL}\n', 0o755)
+        w('h2.sh', f'#!/bin/sh\ngit -C . {CR} approve < x\n', 0o755)
+        w('h.py', f"import subprocess\nsubprocess.run(['git', '{CR}', '{FL}'], input=b'')\n")
+        w('hs.py', f"import subprocess\nsubprocess.run('git {CR} {FL}', shell=True)\n")
+        w('hk.py', f"import subprocess\nsubprocess.run(['git', '{CR}-{OK}', 'get'])\n")
+        w('hc.sh', f'#!/bin/sh\ngit -c {CR}.helper={OK} fetch\n', 0o755)
+        w('ok.sh', '#!/bin/sh\ngit fetch origin\nHOME=/tmp/x git status\n', 0o755)
+        w('okword.py', f"print('the {CR} file is read elsewhere; {FL} the form')\n")
+        w('helper.cjs', f"require('child_process').execFileSync('git', ['{CR}', '{FL}'])\n")
+        w('helper.mjs', f"import {{ execFileSync }} from 'node:child_process'; execFileSync('git', ['{CR}', '{FL}'])\n")
+        w('ok.js', "console.log(1)\n")
+        w(os.path.join('scripts', 'gh-pr.mjs'), f"import {{ execFileSync }} from 'node:child_process'; "
+                                                f"execFileSync('git', ['{CR}', '{FL}'])\n")
+        with open(prod, encoding='utf-8') as f:
+            real_body = f.read()
+        w('gh-pr.mjs.bak', real_body)
+        w(os.path.join('x', 'marveen', 'scripts', 'gh-pr.mjs'), real_body)
+        os.symlink(prod, os.path.join(d, 'gh-link.mjs'))
+        S = d + '/h.sh'
+        rows = [
+            # Viktor 50515: the shapes that ran git's keychain helper unseen (a script file's text)
+            (f'bash {S}', 2), (f'bash {S} | tee {d}/o', 2), (f'bash {S} > {d}/o', 2), (f'bash {S} | cat', 2),
+            (f'bash {S}; echo done', 2), (f'cd {d} && ./h.sh', 2), (f'sh {S} | tee {d}/o', 2),
+            (f'bash {d}/h2.sh', 2), (f'python3 {d}/h.py', 2), (f'python3 {d}/hs.py', 2), (f'python3 {d}/hk.py', 2),
+            (f'sh {d}/hc.sh', 2),
+            # controls: a plain git run, a HOME change, the words in prose
+            (f'bash {d}/ok.sh', 0), (f'python3 {d}/okword.py', 0),
+            # the exemption: an absolute literal path to this tree's gh-pr.mjs, or a symlink to it
+            (f'node {prod} pr view 1', 0), (f'node {d}/gh-link.mjs pr view 1', 0),
+            (f'cd {d} && node {prod} pr view 1', 0),
+            # Viktor 50542 1: a relative name stays under the rule (the gate's cwd reckoning is the weak spot)
+            (f'cd {d} && node scripts/gh-pr.mjs pr view 1', 2), ('node scripts/gh-pr.mjs pr view 1', 2),
+            (f'echo {prod}; node scripts/gh-pr.mjs pr view 1', 2),
+            # Viktor 50542 3: an exact realpath, no prefix or suffix match, no copy
+            (f'node {d}/gh-pr.mjs.bak pr view 1', 2), (f'node {d}/x/marveen/scripts/gh-pr.mjs pr view 1', 2),
+            # Viktor 50542 2: the rest of the command is judged as before
+            (f'node {prod} pr view 1 && bash {S}', 2), (f'bash {S}; node {prod} pr view 1', 2),
+            (f'node {prod} pr view 1 && python3 {d}/h.py', 2),
+            # Viktor 50542 2: node's preload options are read as files of their own, the exemption does not cover them
+            (f'cd {d} && node -r ./helper.cjs {prod} pr view 1', 2), (f'cd {d} && node --import ./helper.mjs {prod} x', 2),
+            (f'cd {d} && NODE_OPTIONS=--require ./helper.cjs node {prod} x', 2),
+            (f'cd {d} && node --loader ./helper.mjs {prod} x', 2),
+            # KNOWN-LIMIT node-options-quoted (main too, not opened by the exemption): a quoted or `=` NODE_OPTIONS
+            # value's preload file is not read, with any script
+            (f'cd {d} && NODE_OPTIONS="--import ./helper.mjs" node {prod} x', 0),
+            (f'cd {d} && NODE_OPTIONS="--import ./helper.mjs" node ./ok.js', 0),
+        ]
+        for cmd, want in rows:
+            n += 1
+            cwd = repo if 'scripts/gh-pr.mjs' in cmd and 'cd ' not in cmd else d
+            code, err = bash_in(cmd, cwd)
+            if code != want:
+                fails.append(f'script-git: want {want}, got {code}: {cmd.replace(d, "<tmp>")[:110]!r} {err[:80]}')
+        shutil.rmtree(os.path.join(d, 'x'), ignore_errors=True)
+    return fails, n
+
+
 def script_cases():
     """Card bc009036 (Kernel 41497, Viktor 41502): the file a command runs is judged too. Every script is written to
     a temp dir at run time from fragments; nothing is executed, the gate only reads the files."""
@@ -4657,15 +4734,18 @@ def main():
                 fails.append(f'wrapper timing case: want {want}, got {p.returncode}: {cmd[:40]!r}...')
         except subprocess.TimeoutExpired:
             fails.append(f'wrapper timing case timed out (5 s): {cmd[:40]!r}...')
-    # card 04d67b39: the GIT_RULES read the command, not a script file: the fleet's GitHub path, which runs
-    # `git credential fill` with the helper list reset (and names it in a comment and a string), passes
+    # card 04d67b39: the fleet's GitHub path, which runs git's helper fill with the helper list reset (and names it in a
+    # comment and a string), passes. Card 8d8298c7 (Viktor 50542 1, 5): named by its absolute path; the relative form
+    # is judged by the script rules (script_git_cases)
     repo = os.path.dirname(os.path.dirname(os.path.dirname(HOOK)))
     if not os.path.isfile(os.path.join(repo, 'scripts', 'gh-pr.mjs')):
         fails.append('gh-pr.mjs not found next to the gate: the regression case did not run')
     else:
-        code, err = bash_in('node scripts/gh-pr.mjs pr view 1', repo)
+        code, err = bash_in('node ' + os.path.join(repo, 'scripts', 'gh-pr.mjs') + ' pr view 1', repo)
         if code != 0:
             fails.append(f'gh-pr.mjs should pass (got {code}): {err[:160]}')
+    sg_fails, sg_n = script_git_cases()
+    fails += sg_fails
     script_fails, script_n = script_cases()
     fails += script_fails
     pre_fails, pre_n = prefilter_cases()
@@ -4683,7 +4763,7 @@ def main():
             compile(hook_src, HOOK, 'exec')
         except SyntaxError as e:
             fails.append(f'the gate does not compile with warnings as errors: line {e.lineno}: {e.msg}')
-    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n + pre_n + 1
+    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n + pre_n + 1 + sg_n
     for f in fails:
         print('FAIL', f)
     print(f'{total - len(fails)}/{total} passed')

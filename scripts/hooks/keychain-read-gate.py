@@ -193,7 +193,15 @@ git's credential paths into the login keychain (card 04d67b39, Viktor 41943): `g
 the osxkeychain helper called directly (`git credential-osxkeychain get`, `git-credential-osxkeychain`, by path),
 and choosing it (`git -c credential.helper=osxkeychain ...`, `git config ... credential.helper osxkeychain`,
 GIT_CONFIG_PARAMETERS / GIT_CONFIG_VALUE_<n>), with git's own options before the subcommand (`git -C d -c a=b`) and
-behind xcrun. Plain `git fetch` / `git push` pass. These read the command text, not a script file's (GIT_RULES).
+behind xcrun. Plain `git fetch` / `git push` pass. These read the command text (GIT_RULES); since card 8d8298c7
+(Viktor 50515, 50542) a script file's text is read by the helper rules too (SCRIPT_GIT_RULES: fill / approve / reject,
+the osxkeychain helper, choosing it; a list form `['credential', 'fill']` as a literal pair), not by the HOME /
+config-override ones. One file is exempt: this tree's scripts/gh-pr.mjs (it runs the fill with the helper list reset
+to the clone's own helper), only when the command names it by an absolute literal path or a symlink to it and every
+word ending in its file name is such a path (gh_pr_exempt); the rest of the command, node's preload files included,
+is judged as before. The exemption is for one file the prod-tree-write-gate guards: an accident guard, not a
+boundary. Known limit (KNOWN-LIMIT node-options-quoted, main too): a preload file in a quoted or `=` NODE_OPTIONS
+value (`NODE_OPTIONS="--import ./x.mjs"`) is not read, with any script.
 And what takes away the ~/.gitconfig helper reset (card 49d58372, Viktor 42039 MEDIUM 1): GIT_CONFIG_GLOBAL=,
 GIT_CONFIG_SYSTEM=, HOME= before git or set in the shell before a later git (export, unset, a bare assignment), env -i /
 env -u HOME before git; an include (`-c include.path=`, `--config-env=`, GIT_CONFIG_PARAMETERS, GIT_CONFIG_KEY_<n>,
@@ -2797,6 +2805,17 @@ def _hits(cmd, script=False):
     return found
 
 
+# card 8d8298c7 (Viktor 50515 MEDIUM, 50542): a script FILE's text is judged by git's helper rules too (the helper's
+# fill / approve / reject, the osxkeychain helper by name, choosing it by name), not by the HOME / config-override
+# rules (a script that sets HOME or names a config is common and reads no keychain). `bash S`, `./S`, `sh S | tee`,
+# a python list or shell=True string ran git's keychain helper unseen. A list form (`['credential', 'fill']`) is a
+# literal pair. hits(body, script=SCRIPT_GIT) runs these on a file; the one exempt file is gh_pr_exempt()'s.
+SCRIPT_GIT = 'git'
+SCRIPT_GIT_RULES = [r for r in GIT_RULES if r[0] in ('git-credential', 'git-credential-helper')] + [
+    ('git-credential', NeedRule('credential', re.compile(
+        r'[\'"]credential[\'"][ \t]*,[ \t\n]*[\'"](?:fill|approve|reject)[\'"]', re.I)))]
+
+
 def hits_in(text, script=False):
     """hits() on a normalised text."""
     # `sudo -u root security ...` (card 3085a683): the text with the wrapped commands' boundaries is judged TOO, not
@@ -2812,7 +2831,7 @@ def hits_in(text, script=False):
     texts += [re.sub(r'[\'"\\]', '', t) for t in texts]
     found = []
     plain = [text, re.sub(r'[\'"\\]', '', text)]
-    for name, rx in RULES + ([] if script else GIT_RULES + CMD_RULES):
+    for name, rx in RULES + (SCRIPT_GIT_RULES if script == SCRIPT_GIT else [] if script else GIT_RULES + CMD_RULES):
         pick = raw if getattr(rx, 'raw', False) else plain if getattr(rx, 'plain', False) else texts
         if name not in found and any(rx.search(t) for t in pick):
             found.append(name)
@@ -5967,6 +5986,38 @@ def shell_heredoc_bodies(cmd, lx):
     return out
 
 
+# card 8d8298c7 (Viktor 50542): scripts/gh-pr.mjs of THIS tree (the live gate's tree is the production checkout,
+# which the prod-tree-write-gate guards) runs git's helper fill on purpose: the helper list reset, only the clone's
+# own helper (scripts/gh-pr.mjs credentialArgs), and it names the call in comments and strings. Its text skips
+# SCRIPT_GIT_RULES only (RULES, literal_hit and hidden_name still read it), and only when the command names it by an
+# ABSOLUTE literal path (or a symlink to it, the realpath decides) and every word ending in its file name is such a
+# path: a relative name after a cd is the gate's cwd reckoning, the weak spot (Viktor 50542 1). An accident guard,
+# not a boundary (same uid). Measured 2026-11-23, 876 transcripts, 14 days: Dave 140, Pulzus 25 runs, 156 absolute.
+GH_PR_PROD = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'gh-pr.mjs'))
+_ABS_WORD_RX = re.compile(r'(?:^|(?<=[\s\'"=]))(/[^\s\'"`$;&|<>()*?\[\]{}\\=]{1,4096})(?=$|[\s\'";&|<>)])')
+MAX_EXEMPT_WORDS = 64
+
+
+def gh_pr_exempt(path, cmd):
+    if path != GH_PR_PROD:
+        return False
+    named, n = [], 0
+    for m in _ABS_WORD_RX.finditer(cmd):
+        n += 1
+        if n > MAX_EXEMPT_WORDS:  # not "look at the first ones": no exemption past the bound (fail-closed)
+            return False
+        if os.path.realpath(m.group(1)) == GH_PR_PROD:
+            named.append(m)
+    if not named:
+        return False
+    ends = {m.end(1) for m in named}
+    for base in {os.path.basename(GH_PR_PROD)} | {os.path.basename(m.group(1)) for m in named}:
+        for o in re.finditer(r'(?<![\w.-])' + re.escape(base) + r'(?![\w.-])', cmd):
+            if o.end() not in ends:
+                return False
+    return True
+
+
 def script_hits(cmd, cwd):
     """Rule names for inline interpreter code and for the files the command runs."""
     found = []
@@ -6081,7 +6132,8 @@ def script_hits(cmd, cwd):
             return found + ['script-too-slow']
         with open(path, 'rb') as f:
             body = f.read(MAX_SCRIPT_BYTES).decode('utf-8', errors='replace')
-        if hits(body, script=True) or literal_hit(body) or (_hn_shell_file(path, body, cmd, pipe_words)
+        mode = True if gh_pr_exempt(path, cmd) else SCRIPT_GIT
+        if hits(body, script=mode) or literal_hit(body) or (_hn_shell_file(path, body, cmd, pipe_words)
                                                              and hidden_name(body)):
             found.append('script-file')
             break
