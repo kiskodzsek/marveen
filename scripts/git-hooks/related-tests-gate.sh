@@ -23,6 +23,10 @@
 #     run by sync-hooks.sh on update); linked worktrees of that clone share it. A push from a scratch bare
 #     repo or another clone is not gated.
 #   - Only vitest files run; the python hook tests (scripts/hooks/*_test.py) are not run here.
+#   - vitest runs without the hook's GIT_DIR / INDEX_FILE / WORK_TREE, the pusher's injected git config
+#     (GIT_CONFIG_COUNT, KEY_n, VALUE_n, PARAMETERS), the config files it names (GIT_CONFIG, _GLOBAL, _SYSTEM,
+#     _NOSYSTEM) and its credential answerers (GIT_ASKPASS, SSH_ASKPASS); every other variable of the pusher
+#     (HOME, PATH, NODE_OPTIONS, ...) reaches the tests as given (card 64d10325, Viktor 50628).
 #
 # stdin: the pre-push ref list (<local ref> <local sha> <remote ref> <remote sha>). Exit 0 = push may go.
 # Portable to macOS bash 3.2 (no mapfile, no associative arrays).
@@ -40,6 +44,9 @@ refuse() { echo "" >&2; echo "BLOCKED by related-tests-gate: $1" >&2; shift; for
 is_gated_path() {
   case "$1" in
     scripts/hooks/*|.claude/settings.json|templates/settings.json.template) return 0 ;;
+    # a name git still quotes (a quote, a backslash or a control character in it; core.quotePath=false below keeps
+    # UTF-8 plain): fail-closed, it is gated (Viktor 50628 L2 P38: scripts/hooks/<accented name>.py passed red)
+    \"scripts/hooks/*|\".claude/settings.json\"|\"templates/settings.json.template\") return 0 ;;
   esac
   return 1
 }
@@ -54,7 +61,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     continue
   }
   # --no-renames: a hook moved OUT of scripts/hooks (git mv) must still show its old path (Viktor 41344 INFO 6).
-  changed="$(git diff --name-only --no-renames "$base" "$local_sha")"
+  # core.quotePath=false: a UTF-8 hook name comes as written, not as a quoted octal string (Viktor 50628 L2 P38)
+  changed="$(git -c core.quotePath=false diff --name-only --no-renames "$base" "$local_sha")"
 
   gated=""
   while IFS= read -r f; do
@@ -122,14 +130,22 @@ EOF
   # KEY_n / VALUE_n, GIT_CONFIG_PARAMETERS): push_pr.py sets credential.helper= that way, it outranks every config
   # file a test sets up, and a test's control that expects the system / global helper to run went red under it
   # (card 64d10325 push, Klodel 50552: pr-head.test.sh, 2 controls).
-  cfg_unset=()
-  while IFS= read -r v; do
-    [ -n "$v" ] && cfg_unset+=(-u "$v")
-  done <<CFG
-$(compgen -e | grep -E '^GIT_CONFIG_(COUNT|PARAMETERS|KEY_[0-9]+|VALUE_[0-9]+)$')
-CFG
-  if ! env -u GIT_DIR -u GIT_INDEX_FILE -u GIT_WORK_TREE ${cfg_unset[@]+"${cfg_unset[@]}"} \
-      node_modules/.bin/vitest run "$@" >&2 </dev/null; then
+  # Round 2 (Viktor 50628): the config FILES it names (GIT_CONFIG_GLOBAL / SYSTEM / NOSYSTEM, the old GIT_CONFIG)
+  # and the pusher's credential answerers (GIT_ASKPASS reads the token file; SSH_ASKPASS) go too: with the helper
+  # reset dropped, a test that set its own HOME and ran an authenticated https git would have stored the token in the
+  # keychain. One pass in a subshell with builtins and a case pattern (no grep: GREP_OPTIONS; no array growth: 3000
+  # pairs took 249 s), then exec.
+  if ! (
+      IFS=$' \t\n'
+      for v in $(builtin compgen -e); do
+        case "$v" in
+          GIT_DIR|GIT_INDEX_FILE|GIT_WORK_TREE|GIT_CONFIG|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_GLOBAL|\
+          GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM|GIT_CONFIG_KEY_*|GIT_CONFIG_VALUE_*|GIT_ASKPASS|SSH_ASKPASS)
+            builtin unset "$v" ;;
+        esac
+      done
+      builtin exec node_modules/.bin/vitest run "$@"
+    ) >&2 </dev/null; then
     refuse "the tests above failed on ${local_sha:0:8}; the push does not go." \
       "Fix them, commit, and push again (CI would go red on the same ones)."
   fi
