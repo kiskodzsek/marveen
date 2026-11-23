@@ -49,6 +49,10 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     curl, A=$(( (1+2) )) curl) is no unit of the main's segment search; CURL_SEG2_RX starts a segment after the ),
     so next to a message or memory write that PUT is a card too, also after a lone number ($(echo 1) curl: the ) closes
     the $( and is no list mark, Viktor 50062 R2).
+    Viktor 50181 R5, 50390 D1 (card 09f76463): from a $'...', comment, ${...} or heredoc inside an open parenthesis,
+    and from a substitution ( that such a sign's quote drift hides at depth 0, no list mark is blanked (fail-closed);
+    accepted overblocks (the safe side): a message heredoc whose body has a word-start # or a ${ inside parentheses
+    before the list (harm-heredoc-hash-paren, harm-heredoc-brace-paren).
     The 13 smuggle labels of Viktor 49901 (indep7) and the five of 49912 K2 are closed by views next to the main's
     segment search (CURL_SEG2_RX, _kanban_put_segment; a view only adds a card judgment): shell words before curl
     (then, do, {, !, if, time, command, env, timeout N, a redirect ...), "curl" and \\curl, quotes read as units in
@@ -678,10 +682,13 @@ _PREFIX = (r'(?:(?:then|do|else|elif|if|while|until|time(?:[ \t]+-p)?|command|bu
            r'|timeout(?:[ \t]+-[^\s;&|(`]+(?:[ \t]+(?:[A-Z][A-Z0-9]*|\d+(?:\.\d+)?[smhd]?))?)*[ \t]+\d+(?:\.\d+)?[smhd]?'
            r'|(?:sudo|xargs)(?:[ \t]+-[^\s;&|(`]+(?:[ \t]+(?!-|[\\"\']?(?:[^\s;&|(`)]*/)?curl\b)[^\s;&|(`]+)?)*'
            r'|\d*(?:>>?|<|>&|&>>?)[ \t]*[^\s;&|(`<>]+)[ \t]+)*')
+# Round 2 (Viktor 50390 D1, d0-trailing-comment): a word-start # (after a blank) is a comment, so the curl segment
+# ends there; before, an apostrophe in a trailing comment (`... -d '{...}' # don't`) opened a quote that swallowed the
+# next line's real PUT into the message curl's segment. A mid-word # (a URL fragment) stays in the segment.
 CURL_SEG2_RX = re.compile(r'(?:^|[;&|(`)])[ \t]*' + _PREFIX + r'(?:' + _env_assign('v3') + r'[ \t]+)*' + _PREFIX
                           + r'(?:' + _env_assign('v4') + r')?'
                           r'(?P<curl>(?:[^\s;&|(`)]*/)?(?:\\|["\'])?curl\b'
-                          r'(?:[^\n;&|\\\'"$]|\\[\s\S]|\$\'(?:[^\'\\]|\\[\s\S])*\'|\'[^\']*\''
+                          r'(?:[^\n;&|\\\'"$#]|(?<!\s)#|\\[\s\S]|\$\'(?:[^\'\\]|\\[\s\S])*\'|\'[^\']*\''
                           r'|"(?:[^"\\]|\\[\s\S])*"|[$\'"])*)?', re.M)
 # The curl's own URL in a view: the first /api/ once the header and data arguments are taken out (an /api/messages
 # in a header, an env value or a -d before the kanban URL is not the URL; a memory body quoting a kanban PUT after
@@ -708,24 +715,34 @@ PAREN_RX = re.compile(r'[()]')
 # new shape when the model grew. Fail-closed instead (Viktor's direction, NOT a wider model): from the first such
 # sign at a depth above 0 on, no list mark is blanked (a kept mark is a start: at worst an overblock). Linear: one
 # pass over the parentheses and these signs, stopping at the first hit.
+# Round 2 (Viktor 50390 D1): at depth 0 such a sign stays read the old way (the message shapes need it), but the
+# quote drift it causes (`# it's`, `$'it\'s'`, a heredoc body with an apostrophe) blanks the ( of a substitution
+# opened after it, so the depth there is no longer measured: after a depth-0 sign, a $( <( >( that `blind` blanked
+# is itself an unmodeled position. Only a substitution: a bare ( (a subshell) cannot close before a command word
+# (`(: 1)curl` is a syntax error), and a message heredoc line such as "Patrik's (lista:" keeps its list ALLOW.
 UNMODELED_RX = re.compile(r"[()]|\$['{]|<<|#")
 _WORD_START = ' \t\n;&|()`'
 
 
 def _unmodeled_from(view, blind):
     """The position of the first sign _quote_blind does not model (see UNMODELED_RX) inside an open parenthesis,
-    or len(view). A sign inside quotes (blanked in `blind`) is text; a # only at a word start."""
-    depth = 0
+    or of the first substitution ( blanked after such a sign at depth 0 (D1), or len(view). A sign inside quotes
+    (blanked in `blind`) is text; a # only at a word start."""
+    depth, seen0 = 0, False
     for m in UNMODELED_RX.finditer(view):
         i, c = m.start(), m.group()
         if blind[i] == ' ':
+            if seen0 and c == '(' and i and view[i - 1] in '$<>':  # D1: a substitution the drift hid
+                return i
             continue
         if c == '(':
             depth += 1
         elif c == ')':
             depth = max(0, depth - 1)
-        elif depth and (c != '#' or i == 0 or view[i - 1] in _WORD_START):
-            return i
+        elif c != '#' or i == 0 or view[i - 1] in _WORD_START:
+            if depth:
+                return i
+            seen0 = True
     return len(view)
 
 

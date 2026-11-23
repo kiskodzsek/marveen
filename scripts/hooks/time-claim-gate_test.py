@@ -1130,6 +1130,69 @@ def unmodeled_sign_in_a_substitution_keeps_the_list_mark(root):
 
 
 @case
+def depth0_sign_that_hides_a_substitution_keeps_the_list_mark(root):
+    # Viktor 50390 D1 (card 09f76463 round 2; his independent probe 6711eb542264, 19 cases, main lets all through): a
+    # depth-0 comment, $'...' or heredoc body with an apostrophe opens a quote in _quote_blind that the shell does not
+    # have, it blanks the ( of the $( after it, and the ) after the number reads as a list mark at depth 0 (zsh and
+    # bash run the PUT). After a depth-0 sign, a $( <( >( that the drift blanked is itself unmodeled. Each BLOCK shape
+    # has an ALLOW pair: the same sign, then only a numbered list written in a message.
+    url = 'http://localhost:3420/api/kanban/abc123'
+    amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh viktor dave '
+    put = 'curl -s -X PUT ' + url + """ -d '{"comment":"Viktor 14:30: kész"}'"""
+    lst = "'Lépések: 1) curl -s -X PUT " + url + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'"
+    env = 'T=$(echo a | tr a 1) '
+    h, d = root['hook'], root['dir']
+    cases = {
+        'd0-comment-apostrophe': ("# it's\n" + env + put + '\n' + amsg + "'ok'", 2),
+        'd0-msg-then-comment': (amsg + "'ok'\n# it's\n" + env + put, 2),
+        'd0-ansi-c': ("echo $'it\\'s' >/dev/null; " + env + put + '; ' + amsg + "'ok'", 2),
+        'd0-heredoc-apostrophe': ("cat >/dev/null <<E\nit's\nE\n" + env + put + '\n' + amsg + "'ok'", 2),
+        'd0-backtick-comment': ("T=`echo a # don't`\nU=$(echo a | tr a 1) " + put + '\n' + amsg + "'ok'", 2),
+        'd0-glued': ("# it's\n$(: 1)" + put + '\n' + amsg + "'ok'", 2),
+        # the curl segment ends at a word-start #: an apostrophe in a trailing comment no longer swallows the next line
+        'd0-trailing-comment': ("curl -s -X POST http://localhost:3420/api/messages -d '{\"content\":\"ok\"}' # don't\n"
+                                + env + put, 2),
+        # the ALLOW pairs: the same sign, then a list only written in a message
+        'allow-comment-apostrophe': ("# it's\n" + amsg + lst, 0),
+        'allow-msg-then-comment': (amsg + "'ok'\n# it's\n" + amsg + lst, 0),
+        'allow-ansi-c': ("echo $'it\\'s' >/dev/null; " + amsg + lst, 0),
+        'allow-heredoc-apostrophe': ("cat >/dev/null <<E\nit's\nE\n" + amsg + lst, 0),
+        'allow-backtick-comment': ("T=`echo a # don't`\n" + amsg + lst, 0),
+        'allow-trailing-comment-list': ("curl -s -X POST http://localhost:3420/api/messages -d '{\"content\":\"ok\"}'"
+                                        " # don't 1) " + put, 0),
+        # a mid-word # (a URL fragment) stays in the curl segment: the PUT is still read
+        'fragment-put-blocks': ('curl -s -X PUT ' + url + "#x -d '{\"comment\":\"Viktor 14:30: kész\"}'", 2),
+        # ... also before the -X PUT, where only the CURL_SEG2_RX view (env value with a pipe) reads the segment
+        'midword-hash-before-put-blocks': (amsg + "'ok'\nT=$(date | tr a b) curl -s -d note#1 -X PUT " + url
+                                           + " -d '{\"comment\":\"Viktor 14:30: kész\"}'", 2),
+        # a bare ( hidden by the drift is no substitution: a message heredoc line keeps its list ALLOW
+        'allow-heredoc-apostrophe-paren': (amsg + "- <<'E'\nPatrik's (lista:\n1) " + put + '\n2) szólj.\nE', 0),
+    }
+    bad = [label for label, (cmd, want) in cases.items()
+           if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
+    for b in bad:
+        print('  d1:', b)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tcg_d1', root['hook'])
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    want = {
+        "# it's\nT=$(a 1)": 10,      # the ( of the $( the drift blanked
+        "# it's\nT=<(a 1)": 10,      # a process substitution too
+        "# it's\nT=(a 1)": 14,       # a bare ( is no substitution: none (len)
+        "# its\nT=$(a 1)": 14,       # no drift: the $( is counted, nothing unmodeled (len)
+        "T=$(a 1) # it's": 15,        # the sign after the $(: none (len)
+        "echo '$(a 1)'": 13,          # quoted text without a sign before it: none (len)
+    }
+    for k, v in want.items():
+        got = g._unmodeled_from(k, g._quote_blind(k))
+        if got != v:
+            bad.append(k)
+            print('  unmodeled d1:', repr(k), '->', got, 'want', v)
+    return not bad
+
+
+@case
 def python_dict_triple_fstring_and_variable_on_rules_3_and_4(root):
     # Viktor 49912 K1: rule 3 (daily-log heading) and rule 4 (card opening stamp) read a triple-quoted or f-prefixed
     # Python value, rule 3 also a `content = '## ...'` variable; a past card stamp, another endpoint, the {{NOW}} token
