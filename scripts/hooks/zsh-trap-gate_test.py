@@ -578,6 +578,53 @@ def env_split_long_chains_stay_linear(_):
 
 
 @case
+def ansi_reading_only_for_a_dollar_quote_word(_):
+    # e6a0f476 round 5 (Viktor 50599 T1): the $'..'-decoded reading of a split value was built for every value and
+    # multiplied the texts per level: the triple-nested env -S row (no $'..' anywhere) made 69 findings() calls on
+    # 6e81321d, 31 now; 200 KB of it took 3,1-3,4 s there and 1,4-1,5 s now (load1 22, agents/kernel/work/ztf-r5-1123/
+    # time_r5.txt). A $'..' word keeps the decoded reading (the R1b rows of round 4 block).
+    import time
+    nest = 'env -S "env -S \'env -S \\"rm\\_-rf \\x5cq #z\\" \\_ \\x5cq #y\' \\_ \\x5cq #x" '
+    real, calls = gate.findings, [0]
+
+    def counting(*a, **kw):
+        calls[0] += 1
+        return real(*a, **kw)
+    gate.findings = counting
+    try:
+        got = gate.findings(nest + 'a $S', ZSH)
+    finally:
+        gate.findings = real
+    cmd = nest + 'a ' * 100000 + '$S'
+    t0 = time.monotonic()
+    big = gate.findings(cmd, ZSH)
+    dt = time.monotonic() - t0
+    # the call count is the exact guard; the time bound has room for a loaded machine and python 3.9 (2,39 s at
+    # load1 22), the old head took 4,65 s on a quiet one (Viktor time_r4.txt)
+    if not got or calls[0] > 31 or not big or dt > 3.0:
+        print(f'  nest3: {len(got)} finding(s), {calls[0]} calls; 200 KB: {len(big)} finding(s), {dt:.2f} s')
+        return False
+    if not (blocks("env -S $'rm\\x5c_-rf\\x5c_${S}'", 'RM-VALTOZO-KAPU') and passes("env -S 'echo a\\\\c' rm -rf $S")):
+        return False
+    # Viktor 50599 I1 (survivors M05, M06, M23 of his mutation round): a one-digit hex, a one- or two-digit octal, and
+    # the simple $'..' escapes f, v, r separate words too (zsh -f with an rm stub ran rm in each, surv_r4.txt)
+    rm = 'RM-VALTOZO-KAPU'
+    return (blocks("env -S $'rm\\x9-rf\\x9${S}'", rm) and blocks("env -S $'rm\\xc-rf\\xc${S}'", rm)
+            and blocks("env -S $'rm\\11-rf\\11${S}'", rm) and blocks("env -S $'rm\\14-rf\\14${S}'", rm)
+            and blocks("env -S $'rm\\f-rf\\f${S}'", rm) and blocks("env -S $'rm\\v-rf\\v${S}'", rm)
+            and blocks("env -S $'rm\\r-rf\\r${S}'", rm))
+
+
+@case
+def arch_options_are_whole_words(_):
+    # e6a0f476 round 5 (Viktor 50599 K5): the e of the arch name -arm64e is no -e taking rm as its value (zsh -f:
+    # arch -arm64e echo RAN prints RAN); round 4 read arch options as getopt clusters
+    r = ' rm -rf $S'
+    return (blocks('arch -arm64e' + r, 'RM-VALTOZO-KAPU') and blocks('arch -arm64 -e A=b' + r, 'RM-VALTOZO-KAPU')
+            and passes('arch -arm64e ls -la $S'))
+
+
+@case
 def env_split_nesting_past_the_depth_bound_blocks(_):
     # e6a0f476: env -S inside env -S is read up to MAX_SPLIT_DEPTH levels; past it the gate blocks (fail-closed)
     cmd = 'rm -rf $S'
@@ -652,6 +699,31 @@ KNOWN_LIMIT_INPUTS += [
     ('time-data-heredoc-300k-tail-rm', "cat > out.txt <<'EOF'\n" + DATA_LINE * 6000 + 'EOF\nrm -rf $S'),
     ('time-1mb-tail-rm', "cat > out.txt <<'EOF'\n" + DATA_LINE * 20000 + 'EOF\nrm -rf $S'),
 ]
+# e6a0f476 round 5 (Viktor 50599): the round-4 probe's old fail-opens (indep15 probe_ztf15.py, probe_v4.py)
+KNOWN_LIMIT_INPUTS += [
+    ('Z24-envS-semicolon', "env -S 'rm -rf ;' $S"),
+    ('Z25-envS-redirect', "env -S 'rm -rf >' $S"),
+    ('Z26-envS-pipe', "env -S 'rm -rf |' $S"),
+    ('Z27-envS-amp', "env -S 'rm -rf &' $S"),
+    ('Z28-envS-quoted-rm', """env -S "'rm' -rf" $S"""),
+    ('Z29-envS-quoted-opt', """env -S "rm '-rf'" $S"""),
+    ('Z10-ansi-Cdash-i', r"env -S $'rm\C-i-rf' $S"),
+    ('Z88-time-Cdash-110k', "env -S $'rm" + r'\C-i' * 28000 + "-rf' $S"),
+    ('Z16-ansi-x27-quoted-rm', r"env -S $'\x27rm\x27 -rf' $S"),
+    ('Z38-eq-rm', '=rm -rf $S'),
+    ('Z39-eq-esc-env', r"=\env -S 'rm -rf' $S"),
+    ('Z40-eq-sqpart-env', "=e''nv -S 'rm -rf' $S"),
+    ('Z46-glob-caret', "/usr/bin/[^a]nv -S 'rm -rf' $S"),
+    ('Z47-glob-posix', "/usr/bin/[[:lower:]]nv -S 'rm -rf' $S"),
+    ('Z48-glob-alt', "/usr/bin/(env|zzq) -S 'rm -rf' $S"),
+    ('Z49-glob-qual', "/usr/bin/env(N) -S 'rm -rf' $S"),
+    ('Z56-brace-path-env', "/usr/bin/{env,env} -S 'rm -rf' $S"),
+    ('bare-glob-env-file', '[e]nv rm -rf $S'),
+    ('bare-q-env-file', 'en? rm -rf $S'),
+    ('glob-rm', '/bin/r[m] -rf $S'),
+    ('Z78-quoted-rm-top', "'rm' -rf $S"),
+    ('Z79-quoted-opt-top', "rm '-rf' $S"),
+]
 
 
 @case
@@ -661,7 +733,7 @@ def known_limit_rows_pin_todays_allow(_):
         if gate.findings(cmd, ZSH):
             print(f'  KNOWN-LIMIT {label}: blocks now (the documented limit changed)')
             ok = False
-    return ok and len(KNOWN_LIMIT_INPUTS) == 17
+    return ok and len(KNOWN_LIMIT_INPUTS) == 39
 
 
 def main():

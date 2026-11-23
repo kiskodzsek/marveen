@@ -56,6 +56,13 @@ substitution in a ${V:-...} default), dollar-dparen-fallback-rm, dparen-start-su
 fallback), dq-case-subst-rm (a case pattern paren in a quoted substitution); not read: bt-heredoc-tail-rm (a
 heredoc end inside backticks), dollar-bracket-shift-tail-rm ($[ ... << ] read as a heredoc), and past the
 256 KB cut (MAX_COMMAND) the tail is not judged: time-data-heredoc-300k-tail-rm, time-1mb-tail-rm.
+Known limits of round 4 (Viktor 50599, indep15 + probe_v4; LOW, main and 6e81321d allow them too; pinned the same
+way): env -S read as zsh, env takes an operator or quote as a plain word: Z24-envS-semicolon, Z25-envS-redirect,
+Z26-envS-pipe, Z27-envS-amp, Z28-envS-quoted-rm, Z29-envS-quoted-opt; $'..' escapes not decoded: Z10-ansi-Cdash-i,
+Z88-time-Cdash-110k (a control escape), Z16-ansi-x27-quoted-rm (a decoded quote env removes); EQUALS:
+Z38-eq-rm, Z39-eq-esc-env, Z40-eq-sqpart-env; zsh globs fnmatch lacks: Z46-glob-caret, Z47-glob-posix,
+Z48-glob-alt, Z49-glob-qual, Z56-brace-path-env, bare-glob-env-file, bare-q-env-file (no path, an env file in the
+cwd), glob-rm; a quoted rm or option at the top: Z78-quoted-rm-top, Z79-quoted-opt-top.
 Inside a backtick sequence a backtick closes the word it is glued to (`a`b`: before, a glued closing backtick opened
 a new nested sequence).
 Prefix words (card e6a0f476, Viktor 50227 round 2 LOW/INFO, all as on main): exec -a NAME takes a value; the one word
@@ -78,8 +85,9 @@ Round 4 (Viktor 50541 R1b, L-a..L-d): the split value is also read after zsh's $
 backslash, x5c, 134, u005c is the backslash env reads, so backslash-c cuts and backslash-underscore separates); a
 real CR, FF and VT separate like a tab; an unquoted =name (zsh EQUALS) and a glob in the last path segment
 (/usr/bin/[e]nv, /usr/bin/en?) name the prefix word; macOS arch is a prefix word (-arch, -d, -e take a value).
-Overblocks (the safe side): ansi_decode runs on every value, so a single-quoted doubled backslash + c is cut too;
-env's own backslash-t puts a tab INTO the word, but the model separates on it.
+Round 5 (Viktor 50599 T1): ansi_decode only for a value whose word has a $'..' part (it ran on every value and
+multiplied the texts per nesting level). Overblocks (the safe side): a $'..' word's raw form is read too; env's own
+backslash-t puts a tab INTO the word, but the model separates on it.
 Tests: python3 -I scripts/hooks/zsh-trap-gate_test.py
 """
 import fnmatch
@@ -144,12 +152,13 @@ REDIRECTS = ['&>>', '&>', '>>', '>|', '>!', '>&', '<&', '<>', '>', '<']
 
 
 class Word:
-    __slots__ = ('parts', 'start', 'end')
+    __slots__ = ('parts', 'start', 'end', 'ansi')
 
     def __init__(self, start):
         self.parts = []   # (kind, text): lit, esc, sq, dq, var, sub, arith, array, procsub
         self.start = start
         self.end = start
+        self.ansi = False  # a $'..' part (kept raw as 'sq'): zsh decoded it (e6a0f476 round 5)
 
     def add(self, kind, text):
         if kind == 'lit' and self.parts and self.parts[-1][0] == 'lit':
@@ -311,6 +320,7 @@ class Parser:
                     while j < n and s[j] != "'":
                         j += 2 if s[j] == '\\' else 1
                     w.add('sq', s[i + 2:j])
+                    w.ansi = True
                     self.blank.append((i, min(j + 1, n)))
                     i = j + 1
                     continue
@@ -706,7 +716,9 @@ def skip_prefix_args(words, j, ambig_value=True):
             break
         if name == 'env' and env_split_at(t) is not None:
             return len(words)  # env -S: the command is the split value plus the words after it (env_split_texts)
-        o = cluster_value_opt(t, vo)
+        # e6a0f476 round 5 (Viktor 50599 K5): arch reads whole option words, not getopt clusters: the e of the arch
+        # name -arm64e is no -e (zsh -f: arch -arm64e echo RAN prints RAN)
+        o = (t if t in vo else None) if name == 'arch' else cluster_value_opt(t, vo)
         j += 2 if o and (ambig_value or o not in amb) else 1
     return j
 
@@ -822,10 +834,12 @@ def env_split_texts(words, j, s):
             return []
         v = env_split_at(t)
         if v is not None:
+            src = words[i]
             if v == '':
                 if i + 1 >= len(words):
                     return []
-                v, nxt = shell_text(words[i + 1]), i + 2
+                src = words[i + 1]
+                v, nxt = shell_text(src), i + 2
             else:
                 nxt = i + 1
             rest = s[words[nxt].start:words[-1].end] if nxt < len(words) else ''
@@ -834,7 +848,11 @@ def env_split_texts(words, j, s):
             # never instead of the first text): a backslash-c ends the value (measured: /usr/bin/env -S 'echo A\c B'
             # x y prints A x y), and backslash-underscore, a tab or a newline (real, or the backslash-t / -n escape
             # that $'..' leaves raw here) separate words like a space (measured by Viktor: env -S 'echo\_U1').
-            for val in dict.fromkeys((v, env_split_model(v), env_split_model(ansi_decode(v)))):
+            # e6a0f476 round 5 (Viktor 50599 T1): the $'..'-decoded reading only for a value whose word has a $'..'
+            # part (zsh decodes only those; the value of a nested env -S is env's text, not zsh's): on every value it
+            # multiplied the texts per level (nested env -S 200 KB: 4,65 s against 2,11 s before it)
+            vals = (v, env_split_model(v)) + ((env_split_model(ansi_decode(v)),) if src.ansi else ())
+            for val in dict.fromkeys(vals):
                 for t in (val, cut_split_comment(val)):
                     t = 'env ' + t + ' ' + rest
                     if t not in texts:
