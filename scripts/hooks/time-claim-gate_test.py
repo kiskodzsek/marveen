@@ -1071,6 +1071,262 @@ def quote_blind_view_counts_only_the_shells_own_parentheses(root):
 
 
 @case
+def unmodeled_sign_in_a_substitution_keeps_the_list_mark(root):
+    # Viktor 50181 R5 (card 09f76463, his verify_r5 shapes): inside the $( ) of an env value, a $'...' with \', a
+    # comment, a ${...} and a heredoc are not modeled by _quote_blind, and each showed or hid a ) so that the real ) after
+    # the number read as a list mark at depth 0 (main and the round-5 head let the PUT through; zsh runs it in all four,
+    # /bin/bash 3.2 in the first two). Fail-closed: from such a sign at a depth above 0 on, no list mark is blanked.
+    # Each has an ALLOW pair: the same sign at the top level (depth 0) before a numbered list in a message.
+    url = 'http://localhost:3420/api/kanban/abc123'
+    amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh viktor dave '
+    put = 'curl -s -X PUT ' + url + """ -d '{"comment":"Viktor 14:30: kész"}'"""
+    lst = "'Lépések: 1) curl -s -X PUT " + url + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'"
+    h, d = root['hook'], root['dir']
+
+    def sub(inner, msg="'kész :)'"):
+        return amsg + msg + '\nT=$(' + inner + ' 1) ' + put
+    cases = {
+        'fo-ansic-escq-paren': (sub("echo $'\\')'"), 2),
+        'fo-ansic-escq-paren-list': (sub("echo $'\\')'", "'1) ok'"), 2),
+        'fo-comment-paren': (sub('echo a # )\n'), 2),
+        'fo-brace-default': (sub('echo ${x:-)}'), 2),
+        'fo-heredoc-paren': (sub('cat <<E\n)\nE\n'), 2),
+        # the ALLOW pairs: the sign at depth 0, then a message with a numbered list (no PUT runs)
+        'top-ansic-then-list': (amsg + "$'it\\'s 1) curl -X PUT " + url + " Viktor 14:30: kész'", 0),
+        'top-comment-then-list': ('# jegyzet: a lista lent\n' + amsg + lst, 0),
+        'top-brace-then-list': ('echo ${HOME:-x}; ' + amsg + lst, 0),
+        'top-heredoc-then-list': (amsg + "- <<'EOF'\nLépések:\n12) " + put + '\n13) szólj.\nEOF', 0),
+        # inside a substitution but modeled: a quoted #, a mid-word #, a quoted ${ change nothing (the depth is right)
+        'sub-quoted-hash-list-after': (amsg + "\"$(echo '#')\" " + lst, 0),
+        'sub-midword-hash-list-after': (amsg + '"$(echo a#b)" ' + lst, 0),
+    }
+    bad = [label for label, (cmd, want) in cases.items()
+           if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
+    for b in bad:
+        print('  r5:', b)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tcg_r5', root['hook'])
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    want = {
+        "T=$(echo $'a' 1)": 9,      # $' inside the $(
+        'T=$(a # c\n 1)': 6,        # a word-start #
+        'T=$(a;# c\n 1)': 6,
+        'T=$(a#b 1)': 10,           # a mid-word # is no comment: none (len)
+        'T=$(echo ${x} 1)': 9,
+        'T=$(cat <<E\n)\nE\n 1)': 8,
+        "T=$(echo '#${<<' 1)": 19,  # quoted: text
+        "echo $'a' ${x} # c <<E": 22,  # depth 0: none
+        'T=$(a) # c': 10,           # the $( closed before the #
+        '"$(echo ${x})"': 8,        # a $( inside "..." is a real substitution
+        'a) # c': 6,                # a stray ) leaves the depth at 0, not below: the # is at depth 0
+    }
+    for k, v in want.items():
+        got = g._unmodeled_from(k, g._quote_blind(k))
+        if got != v:
+            bad.append(k)
+            print('  unmodeled:', repr(k), '->', got, 'want', v)
+    return not bad
+
+
+@case
+def depth0_sign_that_hides_a_substitution_keeps_the_list_mark(root):
+    # Viktor 50390 D1 (card 09f76463 round 2; his independent probe 6711eb542264, 19 cases, main lets all through): a
+    # depth-0 comment, $'...' or heredoc body with an apostrophe opens a quote in _quote_blind that the shell does not
+    # have, it blanks the ( of the $( after it, and the ) after the number reads as a list mark at depth 0 (zsh and
+    # bash run the PUT). After a depth-0 sign, a $( <( >( that the drift blanked is itself unmodeled. Each BLOCK shape
+    # has an ALLOW pair: the same sign, then only a numbered list written in a message.
+    url = 'http://localhost:3420/api/kanban/abc123'
+    amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh viktor dave '
+    put = 'curl -s -X PUT ' + url + """ -d '{"comment":"Viktor 14:30: kész"}'"""
+    lst = "'Lépések: 1) curl -s -X PUT " + url + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + "'"
+    env = 'T=$(echo a | tr a 1) '
+    h, d = root['hook'], root['dir']
+    cases = {
+        'd0-comment-apostrophe': ("# it's\n" + env + put + '\n' + amsg + "'ok'", 2),
+        'd0-msg-then-comment': (amsg + "'ok'\n# it's\n" + env + put, 2),
+        'd0-ansi-c': ("echo $'it\\'s' >/dev/null; " + env + put + '; ' + amsg + "'ok'", 2),
+        'd0-heredoc-apostrophe': ("cat >/dev/null <<E\nit's\nE\n" + env + put + '\n' + amsg + "'ok'", 2),
+        'd0-backtick-comment': ("T=`echo a # don't`\nU=$(echo a | tr a 1) " + put + '\n' + amsg + "'ok'", 2),
+        'd0-glued': ("# it's\n$(: 1)" + put + '\n' + amsg + "'ok'", 2),
+        # the curl segment ends at a word-start #: an apostrophe in a trailing comment no longer swallows the next line
+        'd0-trailing-comment': ("curl -s -X POST http://localhost:3420/api/messages -d '{\"content\":\"ok\"}' # don't\n"
+                                + env + put, 2),
+        # the ALLOW pairs: the same sign, then a list only written in a message
+        'allow-comment-apostrophe': ("# it's\n" + amsg + lst, 0),
+        'allow-msg-then-comment': (amsg + "'ok'\n# it's\n" + amsg + lst, 0),
+        'allow-ansi-c': ("echo $'it\\'s' >/dev/null; " + amsg + lst, 0),
+        'allow-heredoc-apostrophe': ("cat >/dev/null <<E\nit's\nE\n" + amsg + lst, 0),
+        'allow-backtick-comment': ("T=`echo a # don't`\n" + amsg + lst, 0),
+        'allow-trailing-comment-list': ("curl -s -X POST http://localhost:3420/api/messages -d '{\"content\":\"ok\"}'"
+                                        " # don't 1) " + put, 0),
+        # a mid-word # (a URL fragment) stays in the curl segment: the PUT is still read
+        'fragment-put-blocks': ('curl -s -X PUT ' + url + "#x -d '{\"comment\":\"Viktor 14:30: kész\"}'", 2),
+        # ... also before the -X PUT, where only the CURL_SEG2_RX view (env value with a pipe) reads the segment
+        'midword-hash-before-put-blocks': (amsg + "'ok'\nT=$(date | tr a b) curl -s -d note#1 -X PUT " + url
+                                           + " -d '{\"comment\":\"Viktor 14:30: kész\"}'", 2),
+        # a bare ( hidden by the drift is no substitution: a message heredoc line keeps its list ALLOW
+        'allow-heredoc-apostrophe-paren': (amsg + "- <<'E'\nPatrik's (lista:\n1) " + put + '\n2) szólj.\nE', 0),
+    }
+    bad = [label for label, (cmd, want) in cases.items()
+           if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
+    for b in bad:
+        print('  d1:', b)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tcg_d1', root['hook'])
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    want = {
+        "# it's\nT=$(a 1)": 10,      # the ( of the $( the drift blanked
+        "# it's\nT=<(a 1)": 10,      # a process substitution too
+        "# it's\nT=(a 1)": 14,       # a bare ( is no substitution: none (len)
+        "# its\nT=$(a 1)": 14,       # no drift: the $( is counted, nothing unmodeled (len)
+        "T=$(a 1) # it's": 15,        # the sign after the $(: none (len)
+        "echo '$(a 1)'": 13,          # quoted text without a sign before it: none (len)
+    }
+    for k, v in want.items():
+        got = g._unmodeled_from(k, g._quote_blind(k))
+        if got != v:
+            bad.append(k)
+            print('  unmodeled d1:', repr(k), '->', got, 'want', v)
+    return not bad
+
+
+@case
+def brace_and_substitution_units_keep_the_curl_segment(root):
+    # Round 3 (Viktor 50406 R1, Klodel 50408): round 2's word-start # rule ended the curl segment inside a ${...}
+    # too ("${X:- #}" is no comment for the shell), so a PUT glued after "$(: 1)" next to a message passed (main and
+    # cf7e431a block it; bash runs it). Round 4: these rows now pass because CURL_SEG2_RX is the main's again (no #
+    # rule) and the # rule is the separate CURL_SEG3_RX view; the rows stay as they were.
+    url = 'http://localhost:3420/api/kanban/abc123'
+    amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh viktor dave '
+    data = """ -d '{"comment":"Viktor 14:30: kész"}'"""
+    put = 'curl -s -X PUT ' + url + data
+    env = 'T=$(echo a | tr a 1) '
+    h, d = root['hook'], root['dir']
+    cases = {
+        'brace-space-glued': (amsg + "'ok'\n$(: 1)curl -s -X PUT ${X:- #} " + url + data, 2),
+        'brace-tab-glued': (amsg + "'ok'\n$(: 1)curl -s -X PUT ${X:-\t#} " + url + data, 2),
+        'brace-space-plain': (amsg + "'ok'\ncurl -s -X PUT ${X:- #} " + url + data, 2),
+        'brace-tab-plain': (amsg + "'ok'\ncurl -s -X PUT ${X:-\t#} " + url + data, 2),
+        'substitution-hash-kept': (amsg + "'ok'\n$(: 1)curl -s -X PUT $(: x #) " + url + data, 2),
+        # Viktor 50406 I4 T15: a tab before a trailing comment ends the segment like a blank (the apostrophe in it
+        # does not swallow the next line's PUT)
+        'tab-trailing-comment': ("curl -s -X POST http://localhost:3420/api/messages -d '{\"content\":\"ok\"}'\t# don't\n"
+                                 + env + put, 2),
+        # the round 2 rows stay: a blank before the comment, and the ALLOW pair with the list in a message
+        'space-trailing-comment': ("curl -s -X POST http://localhost:3420/api/messages -d '{\"content\":\"ok\"}' # don't\n"
+                                   + env + put, 2),
+        # a ${ unit stops at a newline: a ${...} over lines falls back to the lone $, so the next line's PUT is its
+        # own segment (an overblock: bash and zsh keep that line inside the expansion and run no PUT; the main
+        # blocks the line-start one too, its search stops at the newline; the glued one only CURL_SEG2_RX sees)
+        'brace-over-lines-kept': (amsg + "'ok'\ncurl -s -d x ${X:- # it\n" + put + '\n}', 2),
+        'brace-over-lines-glued-kept': (amsg + "'ok'\ncurl -s -d x ${X:- # it\n$(: 1)" + put + '\n}', 2),
+        'allow-brace-list-in-message': ("curl -s -X POST http://localhost:3420/api/messages -d '{\"content\":\"${X:- #} "
+                                        "1) curl -s -X PUT " + url + " -d {comment: Viktor 14:30}\"}'", 0),
+    }
+    bad = [label for label, (cmd, want) in cases.items()
+           if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
+    for b in bad:
+        print('  r3:', b)
+    return not bad
+
+
+@case
+def hash_rule_is_its_own_view_and_never_hides_a_main_put(root):
+    # Round 4 (Viktor 50421 R2, R3; regressions to main): round 3's ${...} / $(...) unit read a quoted } or ) as its
+    # closer, and the apostrophe left over opened a quote that swallowed the next PUT (R2, 11 shapes); a # after a
+    # nested ${${b}} or a backtick still cut the segment before the kanban URL (R3). bash and zsh run every PUT here
+    # (agents/kernel/work/tcr5-r4-1123/oracle.txt, stub curl); main blocks all of them. The # rule is now the
+    # CURL_SEG3_RX view next to CURL_SEG2_RX (the main's, byte for byte), and either view's card PUT counts.
+    a = "'"
+    url = 'http://localhost:3420/api/kanban/abc123'
+    data = """ -d '{"comment":"Viktor 14:30: kész"}'"""
+    put = '{ curl -s -X PUT ' + url + data + '; }'
+    msg = 'curl -s -X POST http://localhost:3420/api/messages -d ' + a + '{"content":"ok"}' + a + ' '
+    sqb, dqb = '${V:-' + a + '}' + a + '}', '${V:-"}"}'
+    sqp, dqp = '$(printf ' + a + '%s)' + a + ' x)', '$(echo "a)b")'
+    h, d = root['hook'], root['dir']
+    cases = {
+        'msg-sq-brace-semi': (msg + sqb + ' ; ' + put, 2),
+        'msg-sq-brace-and': (msg + sqb + ' && ' + put, 2),
+        'msg-sq-brace-pipe': (msg + sqb + ' | ' + put, 2),
+        'msg-sq-brace-nl': (msg + sqb + '\n' + put, 2),
+        'msg-dq-brace-semi': (msg + dqb + ' ; ' + put, 2),
+        'msg-sq-paren-semi': (msg + sqp + ' ; ' + put, 2),
+        'msg-sq-paren-and': (msg + sqp + ' && ' + put, 2),
+        'msg-dq-paren-nl': (msg + dqp + '\n' + put, 2),
+        'case-arm-sq-brace': ('case a in a) ' + msg + sqb + ' ; ' + put + ' ;; esac', 2),
+        'tsubst-sq-brace': ('T=$(' + msg + sqb + ' ; ' + put + ')', 2),
+        'procsub-sq-paren': ('cat <(' + msg + sqp + ' ; ' + put + ')', 2),
+        'glued-nested-brace-before-url': (msg + '\n$(: 1)curl -s ${a:- ${b} #c} -X PUT ' + url + data, 2),
+        'glued-brace-subst-inside-before-url': (msg + '\n$(: 1)curl -s ${V:- $(printf y) #c} -X PUT ' + url + data, 2),
+        'glued-bq-hash-before-url': (msg + '\n$(: 1)curl -s `echo a #b` -X PUT ' + url + data, 2),
+        'env-nested-brace-before-url': (msg + '\nT=$(date | tr a b) curl -s ${a:- ${b} #c} -X PUT ' + url + data, 2),
+        'env-bq-hash-before-url': (msg + '\nT=$(date | tr a b) curl -s `echo a #b` -X PUT ' + url + data, 2),
+        # the ALLOW pairs: the same ${...} / $(...) in a message, no PUT after it
+        'allow-msg-sq-brace': (msg + sqb, 0),
+        'allow-msg-sq-paren-list': (msg + sqp + " -d 'Lépések: 1) curl -s -X PUT " + url
+                                    + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + a, 0),
+    }
+    bad = [label for label, (cmd, want) in cases.items()
+           if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
+    for b in bad:
+        print('  r4:', b)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tcg_r4', root['hook'])
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    # the # rule lives only in the CURL_SEG3_RX view, as round 2 wrote it; CURL_SEG2_RX keeps a word-start # in the body
+    if r'(?<!\s)#' not in g.CURL_SEG3_RX.pattern or '#' in g.CURL_SEG2_RX.pattern.split('curl\\b', 1)[1]:
+        bad.append('views: the # rule is not exactly in CURL_SEG3_RX')
+        print('  r4: views')
+    return not bad
+
+
+# Viktor 50406 K1 (old fail-opens, main and the round 2 head pass them too; Klodel 50408: Known limits, no code). The
+# probe_tc22 inputs verbatim; a later fix turns its row red on purpose. The control row blocks the same stamp.
+_K1_A = "'"
+_K1_U = 'http://localhost:3420/api/kanban/x'
+_K1_PJ = _K1_A + '{"comment":"mérve 18:15"}' + _K1_A
+_K1_PUT = 'curl -s -X PUT ' + _K1_U + ' -H ' + _K1_A + 'Content-Type: application/json' + _K1_A + ' -d ' + _K1_PJ
+_K1_MSGW = ('curl -s -X POST http://localhost:3420/api/messages -d ' + _K1_A
+            + '{"from":"viktor","to":"klodel","content":"ok"}' + _K1_A)
+KNOWN_K1 = {
+    'bq-dq-apos-sub': _K1_MSGW + '\nX="`echo "it' + _K1_A + 's"`"; T=$(date; echo 1) ' + _K1_PUT,
+    'bq-dq-apos-glued': _K1_MSGW + '\nX="`echo "it' + _K1_A + 's"`"; $(: 1)' + _K1_PUT,
+    'bq-dq-sq-sub': _K1_MSGW + '\nX="`echo ' + _K1_A + '"' + _K1_A + '`"; T=$(date; echo 1) ' + _K1_PUT,
+    'nl-in-subst-arg': _K1_MSGW + '\n$(: 1)curl -s -X PUT $(\n) ' + _K1_U + ' -d ' + _K1_PJ,
+    # Viktor 50421 I4 (old, main and the round 3 head pass it too): agents/kernel/work/tcr5-r4-1123/i4.txt
+    'msg-subst-put': 'curl -s -X POST http://localhost:3420/api/messages -d "$(' + _K1_PUT + ')"',
+    # Viktor 50437 B1 (old, main and the round 4 head pass it too): the same in backticks, the probe_tc24 row
+    # msgsub-backtick-nosep verbatim (agents/viktor/work/tcr5r4-1123/indep-tc24-head.txt)
+    'msgsub-backtick': ('curl -s -X POST http://localhost:3420/api/messages -H ' + _K1_A + 'Content-Type: application/json'
+                        + _K1_A + ' -d ' + _K1_A + '{"from":"viktor","to":"klodel","content":"kesz"}' + _K1_A
+                        + ' `curl -s -X PUT http://localhost:3420/api/kanban/9f1c2d -H ' + _K1_A
+                        + 'Content-Type: application/json' + _K1_A + ' -d ' + _K1_A + '{"comment":"mérve 18:15 kész"}'
+                        + _K1_A + '`'),
+}
+
+
+@case
+def known_limit_k1_rows_pin_todays_allow(root):
+    h, d = root['hook'], root['dir']
+    bad = []
+    if run(h, 'Bash', {'command': _K1_MSGW + '; ' + _K1_PUT}, now='12:00', cwd=d)[0] != 2:
+        bad.append('control: the stamp is not blocked')
+    for label, cmd in KNOWN_K1.items():
+        if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != 0:
+            bad.append(label + ': blocks now (the documented limit changed)')
+    with open(h, encoding='utf-8') as f:
+        head = ''.join(f.readlines()[:80])
+    bad += [label + ': not named in the first 80 lines of the module' for label in KNOWN_K1 if label not in head]
+    for b in bad:
+        print('  k1:', b)
+    return not bad and len(KNOWN_K1) == 6
+
+
+@case
 def python_dict_triple_fstring_and_variable_on_rules_3_and_4(root):
     # Viktor 49912 K1: rule 3 (daily-log heading) and rule 4 (card opening stamp) read a triple-quoted or f-prefixed
     # Python value, rule 3 also a `content = '## ...'` variable; a past card stamp, another endpoint, the {{NOW}} token

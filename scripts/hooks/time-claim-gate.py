@@ -31,6 +31,11 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     Known limits of the card path (Viktor 49811, 49824; the same on /comments): a body on stdin (pipe) is not in
     the command text; a url-var (the URL from a variable, no literal /api/kanban/) is not seen; a relfile (a
     relative @file after a cd) is resolved against the payload cwd only; curl -T (an upload file) is not read;
+    Viktor 50406 K1 (main misses them too): bq-dq-apos-sub, bq-dq-apos-glued, bq-dq-sq-sub (a backtick inside
+    "..." that holds an apostrophe or a quote shifts the quote model; it is no unmodeled sign) and nl-in-subst-arg
+    (a $( with a newline among the curl's arguments) hide a PUT next to a message; Viktor 50421 I4 (main too):
+    msg-subst-put (a PUT inside a $( ) argument of the message curl, no separator: one segment, a message URL),
+    also msgsub-backtick (the same in backticks, Viktor 50437 B1);
     rule 4's opening stamp is read in plain JSON or a Python dict (also a triple-quoted or f-/r-/b-/u-prefixed
     value, Viktor 49912 K1; rule 3 also a `content = '## ...'` variable), not escaped inside a double-quoted -d, and as
     HH:MM only, not with seconds ("Kernel 12:30:00:", an ISO stamp ...T12:30:00+01:00; the same on main);
@@ -49,6 +54,10 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     curl, A=$(( (1+2) )) curl) is no unit of the main's segment search; CURL_SEG2_RX starts a segment after the ),
     so next to a message or memory write that PUT is a card too, also after a lone number ($(echo 1) curl: the ) closes
     the $( and is no list mark, Viktor 50062 R2).
+    Viktor 50181 R5, 50390 D1 (card 09f76463): from a $'...', comment, ${...} or heredoc inside an open parenthesis,
+    and from a substitution ( that such a sign's quote drift hides at depth 0, no list mark is blanked (fail-closed);
+    accepted overblocks (the safe side): a message heredoc whose body has a word-start # or a ${ inside parentheses
+    before the list (harm-heredoc-hash-paren, harm-heredoc-brace-paren).
     The 13 smuggle labels of Viktor 49901 (indep7) and the five of 49912 K2 are closed by views next to the main's
     segment search (CURL_SEG2_RX, _kanban_put_segment; a view only adds a card judgment): shell words before curl
     (then, do, {, !, if, time, command, env, timeout N, a redirect ...), "curl" and \\curl, quotes read as units in
@@ -678,11 +687,23 @@ _PREFIX = (r'(?:(?:then|do|else|elif|if|while|until|time(?:[ \t]+-p)?|command|bu
            r'|timeout(?:[ \t]+-[^\s;&|(`]+(?:[ \t]+(?:[A-Z][A-Z0-9]*|\d+(?:\.\d+)?[smhd]?))?)*[ \t]+\d+(?:\.\d+)?[smhd]?'
            r'|(?:sudo|xargs)(?:[ \t]+-[^\s;&|(`]+(?:[ \t]+(?!-|[\\"\']?(?:[^\s;&|(`)]*/)?curl\b)[^\s;&|(`]+)?)*'
            r'|\d*(?:>>?|<|>&|&>>?)[ \t]*[^\s;&|(`<>]+)[ \t]+)*')
+# Round 2 (Viktor 50390 D1, d0-trailing-comment): a word-start # (after a blank) is a comment, so the curl segment
+# ends there; before, an apostrophe in a trailing comment (`... -d '{...}' # don't`) opened a quote that swallowed the
+# next line's real PUT into the message curl's segment. A mid-word # (a URL fragment) stays in the segment.
+# Round 4 (Viktor 50421 R2, R3): the word-start # rule is its own view, CURL_SEG3_RX, next to CURL_SEG2_RX, which is
+# the main's again, byte for byte. Rounds 2-3 changed CURL_SEG2_RX itself, so every shape where the # cut was wrong
+# lost a card judgment the main had: a # inside ${X:- #} (no comment for the shell, round 3 R1), a quoted } or ) inside
+# round 3's ${...} / $(...) unit (R2: the rest of the quote then swallowed the next PUT), a # after a nested ${${b}}
+# or a backtick (R3). Both views are searched and a card PUT counts when either finds it, so the # rule can only add a
+# judgment (d0-trailing-comment: an apostrophe in a trailing comment no longer hides the next line's PUT), never hide
+# one the main found. No ${...} / $(...) unit any more (round 3's units are gone with it).
 CURL_SEG2_RX = re.compile(r'(?:^|[;&|(`)])[ \t]*' + _PREFIX + r'(?:' + _env_assign('v3') + r'[ \t]+)*' + _PREFIX
                           + r'(?:' + _env_assign('v4') + r')?'
                           r'(?P<curl>(?:[^\s;&|(`)]*/)?(?:\\|["\'])?curl\b'
                           r'(?:[^\n;&|\\\'"$]|\\[\s\S]|\$\'(?:[^\'\\]|\\[\s\S])*\'|\'[^\']*\''
                           r'|"(?:[^"\\]|\\[\s\S])*"|[$\'"])*)?', re.M)
+CURL_SEG3_RX = re.compile(CURL_SEG2_RX.pattern.replace(r"""(?:[^\n;&|\\\'"$]|""", r"""(?:[^\n;&|\\\'"$#]|(?<!\s)#|""", 1),
+                          re.M)
 # The curl's own URL in a view: the first /api/ once the header and data arguments are taken out (an /api/messages
 # in a header, an env value or a -d before the kanban URL is not the URL; a memory body quoting a kanban PUT after
 # the memory URL still is not a kanban segment).
@@ -702,6 +723,41 @@ LIST_MARK_RX = re.compile(r'(?:^|(?<=\s))\d{1,3}\)', re.M)
 CASE_WORD_RX = re.compile(r'\bcase\b')
 IN_WORD_RX = re.compile(r'\bin\b')
 PAREN_RX = re.compile(r'[()]')
+# Viktor 50181 R5 (card 09f76463): _quote_blind models '...', "...", $( in "..." and a backslash, nothing else. A
+# $'...' (where \' does not close), a word-start # (a comment), a ${...} and a heredoc inside an open parenthesis can
+# hide a ) the shell reads or show one it does not, so the depth after them is a guess: four rounds each brought a
+# new shape when the model grew. Fail-closed instead (Viktor's direction, NOT a wider model): from the first such
+# sign at a depth above 0 on, no list mark is blanked (a kept mark is a start: at worst an overblock). Linear: one
+# pass over the parentheses and these signs, stopping at the first hit.
+# Round 2 (Viktor 50390 D1): at depth 0 such a sign stays read the old way (the message shapes need it), but the
+# quote drift it causes (`# it's`, `$'it\'s'`, a heredoc body with an apostrophe) blanks the ( of a substitution
+# opened after it, so the depth there is no longer measured: after a depth-0 sign, a $( <( >( that `blind` blanked
+# is itself an unmodeled position. Only a substitution: a bare ( (a subshell) cannot close before a command word
+# (`(: 1)curl` is a syntax error), and a message heredoc line such as "Patrik's (lista:" keeps its list ALLOW.
+UNMODELED_RX = re.compile(r"[()]|\$['{]|<<|#")
+_WORD_START = ' \t\n;&|()`'
+
+
+def _unmodeled_from(view, blind):
+    """The position of the first sign _quote_blind does not model (see UNMODELED_RX) inside an open parenthesis,
+    or of the first substitution ( blanked after such a sign at depth 0 (D1), or len(view). A sign inside quotes
+    (blanked in `blind`) is text; a # only at a word start."""
+    depth, seen0 = 0, False
+    for m in UNMODELED_RX.finditer(view):
+        i, c = m.start(), m.group()
+        if blind[i] == ' ':
+            if seen0 and c == '(' and i and view[i - 1] in '$<>':  # D1: a substitution the drift hid
+                return i
+            continue
+        if c == '(':
+            depth += 1
+        elif c == ')':
+            depth = max(0, depth - 1)
+        elif c != '#' or i == 0 or view[i - 1] in _WORD_START:
+            if depth:
+                return i
+            seen0 = True
+    return len(view)
 
 
 def _quote_blind(view):
@@ -767,6 +823,7 @@ def _unmark_lists(view):
     lim = c.start() if c and last_in and c.start() < last_in.start() else len(view)
     state = {'pos': 0, 'depth': 0}
     blind = _quote_blind(view)
+    unmodeled = _unmodeled_from(view, blind)
 
     def mark(m):
         close = m.end() - 1
@@ -776,7 +833,7 @@ def _unmark_lists(view):
         for p in PAREN_RX.finditer(blind, state['pos'], close):
             d = d + 1 if p.group() == '(' else max(0, d - 1)
         state['pos'] = close + 1
-        if m.start() < lim and d == 0:
+        if m.start() < lim and d == 0 and close < unmodeled:
             state['depth'] = 0
             return m.group(0)[:-1] + ' '
         state['depth'] = max(0, d - 1) if blind[close] == ')' else d  # a kept, unquoted ) closes a parenthesis
@@ -802,12 +859,14 @@ def _kanban_put_segment(cmd):
         return True
     joined = BS_NL_RX.sub('', cmd)
     for view in (cmd, joined) if joined != cmd else (cmd,):
-        for m in CURL_SEG2_RX.finditer(_unmark_lists(view)):
-            if m.group('curl') and PUT_RX.search(m.group(0)):
-                own = CURL_ARG_RX.sub(' ', m.group('curl'))
-                i = own.find('/api/')
-                if i >= 0 and own.startswith('/api/kanban/', i):
-                    return True
+        unmarked = _unmark_lists(view)
+        for rx in (CURL_SEG2_RX, CURL_SEG3_RX):
+            for m in rx.finditer(unmarked):
+                if m.group('curl') and PUT_RX.search(m.group(0)):
+                    own = CURL_ARG_RX.sub(' ', m.group('curl'))
+                    i = own.find('/api/')
+                    if i >= 0 and own.startswith('/api/kanban/', i):
+                        return True
     return False
 
 
