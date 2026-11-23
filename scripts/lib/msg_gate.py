@@ -72,6 +72,11 @@ Rules:
        IGEN: TG m
    where m is a later inbound message in the same chat holding a yes word (igen, ok, oké, mehet, jó,
    csináld, persze, rendben, hajrá, pontosan) that is not negated and does not end a question.
+   A question of fact is a request (card 8dd5c726, is_idea): "?" with mekkora, mennyi, mikor, hol, ...
+   and no idea mark, conditional or choice form ("mennyiért adjuk?", "mennyit érne?" stay ideas).
+   Known limit info-question-word-list: a question word off the list stays an idea; a plain question of
+   fact meant as an idea ("milyen színű a borító?") passes as a request (Klodel's Kérés-kapu checks the
+   brief); -ja/-je ("ki vigye?") is no choice form. Pinned: agent-msg-send-gate.test.sh, "known limit".
    The message_id alone is ambiguous (measured: private and group chat both hold ids 10-999), so any
    ledger row with that id counts, but the IGEN must be in the chat where the quote was found.
    Measured 2026-11-13 on 30 days of Klodel's messages (9495): 752 hand out work, 623 of them name a
@@ -409,11 +414,28 @@ def source_sentence(text, i, j):
 # - "hogy" and "ki" are not question words (a conjunction, a verb prefix).
 INFO_QUESTION = re.compile(_B + r'(?:mekkora|mennyi(?:be|t|re|ert|vel)?|hany(?:an|szor|at|adik|ra)?|mikor|hol|honnan|'
                            r'hova|milyen|melyik|mi\s+(?:a|az)|mik\s+(?:a|az))(?![a-z0-9])')
-# a conditional verb: the named ones, and any word of 3+ letters ending in -na / -ne ("nyújtana", "ráismerne"); a
-# noun caught by it ("színe") keeps the sentence an idea, the side the rule had before
-CONDITIONAL = re.compile(_B + r'(?:lenne(?:nek)?|volna|tudn(?:a|ek|ank|al|anak)|vennek|[a-z]{3,}n[ae])(?![a-z0-9])')
-CHOICE = re.compile(_B + r'(?:legyen(?:ek)?|szerepeljen|kezdj(?:unk|onk|ek)|csinalj(?:unk|am|ak)|vegy(?:ek|unk)|'
-                    r'vigy(?:em|uk)|menj(?:unk|ek)|valassz(?:unk|ak)|tegy(?:unk|em)|induljunk)(?![a-z0-9])')
+# Round 2 (Viktor 50740): a word list caught a few inflected forms only, so 14 choice and conditional questions read
+# as requests ("mennyiért adjuk a könyvet?", "mikor küldjük ki?", "melyik közös élményt tennétek bele?", "mennyit
+# érne?"). Both are grammatical shapes now (folded text: ö -> o, ü -> u):
+# - a conditional verb: 2+ letters, "n", a conditional person ending: -na/-ne, -nák/-nék, -nám/-ném, -nál/-nél,
+#   -nád/-néd, -nátok/-nétek ("érne", "csinálnál", "tennétek"); -nának/-nének is the -ák/-ék shape after
+#   "n" ("adna" + n + ak), and -nánk/-nénk ("árulnánk") is an IDEA_MARK already (round-2 mutation: both
+#   alternatives were equivalent, so they are not listed);
+# - a choice (imperative / subjunctive): 2+ letters, the mood sign -j or its assimilated form (-zz, -ssz, -ss, -gy,
+#   -ts: "árazzuk", "válasszam", "fizessük", "tegyük", "higgyük", "tanítsuk"; -ty and -ny of Viktor's
+#   proposal are no mood sign of a verb, they only catch nouns such as "lányon"), a person ending: -uk/-ük, -unk/-ünk,
+#   -ak/-ek, -am/-em, -on/-en/-ön, -atok/-etek ("adjuk", "kérjünk", "induljon", "menjen", "kezdjem"); the 3rd
+#   person plural -janak/-jenek ("induljanak") ends in -nak/-nek and is caught by CONDITIONAL,
+#   and -önk/-enk, Patrik's typo of -ünk (TG 17486 "milyen uzletbe kezdjonk?", named in round 1).
+# Both over-catch: the dative and adessive -nak/-nek, -nál/-nél ("a csomagnak", "a gépnél"), the indicative
+# "csináljuk" (we do it), a noun such as "hegyen", "hajón", "színe". An over-caught fact question stays an idea and
+# wants an IGEN, the side the rule had before this card (Viktor 50740: "A túlfogás ... ötlet marad, az a régi,
+# biztonságos oldal"). Not caught: the 3rd person definite imperative -ja/-je ("ki vigye?") and the bare -j
+# ("csinálj"): -ja/-je is the indicative of most fact questions ("hol tartja?"); Known limit in the module header.
+CONDITIONAL = re.compile(_B + r'(?:volna|[a-z]{2,}n(?:a|e|ak|ek|am|em|al|el|ad|ed|atok|etek))'
+                         r'(?![a-z0-9])')
+CHOICE = re.compile(_B + r'[a-z]{2,}(?:j|zz|ssz|ss|gy|ts)(?:uk|unk|onk|enk|ak|ek|am|em|on|en|atok|etek)'
+                    r'(?![a-z0-9])')
 
 
 def is_idea(sentence):
