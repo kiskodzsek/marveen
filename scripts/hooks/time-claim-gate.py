@@ -33,7 +33,8 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     relative @file after a cd) is resolved against the payload cwd only; curl -T (an upload file) is not read;
     Viktor 50406 K1 (main misses them too): bq-dq-apos-sub, bq-dq-apos-glued, bq-dq-sq-sub (a backtick inside
     "..." that holds an apostrophe or a quote shifts the quote model; it is no unmodeled sign) and nl-in-subst-arg
-    (a $( with a newline among the curl's arguments) hide a PUT next to a message;
+    (a $( with a newline among the curl's arguments) hide a PUT next to a message; Viktor 50421 I4 (main too):
+    msg-subst-put (a PUT inside a $( ) argument of the message curl, no separator: one segment, a message URL);
     rule 4's opening stamp is read in plain JSON or a Python dict (also a triple-quoted or f-/r-/b-/u-prefixed
     value, Viktor 49912 K1; rule 3 also a `content = '## ...'` variable), not escaped inside a double-quoted -d, and as
     HH:MM only, not with seconds ("Kernel 12:30:00:", an ISO stamp ...T12:30:00+01:00; the same on main);
@@ -688,17 +689,20 @@ _PREFIX = (r'(?:(?:then|do|else|elif|if|while|until|time(?:[ \t]+-p)?|command|bu
 # Round 2 (Viktor 50390 D1, d0-trailing-comment): a word-start # (after a blank) is a comment, so the curl segment
 # ends there; before, an apostrophe in a trailing comment (`... -d '{...}' # don't`) opened a quote that swallowed the
 # next line's real PUT into the message curl's segment. A mid-word # (a URL fragment) stays in the segment.
-# Round 3 (Viktor 50406 R1, Klodel 50408): a ${...} and a $(...) are one unit each, so a # inside does not end the
-# curl segment. In ${X:- #} the # is no comment (bash and zsh print " #", measured); in $(echo a #b) it is one (the
-# rest of the line, the ) too), but the segment is not cut there either: the main's behaviour, the closed side. A
-# unit's body stops at the next ${ or $( as well as at its closer or a newline, so an unclosed ${${${... run is read
-# once (linear), not once per $; an unclosed or nested one falls back to the lone $ as before.
+# Round 4 (Viktor 50421 R2, R3): the word-start # rule is its own view, CURL_SEG3_RX, next to CURL_SEG2_RX, which is
+# the main's again, byte for byte. Rounds 2-3 changed CURL_SEG2_RX itself, so every shape where the # cut was wrong
+# lost a card judgment the main had: a # inside ${X:- #} (no comment for the shell, round 3 R1), a quoted } or ) inside
+# round 3's ${...} / $(...) unit (R2: the rest of the quote then swallowed the next PUT), a # after a nested ${${b}}
+# or a backtick (R3). Both views are searched and a card PUT counts when either finds it, so the # rule can only add a
+# judgment (d0-trailing-comment: an apostrophe in a trailing comment no longer hides the next line's PUT), never hide
+# one the main found. No ${...} / $(...) unit any more (round 3's units are gone with it).
 CURL_SEG2_RX = re.compile(r'(?:^|[;&|(`)])[ \t]*' + _PREFIX + r'(?:' + _env_assign('v3') + r'[ \t]+)*' + _PREFIX
                           + r'(?:' + _env_assign('v4') + r')?'
                           r'(?P<curl>(?:[^\s;&|(`)]*/)?(?:\\|["\'])?curl\b'
-                          r'(?:[^\n;&|\\\'"$#]|(?<!\s)#|\\[\s\S]|\$\'(?:[^\'\\]|\\[\s\S])*\'|\'[^\']*\''
-                          r'|"(?:[^"\\]|\\[\s\S])*"|\$\{(?:[^}\n$\\]|\\[\s\S]|\$(?![{(]))*\}'
-                          r'|\$\((?:[^)\n$\\]|\\[\s\S]|\$(?![{(]))*\)|[$\'"])*)?', re.M)
+                          r'(?:[^\n;&|\\\'"$]|\\[\s\S]|\$\'(?:[^\'\\]|\\[\s\S])*\'|\'[^\']*\''
+                          r'|"(?:[^"\\]|\\[\s\S])*"|[$\'"])*)?', re.M)
+CURL_SEG3_RX = re.compile(CURL_SEG2_RX.pattern.replace(r"""(?:[^\n;&|\\\'"$]|""", r"""(?:[^\n;&|\\\'"$#]|(?<!\s)#|""", 1),
+                          re.M)
 # The curl's own URL in a view: the first /api/ once the header and data arguments are taken out (an /api/messages
 # in a header, an env value or a -d before the kanban URL is not the URL; a memory body quoting a kanban PUT after
 # the memory URL still is not a kanban segment).
@@ -854,12 +858,14 @@ def _kanban_put_segment(cmd):
         return True
     joined = BS_NL_RX.sub('', cmd)
     for view in (cmd, joined) if joined != cmd else (cmd,):
-        for m in CURL_SEG2_RX.finditer(_unmark_lists(view)):
-            if m.group('curl') and PUT_RX.search(m.group(0)):
-                own = CURL_ARG_RX.sub(' ', m.group('curl'))
-                i = own.find('/api/')
-                if i >= 0 and own.startswith('/api/kanban/', i):
-                    return True
+        unmarked = _unmark_lists(view)
+        for rx in (CURL_SEG2_RX, CURL_SEG3_RX):
+            for m in rx.finditer(unmarked):
+                if m.group('curl') and PUT_RX.search(m.group(0)):
+                    own = CURL_ARG_RX.sub(' ', m.group('curl'))
+                    i = own.find('/api/')
+                    if i >= 0 and own.startswith('/api/kanban/', i):
+                        return True
     return False
 
 

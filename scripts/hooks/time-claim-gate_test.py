@@ -1196,8 +1196,8 @@ def depth0_sign_that_hides_a_substitution_keeps_the_list_mark(root):
 def brace_and_substitution_units_keep_the_curl_segment(root):
     # Round 3 (Viktor 50406 R1, Klodel 50408): round 2's word-start # rule ended the curl segment inside a ${...}
     # too ("${X:- #}" is no comment for the shell), so a PUT glued after "$(: 1)" next to a message passed (main and
-    # cf7e431a block it; bash runs it). A ${...} and a $(...) are units of the segment now; inside a $(...) the # is
-    # a comment for the shell, but the segment is not cut there either (the main's behaviour, the closed side).
+    # cf7e431a block it; bash runs it). Round 4: these rows now pass because CURL_SEG2_RX is the main's again (no #
+    # rule) and the # rule is the separate CURL_SEG3_RX view; the rows stay as they were.
     url = 'http://localhost:3420/api/kanban/abc123'
     amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh viktor dave '
     data = """ -d '{"comment":"Viktor 14:30: kész"}'"""
@@ -1232,6 +1232,58 @@ def brace_and_substitution_units_keep_the_curl_segment(root):
     return not bad
 
 
+@case
+def hash_rule_is_its_own_view_and_never_hides_a_main_put(root):
+    # Round 4 (Viktor 50421 R2, R3; regressions to main): round 3's ${...} / $(...) unit read a quoted } or ) as its
+    # closer, and the apostrophe left over opened a quote that swallowed the next PUT (R2, 11 shapes); a # after a
+    # nested ${${b}} or a backtick still cut the segment before the kanban URL (R3). bash and zsh run every PUT here
+    # (agents/kernel/work/tcr5-r4-1123/oracle.txt, stub curl); main blocks all of them. The # rule is now the
+    # CURL_SEG3_RX view next to CURL_SEG2_RX (the main's, byte for byte), and either view's card PUT counts.
+    a = "'"
+    url = 'http://localhost:3420/api/kanban/abc123'
+    data = """ -d '{"comment":"Viktor 14:30: kész"}'"""
+    put = '{ curl -s -X PUT ' + url + data + '; }'
+    msg = 'curl -s -X POST http://localhost:3420/api/messages -d ' + a + '{"content":"ok"}' + a + ' '
+    sqb, dqb = '${V:-' + a + '}' + a + '}', '${V:-"}"}'
+    sqp, dqp = '$(printf ' + a + '%s)' + a + ' x)', '$(echo "a)b")'
+    h, d = root['hook'], root['dir']
+    cases = {
+        'msg-sq-brace-semi': (msg + sqb + ' ; ' + put, 2),
+        'msg-sq-brace-and': (msg + sqb + ' && ' + put, 2),
+        'msg-sq-brace-pipe': (msg + sqb + ' | ' + put, 2),
+        'msg-sq-brace-nl': (msg + sqb + '\n' + put, 2),
+        'msg-dq-brace-semi': (msg + dqb + ' ; ' + put, 2),
+        'msg-sq-paren-semi': (msg + sqp + ' ; ' + put, 2),
+        'msg-sq-paren-and': (msg + sqp + ' && ' + put, 2),
+        'msg-dq-paren-nl': (msg + dqp + '\n' + put, 2),
+        'case-arm-sq-brace': ('case a in a) ' + msg + sqb + ' ; ' + put + ' ;; esac', 2),
+        'tsubst-sq-brace': ('T=$(' + msg + sqb + ' ; ' + put + ')', 2),
+        'procsub-sq-paren': ('cat <(' + msg + sqp + ' ; ' + put + ')', 2),
+        'glued-nested-brace-before-url': (msg + '\n$(: 1)curl -s ${a:- ${b} #c} -X PUT ' + url + data, 2),
+        'glued-brace-subst-inside-before-url': (msg + '\n$(: 1)curl -s ${V:- $(printf y) #c} -X PUT ' + url + data, 2),
+        'glued-bq-hash-before-url': (msg + '\n$(: 1)curl -s `echo a #b` -X PUT ' + url + data, 2),
+        'env-nested-brace-before-url': (msg + '\nT=$(date | tr a b) curl -s ${a:- ${b} #c} -X PUT ' + url + data, 2),
+        'env-bq-hash-before-url': (msg + '\nT=$(date | tr a b) curl -s `echo a #b` -X PUT ' + url + data, 2),
+        # the ALLOW pairs: the same ${...} / $(...) in a message, no PUT after it
+        'allow-msg-sq-brace': (msg + sqb, 0),
+        'allow-msg-sq-paren-list': (msg + sqp + " -d 'Lépések: 1) curl -s -X PUT " + url
+                                    + ' -d {"comment":"Viktor 14:30: kész"} 2) szólj.' + a, 0),
+    }
+    bad = [label for label, (cmd, want) in cases.items()
+           if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
+    for b in bad:
+        print('  r4:', b)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('tcg_r4', root['hook'])
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    # the # rule lives only in the CURL_SEG3_RX view, as round 2 wrote it; CURL_SEG2_RX keeps a word-start # in the body
+    if r'(?<!\s)#' not in g.CURL_SEG3_RX.pattern or '#' in g.CURL_SEG2_RX.pattern.split('curl\\b', 1)[1]:
+        bad.append('views: the # rule is not exactly in CURL_SEG3_RX')
+        print('  r4: views')
+    return not bad
+
+
 # Viktor 50406 K1 (old fail-opens, main and the round 2 head pass them too; Klodel 50408: Known limits, no code). The
 # probe_tc22 inputs verbatim; a later fix turns its row red on purpose. The control row blocks the same stamp.
 _K1_A = "'"
@@ -1245,6 +1297,8 @@ KNOWN_K1 = {
     'bq-dq-apos-glued': _K1_MSGW + '\nX="`echo "it' + _K1_A + 's"`"; $(: 1)' + _K1_PUT,
     'bq-dq-sq-sub': _K1_MSGW + '\nX="`echo ' + _K1_A + '"' + _K1_A + '`"; T=$(date; echo 1) ' + _K1_PUT,
     'nl-in-subst-arg': _K1_MSGW + '\n$(: 1)curl -s -X PUT $(\n) ' + _K1_U + ' -d ' + _K1_PJ,
+    # Viktor 50421 I4 (old, main and the round 3 head pass it too): agents/kernel/work/tcr5-r4-1123/i4.txt
+    'msg-subst-put': 'curl -s -X POST http://localhost:3420/api/messages -d "$(' + _K1_PUT + ')"',
 }
 
 
@@ -1257,11 +1311,12 @@ def known_limit_k1_rows_pin_todays_allow(root):
     for label, cmd in KNOWN_K1.items():
         if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != 0:
             bad.append(label + ': blocks now (the documented limit changed)')
-    head = ''.join(open(h, encoding='utf-8').readlines()[:80])
+    with open(h, encoding='utf-8') as f:
+        head = ''.join(f.readlines()[:80])
     bad += [label + ': not named in the first 80 lines of the module' for label in KNOWN_K1 if label not in head]
     for b in bad:
         print('  k1:', b)
-    return not bad and len(KNOWN_K1) == 4
+    return not bad and len(KNOWN_K1) == 5
 
 
 @case
