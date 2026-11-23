@@ -77,7 +77,7 @@ Rules:
    info-question-word-list, imperative-3sg-definite, imperative-2sg-short-d, hat-het, modal-infinitive,
    comparative, indicative-decision, imperative-2sg-bare-gy, or-alternatives-without-comma,
    imperative-2sg-bare-vowel-j, infinitive-bare, or-alternatives-slash, imperative-2sg-bare-ddz,
-   imperative-irregular, participle-ando-endo.
+   imperative-irregular, participle-ando-endo, imperative-one-letter-stem-ss-zz, or-alternatives-abbreviated.
    A question of fact: "?" with mekkora, mennyi, mikor, hol, ... ("mennyiért adjuk?", "mennyit érne?" stay
    ideas). info-question-word-list: a question word off the list stays an idea;
    a plain question of fact meant as an idea ("milyen színű a borító?") passes as a request (Klodel's
@@ -96,7 +96,11 @@ Rules:
    8dd5c726: the last fixing round, only -lak/-lek and "avagy" into code): or-alternatives-slash ("kék/
    piros?"), imperative-2sg-bare-ddz ("hányszor eddz?"), imperative-irregular ("mikor gyertek?"),
    participle-ando-endo ("melyik a kiküldendő verzió?"); each turned 0 of Patrik's 126 fact questions in
-   the measure (r5/variants5.py) and is left out by that decision, not by the measure.
+   the measure (r5/variants5.py) and is left out by that decision, not by the measure. Two more names
+   after round 5 (Viktor 50848, Klodel's decision: the ceiling is per class, no new round):
+   imperative-one-letter-stem-ss-zz, a one-letter stem before the assimilated -ss/-zz ("hova üss?",
+   "mikor űzzük ki?": the CHOICE needs two letters before it); or-alternatives-abbreviated, "v" or "vs"
+   for "vagy" ("melyik a jó, a kék v a piros?": ALTERNATIVES knows only the word "(a)vagy").
    The message_id alone is ambiguous (measured: private and group chat both hold ids 10-999), so any
    ledger row with that id counts, but the IGEN must be in the chat where the quote was found.
    Measured 2026-11-13 on 30 days of Klodel's messages (9495): 752 hand out work, 623 of them name a

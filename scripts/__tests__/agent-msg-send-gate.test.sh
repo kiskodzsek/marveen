@@ -176,6 +176,8 @@ rows = [
     ('111', '18156', 'in', 'Hova lőj a képen?', 10330),
     ('111', '18157', 'in', 'Mikor kiküldeni a levelet?', 10340),
     ('111', '18158', 'in', 'Mikor kérnélek meg rá?', 10350),
+    ('111', '18159', 'in', 'Hova üss a képen?', 10360),
+    ('111', '18160', 'in', 'Melyik a jó: kék v a piros?', 10370),
 ]
 con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
                 "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
@@ -730,6 +732,15 @@ done
 # pinned, one row each
 for pair in '18156|Hova lőj a képen' '18157|Mikor kiküldeni a levelet' '18152|Melyik borító: kék/piros' \
             '18153|Hányszor eddz egy héten' '18154|Mikor gyertek át hozzánk' '18155|Melyik a kiküldendő verzió'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r5: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+done
+# known limits imperative-one-letter-stem-ss-zz and or-alternatives-abbreviated (msg_gate.py header, Viktor 50848,
+# Klodel's decision on the card: a ceiling per class, no new round): pass as requests; pinned, one row each
+for pair in '18159|Hova üss a képen' '18160|Melyik a jó: kék v a piros'; do
   tg="${pair%%|*}"; q="${pair#*|}"
   text "$WO
 KERES-SZO-SZERINT: \"$q\" (TG $tg)"
