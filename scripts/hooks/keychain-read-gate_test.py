@@ -1196,6 +1196,9 @@ def script_git_cases():
         w('helper.cjs', f"require('child_process').execFileSync('git', ['{CR}', '{FL}'])\n")
         w('helper.mjs', f"import {{ execFileSync }} from 'node:child_process'; execFileSync('git', ['{CR}', '{FL}'])\n")
         w('ok.js', "console.log(1)\n")
+        w('HANDOFF.md', f'# handoff\n- the shapes that ran the helper:\n```\ngit -C . {CR} approve < x\n'
+                        f'git -c {CR}.helper={OK} fetch\n```\n')
+        w('x.txt', 'data\n')
         w(os.path.join('scripts', 'gh-pr.mjs'), f"import {{ execFileSync }} from 'node:child_process'; "
                                                 f"execFileSync('git', ['{CR}', '{FL}'])\n")
         with open(prod, encoding='utf-8') as f:
@@ -1205,6 +1208,7 @@ def script_git_cases():
         os.symlink(prod, os.path.join(d, 'gh-link.mjs'))
         os.symlink(os.path.join(d, 'scripts', 'gh-pr.mjs'), os.path.join(d, 'other-link.mjs'))
         S = d + '/h.sh'
+        H = d + '/hc.sh'
         rows = [
             # Viktor 50515: the shapes that ran git's keychain helper unseen (a script file's text)
             (f'bash {S}', 2), (f'bash {S} | tee {d}/o', 2), (f'bash {S} > {d}/o', 2), (f'bash {S} | cat', 2),
@@ -1233,6 +1237,28 @@ def script_git_cases():
             # value's preload file is not read, with any script
             (f'cd {d} && NODE_OPTIONS="--import ./helper.mjs" node {prod} x', 0),
             (f'cd {d} && NODE_OPTIONS="--import ./helper.mjs" node ./ok.js', 0),
+            # round 2 (Viktor 50625): git's rules for a file the command runs or feeds to code. hc.sh: only git's
+            # rules see it (h.sh holds the literal pair main blocks anyway). Run: source, dot, stdin redirect,
+            # process substitution
+            (f'source {H}', 2), (f'. {H}', 2), (f'bash < {H}', 2), (f'bash <(cat {H})', 2), (f'source <(cat {H})', 2),
+            # fed: piped straight into an interpreter, or read by eval / -c through a substitution
+            (f'cat {H} | sh', 2), (f'cat {H} | bash -s', 2), (f'head -50 {H} | bash', 2),
+            (f'cat {d}/hk.py | python3', 2), (f'cat {d}/hk.py | python3 -', 2),
+            (f'eval "$(cat {H})"', 2), (f'eval "`cat {H}`"', 2), (f'bash -c "$(cat {H})"', 2),
+            (f'sh -c "$(cat {H})"', 2), (f'zsh -c "$(cat {H})"', 2), (f'python3 -c "$(cat {d}/hk.py)"', 2),
+            (f'C=$(cat {H}); bash -c "$C"', 2),
+            # a data file read next to an interpreter elsewhere keeps the main rules (the fleet's HANDOFF.md read)
+            (f'cat {d}/HANDOFF.md; bash {d}/ok.sh', 0), (f'head -40 {d}/HANDOFF.md && python3 {d}/okword.py', 0),
+            (f'cat {d}/HANDOFF.md | grep -n x; echo a | python3 -c "import sys"', 0),
+            (f'cat {d}/HANDOFF.md {d}/x.txt; node {d}/ok.js', 0),
+            # ...but a run of the same text is judged by them
+            (f'cat {d}/HANDOFF.md; bash {d}/HANDOFF.md', 2),
+            # through a filter into a shell: the pipeline-into-a-shell reading (card 74586987) gives its words to the
+            # git walk too (main allows it: no git rules on a file there)
+            (f'cat {H} | grep -v x | bash', 2),
+            # KNOWN-LIMIT cat-fed-indirect (Viktor 50625): a cat text run through a file the command writes first (it
+            # does not exist when the gate reads the command) keeps the main rules (as on main)
+            (f'cat {H} > {d}/g.sh; bash {d}/g.sh', 0),
         ]
         for cmd, want in rows:
             n += 1

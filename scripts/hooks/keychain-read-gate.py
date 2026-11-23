@@ -8,6 +8,10 @@ isolation (H1). It does not see a keychain read made through Python/Node/Swift A
 calls, or a command name hidden in a variable or made by a substitution (`s=security; $s -i`) beyond the
 hidden-name rule below. Do not rely on it.
 
+Known limits of git's helper rules on a script file's text (card 8d8298c7, Viktor 50542 / 50625; each pinned by a
+KNOWN-LIMIT row): cat-fed-indirect: they read a file the command runs or feeds to code (a pipe into an
+interpreter, a substitution), so a cat text run through a file the command writes first (`cat f > g; bash g`)
+keeps the main rules; node-options-quoted: a preload file in a quoted or `=` NODE_OPTIONS value is not read.
 Known limits (card deede5e4, Viktor r2 point 4 and 49151; the full list is "Not seen" under Script files below):
 a relative script word whose directory or name comes from a value the gate does not bind passes unread: a
 `while read` loop (piped or from a file), `select`, an arithmetic `for ((..))` loop, cdable_vars, find -execdir
@@ -2895,6 +2899,15 @@ HEADTAIL_RX = re.compile(r'(?:\$\(|<\(|`)[ \t]*' + CHAIN + r'(?:' + WORD + r'*/)
                          # an interpreter given its code by -c / -e reads the pipe as data (`tail -1 reg.jsonl |
                          # python3 -c 'import json...'`, the fleet's error-register form: 5 of the replay's rows)
                          + r'(?![^\n;&|()]*?[ \t][\'"]?-(?-i:[A-Za-z]*[ce])(?=[\s\'"]|$)))', re.I)
+# card 8d8298c7 round 2 (Viktor 50625): git's helper rules read a cat file's text only where what cat prints can become
+# code, as HEADTAIL_RX reads head/tail: in a substitution ($( ), <( ), backticks: eval, bash -c, source <(cat f)) or
+# piped straight into an interpreter. A cat next to an interpreter elsewhere reads data (the fleet's `cat HANDOFF.md;
+# ... | python3`: 87 commands in 3 days listed a HANDOFF.md as a script, none fed it to one); such a file keeps the
+# main rules (script=True), as on main.
+CAT_FED_RX = re.compile(r'(?:\$\(|<\(|`)[ \t]*' + CHAIN + r'(?:' + WORD + r'*/)?cat' + _CAT_ARGS
+                        + r'|' + SCRIPT_POSITION + r'(?:' + WORD + r'*/)?cat' + _CAT_ARGS
+                        + r'(?=[ \t]*\|(?!\|)[ \t]*\\?[\'"]?' + INTERP + r'[\'"]?(?=\s|$)'
+                        + r'(?![^\n;&|()]*?[ \t][\'"]?-(?-i:[A-Za-z]*[ce])(?=[\s\'"]|$)))', re.I)
 # Shell variables set in the command (Viktor 41715 LOW f: `F=m.py; python3 $F`), and every cd in order, a relative one
 # on top of the one before (LOW b: `cd sub && python3 only.py`).
 ASSIGN_RX = re.compile(r'''(?<![\w$])([A-Za-z_]\w*)=(['"]?)([^\s'";|&<>()`$]+)\2(?=\s|$|;)''')
@@ -4684,7 +4697,7 @@ def interp_groups(text, expanded=False):
     return groups
 
 
-def script_paths(cmd, cwd, normalised=None, extra=(), live=None):
+def script_paths(cmd, cwd, normalised=None, extra=(), live=None, git_cat=False, cat_seen=None):
     """The script files the command runs (resolved, existing regular files), at most MAX_SCRIPTS (an eleventh file
     or more than MAX_BASES directories returns MAX_SCRIPTS + 1 entries: the caller blocks). Raises TooManyArgs.
     extra: more words to look up as files (a pipeline into a shell, card 74586987)."""
@@ -4733,7 +4746,11 @@ def script_paths(cmd, cwd, normalised=None, extra=(), live=None):
     # by the mutation round). The reader's eval reads the quoted and escaped forms too (`"eval"`, `\eval`)
     if INTERP_RX.search(text) or _hn_reader_rx().search(text):
         groups += [[m.group(1)] for m in REDIRECT_RX.finditer(text)]
-        for m in [*CAT_RX.finditer(text), *HEADTAIL_RX.finditer(text)]:
+        # git_cat (card 8d8298c7 round 2): only a cat whose output can become code (CAT_FED_RX)
+        cat_ms = list((CAT_FED_RX if git_cat else CAT_RX).finditer(text))
+        if cat_ms and cat_seen is not None:
+            cat_seen.append(True)  # the caller's git walk is needed only then
+        for m in [*cat_ms, *HEADTAIL_RX.finditer(text)]:
             cat_words = (m.group(1) or m.group(2)).split()
             if len(cat_words) > MAX_ARGS:
                 raise TooManyArgs(f'cat: {len(cat_words)} szó, MAX_ARGS {MAX_ARGS}')
@@ -6115,24 +6132,38 @@ def script_hits(cmd, cwd):
     if None in bounds:
         return found + ['wrapper-unread']
     try:
-        paths = script_paths(cmd, cwd, text, pipe_words, pipe_live)
+        cat_seen = []
+        paths = script_paths(cmd, cwd, text, pipe_words, pipe_live, cat_seen=cat_seen)
         for t in dict.fromkeys(bounds[:1] + texts[1:] + bounds[1:]):
             if t == text:
                 continue
-            paths +=[p for p in script_paths(cmd, cwd, t) if p not in paths]
+            paths +=[p for p in script_paths(cmd, cwd, t, cat_seen=cat_seen) if p not in paths]
     except TooManyArgs as e:  # not "judge the first MAX_ARGS words": a file behind them would slip past (fail-closed)
         return found + [f'script-too-many-args ({e})']
     except PathUnread as e:  # card deede5e4: a script word the gate cannot look up is not "no file" (fail-closed)
         return found + [f'script-path-unread ({e})']
     if len(paths) > MAX_SCRIPTS:  # not "check the first ten": an eleventh file would slip past (fail-closed)
         return found + ['script-too-many']
+    # card 8d8298c7 round 2 (Viktor 50625): git's helper rules for a file the command runs or feeds to code; a file only
+    # a cat reads next to an interpreter elsewhere (a HANDOFF.md) keeps the main rules. The second walk only when a cat
+    # added words (cat_seen); else every file is a run one
+    git_paths = paths
+    if cat_seen:  # a cat added words in the first walk (scanning every text here again doubled big inputs)
+        try:
+            git_paths = script_paths(cmd, cwd, text, pipe_words, pipe_live, git_cat=True)
+            for t in dict.fromkeys(bounds[:1] + texts[1:] + bounds[1:]):
+                if t == text:
+                    continue
+                git_paths += [p for p in script_paths(cmd, cwd, t, git_cat=True) if p not in git_paths]
+        except (TooManyArgs, PathUnread):  # the first walk read them: unreachable, but never fewer rules
+            git_paths = paths
     budget = script_budget()
     for path in paths:
         if time.monotonic() - T0 > budget:  # not "allow the rest": a timed-out hook would not block either
             return found + ['script-too-slow']
         with open(path, 'rb') as f:
             body = f.read(MAX_SCRIPT_BYTES).decode('utf-8', errors='replace')
-        mode = True if gh_pr_exempt(path, cmd) else SCRIPT_GIT
+        mode = True if gh_pr_exempt(path, cmd) or path not in git_paths else SCRIPT_GIT
         if hits(body, script=mode) or literal_hit(body) or (_hn_shell_file(path, body, cmd, pipe_words)
                                                              and hidden_name(body)):
             found.append('script-file')
