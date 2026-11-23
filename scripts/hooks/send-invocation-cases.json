@@ -1116,6 +1116,136 @@
       "cmd": "cat <&sendmail a@b.c",
       "expected": true,
       "expected_A": false
+    },
+    {
+      "name": "SENDMODES1122 round 5 (Viktor 50388 R1): ((true) ) is two subshells, the # after it a comment; a REAL (( 1 # 2 )) follows: only the A1 reading (lone ) -> P, per (() sees the send",
+      "cmd": "((true) ) # it's\n(( 1 # 2 )); sendmail a@b.hu # '",
+      "expected": true,
+      "expected_A": false,
+      "expected_PP": false,
+      "expected_A1": true
+    },
+    {
+      "name": "SENDMODES1122 round 5 (Viktor 50388 R1): the same with || after a real (( x # 2 ))",
+      "cmd": "((true) ) # it's\nx=1; (( x # 2 )) || sendmail a@b.hu # '",
+      "expected": true,
+      "expected_A": false,
+      "expected_PP": false,
+      "expected_A1": true
+    },
+    {
+      "name": "SENDMODES1122 round 5 (Viktor 50388 R1): the same with graph-mail send",
+      "cmd": "((true) ) # it's\n(( 1 # 2 )); graph-mail send --to a@b.c # '",
+      "expected": true,
+      "expected_A": false,
+      "expected_PP": false,
+      "expected_A1": true
+    },
+    {
+      "name": "SENDMODES1122 round 5 (Viktor 50388 R1): control: the same without a send",
+      "cmd": "((true) ) # it's\n(( 1 # 2 )); echo hi # '",
+      "expected": false,
+      "expected_A1": false
+    },
+    {
+      "name": "round 5 (Viktor 50388 M2): eval 'string' is read as a command line (EVALREC1123)",
+      "cmd": "eval 'sendmail a@b.hu'",
+      "expected": true
+    },
+    {
+      "name": "round 5 (Viktor 50388 M2): eval -- with an unquoted send",
+      "cmd": "eval -- sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "round 5 (Viktor 50388 M2): control: eval of an echo naming the sender",
+      "cmd": "eval 'echo sendmail a@b.hu'",
+      "expected": false
+    },
+    {
+      "name": "round 5 (Viktor 50388 M2): zsh repeat N runs its command (ZSHPREFIX1123)",
+      "cmd": "repeat 1 sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "round 5 (Viktor 50388 M2): control: repeat N of an echo",
+      "cmd": "repeat 2 echo sendmail",
+      "expected": false
+    },
+    {
+      "name": "round 5 (Viktor 50388 M2): zsh noglob runs its command",
+      "cmd": "noglob sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "round 5 (Viktor 50388 M2): control: noglob ls",
+      "cmd": "noglob ls *",
+      "expected": false
+    },
+    {
+      "name": "round 5 (Viktor 50388 M2): zsh - (dash modifier) runs its command",
+      "cmd": "- sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "round 5 (Viktor 50388 M2): zsh { list } always { list }: the second block's command (ZSHALWAYS1123)",
+      "cmd": "{ true } always { sendmail a@b.hu }",
+      "expected": true
+    },
+    {
+      "name": "round 5 (Viktor 50388 M2): control: always block with an echo",
+      "cmd": "{ true } always { echo sendmail a@b.hu }",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): bt-squote-flat",
+      "cmd": "echo `echo 'a`; sendmail a@b.hu; echo `echo '`",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): bt-dquote-flat",
+      "cmd": "echo `echo \"a`; sendmail a@b.hu; echo `echo \"`",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): bt-unclosed-brace-apos",
+      "cmd": "echo `echo ${x`y # it's\nsendmail a@b.hu\n# '",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): br-case-comsub-apos",
+      "cmd": "echo ${x:-$(case a in a) echo # it's\n;; esac)}\nsendmail a@b.hu\n# '",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): br-case-comsub-dquote",
+      "cmd": "echo ${x:-$(case a in a) echo # say \"hi\n;; esac)}\nsendmail a@b.hu\n# \"",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): dp-arith-exp-false-apos",
+      "cmd": "true # it's\nfalse && echo $(( 1 # 2 )); sendmail a@b.hu\n# '",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): hd-backslash-delim-apos",
+      "cmd": "cat <<\\EOF >/dev/null\nit's\nEOF\nsendmail a@b.hu\n# '",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): hd-dquote-delim-subshell-apos",
+      "cmd": "( cat <<\"EOF\" >/dev/null\nit's\nEOF\n)\nsendmail a@b.hu\n# '",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): hd-partial-quote-delim-apos",
+      "cmd": "cat <<E\"O\"F >/dev/null\nit's\nEOF\nsendmail a@b.hu\n# '",
+      "expected": false
+    },
+    {
+      "name": "KNOWN-LIMIT (Viktor 50388 M3, follow-up card; main misses it too): ansic-escaped-quote",
+      "cmd": "echo $'it\\'s'\nsendmail a@b.hu\necho it\\'s",
+      "expected": false
     }
   ]
 }

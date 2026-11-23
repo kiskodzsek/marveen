@@ -43,6 +43,18 @@ closed here by SENDCONT1122, card 64d10325):
   short-cluster-sd-mixed: cluster (a glued -sd); short-bash-c-mixed: bash (a bash -c string);
   short-json-concat-mixed: concat (two --json joined).
 
+Known limits of the send detection's comment mask (Viktor 50388 M3, independent probe 15777b88a170; main lets all 10
+through too, no regression; follow-up card 2f2bb0c6; each pinned for both twins by a KNOWN-LIMIT row in
+send-invocation-cases.json, which the conformance test binds to this list):
+  bt-squote-flat, bt-dquote-flat, bt-unclosed-brace-apos: inside a backtick substitution bash does not follow
+    quotes the mask follows (a quote in one backtick pair "closes" in the next one; an unclosed ${ in a backtick);
+  br-case-comsub-apos, br-case-comsub-dquote: zsh only, a case pattern inside ${x:-$(...)};
+  dp-arith-exp-false-apos: zsh only, a $(( )) with a # in it;
+  hd-backslash-delim-apos, hd-dquote-delim-subshell-apos, hd-partial-quote-delim-apos: a <<\\EOF delimiter, a
+    <<"EOF" in a subshell, a <<E"O"F delimiter: no heredoc cut reads them, an apostrophe in the body opens a quote
+    (the heredoc-strict class, next to card c5c87fbd);
+  ansic-escaped-quote: an escaped quote in $'...' (it\\'s) shifts the quote tracking.
+
 Contract: PreToolUse. Reads the hook payload on stdin, exit 0 = allow,
 exit 2 = block (stderr goes back to the model).
 """
@@ -419,7 +431,8 @@ def _mask_subshell_markers(cmd: str, mode: str = "A") -> str:
     (B), `((` at a word start (A), `$(` (C) and `(` (P) decides: a comment only with an empty stack or a C/P on top.
     Not cutting is the safe side (the text stays and is read). SENDDPAREN1122 (Viktor 50342 R1): a lone `)` with
     an A on top means bash took the `((` as two subshells (`((true) ) # it's` is `( (true) )` and the `#` a comment):
-    the inner one closes, the outer stays open as a P, so a comment after it is cut. `$((` is `$(` + `(` here (C, P): a blank `#` inside an
+    the inner one closes, the outer stays open as a P, so a comment after it is cut (round 4: only in the "A1"
+    reading of SENDMODES1122; the round 4 head had dropped it and lost `((true) ) # it's` + a real `(( 1 # 2 ))`). `$((` is `$(` + `(` here (C, P): a blank `#` inside an
     arithmetic EXPANSION is an error on which a non-interactive bash or zsh exits, so nothing after it runs. SENDCONT1122 (B2): bash drops a backslash-newline before
     it reads words, so `true \\` + newline + `# c` is `true # c`, a comment; the mask drops it too (prev stays)."""
     if mode in ("legacy", "blind"):
@@ -481,7 +494,9 @@ def _mask_subshell_markers(cmd: str, mode: str = "A") -> str:
         elif ch == ")" and ctx:
             if ctx[-1] == "A" and i + 1 < n and cmd[i + 1] == ")":
                 ctx.pop(); out.append("))"); i += 2; continue
-            if ctx[-1] in "CP":
+            if ctx[-1] == "A" and mode == "A1":  # SENDDPAREN1122, the A1 reading: ((true) ) = ( (true) )
+                ctx[-1] = "P"
+            elif ctx[-1] in "CP":
                 ctx.pop()
         out.append(ch); i += 1
     return "".join(out)
@@ -596,6 +611,11 @@ _WRAPPERS = {
     # first count found all sat inside quoted remote (ssh) command strings or heredoc
     # bodies, and that pattern was not quote-aware (Marveen's correction, 2026-09-24).
     "setsid": ("", (), 0),
+    # ZSHPREFIX1123 (card 64d10325 round 5, Viktor 50388 M2): zsh precommand modifiers, `repeat N` runs its command
+    # N times, `noglob` and `-` run it as it stands (bash has none of them: there the line fails, an extra audit)
+    "repeat": ("", (), 1),
+    "noglob": ("", (), 0),
+    "-": ("", (), 0),
 }
 _HEAD_DEPTH = 8
 # SENDREDIR1122 (card 64d10325): a redirect may stand before the command word -- `>/dev/null sendmail x`,
@@ -665,7 +685,17 @@ def _command_heads(toks, _d: int = 0):
 
 
 def _segment_is_send(toks, depth: int) -> bool:
-    return any(_head_is_send(h, depth) for h in _command_heads(toks))
+    if any(_head_is_send(h, depth) for h in _command_heads(toks)):
+        return True
+    # ZSHALWAYS1123 (Viktor 50388 M2): zsh's `{ list } always { list }` needs no separator after the `}`, so the
+    # second block's command stood mid-segment; each piece after a `} always` is read as its own command (linear:
+    # the pieces do not overlap)
+    if "always" not in toks:
+        return False
+    cuts = [j for j in range(len(toks) - 1) if toks[j] == "}" and toks[j + 1] == "always"]
+    bounds = cuts + [len(toks)]
+    return any(_head_is_send(h, depth)
+               for a, b in zip(cuts, bounds[1:]) for h in _command_heads(toks[a + 2:b]))
 
 
 def _head_is_send(toks, depth: int) -> bool:
@@ -683,6 +713,12 @@ def _head_is_send(toks, depth: int) -> bool:
             if t == "-c" and i + 1 < len(rest):
                 if is_send_invocation(rest[i + 1], _depth=depth + 1):
                     return True
+    # EVALREC1123 (Viktor 50388 M2): eval joins its arguments with blanks and runs the result as a command line, so
+    # it is read like a wrapper shell's -c string
+    if prog == "eval" and depth < 3:
+        args = rest[1:] if rest[:1] == ["--"] else rest
+        if args and is_send_invocation(" ".join(args), _depth=depth + 1):
+            return True
     # interpreter kod-string: python -c / node -e / --eval, ami kuldest hiv
     if _PYTHON.match(prog) or _NODEISH.match(prog):
         for i, t in enumerate(rest):
@@ -733,7 +769,10 @@ def wrapper_depth_hit(cmd: str) -> bool:
 # is a send (an extra audit is the safe side): "A" (`((` is arithmetic: the round 2 mask), "PP" (a word-start `((`
 # is two subshells from its first character), "legacy" (main's mask, shlex reading the comments: this twin's main)
 # and "blind" (main's mask, a comment read as words: the JS twin's main, so both twins audit a send named in a
-# comment, as the JS twin did on main). By construction no reading of main or of round 2 is lost. PP runs only with a
+# comment, as the JS twin did on main). Round 5 (Viktor 50388 R1): "A1" is the round 3 mask (A, and a lone `)` with
+# an A on top turns it into a P: bash learned the `((` was two subshells), decided per `((`; the PP reading takes
+# every `((` as two subshells, also a real `(( 1 # 2 ))` later on, and loses the send there. By construction no
+# reading of main or of rounds 2-3 is lost. PP and A1 run only with a
 # `((` and a `#` in the command, legacy and blind only with a `#`, a backslash-newline or a `>&`/`<&` (where the
 # readings can differ at all). Past _MULTI_READING_MAX characters
 # the extra readings are replaced by the long-token literal search (a sender name anywhere: an extra audit), so a
@@ -744,7 +783,7 @@ _MULTI_READING_MAX = 256 * 1024
 def _send_modes(cmd: str):
     modes = ["A"]
     if "#" in cmd and "((" in cmd:
-        modes.append("PP")
+        modes += ["PP", "A1"]
     if "#" in cmd or "\\\n" in cmd or ">&" in cmd or "<&" in cmd:
         modes += ["blind", "legacy"]
     return modes

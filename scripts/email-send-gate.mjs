@@ -294,7 +294,8 @@ export function maskSubshellMarkers(cmd, mode = 'A') {
       ctx.push('P')
     } else if (ch === ')' && top) {
       if (top === 'A' && cmd[i + 1] === ')') { ctx.pop(); out += '))'; i++; continue }
-      if (top === 'C' || top === 'P') ctx.pop()
+      if (top === 'A' && mode === 'A1') ctx[ctx.length - 1] = 'P' // SENDDPAREN1122, the A1 reading: ((true) ) = ( (true) )
+      else if (top === 'C' || top === 'P') ctx.pop()
     }
     out += ch
   }
@@ -351,6 +352,10 @@ const WRAPPERS = new Map([
     'max-procs', 'max-chars', 'process-slot-var'], 0]],
   ['timeout', ['sk', ['signal', 'kill-after'], 1]],
   ['setsid', ['', [], 0]],
+  // ZSHPREFIX1123 (Viktor 50388 M2): zsh precommand modifiers -- see the python twin
+  ['repeat', ['', [], 1]],
+  ['noglob', ['', [], 0]],
+  ['-', ['', [], 0]],
 ])
 const HEAD_DEPTH = 8
 // SENDREDIR1122: a redirect before the command word is stepped over (an operator token alone takes its target);
@@ -401,7 +406,13 @@ function commandHeads(toksIn, d = 0) {
 }
 
 function segmentIsSend(toksIn, depth) {
-  return commandHeads(toksIn).some((h) => headIsSend(h, depth))
+  if (commandHeads(toksIn).some((h) => headIsSend(h, depth))) return true
+  // ZSHALWAYS1123 (Viktor 50388 M2): each piece after a zsh `} always` is its own command -- see the python twin
+  if (!toksIn.includes('always')) return false
+  const cuts = []
+  for (let j = 0; j + 1 < toksIn.length; j++) if (toksIn[j] === '}' && toksIn[j + 1] === 'always') cuts.push(j)
+  return cuts.some((a, k) => commandHeads(toksIn.slice(a + 2, k + 1 < cuts.length ? cuts[k + 1] : toksIn.length))
+    .some((h) => headIsSend(h, depth)))
 }
 
 function headIsSend(toks, depth) {
@@ -414,6 +425,11 @@ function headIsSend(toks, depth) {
     for (let i = 0; i < rest.length; i++) {
       if (rest[i] === '-c' && rest[i + 1] && isSendInvocation(rest[i + 1], depth + 1)) return true
     }
+  }
+  // EVALREC1123 (Viktor 50388 M2): eval runs its joined arguments as a command line -- see the python twin
+  if (prog === 'eval' && depth < 3) {
+    const args = rest[0] === '--' ? rest.slice(1) : rest
+    if (args.length && isSendInvocation(args.join(' '), depth + 1)) return true
   }
   if (PYTHON.test(prog) || NODEISH.test(prog)) {
     for (let i = 0; i < rest.length; i++) {
@@ -481,11 +497,12 @@ export function sendOnlyByStrictHeredoc(cmd, depth = 0, mode = 'A') {
 
 // SENDMODES1122 (card 64d10325 round 4, Viktor 50353): the send detection runs on every reading that can differ,
 // and a send in ANY of them is a send -- "A" (a word-start (( is arithmetic), "PP" (it is two subshells from its first
-// character; only with a (( and a #), "legacy" (main's mask; only with a #, a backslash-newline or a >& / <&). The
+// character; only with a (( and a #), "A1" (round 5, Viktor 50388 R1: the round 3 mask, a lone ) with an A on top
+// turns it into a P; only with a (( and a #), "legacy" (main's mask; only with a #, a backslash-newline or a >& / <&). The
 // python twin (is_send_invocation in outgoing-copy-gate.py) has the reasons and the same readings.
 export function sendModes(cmd) {
   const modes = ['A']
-  if (cmd.includes('#') && cmd.includes('((')) modes.push('PP')
+  if (cmd.includes('#') && cmd.includes('((')) modes.push('PP', 'A1')
   if (cmd.includes('#') || cmd.includes('\\\n') || cmd.includes('>&') || cmd.includes('<&')) modes.push('legacy')
   return modes
 }
