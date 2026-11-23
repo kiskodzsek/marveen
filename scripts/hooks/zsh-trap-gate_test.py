@@ -346,7 +346,10 @@ def contract_internal_error_fails_open_and_logs(_):
              % (HOOK, HOOK, json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'echo ==='}}))],
             capture_output=True, text=True, timeout=20,
             env={'PATH': '/usr/bin:/bin', 'HOOK_ERRLOG_PATH': log}).returncode
-        logged = os.path.exists(log) and 'zsh-trap-gate' in open(log, encoding='utf-8').read()
+        logged = False
+        if os.path.exists(log):
+            with open(log, encoding='utf-8') as f:  # closed: an open file is a ResourceWarning under -W error
+                logged = 'zsh-trap-gate' in f.read()
     return code == 0 and logged
 
 
@@ -412,6 +415,260 @@ def closed_prefix_value_options_cmdvar_after_prefix_eqsplit_and_procsub_redirect
 
 
 @case
+def prefix_follow_ups_exec_a_env_split_sudo_h_command_lookup(_):
+    # e6a0f476 (Viktor 50227 round 2 LOW/INFO; main lets the first group through, overblocks the last group)
+    rm, cv = 'RM-VALTOZO-KAPU', 'ZSH-CSAPDA (változó mint parancs)'
+    nested = 'env -S "env -S ' + "'rm -rf $S'" + '"'
+    return (
+        # LOW 1: exec -a NAME takes a value
+        blocks(r'exec -a nm rm -rf $S', rm) and blocks(r'exec -a nm rm -rf $S/*', rm) and passes(r'exec -a nm ls')
+        # LOW 2: env -S / --split-string: its one word is the command line env runs
+        and blocks(r'env -S "rm -rf $S"', rm) and blocks(r"env -S 'rm -rf $S'", rm)
+        and blocks(r'env --split-string="rm -rf $S"', rm) and blocks(r'env -u A -S "rm -rf $S"', rm)
+        and blocks(r'env -Srm\ -rf\ $S', rm) and blocks(nested, rm)
+        and passes(r'env -S "ls -la"') and passes(r'env -S "rm -rf ${S:?}"')
+        # INFO 2: sudo -h is --help or -h HOST; both ways are looked at
+        and blocks(r'sudo -h rm -rf $S', rm) and blocks(r'sudo -h host rm -rf $S', rm) and passes(r'sudo -h')
+        and passes(r'sudo -h host ls $S')
+        and blocks(r'G="git x"; sudo -h $G', cv) and passes(r'G="git x"; sudo -u root ls $G')
+        # INFO 1: a -v / -V in a cluster (-pv, -vp) or after -p only looks the name up
+        and passes(r'G="git x"; command -pv $G') and passes(r'G="git x"; command -vp $G')
+        and passes(r'G="git x"; command -p -v $G') and passes(r'command -pv rm -rf $S')
+        and blocks(r'G="git x"; command -p $G', cv) and blocks(r'command rm -rf $S', rm)
+        and blocks(r'command -p rm -rf $S', rm))
+
+
+@case
+def prefix_round2_split_rest_clusters_quoted_options_dash_and_set_after_prefix(_):
+    # e6a0f476 round 2 (Viktor 50424 L1-L6; old, main lets every BLOCK row through). zsh -f with an rm stub first on
+    # PATH runs rm in each BLOCK row (agents/kernel/work/ztf-r2-1123/oracle.txt; env -P /bin runs the real /bin/rm
+    # there, S a missing temp path), except the sudo rows (no sudo run; getopt clustering as the man page reads).
+    rm, sp, cv = 'RM-VALTOZO-KAPU', 'ZSH-CSAPDA (szóbontás)', 'ZSH-CSAPDA (változó mint parancs)'
+    r = ' rm -rf $S'
+    return (
+        # L1: env -S takes one word, env appends the words after it
+        blocks('env -S' + r, rm) and blocks("env -S 'rm -rf' $S", rm) and blocks('env -S env -S' + r, rm)
+        and blocks('echo $(env -S' + r + ')', rm) and blocks("env -S 'rm #x' -rf $S", rm)
+        and passes("env -S 'echo #' rm -rf $S") and passes("env -S 'echo rm -rf' $S")
+        # ... and after the split value the next word is no command of its own, for set and the variable-as-command
+        # check too (env -S echo set -- $V runs `echo set -- ...`; a mutant that read on past -S overblocked these)
+        and passes("V='a b'; env -S echo set -- $V") and passes("V='a b'; env -S 'echo' set -- $V")
+        and passes('HJ="a b"; env -S echo $HJ') and passes('HJ="a b"; env -S \'printf %s\' $HJ')
+        # L2: a cluster whose last letter takes a value takes the next word; a glued value does not
+        and blocks('exec -cla x' + r, rm) and blocks('exec -lca x' + r, rm) and blocks('true && exec -ca x' + r, rm)
+        and blocks('true | exec -cla x' + r, rm) and blocks('true\nexec -cla x' + r, rm)
+        and blocks('time noglob exec -cla x' + r, rm) and blocks('exec -cax' + r, rm)
+        and blocks('env -vS' + r, rm) and blocks('env -vu FOO' + r, rm) and blocks('env -vC /tmp' + r, rm)
+        and blocks('env -vP /bin' + r, rm) and blocks('sudo -iu root' + r, rm) and blocks('sudo -Eu root' + r, rm)
+        and blocks('HJ="rm -rf"; exec -cla x $HJ /tmp/x', cv) and passes('exec -a rm echo -rf $S')
+        # L3: env -P altpath
+        and blocks('env -P /bin' + r, rm)
+        # L4: a quoted option or assignment word is still one
+        and blocks('exec "-a" x' + r, rm) and blocks('env "-Srm -rf $S"', rm) and blocks('env "-S" "rm -rf $S"', rm)
+        and blocks('env "FOO=a b"' + r, rm)
+        # L5: zsh's - precommand
+        and blocks('true; -' + r, rm)
+        # L6: set -- after a prefix word splits nothing either
+        and blocks("V='a b'; noglob set -- $V", sp) and blocks("V='a b'; builtin set -- $V", sp)
+        and passes("V='a b'; noglob set -- ${=V}"))
+
+
+@case
+def prefix_round3_split_escapes_prefix_paths_sudo_chroot_and_ambig_clusters(_):
+    # e6a0f476 round 3 (Viktor 50471 R1, L1-L4, I1). R1 was a round-2 regression (main and 301c1ae8 blocked it); the
+    # rest the main lets through as well. zsh -f with an rm stub first on PATH runs rm in each non-sudo BLOCK row and
+    # in none of the env / path ALLOW rows (agents/kernel/work/ztf-r3-1123/oracle_r3.txt, 21/21); sudo not run.
+    rm = 'RM-VALTOZO-KAPU'
+    r = ' rm -rf $S'
+    return (
+        # R1: a backslash-c ends the split value, the words after it are still appended
+        blocks("env -S '\\c'" + r, rm) and passes("env -S 'echo a\\c b'") and passes("env -S 'echo a\\c'" + r)
+        and passes("env -S 'echo a\\c rm -rf $S'") and passes("env -S 'echo a\\\\c b'")
+        # L1: backslash-underscore, a tab or a newline separates words inside the split value
+        and blocks("env -S 'rm\\_-rf\\_${S}'", rm) and blocks("env -S $'rm\\t-rf\\t${S}'", rm)
+        and blocks("env -S $'rm\\n-rf ${S}'", rm) and blocks('env -S "rm\n-rf \\${S}"', rm)
+        and passes("env -S 'echo\\_hi'")
+        # L2: a prefix word written with a path, quoted or escaped
+        and blocks('\\env' + r, rm) and blocks("'nohup'" + r, rm) and blocks('/usr/bin/env' + r, rm)
+        and blocks('/usr/bin/nice -n 1' + r, rm) and blocks("/usr/bin/env -S 'rm -rf ${S}'", rm)
+        and blocks('"/usr/bin/env"' + r, rm) and blocks('echo x | /usr/bin/xargs' + r, rm)
+        and blocks("HJ='rm -rf'; /usr/bin/nohup $HJ /tmp/x", 'ZSH-CSAPDA (változó mint parancs)')
+        and blocks("V='a b'; 'noglob' set -- $V", 'ZSH-CSAPDA (szóbontás)')
+        and passes('/usr/bin/env ls -la $S') and passes('/tmp/x/env -S ok') and passes("'-'" + ' echo -rf $S')
+        and blocks("'-'" + r, rm) and blocks('\\-' + r, rm) and passes("'command' -pv rm -rf $S")
+        # L3: sudo -R / --chroot take a directory
+        and blocks('sudo -R /x' + r, rm) and blocks('sudo --chroot /x' + r, rm) and passes('sudo -R /x ls $S')
+        # L4: no 40-word window for the ambiguous -h; I1: a cluster ending in h is looked at both ways too
+        and blocks('sudo ' + '-E ' * 40 + '-h' + r, rm) and blocks('sudo -Eh' + r, rm)
+        and blocks('sudo -h -E' + r, rm))
+
+
+@case
+def prefix_round4_ansi_c_backslash_env_separators_equals_glob_and_arch(_):
+    # e6a0f476 round 4 (Viktor 50541). R1b was a round-2 regression (main blocked it): a backslash written in a $'..'
+    # word (doubled, x5c, 134, u005c) is the backslash env reads, so backslash-c cuts the value there. L-a..L-d are
+    # old (main lets them through as well): env -S separates on a real CR, FF and VT too; the backslash-underscore of
+    # L1 inside $'..'; zsh EQUALS (=env) and a glob in the last path segment name the prefix word; macOS arch runs its
+    # program. zsh -f with an rm stub first on PATH runs rm in every BLOCK row and in no ALLOW row
+    # (agents/kernel/work/ztf-r4-1123/oracle_r4.txt).
+    rm = 'RM-VALTOZO-KAPU'
+    r = ' rm -rf $S'
+    return (
+        # R1b
+        blocks("env -S $'\\\\c'" + r, rm) and blocks("env -S $'\\x5cc'" + r, rm)
+        and blocks("env -S $'\\134c'" + r, rm) and blocks("env -S $'\\u005cc'" + r, rm)
+        and passes("env -S 'echo a\\c'" + r) and passes("env -S $'echo a\\x5cc b'")
+        and passes("env -S $'\\\\\\\\c'" + r)  # four backslashes: zsh leaves two, env reads a literal one
+        # L-a: a real CR, FF or VT separates words in the split value
+        and blocks("env -S 'rm\x0c-rf\x0c${S}'", rm) and blocks("env -S 'rm\x0b-rf\x0b${S}'", rm)
+        and blocks("env -S 'rm\r-rf\r${S}'", rm)
+        # L-b: backslash-underscore written inside $'..'
+        and blocks("env -S $'rm\\\\_-rf\\\\_${S}'", rm) and blocks("env -S $'rm\\x5c_-rf\\x5c_${S}'", rm)
+        # L-c: =env and a glob in the last path segment
+        and blocks('=env' + r, rm) and blocks('/usr/bin/[e]nv' + r, rm) and blocks('/usr/bin/en?' + r, rm)
+        and passes('=env ls -la $S') and passes('/usr/bin/l? -la $S') and passes("'=env' ls $S")
+        # L-d: arch and its value options
+        and blocks('arch -arm64' + r, rm) and blocks('arch -arch arm64' + r, rm)
+        and blocks('arch -arm64 -e A=b' + r, rm) and blocks('arch -arm64 -d HOME' + r, rm)
+        and passes('arch') and passes('arch -arm64 ls -la $S'))
+
+
+@case
+def ansi_decode_is_linear(_):
+    # e6a0f476 round 4: ansi_decode is one regex substitution with bounded escapes (Viktor's prop2)
+    import time
+    for unit in ('\\x5c', '\\\\', '\\U0010FFFF', '\\777', 'a\\'):
+        t0 = time.monotonic()
+        gate.ansi_decode(unit * (300 * 1024 // len(unit)))
+        dt = time.monotonic() - t0
+        if dt > 2.0:
+            print(f'  ansi_decode {unit!r} x 300 KB: {dt:.2f} s')
+            return False
+    return gate.ansi_decode('\\U00110000') == '\\U00110000' and gate.ansi_decode('\\#\\$') == '\\#\\$'
+
+
+@case
+def ambig_option_search_is_linear(_):
+    # e6a0f476 round 3 (Viktor 50471 L4): has_ambig_opt walks the words once (no window, no slice per prefix word)
+    import time
+    cmd = 'sudo ' + '-E ' * (150 * 1024 // 3) + '-h rm -rf $S'
+    t0 = time.monotonic()
+    got = gate.findings(cmd, ZSH)
+    dt = time.monotonic() - t0
+    if not got or dt > 2.0:
+        print(f'  sudo -E chain: {len(got)} finding(s), {dt:.2f} s')
+        return False
+    return True
+
+
+@case
+def env_split_long_chains_stay_linear(_):
+    # e6a0f476 round 2: only the first split option of a command recurses (the split text holds the words after it),
+    # so a 150 KB env -S chain is a few parses, not one per env word; an exec -cla chain is one pass
+    import time
+    for cmd in ('time ' + 'env -S env ' * (150 * 1024 // 11) + 'rm -rf $S',
+                'exec -cla x ' * (150 * 1024 // 12) + 'rm -rf $S'):
+        t0 = time.monotonic()
+        got = gate.findings(cmd, ZSH)
+        dt = time.monotonic() - t0
+        if not got or dt > 2.0:
+            print(f'  long chain {cmd[:20]!r}: {len(got)} finding(s), {dt:.2f} s')
+            return False
+    return True
+
+
+@case
+def ansi_reading_only_for_a_dollar_quote_word(_):
+    # e6a0f476 round 5 (Viktor 50599 T1): the $'..'-decoded reading of a split value was built for every value and
+    # multiplied the texts per level: the triple-nested env -S row (no $'..' anywhere) made 69 findings() calls on
+    # 6e81321d, 31 now; 200 KB of it took 3,1-3,4 s there and 1,4-1,5 s now (load1 22, agents/kernel/work/ztf-r5-1123/
+    # time_r5.txt). A $'..' word keeps the decoded reading (the R1b rows of round 4 block).
+    import time
+    nest = 'env -S "env -S \'env -S \\"rm\\_-rf \\x5cq #z\\" \\_ \\x5cq #y\' \\_ \\x5cq #x" '
+    real, calls = gate.findings, [0]
+
+    def counting(*a, **kw):
+        calls[0] += 1
+        return real(*a, **kw)
+    gate.findings = counting
+    try:
+        got = gate.findings(nest + 'a $S', ZSH)
+    finally:
+        gate.findings = real
+    cmd = nest + 'a ' * 100000 + '$S'
+    t0 = time.monotonic()
+    big = gate.findings(cmd, ZSH)
+    dt = time.monotonic() - t0
+    # the call count is the exact guard; the time bound has room for a loaded machine and python 3.9 (2,39 s at
+    # load1 22), the old head took 4,65 s on a quiet one (Viktor time_r4.txt)
+    if not got or calls[0] > 31 or not big or dt > 3.0:
+        print(f'  nest3: {len(got)} finding(s), {calls[0]} calls; 200 KB: {len(big)} finding(s), {dt:.2f} s')
+        return False
+    if not (blocks("env -S $'rm\\x5c_-rf\\x5c_${S}'", 'RM-VALTOZO-KAPU') and passes("env -S 'echo a\\\\c' rm -rf $S")):
+        return False
+    # Viktor 50599 I1 (survivors M05, M06, M23 of his mutation round): a one-digit hex, a one- or two-digit octal, and
+    # the simple $'..' escapes f, v, r separate words too (zsh -f with an rm stub ran rm in each, surv_r4.txt)
+    rm = 'RM-VALTOZO-KAPU'
+    return (blocks("env -S $'rm\\x9-rf\\x9${S}'", rm) and blocks("env -S $'rm\\xc-rf\\xc${S}'", rm)
+            and blocks("env -S $'rm\\11-rf\\11${S}'", rm) and blocks("env -S $'rm\\14-rf\\14${S}'", rm)
+            and blocks("env -S $'rm\\f-rf\\f${S}'", rm) and blocks("env -S $'rm\\v-rf\\v${S}'", rm)
+            and blocks("env -S $'rm\\r-rf\\r${S}'", rm))
+
+
+@case
+def arch_options_are_whole_words(_):
+    # e6a0f476 round 5 (Viktor 50599 K5): the e of the arch name -arm64e is no -e taking rm as its value (zsh -f:
+    # arch -arm64e echo RAN prints RAN); round 4 read arch options as getopt clusters
+    r = ' rm -rf $S'
+    return (blocks('arch -arm64e' + r, 'RM-VALTOZO-KAPU') and blocks('arch -arm64 -e A=b' + r, 'RM-VALTOZO-KAPU')
+            and passes('arch -arm64e ls -la $S'))
+
+
+@case
+def env_split_nesting_past_the_depth_bound_blocks(_):
+    # e6a0f476: env -S inside env -S is read up to MAX_SPLIT_DEPTH levels; past it the gate blocks (fail-closed)
+    cmd = 'rm -rf $S'
+    for _i in range(gate.MAX_SPLIT_DEPTH + 1):
+        cmd = 'env -S ' + json.dumps(cmd)
+    m = gate.findings(cmd, ZSH)
+    return bool(m) and m[0].startswith('ZSH-CSAPDA (mélység)')
+
+
+class _W:
+    def __init__(self, t):
+        self.t = t
+
+    def plain(self):
+        return self.t
+
+
+class _CountingWords(list):
+    """A word list that counts every word handed out, by index or inside a slice copy."""
+    touched = 0
+
+    def __getitem__(self, k):
+        got = list.__getitem__(self, k)
+        type(self).touched += len(got) if isinstance(k, slice) else 1
+        return got
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+
+
+@case
+def command_lookup_only_is_linear_on_a_command_chain(_):
+    # e6a0f476 ReDoS round: words[j + 1:] copied the rest of the command for every `command` word, so
+    # "command -p " x 8000 took 0.255 s against 0.034 s before (x3.7 per doubling, redos-probe --repeat). Counted,
+    # not timed: n `command -p` pairs may touch a few words each, not the whole tail.
+    n = 4000
+    words = _CountingWords([_W(t) for _ in range(n) for t in ('command', '-p')] + [_W('rm')])
+    _CountingWords.touched = 0
+    hits = [j for j in range(len(words) - 1) if gate.command_lookup_only(words, j)]
+    return not hits and _CountingWords.touched <= 10 * n
+
+
+@case
 def deep_message_counts_parser_levels(_):
     # Viktor 50179 INFO: a quoted $( ) counts two levels, so the message says parser levels
     m = gate.findings('echo ' + '"$(' * 40, ZSH)
@@ -442,6 +699,31 @@ KNOWN_LIMIT_INPUTS += [
     ('time-data-heredoc-300k-tail-rm', "cat > out.txt <<'EOF'\n" + DATA_LINE * 6000 + 'EOF\nrm -rf $S'),
     ('time-1mb-tail-rm', "cat > out.txt <<'EOF'\n" + DATA_LINE * 20000 + 'EOF\nrm -rf $S'),
 ]
+# e6a0f476 round 5 (Viktor 50599): the round-4 probe's old fail-opens (indep15 probe_ztf15.py, probe_v4.py)
+KNOWN_LIMIT_INPUTS += [
+    ('Z24-envS-semicolon', "env -S 'rm -rf ;' $S"),
+    ('Z25-envS-redirect', "env -S 'rm -rf >' $S"),
+    ('Z26-envS-pipe', "env -S 'rm -rf |' $S"),
+    ('Z27-envS-amp', "env -S 'rm -rf &' $S"),
+    ('Z28-envS-quoted-rm', """env -S "'rm' -rf" $S"""),
+    ('Z29-envS-quoted-opt', """env -S "rm '-rf'" $S"""),
+    ('Z10-ansi-Cdash-i', r"env -S $'rm\C-i-rf' $S"),
+    ('Z88-time-Cdash-110k', "env -S $'rm" + r'\C-i' * 28000 + "-rf' $S"),
+    ('Z16-ansi-x27-quoted-rm', r"env -S $'\x27rm\x27 -rf' $S"),
+    ('Z38-eq-rm', '=rm -rf $S'),
+    ('Z39-eq-esc-env', r"=\env -S 'rm -rf' $S"),
+    ('Z40-eq-sqpart-env', "=e''nv -S 'rm -rf' $S"),
+    ('Z46-glob-caret', "/usr/bin/[^a]nv -S 'rm -rf' $S"),
+    ('Z47-glob-posix', "/usr/bin/[[:lower:]]nv -S 'rm -rf' $S"),
+    ('Z48-glob-alt', "/usr/bin/(env|zzq) -S 'rm -rf' $S"),
+    ('Z49-glob-qual', "/usr/bin/env(N) -S 'rm -rf' $S"),
+    ('Z56-brace-path-env', "/usr/bin/{env,env} -S 'rm -rf' $S"),
+    ('bare-glob-env-file', '[e]nv rm -rf $S'),
+    ('bare-q-env-file', 'en? rm -rf $S'),
+    ('glob-rm', '/bin/r[m] -rf $S'),
+    ('Z78-quoted-rm-top', "'rm' -rf $S"),
+    ('Z79-quoted-opt-top', "rm '-rf' $S"),
+]
 
 
 @case
@@ -451,7 +733,7 @@ def known_limit_rows_pin_todays_allow(_):
         if gate.findings(cmd, ZSH):
             print(f'  KNOWN-LIMIT {label}: blocks now (the documented limit changed)')
             ok = False
-    return ok and len(KNOWN_LIMIT_INPUTS) == 17
+    return ok and len(KNOWN_LIMIT_INPUTS) == 39
 
 
 def main():
