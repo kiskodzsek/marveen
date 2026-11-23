@@ -86,6 +86,16 @@ rows = [
     ('111', '18061', 'in', 'Szerintem a gomb legyen piros.', 9100),
     ('111', '18062', 'in', 'Mi van, ha kékre festjük a hátteret.', 9200),
     ('111', '18063', 'in', 'Mi van ha zöld lesz a háttér.', 9300),
+    # card 8dd5c726: Patrik's verbatim TG 18808 and 18802 (store/claudeclaw.db), and the shapes that stay ideas
+    ('111', '18808', 'in', 'kültéri konyha, mekkora piac?', 9400),
+    ('111', '18802', 'in', 'építészetben vhogy lehetne hasznositani vaagy hogy tudnék beszállni?', 9410),
+    ('111', '18070', 'in', 'Mekkora piac lenne erre?', 9420),
+    ('111', '18071', 'in', 'Hány oldala legyen a receptkönyv?', 9430),
+    ('111', '18072', 'in', 'Miért nem popup?', 9440),
+    ('111', '18073', 'in', 'Milyen közönséget érintő problémára nyújtana megoldást?', 9450),
+    ('111', '18074', 'in', 'Hány seat-et vegyek?', 9460),
+    ('111', '18075', 'in', 'Hol tartunk most a folyamatban?', 9470),
+    ('111', '18076', 'in', 'Mennyi kredit ment el a keretből?', 9480),
 ]
 con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
                 "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
@@ -517,6 +527,26 @@ KERES-SZO-SZERINT: \"$q\" (TG $tg)"
   run klodel dave
   ok "keres: idea mark, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
   ok "keres: the refusal is the IGEN one" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# card 8dd5c726 (Klodel): Patrik's information question is his request: TG 18808 "kültéri konyha, mekkora piac?" goes
+# out without an IGEN; a conditional, a choice, a "miért nem" suggestion and a yes/no question stay ideas
+for pair in '18808|kültéri konyha, mekkora piac' '18075|Hol tartunk most a folyamatban' \
+            '18076|Mennyi kredit ment el a keretből'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres: info question, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+done
+for pair in '18802|építészetben vhogy lehetne hasznositani' '18070|Mekkora piac lenne erre' \
+            '18071|Hány oldala legyen a receptkönyv' '18072|Miért nem popup' \
+            '18073|Milyen közönséget érintő problémára nyújtana megoldást' '18074|Hány seat-et vegyek'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres: still an idea, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres: the refusal is the IGEN one ($tg)" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
 done
 # Viktor 41430 INFO 1: a ledger path with ? # % keeps mode=ro and opens the right file; the connection is read-only
 mkdir -p "$SANDBOX/a?b#c%d" && cp "$SANDBOX/ledger.db" "$SANDBOX/a?b#c%d/ledger.db"

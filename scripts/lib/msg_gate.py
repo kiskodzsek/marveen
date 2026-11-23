@@ -395,8 +395,33 @@ def source_sentence(text, i, j):
     return text[a:(min(ends) + 1 if ends else len(text))]
 
 
+# Card 8dd5c726 (Klodel, 11-23): Patrik's information question is his request, not an idea. TG 18808 "kültéri
+# konyha, mekkora piac?" asked a measurement; rule 5 read the "?" as ötletelés and wanted an IGEN, and the
+# decision-reply gate refuses the "Így értem: ... Mehet?" that would have fetched it: a direct question took one more
+# round with Patrik. A "?" sentence with a question word of fact (how big, how much, how many, when, where, from
+# where, which, what kind, what is) is a request, unless it also holds an idea mark, a conditional verb or a form
+# that asks him to choose. Measured on 30 days of his inbound '?' sentences (1831; measure_flip.py, card 8dd5c726):
+# - "miért" is no question word here: "miért nem popup?", "logo-t miért nem?", "miért nem egységesítünk?" suggest;
+# - a conditional stays an idea ("mekkora piac lenne?", TG 18802 "vhogy lehetne ... hogy tudnék beszállni?");
+# - a choice stays an idea, it is his decision (product, money): "hány oldala legyen a receptkönyv?", "milyen üzletbe
+#   kezdjünk?", "hány seat-et vegyek?";
+# - a yes/no question has no question word and stays an idea ("Megcsinálod a borítót holnapra?");
+# - "hogy" and "ki" are not question words (a conjunction, a verb prefix).
+INFO_QUESTION = re.compile(_B + r'(?:mekkora|mennyi(?:be|t|re|ert|vel)?|hany(?:an|szor|at|adik|ra)?|mikor|hol|honnan|'
+                           r'hova|milyen|melyik|mi\s+(?:a|az)|mik\s+(?:a|az))(?![a-z0-9])')
+# a conditional verb: the named ones, and any word of 3+ letters ending in -na / -ne ("nyújtana", "ráismerne"); a
+# noun caught by it ("színe") keeps the sentence an idea, the side the rule had before
+CONDITIONAL = re.compile(_B + r'(?:lenne(?:nek)?|volna|tudn(?:a|ek|ank|al|anak)|vennek|[a-z]{3,}n[ae])(?![a-z0-9])')
+CHOICE = re.compile(_B + r'(?:legyen(?:ek)?|szerepeljen|kezdj(?:unk|onk|ek)|csinalj(?:unk|am|ak)|vegy(?:ek|unk)|'
+                    r'vigy(?:em|uk)|menj(?:unk|ek)|valassz(?:unk|ak)|tegy(?:unk|em)|induljunk)(?![a-z0-9])')
+
+
 def is_idea(sentence):
-    return '?' in sentence or any(m in sentence for m in IDEA_MARKS)
+    if any(m in sentence for m in IDEA_MARKS):
+        return True
+    if '?' not in sentence:
+        return False
+    return not (INFO_QUESTION.search(sentence) and not CONDITIONAL.search(sentence) and not CHOICE.search(sentence))
 
 
 def says_yes(folded):
