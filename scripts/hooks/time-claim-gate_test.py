@@ -1299,6 +1299,13 @@ KNOWN_K1 = {
     'nl-in-subst-arg': _K1_MSGW + '\n$(: 1)curl -s -X PUT $(\n) ' + _K1_U + ' -d ' + _K1_PJ,
     # Viktor 50421 I4 (old, main and the round 3 head pass it too): agents/kernel/work/tcr5-r4-1123/i4.txt
     'msg-subst-put': 'curl -s -X POST http://localhost:3420/api/messages -d "$(' + _K1_PUT + ')"',
+    # Viktor 50437 B1 (old, main and the round 4 head pass it too): the same in backticks, the probe_tc24 row
+    # msgsub-backtick-nosep verbatim (agents/viktor/work/tcr5r4-1123/indep-tc24-head.txt)
+    'msgsub-backtick': ('curl -s -X POST http://localhost:3420/api/messages -H ' + _K1_A + 'Content-Type: application/json'
+                        + _K1_A + ' -d ' + _K1_A + '{"from":"viktor","to":"klodel","content":"kesz"}' + _K1_A
+                        + ' `curl -s -X PUT http://localhost:3420/api/kanban/9f1c2d -H ' + _K1_A
+                        + 'Content-Type: application/json' + _K1_A + ' -d ' + _K1_A + '{"comment":"mérve 18:15 kész"}'
+                        + _K1_A + '`'),
 }
 
 
@@ -1316,7 +1323,7 @@ def known_limit_k1_rows_pin_todays_allow(root):
     bad += [label + ': not named in the first 80 lines of the module' for label in KNOWN_K1 if label not in head]
     for b in bad:
         print('  k1:', b)
-    return not bad and len(KNOWN_K1) == 5
+    return not bad and len(KNOWN_K1) == 6
 
 
 @case

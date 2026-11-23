@@ -34,7 +34,8 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     Viktor 50406 K1 (main misses them too): bq-dq-apos-sub, bq-dq-apos-glued, bq-dq-sq-sub (a backtick inside
     "..." that holds an apostrophe or a quote shifts the quote model; it is no unmodeled sign) and nl-in-subst-arg
     (a $( with a newline among the curl's arguments) hide a PUT next to a message; Viktor 50421 I4 (main too):
-    msg-subst-put (a PUT inside a $( ) argument of the message curl, no separator: one segment, a message URL);
+    msg-subst-put (a PUT inside a $( ) argument of the message curl, no separator: one segment, a message URL),
+    also msgsub-backtick (the same in backticks, Viktor 50437 B1);
     rule 4's opening stamp is read in plain JSON or a Python dict (also a triple-quoted or f-/r-/b-/u-prefixed
     value, Viktor 49912 K1; rule 3 also a `content = '## ...'` variable), not escaped inside a double-quoted -d, and as
     HH:MM only, not with seconds ("Kernel 12:30:00:", an ISO stamp ...T12:30:00+01:00; the same on main);
