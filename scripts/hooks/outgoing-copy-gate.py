@@ -778,6 +778,15 @@ def wrapper_depth_hit(cmd: str) -> bool:
 # the extra readings are replaced by the long-token literal search (a sender name anywhere: an extra audit), so a
 # large command does not pay three shlex passes against the hook timeout. The JS twin runs all readings (linear).
 _MULTI_READING_MAX = 256 * 1024
+# SENDFANOUT1123 (round 5, measured while closing Viktor 50388 M2): every reading of a wrapper shell's -c string (and
+# of an eval) runs every reading again, so the readings multiply with the depth: a 250 KB command of `eval "..."`
+# lines, each holding eight `eval \"...# ((\"` strings, took 12.2 s on the round 4 head with `bash -c` (13.1 s) and
+# 0.14 s on main, past the 10 s hook timeout (a timed-out hook lets the command through). So one top-level call has a
+# budget of characters it may read across all readings and depths (3 MiB plus twice the command: one reading and its
+# strict heredoc pass, what main reads, always fit); past it the command counts as a send (an extra audit, never a
+# miss). The JS twin reads the same input in 0.5 s and has no budget.
+_FANOUT_BUDGET = 3 * 1024 * 1024
+_fanout_left = [0]
 
 
 def _send_modes(cmd: str):
@@ -790,15 +799,27 @@ def _send_modes(cmd: str):
 
 
 def is_send_invocation(cmd: str, _depth: int = 0) -> bool:
+    if _depth == 0:
+        _fanout_left[0] = _FANOUT_BUDGET + 2 * len(cmd)
     modes = _send_modes(cmd)
     if len(modes) > 1 and len(cmd) > _MULTI_READING_MAX:
         if _LONG_TOKEN_SENDERS.search(_dequoted(cmd)):
             return True
         modes = modes[:1]
-    return any(_is_send_in_reading(cmd, _depth, m) for m in modes)
+    return any(_reading_send(cmd, _depth, m) for m in modes)
 
 
 def _is_send_in_reading(cmd: str, _depth: int, mode: str) -> bool:
+    """One reading alone (tests pin a reading with it); a top-level call gets a fresh SENDFANOUT1123 budget."""
+    if _depth == 0:
+        _fanout_left[0] = _FANOUT_BUDGET + 2 * len(cmd)
+    return _reading_send(cmd, _depth, mode)
+
+
+def _reading_send(cmd: str, _depth: int, mode: str) -> bool:
+    _fanout_left[0] -= len(cmd)
+    if _fanout_left[0] < 0:  # SENDFANOUT1123: the read budget is spent, audit
+        return True
     try:
         segments = _segments_tokens(cmd, bound=True, mode=mode)
     except _LongToken:
@@ -811,14 +832,24 @@ def _is_send_in_reading(cmd: str, _depth: int, mode: str) -> bool:
         return bool(_FALLBACK_LITERALS.search(cmd))
     if any(_segment_is_send(toks, _depth) for toks in segments):
         return True
-    return send_only_by_strict_heredoc(cmd, _depth, mode)
+    return _strict_send(cmd, _depth, mode)
 
 
 def send_only_by_strict_heredoc(cmd: str, _depth: int = 0, mode: str = "A") -> bool:
     """The HDSTRICT1122 second pass alone: a send the strict heredoc cut exposes (call it after the loose pass said
-    no). A parse error of the strict text falls back like the loose one (strong literals): an extra audit, not a miss."""
+    no). A parse error of the strict text falls back like the loose one (strong literals): an extra audit, not a miss.
+    A top-level call gets a fresh SENDFANOUT1123 budget."""
+    if _depth == 0:
+        _fanout_left[0] = _FANOUT_BUDGET + 2 * len(cmd)
+    return _strict_send(cmd, _depth, mode)
+
+
+def _strict_send(cmd: str, _depth: int, mode: str) -> bool:
     if '<<' not in cmd:
         return False
+    _fanout_left[0] -= len(cmd)
+    if _fanout_left[0] < 0:  # SENDFANOUT1123
+        return True
     try:
         segments = _segments_tokens(cmd, strict=True, bound=True, mode=mode)
     except _LongToken:

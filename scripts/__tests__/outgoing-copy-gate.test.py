@@ -623,6 +623,28 @@ def main():
         check("SENDMODES1122: ... and a large command with a comment and no sender name stays clean",
               _g.is_send_invocation("true # a note\n" + pad), False)
 
+        # --- SENDFANOUT1123 (round 5): the readings multiply with each -c / eval level; one call has a read budget --
+        # On the round 4 head the two-level shape below took 12.2 s (eval) and 13.1 s (bash -c), main 0.14 s; the
+        # hook timeout is 10 s and a timed-out hook lets the command through. 4 s of CPU is the guard (measured
+        # ~1.1 s with the budget); past the budget the command is audited.
+        import time as _t2
+        for _w in ("eval", "bash -c"):
+            _l1 = _w + " \\\": " + "x " * 40 + "# ((\\\"; "
+            _seg = _w + " \"" + _l1 * 8 + "\"\n"
+            _two = _seg * (250_000 // len(_seg))
+            _c0 = _t2.process_time()
+            _v = _g.is_send_invocation(_two)
+            _cpu = _t2.process_time() - _c0
+            check("SENDFANOUT1123: two-level %s fan-out (250 KB) is audited once the budget is spent" % _w, _v, True)
+            check_true("SENDFANOUT1123: ... within 4 s of CPU (%s)" % _w, _cpu < 4.0, "%.2f s" % _cpu)
+        _flat = (": " + "abcdefg " * 12 + "\n") * (4 * 1024 * 1024 // 98)
+        check("SENDFANOUT1123: a flat 4 MiB command with no sender is not audited (one reading always fits)",
+              _g.is_send_invocation(_flat), False)
+        check("SENDFANOUT1123: ... with a heredoc too (its strict pass fits as well)",
+              _g.is_send_invocation(_flat + "cat <<E\nx\nE\n"), False)
+        check("SENDFANOUT1123: a one-level eval with a send still reads the send, not the budget",
+              _g.is_send_invocation("eval 'true # ((x\nsendmail a@b.c'"), True)
+
     if FAILS:
         print(f"\n{len(FAILS)} FAILED: {FAILS}", file=sys.stderr)
         sys.exit(1)
