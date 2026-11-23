@@ -102,9 +102,11 @@ export function hookCommand(scriptPath: string): string {
 // is the 127 exit, because Claude Code treats 127 as NON-blocking and lets the
 // tool call through -- a gate that silently stops enforcing. So the interpreter
 // is probed first and a miss exits 2, which blocks.
+// The fixed head of every pythonHookCommand: upgradeLegacyHookCommands recognises the fail-closed form by it.
+export const PYTHON_HOOK_PROBE = 'command -v python3 >/dev/null 2>&1 || {'
 export function pythonHookCommand(scriptPath: string): string {
   const miss = 'governance-kapu: a hook interpretere nem talalhato (python3 nincs a PATH-on). A kapu ezert BLOKKOL. Javitas: telepitsd a python3-at, vagy inditsd ujra a dashboardot.'
-  return `command -v python3 >/dev/null 2>&1 || { echo "${miss}" >&2; exit 2; }; python3 "${scriptPath}"`
+  return `${PYTHON_HOOK_PROBE} echo "${miss}" >&2; exit 2; }; python3 "${scriptPath}"`
 }
 
 // Wired-already predicate for the ensure* migrations: is `command` present in
@@ -276,6 +278,13 @@ export function upgradeLegacyHookCommands(
           for (const existHook of existEntry.hooks ?? []) {
             if (!existHook.command) continue
             const existBn = _hookScriptBasename(existHook.command)
+            // An ensure*/inject* gate writes the fail-closed pythonHookCommand form (exit 2 when python3 is
+            // missing), often under its own matcher. That is no legacy command: rewriting it to the template's
+            // fail-open wrapper downgrades the gate, and syncHookMatchers then moved the group onto the
+            // template matcher, so its inject re-added it on the next boot (card 47468cc1: the time-claim
+            // gate's Telegram entry became one more "Write|Edit|MultiEdit|Bash" copy per dashboard boot, 47
+            // in every sub-agent by 2026-11-23).
+            if (existBn === tplBn && existHook.command.startsWith(PYTHON_HOOK_PROBE)) continue
             if (existBn === tplBn && existHook.command !== tplHook.command) {
               existHook.command = tplHook.command
               if (tplHook.timeout != null) existHook.timeout = tplHook.timeout
@@ -284,6 +293,32 @@ export function upgradeLegacyHookCommands(
           }
         }
       }
+    }
+  }
+  return changed
+}
+
+/**
+ * In-place collapse of hook groups that are identical within one event (compared with sorted keys). The first
+ * copy stays where it is; later copies are dropped. Two identical groups run the same command on the same tool
+ * calls, so dropping one changes no decision. Returns true if anything was removed.
+ *
+ * Exported for unit testing.
+ */
+export function dedupeIdenticalHookEntries(existingHooks: Record<string, unknown>): boolean {
+  let changed = false
+  for (const [event, entries] of Object.entries(existingHooks)) {
+    if (!Array.isArray(entries)) continue
+    const seen = new Set<string>()
+    const kept = entries.filter((e) => {
+      const key = sortedKeyJson(e)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    if (kept.length !== entries.length) {
+      existingHooks[event] = kept
+      changed = true
     }
   }
   return changed
@@ -329,6 +364,12 @@ export function syncHookMatchers(
         if (existCommands.length === 0) continue
         if (!existCommands.every((c) => tplCommands.has(c))) continue
         if (existEntry.matcher === tplEntry.matcher) continue
+        // Another group already carries these commands under the template matcher: re-matching this one only
+        // makes a duplicate of it (card 47468cc1). Leave it; it is someone else's group under its own matcher.
+        const covered = (existEntries as HookEntry[]).some((other) => other !== existEntry
+          && other?.matcher === tplEntry.matcher
+          && existCommands.every((c) => (other.hooks ?? []).some((h) => h.command === c)))
+        if (covered) continue
         existEntry.matcher = tplEntry.matcher
         changed = true
       }
@@ -554,6 +595,9 @@ export function ensureAgentHooks(
     // Matcher pass: a widened template matcher (e.g. SessionStart gaining
     // `clear`) must reach agents whose command string is unchanged.
     if (syncHookMatchers(existingHooks, tplHooks)) changed = true
+    // Collapse groups that are identical (key order aside): the add pass only stops NEW copies, it never
+    // removes the ones an earlier boot left (card 47468cc1: 47 time-claim copies per sub-agent).
+    if (dedupeIdenticalHookEntries(existingHooks)) changed = true
     for (const [event, handlers] of Object.entries(tplHooks)) {
       if (!existingHooks[event]) {
         // Wholesale add of a missing event still has to respect the cross-scope
