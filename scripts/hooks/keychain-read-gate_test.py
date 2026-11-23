@@ -1331,16 +1331,29 @@ def script_git_cases():
             (f'cd {d} && F=./helper.cjs; node -e 1 -r $F', 2), (f'cd {d} && F=./helper.cjs; node -e 1 -r "$F"', 2),
             (f'cd {d} && node -e 1 -r $UNSET_ZZ ./helper.cjs', 2), (f'cd {d} && node $NOPE_ZZ -e 1 -r ./helper.cjs', 2),
             (f'cd {d} && F=./helper.cjs; node -p 1 -r $F', 2),
+            # ... and a variable before -e with no preload after it: every later word joins the group, the variable
+            # may be a preload of its own (mutation r6 "-e: run_all overwritten")
+            (f'cd {d} && node $NOPE_ZZ -e 1 ./helper.cjs', 2),
             # round 6 (Viktor 50908 b, old): a command substitution as a run file word cannot be read: it blocks (as
             # python -m with a substituted module name); in the code text it is no file word
             (f'cd {d} && node -e 1 -r $(echo ./helper.cjs)', 2), (f'cd {d} && node -p 1 -r $(echo ./helper.cjs)', 2),
             (f'cd {d} && node $(echo ./helper.cjs)', 2), (f'cd {d} && node -r $(echo ./helper.cjs) ./ok.js', 2),
             (f'cd {d} && node `echo ./helper.cjs`', 2), (f'cd {d} && node --require=$(echo ./helper.cjs) ./ok.js', 2),
+            # after -p the walk goes on with no script to find; an unread preload set run_all, so a later substituted
+            # word may be the preload file (an empty $NOPE_ZZ: -r takes it; mutation r6 "walk: only while need")
+            (f'cd {d} && node -p 1 -r $NOPE_ZZ $(echo ./helper.cjs)', 2),
+            # a dash-led redirect target is a file bash opens, and node runs its stdin (measured: `node < -$(echo
+            # h).cjs` ran -h.cjs; node -r / --import refuse a dash-led value; mutation r6 "subst: valrun value off")
+            (f'cd {d} && node < -$(echo h).cjs', 2),
             # controls: a clean file through a variable; a substitution in the code text or as the script's argument
             (f'cd {d} && F=./ok.js; node -e 1 -r $F', 0), (f'cd {d} && node -e "$(echo 1)"', 0),
             (f'cd {d} && node ./ok.js $(echo x)', 0),
-            # round 6 (Kernel, old: main too): the same for python's script word; its arguments stay free
-            (f'cd {d} && python3 $(echo ./h.py)', 2), (f'cd {d} && python3 -I `echo ./h.py`', 2),
+            # the value of an option that takes a plain value is no run file (mutation r6 "subst: any operand")
+            (f'cd {d} && node --title $(echo x) ./ok.js', 0),
+            # KNOWN-LIMIT python-subst-script-word (old: main too): python's script word is read as the substitution
+            # printing nothing (cards 4bdf7309, 946937b7 pin `python3 $(true)stat.py` as allowed), so a substitution
+            # that prints the script's name is not read; the block stays on node (Viktor 50908 b)
+            (f'cd {d} && python3 $(echo ./h.py)', 0), (f'cd {d} && python3 -I `echo ./h.py`', 0),
             (f'cd {d} && python3 -c "$(echo 1)"', 0), (f'cd {d} && python3 ./okword.py $(echo x)', 0),
             # KNOWN-LIMIT node-brace-option-word: bash brace-expands {-r,F} into two words; the gate reads one
             (f'cd {d} && node -e 1 {{-r,./helper.cjs}}', 0),

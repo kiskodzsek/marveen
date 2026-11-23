@@ -17,7 +17,8 @@ a stdin redirect, a fed cat, a pipe word, a direct path). Round 5 (Viktor 50854)
 switch (`node -e 1 -r f`) is a RUN position too, and a RUN word with a glob is globbed off the first operand as well. git-rules-on-argument-files: a script that runs its own
 argument file (`bash runner.sh f`, runner.sh runs "$1") hands f the main rules only, and so does runpy with a module
 name (`cd D && python3 -m runpy evil` runs D/evil.py; a path, `python3 -m runpy D/evil.py`, does not run: measured,
-Viktor 50854); env-prefix-run-file: BASH_ENV=f
+Viktor 50854); python-subst-script-word (round 6, main too): a command substitution in python's script word is read
+as printing nothing (`python3 $(echo ./h.py)` judges no file; node's blocks); env-prefix-run-file: BASH_ENV=f
 and ENV=f before a shell are not read (main too); find-exec-computed-name: `find D -name x.sh -exec bash {} \\;` runs
 a name find computes, so x.sh keeps the main rules; dash-c-argument (an over-block): after a -c payload the payload
 view reads the next word as a command word, so `bash -c '...' f` judges f by them; a python heredoc body naming a
@@ -4737,13 +4738,14 @@ def interp_groups(text, expanded=False):
         i = 0
         while i < len(words):
             w = words[i]
-            if (python or NODE_NAMES_RX.fullmatch(name)) and ('$(' in all_words[i] or '`' in all_words[i]) and (
+            if NODE_NAMES_RX.fullmatch(name) and ('$(' in all_words[i] or '`' in all_words[i]) and (
                     run_all or need or (nxt and nxt[1] == i)) and subst_run_word(name, w, python, nxt, i, sub_words):
-                # round 6 (Viktor 50908 b, old: main too; python found by Kernel): a command substitution as the file a
-                # node or python runs cannot be read (`node $(echo F)`, `node -r $(echo F) ok.js`, `python3 $(echo
-                # F)`): it blocks, as python -m with a substituted module name does. Once run_all is set the walk
-                # no longer knows the script's place, so every substituted operand counts (fail-closed).
-                raise TooManyArgs('node/python: a futtatott fájl parancs-helyettesítés, nem olvasható')
+                # round 6 (Viktor 50908 b, old: main too): a command substitution as the file node runs cannot be
+                # read (`node $(echo F)`, `node -r $(echo F) ok.js`, `node < -$(echo h).cjs`): it blocks, as python -m
+                # with a substituted module name does. Once run_all is set the walk no longer knows the script's
+                # place, so every substituted operand counts (fail-closed). Not python: its script word is read as
+                # the substitution printing nothing (cards 4bdf7309, 946937b7), KNOWN-LIMIT python-subst-script-word
+                raise TooManyArgs('node: a futtatott fájl parancs-helyettesítés, nem olvasható')
             if not run_all and need and not OUT_REDIR_RX.match(w):  # an output target: skipped by the walk below
                 raw_w = all_words[i]
                 in_redir = SRC_REDIR_RX.match(w)
