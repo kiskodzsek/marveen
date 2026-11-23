@@ -1203,6 +1203,7 @@ def script_git_cases():
         w('gh-pr.mjs.bak', real_body)
         w(os.path.join('x', 'marveen', 'scripts', 'gh-pr.mjs'), real_body)
         os.symlink(prod, os.path.join(d, 'gh-link.mjs'))
+        os.symlink(os.path.join(d, 'scripts', 'gh-pr.mjs'), os.path.join(d, 'other-link.mjs'))
         S = d + '/h.sh'
         rows = [
             # Viktor 50515: the shapes that ran git's keychain helper unseen (a script file's text)
@@ -1220,6 +1221,7 @@ def script_git_cases():
             (f'echo {prod}; node scripts/gh-pr.mjs pr view 1', 2),
             # Viktor 50542 3: an exact realpath, no prefix or suffix match, no copy
             (f'node {d}/gh-pr.mjs.bak pr view 1', 2), (f'node {d}/x/marveen/scripts/gh-pr.mjs pr view 1', 2),
+            (f'node {prod} pr view 1; node {d}/other-link.mjs', 2),  # another scripts/gh-pr.mjs behind a symlink
             # Viktor 50542 2: the rest of the command is judged as before
             (f'node {prod} pr view 1 && bash {S}', 2), (f'bash {S}; node {prod} pr view 1', 2),
             (f'node {prod} pr view 1 && python3 {d}/h.py', 2),
