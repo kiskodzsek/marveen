@@ -474,6 +474,50 @@ def prefix_round2_split_rest_clusters_quoted_options_dash_and_set_after_prefix(_
 
 
 @case
+def prefix_round3_split_escapes_prefix_paths_sudo_chroot_and_ambig_clusters(_):
+    # e6a0f476 round 3 (Viktor 50471 R1, L1-L4, I1). R1 was a round-2 regression (main and 301c1ae8 blocked it); the
+    # rest the main lets through as well. zsh -f with an rm stub first on PATH runs rm in each non-sudo BLOCK row and
+    # in none of the env / path ALLOW rows (agents/kernel/work/ztf-r3-1123/oracle_r3.txt, 21/21); sudo not run.
+    rm = 'RM-VALTOZO-KAPU'
+    r = ' rm -rf $S'
+    return (
+        # R1: a backslash-c ends the split value, the words after it are still appended
+        blocks("env -S '\\c'" + r, rm) and passes("env -S 'echo a\\c b'") and passes("env -S 'echo a\\c'" + r)
+        and passes("env -S 'echo a\\c rm -rf $S'") and passes("env -S 'echo a\\\\c b'")
+        # L1: backslash-underscore, a tab or a newline separates words inside the split value
+        and blocks("env -S 'rm\\_-rf\\_${S}'", rm) and blocks("env -S $'rm\\t-rf\\t${S}'", rm)
+        and blocks("env -S $'rm\\n-rf ${S}'", rm) and blocks('env -S "rm\n-rf \\${S}"', rm)
+        and passes("env -S 'echo\\_hi'")
+        # L2: a prefix word written with a path, quoted or escaped
+        and blocks('\\env' + r, rm) and blocks("'nohup'" + r, rm) and blocks('/usr/bin/env' + r, rm)
+        and blocks('/usr/bin/nice -n 1' + r, rm) and blocks("/usr/bin/env -S 'rm -rf ${S}'", rm)
+        and blocks('"/usr/bin/env"' + r, rm) and blocks('echo x | /usr/bin/xargs' + r, rm)
+        and blocks("HJ='rm -rf'; /usr/bin/nohup $HJ /tmp/x", 'ZSH-CSAPDA (változó mint parancs)')
+        and blocks("V='a b'; 'noglob' set -- $V", 'ZSH-CSAPDA (szóbontás)')
+        and passes('/usr/bin/env ls -la $S') and passes('/tmp/x/env -S ok') and passes("'-'" + ' echo -rf $S')
+        and blocks("'-'" + r, rm) and blocks('\\-' + r, rm) and passes("'command' -pv rm -rf $S")
+        # L3: sudo -R / --chroot take a directory
+        and blocks('sudo -R /x' + r, rm) and blocks('sudo --chroot /x' + r, rm) and passes('sudo -R /x ls $S')
+        # L4: no 40-word window for the ambiguous -h; I1: a cluster ending in h is looked at both ways too
+        and blocks('sudo ' + '-E ' * 40 + '-h' + r, rm) and blocks('sudo -Eh' + r, rm)
+        and blocks('sudo -h -E' + r, rm))
+
+
+@case
+def ambig_option_search_is_linear(_):
+    # e6a0f476 round 3 (Viktor 50471 L4): has_ambig_opt walks the words once (no window, no slice per prefix word)
+    import time
+    cmd = 'sudo ' + '-E ' * (150 * 1024 // 3) + '-h rm -rf $S'
+    t0 = time.monotonic()
+    got = gate.findings(cmd, ZSH)
+    dt = time.monotonic() - t0
+    if not got or dt > 2.0:
+        print(f'  sudo -E chain: {len(got)} finding(s), {dt:.2f} s')
+        return False
+    return True
+
+
+@case
 def env_split_long_chains_stay_linear(_):
     # e6a0f476 round 2: only the first split option of a command recurses (the split text holds the words after it),
     # so a 150 KB env -S chain is a few parses, not one per env word; an exec -cla chain is one pass

@@ -103,7 +103,9 @@ XARGS_VALUE_OPTS.add('-S')
 # The prefix words' options that take the next word as their value (indep12: sudo -u root rm ..., nice -n 10 rm ...)
 PRECMD_VALUE_OPTS = {'sudo': {'-u', '-g', '-h', '-p', '-C', '-D', '-U', '-T', '-r', '-t', '--user', '--group', '--host',
                               '--prompt', '--close-from', '--chdir', '--other-user', '--command-timeout', '--role',
-                              '--type'},
+                              '--type',
+                              # e6a0f476 round 3 (Viktor 50471 L3): -R / --chroot directory (man sudo)
+                              '-R', '--chroot'},
                      'nice': {'-n', '--adjustment'},
                      # e6a0f476 round 2 (Viktor 50424 L3): BSD env -P altpath
                      'env': {'-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-P'},
@@ -648,11 +650,26 @@ def shell_is_zsh(env):
     return base == '' or 'zsh' in base
 
 
+def prefix_name(word):
+    """The name of a prefix word (PRECMD or xargs) also when it is written with a path or quoted (e6a0f476 round 3,
+    Viktor 50471 L2: /usr/bin/env, /usr/bin/nice, \\env, 'nohup' ran the rm unseen), else word.plain(). Only words of
+    literal / quoted / escaped parts (no expansion); zsh reads a quoted or escaped `-` as the modifier too (measured:
+    zsh -f -c "'-' echo hi" prints hi). Keywords are not resolved here: a quoted `if` is no keyword (the callers keep
+    plain() for KEYWORDS)."""
+    p = word.plain()
+    if p is not None and '/' not in p:
+        return p
+    if not word.parts or not all(k in ('lit', 'sq', 'dq', 'esc') for k, _ in word.parts):
+        return p
+    b = shell_text(word).rsplit('/', 1)[-1]
+    return b if b in PRECMD or b == 'xargs' else p
+
+
 def skip_prefix_args(words, j, ambig_value=True):
     """Past a prefix word at j (sudo, nice, env, ..., or a keyword): its options, the value of the ones that take one
     (PRECMD_VALUE_OPTS), and VAR=x words. Returns the index of the next word. ambig_value: whether an option of
     AMBIG_VALUE_OPTS takes the next word too (the caller tries both)."""
-    name = words[j].plain()
+    name = prefix_name(words[j])
     vo = PRECMD_VALUE_OPTS.get(name, ())
     amb = AMBIG_VALUE_OPTS.get(name, ())
     j += 1
@@ -713,7 +730,7 @@ def env_split_at(t):
 def set_index(words, flags, k):
     """The index of `set` when it is the command at k, also after prefix words (e6a0f476 round 2, Viktor 50424 L6:
     noglob set -- $V, builtin set -- $V split like a bare set), else None."""
-    while k < len(words) and not flags[k] and words[k].plain() in PRECMD:
+    while k < len(words) and not flags[k] and prefix_name(words[k]) in PRECMD:
         if command_lookup_only(words, k):
             return None
         k = skip_prefix_args(words, k)
@@ -721,17 +738,27 @@ def set_index(words, flags, k):
 
 
 def has_ambig_opt(words):
-    """Does some prefix word in this command carry an option of AMBIG_VALUE_OPTS (then the head is looked for both
-    ways)? Linear."""
-    names = [w.plain() for w in words]
-    return any(n in AMBIG_VALUE_OPTS and any(m in AMBIG_VALUE_OPTS[n] for m in names[i + 1:i + 40])
-               for i, n in enumerate(names) if n in AMBIG_VALUE_OPTS)
+    """Does some prefix word in this command carry an option of AMBIG_VALUE_OPTS after it (then the head is looked for
+    both ways)? e6a0f476 round 3 (Viktor 50471 L4, I1): no 40-word window (sudo + 40 x -E + -h hid the -h), and an
+    option that ends a cluster counts like a bare one (sudo -Eh: both readings, as for sudo -E -h). One backward walk:
+    linear in the number of words."""
+    seen = set()   # the prefix names whose ambiguous option stands somewhere to the right
+    for w in reversed(words):
+        n = prefix_name(w)
+        if n in seen:
+            return True
+        t = opt_text(w)
+        if t is not None and t.startswith('-'):
+            for name, amb in AMBIG_VALUE_OPTS.items():
+                if cluster_value_opt(t, PRECMD_VALUE_OPTS.get(name, ())) in amb:
+                    seen.add(name)
+    return False
 
 
 def command_lookup_only(words, j):
     """`command` at j with a -v / -V among its options (also in a cluster: -pv, -vp) only looks the name up and runs
     nothing (e6a0f476, Viktor 50227 INFO 1: only a separate -v / -V counted, command -pv $X overblocked)."""
-    if words[j].plain() != 'command':
+    if prefix_name(words[j]) != 'command':
         return False
     # an index walk, not words[j + 1:]: the slice copies the whole rest of the command for every `command` word,
     # so a long "command -p command -p ..." chain took quadratic time (e6a0f476 ReDoS round)
@@ -775,16 +802,45 @@ def env_split_texts(words, j, s):
             else:
                 nxt = i + 1
             rest = s[words[nxt].start:words[-1].end] if nxt < len(words) else ''
-            texts = ['env ' + v + ' ' + rest]
-            m = SPLIT_COMMENT_RX.search(v)
-            if m:
-                texts.append('env ' + v[:m.start()] + ' ' + rest)
+            texts = []
+            # e6a0f476 round 3 (Viktor 50471 R1, L1): the value as env itself splits it is judged TOO (only added,
+            # never instead of the first text): a backslash-c ends the value (measured: /usr/bin/env -S 'echo A\c B'
+            # x y prints A x y), and backslash-underscore, a tab or a newline (real, or the backslash-t / -n escape
+            # that $'..' leaves raw here) separate words like a space (measured by Viktor: env -S 'echo\_U1').
+            for val in (v, env_split_model(v)):
+                for t in (val, cut_split_comment(val)):
+                    t = 'env ' + t + ' ' + rest
+                    if t not in texts:
+                        texts.append(t)
             return texts
         i += 2 if cluster_value_opt(t, PRECMD_VALUE_OPTS['env']) else 1
     return []
 
 
 SPLIT_COMMENT_RX = re.compile(r'(?:^|(?<=\s))#')
+SPLIT_ESC_RX = re.compile(r'\\(.)|[\t\n]', re.S)
+
+
+def cut_split_comment(v):
+    """The split value before a word-start # (env reads the rest as a comment), or v when it has none."""
+    m = SPLIT_COMMENT_RX.search(v)
+    return v[:m.start()] if m else v
+
+
+def env_split_model(v):
+    """The split value as env -S reads its escapes: cut at the first backslash-c, and backslash-underscore,
+    backslash-t, backslash-n, a tab and a newline turned into a space. The escapes are read left to right in pairs,
+    so a backslash-backslash before a c is a literal backslash, not the cut. Other pairs stay as written. Linear."""
+    out, last = [], 0
+    for m in SPLIT_ESC_RX.finditer(v):
+        out.append(v[last:m.start()])
+        last = m.end()
+        e = m.group(1)
+        if e == 'c':
+            return ''.join(out)
+        out.append(' ' if e is None or e in '_tn' else m.group(0))
+    out.append(v[last:])
+    return ''.join(out)
 
 
 def rm_check(words, k, s, out, amb_v, env, _depth):
@@ -792,7 +848,8 @@ def rm_check(words, k, s, out, amb_v, env, _depth):
     j = k
     while j < len(words):
         pw = words[j].plain()
-        if pw == 'xargs':
+        pn = prefix_name(words[j])
+        if pn == 'xargs':
             # Kernel 41291: "... | xargs rm -rf $S" runs rm too; skip xargs' options (and the value of the ones
             # that take one as a separate word: -I {} -n 1 -P 4 -L 1 -s N -E eof -d c -J x -R n)
             j += 1
@@ -800,7 +857,7 @@ def rm_check(words, k, s, out, amb_v, env, _depth):
                 o = words[j].plain()
                 j += 2 if o in XARGS_VALUE_OPTS else 1
             continue
-        if pw == 'env':
+        if pn == 'env':
             texts = env_split_texts(words, j, s)
             if texts and _depth < MAX_SPLIT_DEPTH:
                 for v in texts:
@@ -809,9 +866,9 @@ def rm_check(words, k, s, out, amb_v, env, _depth):
             if texts:
                 out.append(MSG_SPLIT_DEEP.format(d=MAX_SPLIT_DEPTH))
                 return
-        if pw == 'command' and command_lookup_only(words, j):
+        if pn == 'command' and command_lookup_only(words, j):
             return
-        if pw in PRECMD or pw in KEYWORDS:
+        if pn in PRECMD or pw in KEYWORDS:
             j = skip_prefix_args(words, j, amb_v)
             continue
         break
@@ -877,7 +934,7 @@ def findings(command, env=None, _depth=0):
             # -V only looks the name up, it runs nothing
             for amb_v in (True, False) if has_ambig_opt(words) else (True,):
                 e2 = k
-                while e2 < len(words) and not flags[e2] and words[e2].plain() in PRECMD:
+                while e2 < len(words) and not flags[e2] and prefix_name(words[e2]) in PRECMD:
                     if command_lookup_only(words, e2):
                         e2 = len(words)
                         break
