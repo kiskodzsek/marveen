@@ -31,6 +31,9 @@ SCOPE (everything else is allowed at once, exit 0, no output):
     Known limits of the card path (Viktor 49811, 49824; the same on /comments): a body on stdin (pipe) is not in
     the command text; a url-var (the URL from a variable, no literal /api/kanban/) is not seen; a relfile (a
     relative @file after a cd) is resolved against the payload cwd only; curl -T (an upload file) is not read;
+    Viktor 50406 K1 (main misses them too): bq-dq-apos-sub, bq-dq-apos-glued, bq-dq-sq-sub (a backtick inside
+    "..." that holds an apostrophe or a quote shifts the quote model; it is no unmodeled sign) and nl-in-subst-arg
+    (a $( with a newline among the curl's arguments) hide a PUT next to a message;
     rule 4's opening stamp is read in plain JSON or a Python dict (also a triple-quoted or f-/r-/b-/u-prefixed
     value, Viktor 49912 K1; rule 3 also a `content = '## ...'` variable), not escaped inside a double-quoted -d, and as
     HH:MM only, not with seconds ("Kernel 12:30:00:", an ISO stamp ...T12:30:00+01:00; the same on main);
@@ -685,11 +688,17 @@ _PREFIX = (r'(?:(?:then|do|else|elif|if|while|until|time(?:[ \t]+-p)?|command|bu
 # Round 2 (Viktor 50390 D1, d0-trailing-comment): a word-start # (after a blank) is a comment, so the curl segment
 # ends there; before, an apostrophe in a trailing comment (`... -d '{...}' # don't`) opened a quote that swallowed the
 # next line's real PUT into the message curl's segment. A mid-word # (a URL fragment) stays in the segment.
+# Round 3 (Viktor 50406 R1, Klodel 50408): a ${...} and a $(...) are one unit each, so a # inside does not end the
+# curl segment. In ${X:- #} the # is no comment (bash and zsh print " #", measured); in $(echo a #b) it is one (the
+# rest of the line, the ) too), but the segment is not cut there either: the main's behaviour, the closed side. A
+# unit's body stops at the next ${ or $( as well as at its closer or a newline, so an unclosed ${${${... run is read
+# once (linear), not once per $; an unclosed or nested one falls back to the lone $ as before.
 CURL_SEG2_RX = re.compile(r'(?:^|[;&|(`)])[ \t]*' + _PREFIX + r'(?:' + _env_assign('v3') + r'[ \t]+)*' + _PREFIX
                           + r'(?:' + _env_assign('v4') + r')?'
                           r'(?P<curl>(?:[^\s;&|(`)]*/)?(?:\\|["\'])?curl\b'
                           r'(?:[^\n;&|\\\'"$#]|(?<!\s)#|\\[\s\S]|\$\'(?:[^\'\\]|\\[\s\S])*\'|\'[^\']*\''
-                          r'|"(?:[^"\\]|\\[\s\S])*"|[$\'"])*)?', re.M)
+                          r'|"(?:[^"\\]|\\[\s\S])*"|\$\{(?:[^}\n$\\]|\\[\s\S]|\$(?![{(]))*\}'
+                          r'|\$\((?:[^)\n$\\]|\\[\s\S]|\$(?![{(]))*\)|[$\'"])*)?', re.M)
 # The curl's own URL in a view: the first /api/ once the header and data arguments are taken out (an /api/messages
 # in a header, an env value or a -d before the kanban URL is not the URL; a memory body quoting a kanban PUT after
 # the memory URL still is not a kanban segment).

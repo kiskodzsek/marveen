@@ -1193,6 +1193,78 @@ def depth0_sign_that_hides_a_substitution_keeps_the_list_mark(root):
 
 
 @case
+def brace_and_substitution_units_keep_the_curl_segment(root):
+    # Round 3 (Viktor 50406 R1, Klodel 50408): round 2's word-start # rule ended the curl segment inside a ${...}
+    # too ("${X:- #}" is no comment for the shell), so a PUT glued after "$(: 1)" next to a message passed (main and
+    # cf7e431a block it; bash runs it). A ${...} and a $(...) are units of the segment now; inside a $(...) the # is
+    # a comment for the shell, but the segment is not cut there either (the main's behaviour, the closed side).
+    url = 'http://localhost:3420/api/kanban/abc123'
+    amsg = 'bash /Users/klodel/marveen/scripts/agent-msg.sh viktor dave '
+    data = """ -d '{"comment":"Viktor 14:30: kész"}'"""
+    put = 'curl -s -X PUT ' + url + data
+    env = 'T=$(echo a | tr a 1) '
+    h, d = root['hook'], root['dir']
+    cases = {
+        'brace-space-glued': (amsg + "'ok'\n$(: 1)curl -s -X PUT ${X:- #} " + url + data, 2),
+        'brace-tab-glued': (amsg + "'ok'\n$(: 1)curl -s -X PUT ${X:-\t#} " + url + data, 2),
+        'brace-space-plain': (amsg + "'ok'\ncurl -s -X PUT ${X:- #} " + url + data, 2),
+        'brace-tab-plain': (amsg + "'ok'\ncurl -s -X PUT ${X:-\t#} " + url + data, 2),
+        'substitution-hash-kept': (amsg + "'ok'\n$(: 1)curl -s -X PUT $(: x #) " + url + data, 2),
+        # Viktor 50406 I4 T15: a tab before a trailing comment ends the segment like a blank (the apostrophe in it
+        # does not swallow the next line's PUT)
+        'tab-trailing-comment': ("curl -s -X POST http://localhost:3420/api/messages -d '{\"content\":\"ok\"}'\t# don't\n"
+                                 + env + put, 2),
+        # the round 2 rows stay: a blank before the comment, and the ALLOW pair with the list in a message
+        'space-trailing-comment': ("curl -s -X POST http://localhost:3420/api/messages -d '{\"content\":\"ok\"}' # don't\n"
+                                   + env + put, 2),
+        # a ${ unit stops at a newline: a ${...} over lines falls back to the lone $, so the next line's PUT is its
+        # own segment (an overblock: bash and zsh keep that line inside the expansion and run no PUT; the main
+        # blocks the line-start one too, its search stops at the newline; the glued one only CURL_SEG2_RX sees)
+        'brace-over-lines-kept': (amsg + "'ok'\ncurl -s -d x ${X:- # it\n" + put + '\n}', 2),
+        'brace-over-lines-glued-kept': (amsg + "'ok'\ncurl -s -d x ${X:- # it\n$(: 1)" + put + '\n}', 2),
+        'allow-brace-list-in-message': ("curl -s -X POST http://localhost:3420/api/messages -d '{\"content\":\"${X:- #} "
+                                        "1) curl -s -X PUT " + url + " -d {comment: Viktor 14:30}\"}'", 0),
+    }
+    bad = [label for label, (cmd, want) in cases.items()
+           if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != want]
+    for b in bad:
+        print('  r3:', b)
+    return not bad
+
+
+# Viktor 50406 K1 (old fail-opens, main and the round 2 head pass them too; Klodel 50408: Known limits, no code). The
+# probe_tc22 inputs verbatim; a later fix turns its row red on purpose. The control row blocks the same stamp.
+_K1_A = "'"
+_K1_U = 'http://localhost:3420/api/kanban/x'
+_K1_PJ = _K1_A + '{"comment":"mérve 18:15"}' + _K1_A
+_K1_PUT = 'curl -s -X PUT ' + _K1_U + ' -H ' + _K1_A + 'Content-Type: application/json' + _K1_A + ' -d ' + _K1_PJ
+_K1_MSGW = ('curl -s -X POST http://localhost:3420/api/messages -d ' + _K1_A
+            + '{"from":"viktor","to":"klodel","content":"ok"}' + _K1_A)
+KNOWN_K1 = {
+    'bq-dq-apos-sub': _K1_MSGW + '\nX="`echo "it' + _K1_A + 's"`"; T=$(date; echo 1) ' + _K1_PUT,
+    'bq-dq-apos-glued': _K1_MSGW + '\nX="`echo "it' + _K1_A + 's"`"; $(: 1)' + _K1_PUT,
+    'bq-dq-sq-sub': _K1_MSGW + '\nX="`echo ' + _K1_A + '"' + _K1_A + '`"; T=$(date; echo 1) ' + _K1_PUT,
+    'nl-in-subst-arg': _K1_MSGW + '\n$(: 1)curl -s -X PUT $(\n) ' + _K1_U + ' -d ' + _K1_PJ,
+}
+
+
+@case
+def known_limit_k1_rows_pin_todays_allow(root):
+    h, d = root['hook'], root['dir']
+    bad = []
+    if run(h, 'Bash', {'command': _K1_MSGW + '; ' + _K1_PUT}, now='12:00', cwd=d)[0] != 2:
+        bad.append('control: the stamp is not blocked')
+    for label, cmd in KNOWN_K1.items():
+        if run(h, 'Bash', {'command': cmd}, now='12:00', cwd=d)[0] != 0:
+            bad.append(label + ': blocks now (the documented limit changed)')
+    head = ''.join(open(h, encoding='utf-8').readlines()[:80])
+    bad += [label + ': not named in the first 80 lines of the module' for label in KNOWN_K1 if label not in head]
+    for b in bad:
+        print('  k1:', b)
+    return not bad and len(KNOWN_K1) == 4
+
+
+@case
 def python_dict_triple_fstring_and_variable_on_rules_3_and_4(root):
     # Viktor 49912 K1: rule 3 (daily-log heading) and rule 4 (card opening stamp) read a triple-quoted or f-prefixed
     # Python value, rule 3 also a `content = '## ...'` variable; a past card stamp, another endpoint, the {{NOW}} token
