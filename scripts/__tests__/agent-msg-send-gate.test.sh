@@ -178,6 +178,10 @@ rows = [
     ('111', '18158', 'in', 'Mikor kérnélek meg rá?', 10350),
     ('111', '18159', 'in', 'Hova üss a képen?', 10360),
     ('111', '18160', 'in', 'Melyik a jó: kék v a piros?', 10370),
+    ('111', '18161', 'in', 'Hány részre osszuk el a keretet?', 10380),
+    ('111', '18162', 'in', 'Melyik a kiküldhető verzió?', 10390),
+    ('111', '18163', 'in', 'Melyik szín: kék, piros, zöld?', 10400),
+    ('111', '18164', 'in', 'Melyik branch, main or develop?', 10410),
 ]
 con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
                 "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
@@ -738,9 +742,12 @@ KERES-SZO-SZERINT: \"$q\" (TG $tg)"
   run klodel dave
   ok "keres r5: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
 done
-# known limits imperative-one-letter-stem-ss-zz and or-alternatives-abbreviated (msg_gate.py header, Viktor 50848,
-# Klodel's decision on the card: a ceiling per class, no new round): pass as requests; pinned, one row each
-for pair in '18159|Hova üss a képen' '18160|Melyik a jó: kék v a piros'; do
+# known limits imperative-one-letter-stem-assimilated and or-alternatives-abbreviated (msg_gate.py header, Viktor 50848,
+# Klodel's decision on the card: a ceiling per class, no new round), then -ssz in the first, participle-hato-heto,
+# or-alternatives-enumeration, or-alternatives-english-or (Viktor 50862): pass as requests; pinned, one row each
+for pair in '18159|Hova üss a képen' '18160|Melyik a jó: kék v a piros' \
+            '18161|Hány részre osszuk el a keretet' '18162|Melyik a kiküldhető verzió' \
+            '18163|Melyik szín: kék, piros, zöld' '18164|Melyik branch, main or develop'; do
   tg="${pair%%|*}"; q="${pair#*|}"
   text "$WO
 KERES-SZO-SZERINT: \"$q\" (TG $tg)"

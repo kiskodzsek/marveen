@@ -56,12 +56,11 @@ Rules:
    "nem kell PR, de indulhat a kód" stays refused. A missing lock file means no lock; an unreadable or
    malformed one is a gate failure (exit 4), never a silent "nothing locked".
 
-5. REQUEST VERBATIM (retro 2026-11-13 R5, card 858f80bc): a request was over-read six times in a week
-   (an idea turned into a production plan, an opinion read as a stop, an unrequested change; Patrik TG
-   17827 "ki a faszom adott erre utasitast?", TG 17829 "ötleteltem cska"). A text from KERES_FROM
-   (default "klodel") that hands out work -- a "Kész, ha:" anywhere or a "FELADAT (Patrik TG n)" header --
-   and names a Patrik message ("Patrik ... TG n", same sentence, within 40 characters) is refused unless
-   it carries a line
+5. REQUEST VERBATIM (retro 2026-11-13 R5, card 858f80bc): a request was over-read six times in a week (an idea
+   turned into a production plan, an opinion read as a stop, an unrequested change; Patrik TG 17827 "ki a faszom
+   adott erre utasitast?", TG 17829 "ötleteltem cska"). A text from KERES_FROM (default "klodel") that hands out
+   work -- a "Kész, ha:" anywhere or a "FELADAT (Patrik TG n)" header -- and names a Patrik message ("Patrik ...
+   TG n", same sentence, within 40 characters) is refused unless it carries a line
        KERES-SZO-SZERINT: "<Patrik's words, at least 3, contiguous>" (TG n)
    whose quote is found, accent- and whitespace-insensitively, in an inbound Telegram message n of the
    main agent's ledger (store/claudeclaw.db, conversation_log, direction 'in', read-only). If the text
@@ -72,12 +71,13 @@ Rules:
        IGEN: TG m
    where m is a later inbound message in the same chat holding a yes word (igen, ok, oké, mehet, jó,
    csináld, persze, rendben, hajrá, pontosan) that is not negated and does not end a question.
-   A question of fact is a request (card 8dd5c726, is_idea) unless it holds an idea mark, a conditional or
-   a choice form. Known limits, by name (pinned: agent-msg-send-gate.test.sh "known limit", one row each):
+   A question of fact is a request (card 8dd5c726, is_idea) unless it holds an idea mark, a conditional or a
+   choice form. Known limits, by name (pinned: agent-msg-send-gate.test.sh "known limit", one row each):
    info-question-word-list, imperative-3sg-definite, imperative-2sg-short-d, hat-het, modal-infinitive,
    comparative, indicative-decision, imperative-2sg-bare-gy, or-alternatives-without-comma,
    imperative-2sg-bare-vowel-j, infinitive-bare, or-alternatives-slash, imperative-2sg-bare-ddz,
-   imperative-irregular, participle-ando-endo, imperative-one-letter-stem-ss-zz, or-alternatives-abbreviated.
+   imperative-irregular, participle-ando-endo, imperative-one-letter-stem-assimilated,
+   or-alternatives-abbreviated, participle-hato-heto, or-alternatives-enumeration, or-alternatives-english-or.
    A question of fact: "?" with mekkora, mennyi, mikor, hol, ... ("mennyiért adjuk?", "mennyit érne?" stay
    ideas). info-question-word-list: a question word off the list stays an idea;
    a plain question of fact meant as an idea ("milyen színű a borító?") passes as a request (Klodel's
@@ -98,9 +98,13 @@ Rules:
    participle-ando-endo ("melyik a kiküldendő verzió?"); each turned 0 of Patrik's 126 fact questions in
    the measure (r5/variants5.py) and is left out by that decision, not by the measure. Two more names
    after round 5 (Viktor 50848, Klodel's decision: the ceiling is per class, no new round):
-   imperative-one-letter-stem-ss-zz, a one-letter stem before the assimilated -ss/-zz ("hova üss?",
-   "mikor űzzük ki?": the CHOICE needs two letters before it); or-alternatives-abbreviated, "v" or "vs"
-   for "vagy" ("melyik a jó, a kék v a piros?": ALTERNATIVES knows only the word "(a)vagy").
+   imperative-one-letter-stem-assimilated, a one-letter stem before the assimilated -ss/-ssz/-zz ("hova üss?",
+   "hány részre osszuk el?", "mikor űzzük ki?": the CHOICE needs two letters before it);
+   or-alternatives-abbreviated, "v" or "vs" for "vagy" ("melyik a jó, a kék v a piros?": ALTERNATIVES knows
+   only the word "(a)vagy"). Then (Viktor 50862, the same decision): participle-hato-heto, a -ható/-hető
+   participle ("melyik a kiküldhető verzió?": hat-het is the verb, participle-ando-endo the -andó/-endő);
+   or-alternatives-enumeration, a list with no "vagy" ("melyik szín: kék, piros, zöld?");
+   or-alternatives-english-or ("melyik branch, main or develop?").
    The message_id alone is ambiguous (measured: private and group chat both hold ids 10-999), so any
    ledger row with that id counts, but the IGEN must be in the chat where the quote was found.
    Measured 2026-11-13 on 30 days of Klodel's messages (9495): 752 hand out work, 623 of them name a
