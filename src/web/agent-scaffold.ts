@@ -285,7 +285,14 @@ export function upgradeLegacyHookCommands(
             // in every sub-agent by 2026-11-23).
             // Only the EXACT fail-closed form of the template's own script path is left alone (Viktor 50546 B1): a
             // probe head followed by another path, or by a trailing `|| true`, is still rewritten to the template.
-            if (existBn === tplBn && tplPath && existHook.command === pythonHookCommand(tplPath)) continue
+            if (existBn === tplBn && tplPath && existHook.command === pythonHookCommand(tplPath)) {
+              // ...but its timeout follows the template's (Viktor 50557 R14: a 1 s timeout can expire the gate)
+              if (tplHook.timeout != null && existHook.timeout !== tplHook.timeout) {
+                existHook.timeout = tplHook.timeout
+                changed = true
+              }
+              continue
+            }
             if (existBn === tplBn && existHook.command !== tplHook.command) {
               existHook.command = tplHook.command
               if (tplHook.timeout != null) existHook.timeout = tplHook.timeout
@@ -369,7 +376,8 @@ export function syncHookMatchers(
         // makes a duplicate of it (card 47468cc1). Leave it; it is someone else's group under its own matcher.
         const covered = (existEntries as HookEntry[]).some((other) => other !== existEntry
           && other?.matcher === tplEntry.matcher
-          && existCommands.every((c) => (other.hooks ?? []).some((h) => h.command === c)))
+          // only a command hook covers (Viktor 50557 R18: a type "prompt" copy runs no gate)
+          && existCommands.every((c) => (other.hooks ?? []).some((h) => h.type === 'command' && h.command === c)))
         if (covered) continue
         existEntry.matcher = tplEntry.matcher
         changed = true
@@ -620,8 +628,11 @@ export function ensureAgentHooks(
         const tplEntries = handlers as HookEntry[]
         const existEntries = existingHooks[event] as HookEntry[]
         // Collect all command strings already present in this event's hook groups.
+        // Only a command hook counts as present (Viktor 50557 R17: a template command left under type "prompt"
+        // was never added back, and no command-type gate stayed on its matcher).
         const existingCommands = new Set(
-          existEntries.flatMap((e) => (e.hooks ?? []).map((h) => h.command).filter(Boolean)),
+          existEntries.flatMap((e) => (e.hooks ?? []).filter((h) => h.type === 'command').map((h) => h.command)
+            .filter(Boolean)),
         )
         for (const tplEntry of tplEntries) {
           // Add hooks that are missing AND safe to register (registration guard).

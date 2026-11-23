@@ -77,6 +77,16 @@ describe('a dashboard boot does not duplicate the time-claim gate (47468cc1)', (
     expect(timeClaim(s)).toHaveLength(2)
   })
 
+  it('a template command left under type "prompt" is added back as a command hook (Viktor 50557 R17)', () => {
+    const prompt = { matcher: WRITE_MATCHER, hooks: [{ type: 'prompt', command: WRAPPED, timeout: 10 }] }
+    writeFileSync(settingsPath, JSON.stringify({ hooks: { PreToolUse: [prompt, TELEGRAM] } }, null, 2))
+    boot()
+    const s = read()
+    const cmd = byMatcher(s, WRITE_MATCHER).filter((e) => e.hooks.some((h) => h.type === 'command' && h.command === WRAPPED))
+    expect(cmd).toHaveLength(1)
+    expect(boot()).toEqual({ a: false, b: false })
+  })
+
   it('the copies an earlier boot left collapse to one on the next boot', () => {
     const copies = Array.from({ length: 47 }, () => HAND_WIRED)
     writeFileSync(settingsPath, JSON.stringify({ hooks: { PreToolUse: [...copies, TELEGRAM] } }, null, 2))
@@ -97,6 +107,10 @@ describe('the passes keep their own jobs (47468cc1)', () => {
     const gated = { PreToolUse: [JSON.parse(JSON.stringify(TELEGRAM))] } as Record<string, unknown>
     expect(upgradeLegacyHookCommands(gated, tpl)).toBe(false)
     expect((gated.PreToolUse as Entry[])[0].hooks[0].command).toBe(pythonHookCommand(SCRIPT))
+    // Viktor 50557 R14: the exact form keeps its command, but its timeout follows the template's
+    const short = { PreToolUse: [{ matcher: TELEGRAM_COPY_GATE_MATCHER, hooks: [{ command: pythonHookCommand(SCRIPT), timeout: 1 }] }] } as Record<string, unknown>
+    expect(upgradeLegacyHookCommands(short, tpl)).toBe(true)
+    expect((short.PreToolUse as Entry[])[0].hooks[0]).toEqual({ command: pythonHookCommand(SCRIPT), timeout: 10 })
     // Viktor 50546 B1: only the EXACT fail-closed form of the template's own path is left alone; the probe head
     // followed by another path, or the real path with a trailing `|| true`, is still rewritten to the template.
     for (const command of [pythonHookCommand('/tmp/x/time-claim-gate.py'), `${pythonHookCommand(SCRIPT)} || true`]) {
@@ -116,6 +130,13 @@ describe('the passes keep their own jobs (47468cc1)', () => {
     } as Record<string, unknown>
     expect(syncHookMatchers(owned, tpl)).toBe(false)
     expect((owned.PreToolUse as Entry[])[1].matcher).toBe(TELEGRAM_COPY_GATE_MATCHER)
+    // Viktor 50557 R18: a type "prompt" copy under the template matcher covers nothing; the working one moves over
+    const promptOnly = {
+      PreToolUse: [{ matcher: WRITE_MATCHER, hooks: [{ type: 'prompt', command: WRAPPED }] },
+        { matcher: 'Bash', hooks: [{ type: 'command', command: WRAPPED }] }],
+    } as Record<string, unknown>
+    expect(syncHookMatchers(promptOnly, tpl)).toBe(true)
+    expect((promptOnly.PreToolUse as Entry[])[1].matcher).toBe(WRITE_MATCHER)
   })
 
   it('dedupeIdenticalHookEntries drops only identical groups (key order aside) and keeps the first in place', () => {
