@@ -436,6 +436,53 @@ def prefix_follow_ups_exec_a_env_split_sudo_h_command_lookup(_):
 
 
 @case
+def prefix_round2_split_rest_clusters_quoted_options_dash_and_set_after_prefix(_):
+    # e6a0f476 round 2 (Viktor 50424 L1-L6; old, main lets every BLOCK row through). zsh -f with an rm stub first on
+    # PATH runs rm in each BLOCK row (agents/kernel/work/ztf-r2-1123/oracle.txt; env -P /bin runs the real /bin/rm
+    # there, S a missing temp path), except the sudo rows (no sudo run; getopt clustering as the man page reads).
+    rm, sp, cv = 'RM-VALTOZO-KAPU', 'ZSH-CSAPDA (szóbontás)', 'ZSH-CSAPDA (változó mint parancs)'
+    r = ' rm -rf $S'
+    return (
+        # L1: env -S takes one word, env appends the words after it
+        blocks('env -S' + r, rm) and blocks("env -S 'rm -rf' $S", rm) and blocks('env -S env -S' + r, rm)
+        and blocks('echo $(env -S' + r + ')', rm) and blocks("env -S 'rm #x' -rf $S", rm)
+        and passes("env -S 'echo #' rm -rf $S") and passes("env -S 'echo rm -rf' $S")
+        # L2: a cluster whose last letter takes a value takes the next word; a glued value does not
+        and blocks('exec -cla x' + r, rm) and blocks('exec -lca x' + r, rm) and blocks('true && exec -ca x' + r, rm)
+        and blocks('true | exec -cla x' + r, rm) and blocks('true\nexec -cla x' + r, rm)
+        and blocks('time noglob exec -cla x' + r, rm) and blocks('exec -cax' + r, rm)
+        and blocks('env -vS' + r, rm) and blocks('env -vu FOO' + r, rm) and blocks('env -vC /tmp' + r, rm)
+        and blocks('env -vP /bin' + r, rm) and blocks('sudo -iu root' + r, rm) and blocks('sudo -Eu root' + r, rm)
+        and blocks('HJ="rm -rf"; exec -cla x $HJ /tmp/x', cv) and passes('exec -a rm echo -rf $S')
+        # L3: env -P altpath
+        and blocks('env -P /bin' + r, rm)
+        # L4: a quoted option or assignment word is still one
+        and blocks('exec "-a" x' + r, rm) and blocks('env "-Srm -rf $S"', rm) and blocks('env "-S" "rm -rf $S"', rm)
+        and blocks('env "FOO=a b"' + r, rm)
+        # L5: zsh's - precommand
+        and blocks('true; -' + r, rm)
+        # L6: set -- after a prefix word splits nothing either
+        and blocks("V='a b'; noglob set -- $V", sp) and blocks("V='a b'; builtin set -- $V", sp)
+        and passes("V='a b'; noglob set -- ${=V}"))
+
+
+@case
+def env_split_long_chains_stay_linear(_):
+    # e6a0f476 round 2: only the first split option of a command recurses (the split text holds the words after it),
+    # so a 150 KB env -S chain is a few parses, not one per env word; an exec -cla chain is one pass
+    import time
+    for cmd in ('time ' + 'env -S env ' * (150 * 1024 // 11) + 'rm -rf $S',
+                'exec -cla x ' * (150 * 1024 // 12) + 'rm -rf $S'):
+        t0 = time.monotonic()
+        got = gate.findings(cmd, ZSH)
+        dt = time.monotonic() - t0
+        if not got or dt > 2.0:
+            print(f'  long chain {cmd[:20]!r}: {len(got)} finding(s), {dt:.2f} s')
+            return False
+    return True
+
+
+@case
 def env_split_nesting_past_the_depth_bound_blocks(_):
     # e6a0f476: env -S inside env -S is read up to MAX_SPLIT_DEPTH levels; past it the gate blocks (fail-closed)
     cmd = 'rm -rf $S'

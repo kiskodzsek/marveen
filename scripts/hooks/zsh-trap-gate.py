@@ -63,6 +63,12 @@ of env -S / --split-string is read as the command line env runs (inside "..." th
 dropped first), nested up to MAX_SPLIT_DEPTH (3) levels, deeper blocks; sudo -h is --help or -h HOST (the man page
 lists both), so the head is looked for both ways and a finding in either counts; a -v / -V among command's options,
 also in a cluster (-pv, -vp), only looks the name up and runs nothing.
+Round 2 (Viktor 50424 L1-L6, all old): env appends the words after the -S value to it, so the text judged is
+`env <value> <rest>` (and the value cut at a word-start #, which ends only the value); a short option cluster whose
+last letter takes a value takes the next word (exec -cla x, env -vu FOO, sudo -iu root; a glued -aNAME does not);
+env -P altpath takes a value; a quoted option or VAR=x word ("-a", "-S", "FOO=a b") is still one; zsh's `- cmd`
+is a prefix word; `set --` after prefix words (noglob, builtin) is check 1 too. Only the first split option of a
+command recurses (its text holds the words after it): a 150 KB env -S chain is a few parses, not one per env word.
 Tests: python3 -I scripts/hooks/zsh-trap-gate_test.py
 """
 import json
@@ -98,7 +104,9 @@ XARGS_VALUE_OPTS.add('-S')
 PRECMD_VALUE_OPTS = {'sudo': {'-u', '-g', '-h', '-p', '-C', '-D', '-U', '-T', '-r', '-t', '--user', '--group', '--host',
                               '--prompt', '--close-from', '--chdir', '--other-user', '--command-timeout', '--role',
                               '--type'},
-                     'nice': {'-n', '--adjustment'}, 'env': {'-u', '--unset', '-C', '--chdir', '-S', '--split-string'},
+                     'nice': {'-n', '--adjustment'},
+                     # e6a0f476 round 2 (Viktor 50424 L3): BSD env -P altpath
+                     'env': {'-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-P'},
                      'caffeinate': {'-t', '-w'},
                      # e6a0f476 (Viktor 50227 LOW 1): exec -a NAME runs the command under another argv[0]
                      'exec': {'-a'}}
@@ -108,7 +116,8 @@ AMBIG_VALUE_OPTS = {'sudo': {'-h'}}
 # e6a0f476 (Viktor 50227 LOW 2): env -S / --split-string takes ONE word and splits it into the command line it runs
 ENV_SPLIT_OPTS = ('-S', '--split-string')
 MAX_SPLIT_DEPTH = 3
-PRECMD = {'sudo', 'command', 'builtin', 'exec', 'nocorrect', 'noglob', 'nohup', 'env', 'nice', 'caffeinate'}
+# e6a0f476 round 2 (Viktor 50424 L5): zsh's `- cmd` runs cmd with a dash before argv[0] (a precommand modifier)
+PRECMD = {'sudo', 'command', 'builtin', 'exec', 'nocorrect', 'noglob', 'nohup', 'env', 'nice', 'caffeinate', '-'}
 DECLARERS = {'typeset', 'local', 'declare', 'export', 'readonly', 'integer', 'float'}
 OPERATORS = [';;', ';&', ';|', '&&', '||', '|&', '&!', '&|', ';', '|', '&']
 REDIRECTS = ['&>>', '&>', '>>', '>|', '>!', '>&', '<&', '<>', '>', '<']
@@ -647,12 +656,68 @@ def skip_prefix_args(words, j, ambig_value=True):
     vo = PRECMD_VALUE_OPTS.get(name, ())
     amb = AMBIG_VALUE_OPTS.get(name, ())
     j += 1
-    while j < len(words) and ((words[j].plain() or '').startswith('-')
-                              or (words[j].parts and words[j].parts[0][0] == 'lit'
-                                  and ASSIGN_RX.match(words[j].text()))):
-        o = words[j].plain()
-        j += 2 if o in vo and (ambig_value or o not in amb) else 1
+    while j < len(words):
+        t = opt_text(words[j])
+        if t is None or not (t.startswith('-') or ASSIGN_RX.match(t)):
+            break
+        if name == 'env' and env_split_at(t) is not None:
+            return len(words)  # env -S: the command is the split value plus the words after it (env_split_texts)
+        o = cluster_value_opt(t, vo)
+        j += 2 if o and (ambig_value or o not in amb) else 1
     return j
+
+
+def opt_text(word):
+    """An option or VAR=x word as the program sees it (e6a0f476 round 2, Viktor 50424 L4: a quoted "-a" or
+    "FOO=a b" is still one; plain() saw only an unquoted literal). None for a word with an expansion that does not
+    start with a literal."""
+    if not word.parts:
+        return None
+    if all(k in ('lit', 'sq', 'dq', 'esc') for k, _ in word.parts) or word.parts[0][0] == 'lit':
+        return shell_text(word)
+    return None
+
+
+def cluster_value_opt(t, vo):
+    """The option of vo that takes the NEXT word as its value in the option word t, else None. A long option counts
+    as a whole; a short cluster (-cla, -vu, -iu) is read as getopt reads it (e6a0f476 round 2, Viktor 50424 L2): the
+    first letter that takes a value ends the cluster, and it takes the next word only when it is the last letter
+    (-aNAME, -uFOO carry it glued)."""
+    if t.startswith('--'):
+        return t if t in vo else None
+    for k in range(1, len(t)):
+        o = '-' + t[k]
+        if o in vo:
+            return o if k == len(t) - 1 else None
+    return None
+
+
+def env_split_at(t):
+    """In env's option word t, the split value glued to it ('' when it is in the next word), else None: -S, a -S
+    ending a cluster (-vS) or carrying its value (-Secho, -vSecho), --split-string[=...]. A value letter before the
+    S (-uS: S is -u's value) ends the cluster first."""
+    if t == '--split-string':
+        return ''
+    if t.startswith('--split-string='):
+        return t[len('--split-string='):]
+    if t.startswith('--') or not t.startswith('-'):
+        return None
+    for k in range(1, len(t)):
+        if t[k] == 'S':
+            return t[k + 1:]
+        if '-' + t[k] in PRECMD_VALUE_OPTS['env']:
+            return None
+    return None
+
+
+def set_index(words, flags, k):
+    """The index of `set` when it is the command at k, also after prefix words (e6a0f476 round 2, Viktor 50424 L6:
+    noglob set -- $V, builtin set -- $V split like a bare set), else None."""
+    while k < len(words) and not flags[k] and words[k].plain() in PRECMD:
+        if command_lookup_only(words, k):
+            return None
+        k = skip_prefix_args(words, k)
+    return k if k < len(words) and not flags[k] and words[k].plain() == 'set' else None
 
 
 def has_ambig_opt(words):
@@ -688,27 +753,38 @@ def shell_text(word):
     return ''.join(DQ_ESC_RX.sub(r'\1', t) if k == 'dq' else t for k, t in word.parts)
 
 
-def env_split_values(words, j):
-    """The text of every -S / --split-string value of the env at j (quotes removed, expansions kept): env splits it
-    into the command line it runs, so the gate reads it as a command (e6a0f476)."""
-    out = []
+def env_split_texts(words, j, s):
+    """The command line the env at j runs when an option splits a word (-S, --split-string, also in a cluster or a
+    quoted option word), else []. e6a0f476 round 2 (Viktor 50424 L1): env splits the value into env ARGUMENTS and
+    appends the words after it, so `env -S rm -rf $S` runs rm (measured: /usr/bin/env -S 'echo a' b c prints a b c);
+    the text judged is `env <value> <the words after it as written>`. A word-start # in the value is a comment that ends
+    the VALUE only (measured: /usr/bin/env -S 'echo #' echo hi prints echo hi), so the value cut before it is judged
+    too; a # inside the value's quotes stays in the first text. Only the first split option counts: a later one is in
+    the words after it, which the recursion reads (one parse per level, not one per env word)."""
     i = j + 1
     while i < len(words):
-        o = words[i].plain()
-        t = shell_text(words[i])
-        if o in ENV_SPLIT_OPTS:
-            if i + 1 < len(words):
-                out.append(shell_text(words[i + 1]))
-            i += 2
-            continue
-        if t.startswith('--split-string='):
-            out.append(t[len('--split-string='):])
-        elif t.startswith('-S') and len(t) > 2 and words[i].parts and words[i].parts[0][0] == 'lit':
-            out.append(t[2:])
-        elif not (t.startswith('-') or (words[i].parts and words[i].parts[0][0] == 'lit' and ASSIGN_RX.match(t))):
-            break
-        i += 1 if not (o in PRECMD_VALUE_OPTS['env'] and o not in ENV_SPLIT_OPTS) else 2
-    return out
+        t = opt_text(words[i])
+        if t is None or not (t.startswith('-') or ASSIGN_RX.match(t)):
+            return []
+        v = env_split_at(t)
+        if v is not None:
+            if v == '':
+                if i + 1 >= len(words):
+                    return []
+                v, nxt = shell_text(words[i + 1]), i + 2
+            else:
+                nxt = i + 1
+            rest = s[words[nxt].start:words[-1].end] if nxt < len(words) else ''
+            texts = ['env ' + v + ' ' + rest]
+            m = SPLIT_COMMENT_RX.search(v)
+            if m:
+                texts.append('env ' + v[:m.start()] + ' ' + rest)
+            return texts
+        i += 2 if cluster_value_opt(t, PRECMD_VALUE_OPTS['env']) else 1
+    return []
+
+
+SPLIT_COMMENT_RX = re.compile(r'(?:^|(?<=\s))#')
 
 
 def rm_check(words, k, s, out, amb_v, env, _depth):
@@ -724,11 +800,15 @@ def rm_check(words, k, s, out, amb_v, env, _depth):
                 o = words[j].plain()
                 j += 2 if o in XARGS_VALUE_OPTS else 1
             continue
-        if pw == 'env' and _depth < MAX_SPLIT_DEPTH:
-            for v in env_split_values(words, j):
-                out.extend(findings(v, env, _depth + 1))
-        elif pw == 'env' and env_split_values(words, j):
-            out.append(MSG_SPLIT_DEEP.format(d=MAX_SPLIT_DEPTH))
+        if pw == 'env':
+            texts = env_split_texts(words, j, s)
+            if texts and _depth < MAX_SPLIT_DEPTH:
+                for v in texts:
+                    out.extend(findings(v, env, _depth + 1))
+                return  # the split text holds every word after it
+            if texts:
+                out.append(MSG_SPLIT_DEEP.format(d=MAX_SPLIT_DEPTH))
+                return
         if pw == 'command' and command_lookup_only(words, j):
             return
         if pw in PRECMD or pw in KEYWORDS:
@@ -816,8 +896,8 @@ def findings(command, env=None, _depth=0):
                     if x.plain() == 'in':
                         items = [y for y in rest[idx + 1:] if y.plain() not in ('do',)]
                         break
-            elif head == 'set':
-                rest = words[k + 1:]
+            elif set_index(words, flags, k) is not None:
+                rest = words[set_index(words, flags, k) + 1:]
                 for idx, x in enumerate(rest):
                     if x.plain() == '--':
                         items = rest[idx + 1:]
