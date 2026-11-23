@@ -412,6 +412,74 @@ def closed_prefix_value_options_cmdvar_after_prefix_eqsplit_and_procsub_redirect
 
 
 @case
+def prefix_follow_ups_exec_a_env_split_sudo_h_command_lookup(_):
+    # e6a0f476 (Viktor 50227 round 2 LOW/INFO; main lets the first group through, overblocks the last group)
+    rm, cv = 'RM-VALTOZO-KAPU', 'ZSH-CSAPDA (változó mint parancs)'
+    nested = 'env -S "env -S ' + "'rm -rf $S'" + '"'
+    return (
+        # LOW 1: exec -a NAME takes a value
+        blocks(r'exec -a nm rm -rf $S', rm) and blocks(r'exec -a nm rm -rf $S/*', rm) and passes(r'exec -a nm ls')
+        # LOW 2: env -S / --split-string: its one word is the command line env runs
+        and blocks(r'env -S "rm -rf $S"', rm) and blocks(r"env -S 'rm -rf $S'", rm)
+        and blocks(r'env --split-string="rm -rf $S"', rm) and blocks(r'env -u A -S "rm -rf $S"', rm)
+        and blocks(r'env -Srm\ -rf\ $S', rm) and blocks(nested, rm)
+        and passes(r'env -S "ls -la"') and passes(r'env -S "rm -rf ${S:?}"')
+        # INFO 2: sudo -h is --help or -h HOST; both ways are looked at
+        and blocks(r'sudo -h rm -rf $S', rm) and blocks(r'sudo -h host rm -rf $S', rm) and passes(r'sudo -h')
+        and passes(r'sudo -h host ls $S')
+        and blocks(r'G="git x"; sudo -h $G', cv) and passes(r'G="git x"; sudo -u root ls $G')
+        # INFO 1: a -v / -V in a cluster (-pv, -vp) or after -p only looks the name up
+        and passes(r'G="git x"; command -pv $G') and passes(r'G="git x"; command -vp $G')
+        and passes(r'G="git x"; command -p -v $G') and passes(r'command -pv rm -rf $S')
+        and blocks(r'G="git x"; command -p $G', cv) and blocks(r'command rm -rf $S', rm)
+        and blocks(r'command -p rm -rf $S', rm))
+
+
+@case
+def env_split_nesting_past_the_depth_bound_blocks(_):
+    # e6a0f476: env -S inside env -S is read up to MAX_SPLIT_DEPTH levels; past it the gate blocks (fail-closed)
+    cmd = 'rm -rf $S'
+    for _i in range(gate.MAX_SPLIT_DEPTH + 1):
+        cmd = 'env -S ' + json.dumps(cmd)
+    m = gate.findings(cmd, ZSH)
+    return bool(m) and m[0].startswith('ZSH-CSAPDA (mélység)')
+
+
+class _W:
+    def __init__(self, t):
+        self.t = t
+
+    def plain(self):
+        return self.t
+
+
+class _CountingWords(list):
+    """A word list that counts every word handed out, by index or inside a slice copy."""
+    touched = 0
+
+    def __getitem__(self, k):
+        got = list.__getitem__(self, k)
+        type(self).touched += len(got) if isinstance(k, slice) else 1
+        return got
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+
+
+@case
+def command_lookup_only_is_linear_on_a_command_chain(_):
+    # e6a0f476 ReDoS round: words[j + 1:] copied the rest of the command for every `command` word, so
+    # "command -p " x 8000 took 0.255 s against 0.034 s before (x3.7 per doubling, redos-probe --repeat). Counted,
+    # not timed: n `command -p` pairs may touch a few words each, not the whole tail.
+    n = 4000
+    words = _CountingWords([_W(t) for _ in range(n) for t in ('command', '-p')] + [_W('rm')])
+    _CountingWords.touched = 0
+    hits = [j for j in range(len(words) - 1) if gate.command_lookup_only(words, j)]
+    return not hits and _CountingWords.touched <= 10 * n
+
+
+@case
 def deep_message_counts_parser_levels(_):
     # Viktor 50179 INFO: a quoted $( ) counts two levels, so the message says parser levels
     m = gate.findings('echo ' + '"$(' * 40, ZSH)

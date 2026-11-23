@@ -58,6 +58,11 @@ heredoc end inside backticks), dollar-bracket-shift-tail-rm ($[ ... << ] read as
 256 KB cut (MAX_COMMAND) the tail is not judged: time-data-heredoc-300k-tail-rm, time-1mb-tail-rm.
 Inside a backtick sequence a backtick closes the word it is glued to (`a`b`: before, a glued closing backtick opened
 a new nested sequence).
+Prefix words (card e6a0f476, Viktor 50227 round 2 LOW/INFO, all as on main): exec -a NAME takes a value; the one word
+of env -S / --split-string is read as the command line env runs (inside "..." the shell's backslash escapes are
+dropped first), nested up to MAX_SPLIT_DEPTH (3) levels, deeper blocks; sudo -h is --help or -h HOST (the man page
+lists both), so the head is looked for both ways and a finding in either counts; a -v / -V among command's options,
+also in a cluster (-pv, -vp), only looks the name up and runs nothing.
 Tests: python3 -I scripts/hooks/zsh-trap-gate_test.py
 """
 import json
@@ -94,7 +99,15 @@ PRECMD_VALUE_OPTS = {'sudo': {'-u', '-g', '-h', '-p', '-C', '-D', '-U', '-T', '-
                               '--prompt', '--close-from', '--chdir', '--other-user', '--command-timeout', '--role',
                               '--type'},
                      'nice': {'-n', '--adjustment'}, 'env': {'-u', '--unset', '-C', '--chdir', '-S', '--split-string'},
-                     'caffeinate': {'-t', '-w'}}
+                     'caffeinate': {'-t', '-w'},
+                     # e6a0f476 (Viktor 50227 LOW 1): exec -a NAME runs the command under another argv[0]
+                     'exec': {'-a'}}
+# e6a0f476 (Viktor 50227 INFO 2): sudo's -h is --help and -h HOST (the man page lists both and does not say whether a
+# separate next word is the host). Not modeled: the head is looked for both ways, and a finding in either counts.
+AMBIG_VALUE_OPTS = {'sudo': {'-h'}}
+# e6a0f476 (Viktor 50227 LOW 2): env -S / --split-string takes ONE word and splits it into the command line it runs
+ENV_SPLIT_OPTS = ('-S', '--split-string')
+MAX_SPLIT_DEPTH = 3
 PRECMD = {'sudo', 'command', 'builtin', 'exec', 'nocorrect', 'noglob', 'nohup', 'env', 'nice', 'caffeinate'}
 DECLARERS = {'typeset', 'local', 'declare', 'export', 'readonly', 'integer', 'float'}
 OPERATORS = [';;', ';&', ';|', '&&', '||', '|&', '&!', '&|', ';', '|', '&']
@@ -614,6 +627,8 @@ MSG_EQ = ('ZSH-CSAPDA (=-kibontás): {f!r} -- a zsh az =-jellel kezdődő szót 
 MSG_DEEP = ('ZSH-CSAPDA (mélység): a parancs {d}-nél több elemzési szinten ágyaz egymásba $( ), backtick, <( ), =( ) '
             'vagy idézőjeles részt (egy idézőjelen belüli $( ) két szintnek számít); a kapu ennyit nem elemez végig (a valódi parancsok néhány szintet használnak). Bontsd '
             'lépésekre vagy írd szkriptfájlba.')
+MSG_SPLIT_DEEP = ('ZSH-CSAPDA (mélység): az env -S / --split-string {d}-nél több szinten ágyaz egymásba (az értéke maga '
+                  'is env -S); a kapu ennyit nem elemez végig. Bontsd lépésekre vagy írd szkriptfájlba.')
 MSG_RM = ('RM-VALTOZO-KAPU: {f!r} -- rm -r változóval kezdődő úton: üres vagy elírt változónál a cwd vagy a / törlődik. '
           'Írd: rm -rf -- "${{S:?}}/alut" (a :? megáll, ha S üres), vagy kiírt abszolút úttal.')
 
@@ -624,19 +639,126 @@ def shell_is_zsh(env):
     return base == '' or 'zsh' in base
 
 
-def skip_prefix_args(words, j):
+def skip_prefix_args(words, j, ambig_value=True):
     """Past a prefix word at j (sudo, nice, env, ..., or a keyword): its options, the value of the ones that take one
-    (PRECMD_VALUE_OPTS), and VAR=x words. Returns the index of the next word."""
-    vo = PRECMD_VALUE_OPTS.get(words[j].plain(), ())
+    (PRECMD_VALUE_OPTS), and VAR=x words. Returns the index of the next word. ambig_value: whether an option of
+    AMBIG_VALUE_OPTS takes the next word too (the caller tries both)."""
+    name = words[j].plain()
+    vo = PRECMD_VALUE_OPTS.get(name, ())
+    amb = AMBIG_VALUE_OPTS.get(name, ())
     j += 1
     while j < len(words) and ((words[j].plain() or '').startswith('-')
                               or (words[j].parts and words[j].parts[0][0] == 'lit'
                                   and ASSIGN_RX.match(words[j].text()))):
-        j += 2 if words[j].plain() in vo else 1
+        o = words[j].plain()
+        j += 2 if o in vo and (ambig_value or o not in amb) else 1
     return j
 
 
-def findings(command, env=None):
+def has_ambig_opt(words):
+    """Does some prefix word in this command carry an option of AMBIG_VALUE_OPTS (then the head is looked for both
+    ways)? Linear."""
+    names = [w.plain() for w in words]
+    return any(n in AMBIG_VALUE_OPTS and any(m in AMBIG_VALUE_OPTS[n] for m in names[i + 1:i + 40])
+               for i, n in enumerate(names) if n in AMBIG_VALUE_OPTS)
+
+
+def command_lookup_only(words, j):
+    """`command` at j with a -v / -V among its options (also in a cluster: -pv, -vp) only looks the name up and runs
+    nothing (e6a0f476, Viktor 50227 INFO 1: only a separate -v / -V counted, command -pv $X overblocked)."""
+    if words[j].plain() != 'command':
+        return False
+    # an index walk, not words[j + 1:]: the slice copies the whole rest of the command for every `command` word,
+    # so a long "command -p command -p ..." chain took quadratic time (e6a0f476 ReDoS round)
+    for i in range(j + 1, len(words)):
+        o = words[i].plain() or ''
+        if o == '--' or not o.startswith('-') or o.startswith('--') or len(o) < 2:
+            return False
+        if 'v' in o or 'V' in o:
+            return True
+    return False
+
+
+DQ_ESC_RX = re.compile(r'\\([$`"\\\n])')
+
+
+def shell_text(word):
+    """The word as the shell hands it to the program: quotes removed, and inside "..." the backslash before $ ` " \\
+    or a newline dropped (Word.text() keeps it). An unescaped \\$ reads as an expansion: at worst an overblock."""
+    return ''.join(DQ_ESC_RX.sub(r'\1', t) if k == 'dq' else t for k, t in word.parts)
+
+
+def env_split_values(words, j):
+    """The text of every -S / --split-string value of the env at j (quotes removed, expansions kept): env splits it
+    into the command line it runs, so the gate reads it as a command (e6a0f476)."""
+    out = []
+    i = j + 1
+    while i < len(words):
+        o = words[i].plain()
+        t = shell_text(words[i])
+        if o in ENV_SPLIT_OPTS:
+            if i + 1 < len(words):
+                out.append(shell_text(words[i + 1]))
+            i += 2
+            continue
+        if t.startswith('--split-string='):
+            out.append(t[len('--split-string='):])
+        elif t.startswith('-S') and len(t) > 2 and words[i].parts and words[i].parts[0][0] == 'lit':
+            out.append(t[2:])
+        elif not (t.startswith('-') or (words[i].parts and words[i].parts[0][0] == 'lit' and ASSIGN_RX.match(t))):
+            break
+        i += 1 if not (o in PRECMD_VALUE_OPTS['env'] and o not in ENV_SPLIT_OPTS) else 2
+    return out
+
+
+def rm_check(words, k, s, out, amb_v, env, _depth):
+    """Check 5 (rm -r on a variable, every shell) from the head search at k on; appends to out."""
+    j = k
+    while j < len(words):
+        pw = words[j].plain()
+        if pw == 'xargs':
+            # Kernel 41291: "... | xargs rm -rf $S" runs rm too; skip xargs' options (and the value of the ones
+            # that take one as a separate word: -I {} -n 1 -P 4 -L 1 -s N -E eof -d c -J x -R n)
+            j += 1
+            while j < len(words) and (words[j].plain() or '').startswith('-'):
+                o = words[j].plain()
+                j += 2 if o in XARGS_VALUE_OPTS else 1
+            continue
+        if pw == 'env' and _depth < MAX_SPLIT_DEPTH:
+            for v in env_split_values(words, j):
+                out.extend(findings(v, env, _depth + 1))
+        elif pw == 'env' and env_split_values(words, j):
+            out.append(MSG_SPLIT_DEEP.format(d=MAX_SPLIT_DEPTH))
+        if pw == 'command' and command_lookup_only(words, j):
+            return
+        if pw in PRECMD or pw in KEYWORDS:
+            j = skip_prefix_args(words, j, amb_v)
+            continue
+        break
+    # Viktor 41294 LOW 2: "\\rm" (the alias-bypass habit) is rm too: a name of only literal/escaped parts
+    cmd = words[j].text() if j < len(words) and all(k in ('lit', 'esc') for k, _ in words[j].parts) else ''
+    if j < len(words) and cmd.split('/')[-1] == 'rm':
+        args = words[j + 1:]
+        recursive, operands, opts_done = False, [], False
+        for x in args:
+            pw = x.plain()
+            if not opts_done and pw == '--':
+                opts_done = True
+                continue
+            if not opts_done and pw and pw.startswith('-') and len(pw) > 1:
+                if pw == '--recursive' or (not pw.startswith('--') and re.search('[rR]', pw)):
+                    recursive = True
+                continue
+            operands.append(x)
+        if recursive:
+            for x in operands:
+                v = starts_with_var(x)
+                if v and not GUARD_RX.match(v):
+                    out.append(MSG_RM.format(f=s[words[j].start:x.end][:120]))
+                    break
+
+
+def findings(command, env=None, _depth=0):
     env = os.environ if env is None else env
     if not isinstance(command, str) or not command.strip():
         return []
@@ -673,16 +795,19 @@ def findings(command, env=None):
                 out.append(MSG_CMDVAR.format(f=s[head_word.start:words[min(k + 1, len(words) - 1)].end][:120]))
             # ... also after prefix words (indep12 nohup-cmdvar, command-cmdvar: nohup $HJ, command $G); command -v /
             # -V only looks the name up, it runs nothing
-            e2 = k
-            while e2 < len(words) and not flags[e2] and words[e2].plain() in PRECMD:
-                if words[e2].plain() == 'command' and e2 + 1 < len(words) and words[e2 + 1].plain() in ('-v', '-V'):
-                    e2 = len(words)
-                    break
-                e2 = skip_prefix_args(words, e2)
-            if e2 != k and e2 < len(words) and not flags[e2]:
-                name = bare_var(words[e2], allow_dq=True)
-                if name and 'ws' in assigns.get(name, ()) and 'array' not in assigns.get(name, ()):
-                    out.append(MSG_CMDVAR.format(f=s[head_word.start:words[min(e2 + 1, len(words) - 1)].end][:120]))
+            for amb_v in (True, False) if has_ambig_opt(words) else (True,):
+                e2 = k
+                while e2 < len(words) and not flags[e2] and words[e2].plain() in PRECMD:
+                    if command_lookup_only(words, e2):
+                        e2 = len(words)
+                        break
+                    e2 = skip_prefix_args(words, e2, amb_v)
+                if e2 != k and e2 < len(words) and not flags[e2]:
+                    name = bare_var(words[e2], allow_dq=True)
+                    if name and 'ws' in assigns.get(name, ()) and 'array' not in assigns.get(name, ()):
+                        out.append(MSG_CMDVAR.format(
+                            f=s[head_word.start:words[min(e2 + 1, len(words) - 1)].end][:120]))
+                        break
             # 1. for x in $V / set -- $V
             items = []
             if head == 'for' and k + 1 < len(words):
@@ -719,43 +844,13 @@ def findings(command, env=None):
                         out.append(MSG_EQ.format(f=frag(x, s), nf=nf))
                         break
 
-        # 5. rm -r on a variable (every shell)
-        j = k
-        while j < len(words):
-            pw = words[j].plain()
-            if pw == 'xargs':
-                # Kernel 41291: "... | xargs rm -rf $S" runs rm too; skip xargs' options (and the value of the ones
-                # that take one as a separate word: -I {} -n 1 -P 4 -L 1 -s N -E eof -d c -J x -R n)
-                j += 1
-                while j < len(words) and (words[j].plain() or '').startswith('-'):
-                    o = words[j].plain()
-                    j += 2 if o in XARGS_VALUE_OPTS else 1
-                continue
-            if pw in PRECMD or pw in KEYWORDS:
-                j = skip_prefix_args(words, j)
-                continue
-            break
-        # Viktor 41294 LOW 2: "\\rm" (the alias-bypass habit) is rm too: a name of only literal/escaped parts
-        cmd = words[j].text() if j < len(words) and all(k in ('lit', 'esc') for k, _ in words[j].parts) else ''
-        if j < len(words) and cmd.split('/')[-1] == 'rm':
-            args = words[j + 1:]
-            recursive, operands, opts_done = False, [], False
-            for x in args:
-                pw = x.plain()
-                if not opts_done and pw == '--':
-                    opts_done = True
-                    continue
-                if not opts_done and pw and pw.startswith('-') and len(pw) > 1:
-                    if pw == '--recursive' or (not pw.startswith('--') and re.search('[rR]', pw)):
-                        recursive = True
-                    continue
-                operands.append(x)
-            if recursive:
-                for x in operands:
-                    v = starts_with_var(x)
-                    if v and not GUARD_RX.match(v):
-                        out.append(MSG_RM.format(f=s[words[j].start:x.end][:120]))
-                        break
+        # 5. rm -r on a variable (every shell); with an ambiguous prefix option (sudo -h) the head is looked for both
+        # ways (e6a0f476)
+        for amb_v in (True, False) if has_ambig_opt(words) else (True,):
+            n_out = len(out)
+            rm_check(words, k, s, out, amb_v, env, _depth)
+            if len(out) > n_out:
+                break
 
     if zsh:
         masked = masked_text(p)
