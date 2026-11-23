@@ -69,6 +69,11 @@ last letter takes a value takes the next word (exec -cla x, env -vu FOO, sudo -i
 env -P altpath takes a value; a quoted option or VAR=x word ("-a", "-S", "FOO=a b") is still one; zsh's `- cmd`
 is a prefix word; `set --` after prefix words (noglob, builtin) is check 1 too. Only the first split option of a
 command recurses (its text holds the words after it): a 150 KB env -S chain is a few parses, not one per env word.
+Round 3 (Viktor 50471 R1, L1-L4, I1): the split value is judged a second time as env reads its escapes (a backslash-c
+ends it, backslash-underscore / -t / -n, a tab and a newline separate words; the words after it are still appended);
+a prefix word written with a path, quotes or a backslash (/usr/bin/env, "/usr/bin/env", \\env, 'nohup', '-',
+/usr/bin/xargs) is the same prefix word (keywords stay unquoted-only); sudo -R / --chroot take a directory; the
+ambiguous -h is found anywhere after its prefix word (no window) and also as the last letter of a cluster (-Eh).
 Tests: python3 -I scripts/hooks/zsh-trap-gate_test.py
 """
 import json
