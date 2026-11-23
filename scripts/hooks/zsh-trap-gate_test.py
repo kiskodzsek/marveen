@@ -346,7 +346,10 @@ def contract_internal_error_fails_open_and_logs(_):
              % (HOOK, HOOK, json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'echo ==='}}))],
             capture_output=True, text=True, timeout=20,
             env={'PATH': '/usr/bin:/bin', 'HOOK_ERRLOG_PATH': log}).returncode
-        logged = os.path.exists(log) and 'zsh-trap-gate' in open(log, encoding='utf-8').read()
+        logged = False
+        if os.path.exists(log):
+            with open(log, encoding='utf-8') as f:  # closed: an open file is a ResourceWarning under -W error
+                logged = 'zsh-trap-gate' in f.read()
     return code == 0 and logged
 
 
@@ -447,6 +450,10 @@ def prefix_round2_split_rest_clusters_quoted_options_dash_and_set_after_prefix(_
         blocks('env -S' + r, rm) and blocks("env -S 'rm -rf' $S", rm) and blocks('env -S env -S' + r, rm)
         and blocks('echo $(env -S' + r + ')', rm) and blocks("env -S 'rm #x' -rf $S", rm)
         and passes("env -S 'echo #' rm -rf $S") and passes("env -S 'echo rm -rf' $S")
+        # ... and after the split value the next word is no command of its own, for set and the variable-as-command
+        # check too (env -S echo set -- $V runs `echo set -- ...`; a mutant that read on past -S overblocked these)
+        and passes("V='a b'; env -S echo set -- $V") and passes("V='a b'; env -S 'echo' set -- $V")
+        and passes('HJ="a b"; env -S echo $HJ') and passes('HJ="a b"; env -S \'printf %s\' $HJ')
         # L2: a cluster whose last letter takes a value takes the next word; a glued value does not
         and blocks('exec -cla x' + r, rm) and blocks('exec -lca x' + r, rm) and blocks('true && exec -ca x' + r, rm)
         and blocks('true | exec -cla x' + r, rm) and blocks('true\nexec -cla x' + r, rm)
