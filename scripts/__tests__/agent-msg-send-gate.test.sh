@@ -165,6 +165,17 @@ rows = [
     ('111', '18145', 'in', 'Hova tégy még egy képet?', 10220),
     ('111', '18146', 'in', 'Melyik a jó: a kék vagy a piros?', 10230),
     ('111', '18147', 'in', 'Hol tart a nyomda, Bence? Vagy mikor jön a csomag?', 10240),
+    ('111', '18148', 'in', 'Mikor hívjalak fel újra?', 10250),
+    ('111', '18149', 'in', 'Mikor keresselek meg téged?', 10260),
+    ('111', '18150', 'in', 'Mikor hívnálak fel?', 10270),
+    ('111', '18151', 'in', 'Mikor, holnap avagy pénteken?', 10280),
+    ('111', '18152', 'in', 'Melyik borító: kék/piros?', 10290),
+    ('111', '18153', 'in', 'Hányszor eddz egy héten?', 10300),
+    ('111', '18154', 'in', 'Mikor gyertek át hozzánk?', 10310),
+    ('111', '18155', 'in', 'Melyik a kiküldendő verzió?', 10320),
+    ('111', '18156', 'in', 'Hova lőj a képen?', 10330),
+    ('111', '18157', 'in', 'Mikor kiküldeni a levelet?', 10340),
+    ('111', '18158', 'in', 'Mikor kérnélek meg rá?', 10350),
 ]
 con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
                 "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
@@ -703,6 +714,28 @@ text "$WO
 KERES-SZO-SZERINT: \"Hol tart a nyomda, Bence? Vagy mikor jön a csomag\" (TG 18147)"
 run klodel dave
 ok "keres r4: a comma and a \"vagy\" in two sentences (TG 18147) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+# card 8dd5c726 round 5 (Viktor 50837, Klodel's decision on the card): the -lak/-lek ending (choice and conditional)
+# and "avagy" after a comma stay ideas, one row per shape
+for pair in '18148|Mikor hívjalak fel újra' '18149|Mikor keresselek meg téged' '18150|Mikor hívnálak fel' \
+            '18151|Mikor, holnap avagy pénteken' '18158|Mikor kérnélek meg rá'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r5: choice stays an idea, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres r5: the refusal is the IGEN one ($tg)" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# known limits imperative-2sg-bare-vowel-j, infinitive-bare, or-alternatives-slash, imperative-2sg-bare-ddz,
+# imperative-irregular, participle-ando-endo (msg_gate.py header, Viktor 50837, Klodel's decision): pass as requests;
+# pinned, one row each
+for pair in '18156|Hova lőj a képen' '18157|Mikor kiküldeni a levelet' '18152|Melyik borító: kék/piros' \
+            '18153|Hányszor eddz egy héten' '18154|Mikor gyertek át hozzánk' '18155|Melyik a kiküldendő verzió'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r5: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+done
 # Viktor 41430 INFO 1: a ledger path with ? # % keeps mode=ro and opens the right file; the connection is read-only
 mkdir -p "$SANDBOX/a?b#c%d" && cp "$SANDBOX/ledger.db" "$SANDBOX/a?b#c%d/ledger.db"
 text "$WO

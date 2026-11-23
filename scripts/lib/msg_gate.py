@@ -72,12 +72,14 @@ Rules:
        IGEN: TG m
    where m is a later inbound message in the same chat holding a yes word (igen, ok, oké, mehet, jó,
    csináld, persze, rendben, hajrá, pontosan) that is not negated and does not end a question.
-   A question of fact is a request (card 8dd5c726, is_idea): "?" with mekkora, mennyi, mikor, hol, ...
-   and no idea mark, conditional or choice form ("mennyiért adjuk?", "mennyit érne?" stay ideas).
-   Known limits, by name: info-question-word-list, imperative-3sg-definite, imperative-2sg-short-d,
-   hat-het, modal-infinitive, comparative, indicative-decision, imperative-2sg-bare-gy,
-   or-alternatives-without-comma (pinned: agent-msg-send-gate.test.sh, "known limit", one row each).
-   info-question-word-list: a question word off the list stays an idea;
+   A question of fact is a request (card 8dd5c726, is_idea) unless it holds an idea mark, a conditional or
+   a choice form. Known limits, by name (pinned: agent-msg-send-gate.test.sh "known limit", one row each):
+   info-question-word-list, imperative-3sg-definite, imperative-2sg-short-d, hat-het, modal-infinitive,
+   comparative, indicative-decision, imperative-2sg-bare-gy, or-alternatives-without-comma,
+   imperative-2sg-bare-vowel-j, infinitive-bare, or-alternatives-slash, imperative-2sg-bare-ddz,
+   imperative-irregular, participle-ando-endo.
+   A question of fact: "?" with mekkora, mennyi, mikor, hol, ... ("mennyiért adjuk?", "mennyit érne?" stay
+   ideas). info-question-word-list: a question word off the list stays an idea;
    a plain question of fact meant as an idea ("milyen színű a borító?") passes as a request (Klodel's
    Kérés-kapu checks the brief). The choice is a verb form, so a decision asked in other words passes as
    a request too (Viktor 50775; measured: in Patrik's 30 days these shapes ask facts, "hol lehet
@@ -88,7 +90,13 @@ Rules:
    comparative ("melyik a jobb?", "melyik éri meg?", "mi a legjobb ár?"); indicative-decision ("melyik
    borítóval indulunk?"); imperative-2sg-bare-gy, the bare -gy ("hova tégy?": "egy", "vagy", "nagy",
    "megy" end the same way); or-alternatives-without-comma, a choice of "X vagy Y" with no comma before
-   it ("melyik a jó: a kék vagy a piros?"; "vagy hol?" asks a fact).
+   it ("melyik a jó: a kék vagy a piros?"; "vagy hol?" asks a fact); imperative-2sg-bare-vowel-j, a bare
+   -j after a vowel ("hova lőj?": "fej", "díj", "új" end the same way); infinitive-bare, an infinitive with
+   no modal ("mikor kiküldeni?": "mit kell tenni?" holds one too). Round 5 (Klodel's decision on card
+   8dd5c726: the last fixing round, only -lak/-lek and "avagy" into code): or-alternatives-slash ("kék/
+   piros?"), imperative-2sg-bare-ddz ("hányszor eddz?"), imperative-irregular ("mikor gyertek?"),
+   participle-ando-endo ("melyik a kiküldendő verzió?"); each turned 0 of Patrik's 126 fact questions in
+   the measure (r5/variants5.py) and is left out by that decision, not by the measure.
    The message_id alone is ambiguous (measured: private and group chat both hold ids 10-999), so any
    ledger row with that id counts, but the IGEN must be in the chat where the quote was found.
    Measured 2026-11-13 on 30 days of Klodel's messages (9495): 752 hand out work, 623 of them name a
@@ -463,13 +471,18 @@ INFO_QUESTION = re.compile(_B + r'(?:mekkora|mennyi(?:be|t|re|ert|vel)?|hany(?:a
 # Measured as in round 3 (work/keres-info-1123/r4/variants4.py, 126 '?' sentences that round 3 reads as requests): each
 # bare assimilated form and the comma + "vagy" turn 0 into ideas. The bare -gy would turn 13 ("egy", "vagy", "nagy",
 # "megy"), any "vagy" 5 ("vagy hol?"): Known limits imperative-2sg-bare-gy and or-alternatives-without-comma.
-CONDITIONAL = re.compile(_B + r'(?:volna|[a-z]{2,}n(?:a|e|ak|ek|am|em|al|el|ad|ed|atok|etek))'
+# Round 5 (Viktor 50837: 10 shapes outside the named classes; Klodel on card 8dd5c726: the last fixing round, only
+# -lak/-lek and "avagy" into code, every other shape a named Known limit): the choice and the conditional also take
+# the -lak/-lek person ending (I you: "hívjalak", "keresselek", "hívnálak"), and ALTERNATIVES takes "avagy" after a
+# comma as "vagy". Measured as in round 4 (work/keres-info-1123/r5/variants5.py, 126 '?' sentences that round 4 reads
+# as requests): each turns 0 into ideas. The other six shapes are Known limits in the module header.
+CONDITIONAL = re.compile(_B + r'(?:volna|[a-z]{2,}n(?:a|e|ak|ek|am|em|al|el|ad|ed|atok|etek|alak|elek))'
                          r'(?![a-z0-9])')
 CHOICE = re.compile(_B + r'(?:(?:[a-z]{2,}(?:zz|ssz|ss|ts)|[a-z]+(?:j|gy|ddz))'
-                    r'(?:uk|unk|onk|enk|ak|ek|am|em|on|en|atok|etek|al|el|ad|ed)'
+                    r'(?:uk|unk|onk|enk|ak|ek|am|em|on|en|atok|etek|al|el|ad|ed|alak|elek)'
                     r'|[a-z]*[bcdfghjklmnpqrstvwxyz]j|[a-z]+(?:dd|sd|zd|gyd)|[a-z]{2,}(?:zz|ssz|ss|ts))'
                     r'(?![a-z0-9])')
-ALTERNATIVES = re.compile(r',[^,?]*' + _B + r'vagy(?![a-z0-9])')
+ALTERNATIVES = re.compile(r',[^,?]*' + _B + r'a?vagy(?![a-z0-9])')
 
 
 def is_idea(sentence):
