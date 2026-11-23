@@ -56,12 +56,11 @@ Rules:
    "nem kell PR, de indulhat a kód" stays refused. A missing lock file means no lock; an unreadable or
    malformed one is a gate failure (exit 4), never a silent "nothing locked".
 
-5. REQUEST VERBATIM (retro 2026-11-13 R5, card 858f80bc): a request was over-read six times in a week
-   (an idea turned into a production plan, an opinion read as a stop, an unrequested change; Patrik TG
-   17827 "ki a faszom adott erre utasitast?", TG 17829 "ötleteltem cska"). A text from KERES_FROM
-   (default "klodel") that hands out work -- a "Kész, ha:" anywhere or a "FELADAT (Patrik TG n)" header --
-   and names a Patrik message ("Patrik ... TG n", same sentence, within 40 characters) is refused unless
-   it carries a line
+5. REQUEST VERBATIM (retro 2026-11-13 R5, card 858f80bc): a request was over-read six times in a week (an idea
+   turned into a production plan, an opinion read as a stop, an unrequested change; Patrik TG 17827 "ki a faszom
+   adott erre utasitast?", TG 17829 "ötleteltem cska"). A text from KERES_FROM (default "klodel") that hands out
+   work -- a "Kész, ha:" anywhere or a "FELADAT (Patrik TG n)" header -- and names a Patrik message ("Patrik ...
+   TG n", same sentence, within 40 characters) is refused unless it carries a line
        KERES-SZO-SZERINT: "<Patrik's words, at least 3, contiguous>" (TG n)
    whose quote is found, accent- and whitespace-insensitively, in an inbound Telegram message n of the
    main agent's ledger (store/claudeclaw.db, conversation_log, direction 'in', read-only). If the text
@@ -72,6 +71,40 @@ Rules:
        IGEN: TG m
    where m is a later inbound message in the same chat holding a yes word (igen, ok, oké, mehet, jó,
    csináld, persze, rendben, hajrá, pontosan) that is not negated and does not end a question.
+   A question of fact is a request (card 8dd5c726, is_idea) unless it holds an idea mark, a conditional or a
+   choice form. Known limits, by name (pinned: agent-msg-send-gate.test.sh "known limit", one row each):
+   info-question-word-list, imperative-3sg-definite, imperative-2sg-short-d, hat-het, modal-infinitive,
+   comparative, indicative-decision, imperative-2sg-bare-gy, or-alternatives-without-comma,
+   imperative-2sg-bare-vowel-j, infinitive-bare, or-alternatives-slash, imperative-2sg-bare-ddz,
+   imperative-irregular, participle-ando-endo, imperative-one-letter-stem-assimilated,
+   or-alternatives-abbreviated, participle-hato-heto, or-alternatives-enumeration, or-alternatives-english-or.
+   A question of fact: "?" with mekkora, mennyi, mikor, hol, ... ("mennyiért adjuk?", "mennyit érne?" stay
+   ideas). info-question-word-list: a question word off the list stays an idea;
+   a plain question of fact meant as an idea ("milyen színű a borító?") passes as a request (Klodel's
+   Kérés-kapu checks the brief). The choice is a verb form, so a decision asked in other words passes as
+   a request too (Viktor 50775; measured: in Patrik's 30 days these shapes ask facts, "hol lehet
+   szerkeszteni?", "mennyi kell utalni?"): imperative-3sg-definite -ja/-je ("ki vigye?", the indicative
+   of most fact questions); imperative-2sg-short-d, -d after a consonant other than d s z gy ts ("kérd",
+   "csináld"; "mi a gond?" has the same shape); hat-het, a -hat/-het verb ("mennyiért adhatom el?");
+   modal-infinitive, kell / lehet / szabad / illik with an infinitive ("melyik verziót lehet kiküldeni?");
+   comparative ("melyik a jobb?", "melyik éri meg?", "mi a legjobb ár?"); indicative-decision ("melyik
+   borítóval indulunk?"); imperative-2sg-bare-gy, the bare -gy ("hova tégy?": "egy", "vagy", "nagy",
+   "megy" end the same way); or-alternatives-without-comma, a choice of "X vagy Y" with no comma before
+   it ("melyik a jó: a kék vagy a piros?"; "vagy hol?" asks a fact); imperative-2sg-bare-vowel-j, a bare
+   -j after a vowel ("hova lőj?": "fej", "díj", "új" end the same way); infinitive-bare, an infinitive with
+   no modal ("mikor kiküldeni?": "mit kell tenni?" holds one too). Round 5 (Klodel's decision on card
+   8dd5c726: the last fixing round, only -lak/-lek and "avagy" into code): or-alternatives-slash ("kék/
+   piros?"), imperative-2sg-bare-ddz ("hányszor eddz?"), imperative-irregular ("mikor gyertek?"),
+   participle-ando-endo ("melyik a kiküldendő verzió?"); each turned 0 of Patrik's 126 fact questions in
+   the measure (r5/variants5.py) and is left out by that decision, not by the measure. Two more names
+   after round 5 (Viktor 50848, Klodel's decision: the ceiling is per class, no new round):
+   imperative-one-letter-stem-assimilated, a one-letter stem before the assimilated -ss/-ssz/-zz ("hova üss?",
+   "hány részre osszuk el?", "mikor űzzük ki?": the CHOICE needs two letters before it);
+   or-alternatives-abbreviated, "v" or "vs" for "vagy" ("melyik a jó, a kék v a piros?": ALTERNATIVES knows
+   only the word "(a)vagy"). Then (Viktor 50862, the same decision): participle-hato-heto, a -ható/-hető
+   participle ("melyik a kiküldhető verzió?": hat-het is the verb, participle-ando-endo the -andó/-endő);
+   or-alternatives-enumeration, a list with no "vagy" ("melyik szín: kék, piros, zöld?");
+   or-alternatives-english-or ("melyik branch, main or develop?").
    The message_id alone is ambiguous (measured: private and group chat both hold ids 10-999), so any
    ledger row with that id counts, but the IGEN must be in the chat where the quote was found.
    Measured 2026-11-13 on 30 days of Klodel's messages (9495): 752 hand out work, 623 of them name a
@@ -395,8 +428,78 @@ def source_sentence(text, i, j):
     return text[a:(min(ends) + 1 if ends else len(text))]
 
 
+# Card 8dd5c726 (Klodel, 11-23): Patrik's information question is his request, not an idea. TG 18808 "kültéri
+# konyha, mekkora piac?" asked a measurement; rule 5 read the "?" as ötletelés and wanted an IGEN, and the
+# decision-reply gate refuses the "Így értem: ... Mehet?" that would have fetched it: a direct question took one more
+# round with Patrik. A "?" sentence with a question word of fact (how big, how much, how many, when, where, from
+# where, which, what kind, what is) is a request, unless it also holds an idea mark, a conditional verb or a form
+# that asks him to choose. Measured on 30 days of his inbound '?' sentences (1831; measure_flip.py, card 8dd5c726):
+# - "miért" is no question word here: "miért nem popup?", "logo-t miért nem?", "miért nem egységesítünk?" suggest;
+# - a conditional stays an idea ("mekkora piac lenne?", TG 18802 "vhogy lehetne ... hogy tudnék beszállni?");
+# - a choice stays an idea, it is his decision (product, money): "hány oldala legyen a receptkönyv?", "milyen üzletbe
+#   kezdjünk?", "hány seat-et vegyek?";
+# - a yes/no question has no question word and stays an idea ("Megcsinálod a borítót holnapra?");
+# - "hogy" and "ki" are not question words (a conjunction, a verb prefix).
+INFO_QUESTION = re.compile(_B + r'(?:mekkora|mennyi(?:be|t|re|ert|vel)?|hany(?:an|szor|at|adik|ra)?|mikor|hol|honnan|'
+                           r'hova|milyen|melyik|mi\s+(?:a|az)|mik\s+(?:a|az))(?![a-z0-9])')
+# Round 2 (Viktor 50740): a word list caught a few inflected forms only, so 14 choice and conditional questions read
+# as requests ("mennyiért adjuk a könyvet?", "mikor küldjük ki?", "melyik közös élményt tennétek bele?", "mennyit
+# érne?"). Both are grammatical shapes now (folded text: ö -> o, ü -> u):
+# - a conditional verb: 2+ letters, "n", a conditional person ending: -na/-ne, -nák/-nék, -nám/-ném, -nál/-nél,
+#   -nád/-néd, -nátok/-nétek ("érne", "csinálnál", "tennétek"); -nának/-nének is the -ák/-ék shape after
+#   "n" ("adna" + n + ak), and -nánk/-nénk ("árulnánk") is an IDEA_MARK already (round-2 mutation: both
+#   alternatives were equivalent, so they are not listed);
+# - a choice (imperative / subjunctive): 2+ letters, the mood sign -j or its assimilated form (-zz, -ssz, -ss, -gy,
+#   -ts: "árazzuk", "válasszam", "fizessük", "tegyük", "higgyük", "tanítsuk"; -ty and -ny of Viktor's
+#   proposal are no mood sign of a verb, they only catch nouns such as "lányon"), a person ending: -uk/-ük, -unk/-ünk,
+#   -ak/-ek, -am/-em, -on/-en/-ön, -atok/-etek ("adjuk", "kérjünk", "induljon", "menjen", "kezdjem"); the 3rd
+#   person plural -janak/-jenek ("induljanak") ends in -nak/-nek and is caught by CONDITIONAL,
+#   and -önk/-enk, Patrik's typo of -ünk (TG 17486 "milyen uzletbe kezdjonk?", named in round 1).
+# Both over-catch: the dative and adessive -nak/-nek, -nál/-nél ("a csomagnak", "a gépnél"), the indicative
+# "csináljuk" (we do it), a noun such as "hegyen", "hajón", "színe". An over-caught fact question stays an idea and
+# wants an IGEN, the side the rule had before this card (Viktor 50740: "A túlfogás ... ötlet marad, az a régi,
+# biztonságos oldal"). Not caught: the 3rd person definite imperative -ja/-je ("ki vigye?"): it is the indicative of
+# most fact questions ("hol tartja?"); Known limit imperative-3sg-definite in the module header.
+# Round 3 (Viktor 50775: 2nd person singular, -ddz, a one-letter stem read as requests): the choice also takes
+# - the 2nd person singular long forms -jál/-jél, -jad/-jed ("kérjél", "küldjed"; also after the assimilated signs);
+# - the assimilated sign -ddz of a stem in -dz ("eddzük") and a one-letter stem before -j, -gy, -ddz ("igyunk",
+#   "együnk");
+# - the bare short forms: a consonant + -j ("kérj", "adj", "csinálj") and -dd, -sd, -zd, -gyd ("küldd", "tedd",
+#   "fizesd", "hozd", "hagyd"); -tsd ("tanítsd") ends in -sd (round-3 mutation: a -tsd alternative was equivalent).
+# Measured on the 129 '?' sentences of Patrik's 30 days that round 2 reads as requests (work/keres-info-1123/r3/
+# variants.py): the long forms turn 2 into ideas (the instrumental -ssal/-zzel: "prototípussal", "eszközzel"), -dd 1
+# ("group add"), the rest 0. The short -d after any other consonant ("kérd", "csináld") would turn 4 ("mi a gond?",
+# "majd"): Known limit imperative-2sg-short-d in the module header.
+# Round 4 (Viktor 50820: the bare 2nd person singular with an assimilated sign, and a choice of alternatives, read as
+# requests): the choice also takes
+# - the bare assimilated forms -zz, -ssz, -ss, -ts ("fűzz", "válassz", "fizess", "taníts") and -jj after a vowel
+#   ("fújj"; j joins the consonant class of the bare consonant + -j);
+# - ALTERNATIVES: "vagy" after a comma in the same sentence ("melyik a jó, a kék vagy a piros?", "mikor, holnap vagy
+#   jövő héten?").
+# Measured as in round 3 (work/keres-info-1123/r4/variants4.py, 126 '?' sentences that round 3 reads as requests): each
+# bare assimilated form and the comma + "vagy" turn 0 into ideas. The bare -gy would turn 13 ("egy", "vagy", "nagy",
+# "megy"), any "vagy" 5 ("vagy hol?"): Known limits imperative-2sg-bare-gy and or-alternatives-without-comma.
+# Round 5 (Viktor 50837: 10 shapes outside the named classes; Klodel on card 8dd5c726: the last fixing round, only
+# -lak/-lek and "avagy" into code, every other shape a named Known limit): the choice and the conditional also take
+# the -lak/-lek person ending (I you: "hívjalak", "keresselek", "hívnálak"), and ALTERNATIVES takes "avagy" after a
+# comma as "vagy". Measured as in round 4 (work/keres-info-1123/r5/variants5.py, 126 '?' sentences that round 4 reads
+# as requests): each turns 0 into ideas. The other six shapes are Known limits in the module header.
+CONDITIONAL = re.compile(_B + r'(?:volna|[a-z]{2,}n(?:a|e|ak|ek|am|em|al|el|ad|ed|atok|etek|alak|elek))'
+                         r'(?![a-z0-9])')
+CHOICE = re.compile(_B + r'(?:(?:[a-z]{2,}(?:zz|ssz|ss|ts)|[a-z]+(?:j|gy|ddz))'
+                    r'(?:uk|unk|onk|enk|ak|ek|am|em|on|en|atok|etek|al|el|ad|ed|alak|elek)'
+                    r'|[a-z]*[bcdfghjklmnpqrstvwxyz]j|[a-z]+(?:dd|sd|zd|gyd)|[a-z]{2,}(?:zz|ssz|ss|ts))'
+                    r'(?![a-z0-9])')
+ALTERNATIVES = re.compile(r',[^,?]*' + _B + r'a?vagy(?![a-z0-9])')
+
+
 def is_idea(sentence):
-    return '?' in sentence or any(m in sentence for m in IDEA_MARKS)
+    if any(m in sentence for m in IDEA_MARKS):
+        return True
+    if '?' not in sentence:
+        return False
+    return not (INFO_QUESTION.search(sentence) and not CONDITIONAL.search(sentence) and not CHOICE.search(sentence)
+                and not ALTERNATIVES.search(sentence))
 
 
 def says_yes(folded):

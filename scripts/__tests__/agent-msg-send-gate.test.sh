@@ -86,6 +86,102 @@ rows = [
     ('111', '18061', 'in', 'Szerintem a gomb legyen piros.', 9100),
     ('111', '18062', 'in', 'Mi van, ha kékre festjük a hátteret.', 9200),
     ('111', '18063', 'in', 'Mi van ha zöld lesz a háttér.', 9300),
+    # card 8dd5c726: Patrik's verbatim TG 18808 and 18802 (store/claudeclaw.db), and the shapes that stay ideas
+    ('111', '18808', 'in', 'kültéri konyha, mekkora piac?', 9400),
+    ('111', '18802', 'in', 'építészetben vhogy lehetne hasznositani vaagy hogy tudnék beszállni?', 9410),
+    ('111', '18070', 'in', 'Mekkora piac lenne erre?', 9420),
+    ('111', '18071', 'in', 'Hány oldala legyen a receptkönyv?', 9430),
+    ('111', '18072', 'in', 'Miért nem popup?', 9440),
+    ('111', '18073', 'in', 'Milyen közönséget érintő problémára nyújtana megoldást?', 9450),
+    ('111', '18074', 'in', 'Hány seat-et vegyek?', 9460),
+    ('111', '18075', 'in', 'Hol tartunk most a folyamatban?', 9470),
+    ('111', '18076', 'in', 'Mennyi kredit ment el a keretből?', 9480),
+    # card 8dd5c726 round 2 (Viktor 50740): choice and conditional shapes that stay ideas, and two known-limit pins
+    ('111', '18080', 'in', 'Milyen színűre csináljuk a borítót?', 9500),
+    ('111', '18081', 'in', 'Mennyiért adjuk a könyvet?', 9510),
+    ('111', '18082', 'in', 'Melyik képet tegyük be?', 9520),
+    ('111', '18083', 'in', 'Mikor induljon a kampány?', 9530),
+    ('111', '18084', 'in', 'Milyen áron árazzuk?', 9540),
+    ('111', '18085', 'in', 'Melyik csomagot vegyük meg?', 9550),
+    ('111', '18086', 'in', 'Mennyit kérjünk érte?', 9560),
+    ('111', '18087', 'in', 'Mikor küldjük ki a levelet?', 9570),
+    ('111', '18088', 'in', 'Hogyan nevezzük el, melyik név?', 9580),
+    ('111', '18089', 'in', 'Hol kezdjem el a munkát?', 9590),
+    ('111', '18090', 'in', 'Melyik verzió menjen ki?', 9600),
+    ('111', '18091', 'in', 'Melyik közös élményt tennétek bele?', 9610),
+    ('111', '18092', 'in', 'Mennyiért csinálnál egy logót?', 9620),
+    ('111', '18093', 'in', 'Mennyit érne ez nekünk?', 9630),
+    ('111', '18094', 'in', 'Mennyit fizessünk érte?', 9640),
+    ('111', '18095', 'in', 'Mikor tanítsuk be az ügynököt?', 9650),
+    ('111', '18096', 'in', 'Melyik zenét játsszuk le?', 9660),
+    ('111', '18097', 'in', 'Mikor hozzuk ki az új terméket?', 9670),
+    ('111', '18098', 'in', 'Mikor induljanak a hirdetések?', 9680),
+    ('111', '18099', 'in', 'Milyen színűt csináljatok nekem?', 9690),
+    ('111', '18100', 'in', 'Mennyit írjak a levélbe?', 9700),
+    ('111', '18101', 'in', 'Hova vigyük a csomagot?', 9710),
+    ('111', '18102', 'in', 'Milyen uzletbe kezdjonk most?', 9720),
+    ('111', '18103', 'in', 'Mennyiért csinálnám meg ezt?', 9730),
+    ('111', '18104', 'in', 'Melyik csomagot vennétek meg?', 9740),
+    ('111', '18105', 'in', 'Mennyit adnának érte a vevők?', 9750),
+    ('111', '18106', 'in', 'Mikor csinálnád meg a borítót?', 9760),
+    ('111', '18107', 'in', 'Hol tudnánk eladni a könyvet?', 9770),
+    ('111', '18108', 'in', 'Mennyit kérnék érte összesen?', 9780),
+    ('111', '18109', 'in', 'Mikor döntsük el végleg?', 9790),
+    ('111', '18110', 'in', 'Hány oldalasak legyenek a könyvek?', 9800),
+    ('111', '18113', 'in', 'Mennyit kérjek érte?', 9900),
+    ('111', '18114', 'in', 'Mikor küldjétek el a levelet?', 9910),
+    ('111', '18111', 'in', 'Milyen színű a borító most?', 9810),
+    ('111', '18112', 'in', 'Hova vigye a futár a csomagot?', 9820),
+    ('111', '18115', 'in', 'Mennyit kérj érte?', 9920),
+    ('111', '18116', 'in', 'Mennyit kérjél érte?', 9930),
+    ('111', '18117', 'in', 'Melyik képet küldd ki?', 9940),
+    ('111', '18118', 'in', 'Melyik képet küldjed ki?', 9950),
+    ('111', '18119', 'in', 'Hova tedd a logót?', 9960),
+    ('111', '18120', 'in', 'Mikor fizesd ki a nyomdát?', 9970),
+    ('111', '18121', 'in', 'Mikor eddzük be a modellt?', 9980),
+    ('111', '18122', 'in', 'Milyen bort igyunk a bemutatón?', 9990),
+    ('111', '18123', 'in', 'Hol együnk az egyeztetés után?', 10000),
+    ('111', '18124', 'in', 'Mikor hozd ki az új terméket?', 10010),
+    ('111', '18125', 'in', 'Melyik képet hagyd ki?', 10020),
+    ('111', '18126', 'in', 'Mikor tanítsd be az ügynököt?', 10030),
+    ('111', '18127', 'in', 'Mennyit adj érte?', 10040),
+    ('111', '18128', 'in', 'Hány darabot fizessél ki?', 10050),
+    ('111', '18129', 'in', 'Mikor csináld meg a borítót?', 10060),
+    ('111', '18130', 'in', 'Mennyiért adhatom el?', 10070),
+    ('111', '18131', 'in', 'Melyik verziót lehet kiküldeni?', 10080),
+    ('111', '18132', 'in', 'Melyik a jobb borító?', 10090),
+    ('111', '18133', 'in', 'Melyik borítóval indulunk?', 10100),
+    ('111', '18134', 'in', 'Mennyit adjál érte?', 10110),
+    ('111', '18135', 'in', 'Hova rakjad a logót?', 10120),
+    ('111', '18136', 'in', 'Hány darabot csinálj belőle?', 10130),
+    ('111', '18137', 'in', 'Mikor fizess be?', 10140),
+    ('111', '18138', 'in', 'Melyik nyomdát válassz?', 10150),
+    ('111', '18139', 'in', 'Hány órát taníts be?', 10160),
+    ('111', '18140', 'in', 'Hány képet fűzz be?', 10170),
+    ('111', '18141', 'in', 'Mekkora lufit fújj fel?', 10180),
+    ('111', '18142', 'in', 'Melyik a jó, a kék vagy a piros?', 10190),
+    ('111', '18143', 'in', 'Mikor a kampány, holnap vagy jövő héten?', 10200),
+    ('111', '18144', 'in', 'Milyen ár a csomagra, 9990 vagy 12990?', 10210),
+    ('111', '18145', 'in', 'Hova tégy még egy képet?', 10220),
+    ('111', '18146', 'in', 'Melyik a jó: a kék vagy a piros?', 10230),
+    ('111', '18147', 'in', 'Hol tart a nyomda, Bence? Vagy mikor jön a csomag?', 10240),
+    ('111', '18148', 'in', 'Mikor hívjalak fel újra?', 10250),
+    ('111', '18149', 'in', 'Mikor keresselek meg téged?', 10260),
+    ('111', '18150', 'in', 'Mikor hívnálak fel?', 10270),
+    ('111', '18151', 'in', 'Mikor, holnap avagy pénteken?', 10280),
+    ('111', '18152', 'in', 'Melyik borító: kék/piros?', 10290),
+    ('111', '18153', 'in', 'Hányszor eddz egy héten?', 10300),
+    ('111', '18154', 'in', 'Mikor gyertek át hozzánk?', 10310),
+    ('111', '18155', 'in', 'Melyik a kiküldendő verzió?', 10320),
+    ('111', '18156', 'in', 'Hova lőj a képen?', 10330),
+    ('111', '18157', 'in', 'Mikor kiküldeni a levelet?', 10340),
+    ('111', '18158', 'in', 'Mikor kérnélek meg rá?', 10350),
+    ('111', '18159', 'in', 'Hova üss a képen?', 10360),
+    ('111', '18160', 'in', 'Melyik a jó: kék v a piros?', 10370),
+    ('111', '18161', 'in', 'Hány részre osszuk el a keretet?', 10380),
+    ('111', '18162', 'in', 'Melyik a kiküldhető verzió?', 10390),
+    ('111', '18163', 'in', 'Melyik szín: kék, piros, zöld?', 10400),
+    ('111', '18164', 'in', 'Melyik branch, main or develop?', 10410),
 ]
 con.executemany("INSERT INTO conversation_log (agent_id, chat_id, message_id, direction, text, created_at) "
                 "VALUES ('klodel', ?, ?, ?, ?, ?)", rows)
@@ -517,6 +613,146 @@ KERES-SZO-SZERINT: \"$q\" (TG $tg)"
   run klodel dave
   ok "keres: idea mark, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
   ok "keres: the refusal is the IGEN one" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# card 8dd5c726 (Klodel): Patrik's information question is his request: TG 18808 "kültéri konyha, mekkora piac?" goes
+# out without an IGEN; a conditional, a choice, a "miért nem" suggestion and a yes/no question stay ideas
+for pair in '18808|kültéri konyha, mekkora piac' '18075|Hol tartunk most a folyamatban' \
+            '18076|Mennyi kredit ment el a keretből'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres: info question, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+done
+for pair in '18802|építészetben vhogy lehetne hasznositani' '18070|Mekkora piac lenne erre' \
+            '18071|Hány oldala legyen a receptkönyv' '18072|Miért nem popup' \
+            '18073|Milyen közönséget érintő problémára nyújtana megoldást' '18074|Hány seat-et vegyek'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres: still an idea, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres: the refusal is the IGEN one ($tg)" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# card 8dd5c726 round 2 (Viktor 50740: 14 choice / conditional questions read as requests): a choice (imperative or
+# subjunctive, with the assimilated mood sign) and a conditional stay ideas, one row per shape
+for pair in '18080|Milyen színűre csináljuk a borítót' '18081|Mennyiért adjuk a könyvet' \
+            '18082|Melyik képet tegyük be' '18083|Mikor induljon a kampány' '18084|Milyen áron árazzuk' \
+            '18085|Melyik csomagot vegyük meg' '18086|Mennyit kérjünk érte' '18087|Mikor küldjük ki a levelet' \
+            '18088|Hogyan nevezzük el, melyik név' '18089|Hol kezdjem el a munkát' \
+            '18090|Melyik verzió menjen ki' '18091|Melyik közös élményt tennétek bele' \
+            '18092|Mennyiért csinálnál egy logót' '18093|Mennyit érne ez nekünk' \
+            '18094|Mennyit fizessünk érte' '18095|Mikor tanítsuk be az ügynököt' \
+            '18096|Melyik zenét játsszuk le' '18097|Mikor hozzuk ki az új terméket' \
+            '18098|Mikor induljanak a hirdetések' '18099|Milyen színűt csináljatok nekem' \
+            '18100|Mennyit írjak a levélbe' '18101|Hova vigyük a csomagot' '18102|Milyen uzletbe kezdjonk most' \
+            '18103|Mennyiért csinálnám meg ezt' '18104|Melyik csomagot vennétek meg' \
+            '18105|Mennyit adnának érte a vevők' '18106|Mikor csinálnád meg a borítót' \
+            '18107|Hol tudnánk eladni a könyvet' '18108|Mennyit kérnék érte összesen' \
+            '18109|Mikor döntsük el végleg' '18110|Hány oldalasak legyenek a könyvek' \
+           '18113|Mennyit kérjek érte' '18114|Mikor küldjétek el a levelet'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r2: choice/conditional stays an idea, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres r2: the refusal is the IGEN one ($tg)" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# known limits info-question-word-list and imperative-3sg-definite (msg_gate.py header): a plain question of fact meant
+# as an idea, and the -ja/-je imperative, pass as requests; pinned so a change of either side is seen
+for pair in '18111|Milyen színű a borító most' '18112|Hova vigye a futár a csomagot'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r2: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+done
+# card 8dd5c726 round 3 (Viktor 50775: 2nd person singular, -ddz, a one-letter stem read as requests): the long and
+# the bare short 2nd person singular, -ddz and a one-letter stem before -gy stay ideas, one row per shape
+for pair in '18115|Mennyit kérj érte' '18116|Mennyit kérjél érte' '18117|Melyik képet küldd ki' \
+            '18118|Melyik képet küldjed ki' '18119|Hova tedd a logót' '18120|Mikor fizesd ki a nyomdát' \
+            '18121|Mikor eddzük be a modellt' '18122|Milyen bort igyunk a bemutatón' \
+            '18123|Hol együnk az egyeztetés után' '18124|Mikor hozd ki az új terméket' \
+            '18125|Melyik képet hagyd ki' '18126|Mikor tanítsd be az ügynököt' '18127|Mennyit adj érte' \
+            '18128|Hány darabot fizessél ki' '18134|Mennyit adjál érte' '18135|Hova rakjad a logót' \
+            '18136|Hány darabot csinálj belőle'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r3: choice stays an idea, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres r3: the refusal is the IGEN one ($tg)" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# known limits imperative-2sg-short-d, hat-het, modal-infinitive, comparative, indicative-decision (msg_gate.py header,
+# Viktor 50775): a decision asked in other words than a choice form passes as a request; pinned, one row each
+for pair in '18129|Mikor csináld meg a borítót' '18130|Mennyiért adhatom el' '18131|Melyik verziót lehet kiküldeni' \
+            '18132|Melyik a jobb borító' '18133|Melyik borítóval indulunk'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r3: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+done
+# card 8dd5c726 round 4 (Viktor 50820): the bare 2nd person singular with an assimilated sign (-ss, -ssz, -ts, -zz,
+# vowel + -jj) and a choice of alternatives after a comma stay ideas, one row per shape
+for pair in '18137|Mikor fizess be' '18138|Melyik nyomdát válassz' '18139|Hány órát taníts be' \
+            '18140|Hány képet fűzz be' '18141|Mekkora lufit fújj fel' '18142|Melyik a jó, a kék vagy a piros' \
+            '18143|Mikor a kampány, holnap vagy jövő héten' '18144|Milyen ár a csomagra, 9990 vagy 12990'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r4: choice stays an idea, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres r4: the refusal is the IGEN one ($tg)" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# known limits imperative-2sg-bare-gy and or-alternatives-without-comma (msg_gate.py header, Viktor 50820): pass as
+# requests; pinned, one row each
+for pair in '18145|Hova tégy még egy képet' '18146|Melyik a jó: a kék vagy a piros'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r4: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+done
+# a quote over two sentences: the comma of the first and the "vagy" of the next are no choice (ALTERNATIVES stops at
+# a "?"), so the fact question stays a request
+text "$WO
+KERES-SZO-SZERINT: \"Hol tart a nyomda, Bence? Vagy mikor jön a csomag\" (TG 18147)"
+run klodel dave
+ok "keres r4: a comma and a \"vagy\" in two sentences (TG 18147) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+# card 8dd5c726 round 5 (Viktor 50837, Klodel's decision on the card): the -lak/-lek ending (choice and conditional)
+# and "avagy" after a comma stay ideas, one row per shape
+for pair in '18148|Mikor hívjalak fel újra' '18149|Mikor keresselek meg téged' '18150|Mikor hívnálak fel' \
+            '18151|Mikor, holnap avagy pénteken' '18158|Mikor kérnélek meg rá'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r5: choice stays an idea, \"$q\" (TG $tg) without IGEN: refused" "$(refused)" "rc=$RC posts=$POSTS"
+  ok "keres r5: the refusal is the IGEN one ($tg)" "$(grep -q 'IGEN: TG' "$SANDBOX/err" && echo 0 || echo 1)"
+done
+# known limits imperative-2sg-bare-vowel-j, infinitive-bare, or-alternatives-slash, imperative-2sg-bare-ddz,
+# imperative-irregular, participle-ando-endo (msg_gate.py header, Viktor 50837, Klodel's decision): pass as requests;
+# pinned, one row each
+for pair in '18156|Hova lőj a képen' '18157|Mikor kiküldeni a levelet' '18152|Melyik borító: kék/piros' \
+            '18153|Hányszor eddz egy héten' '18154|Mikor gyertek át hozzánk' '18155|Melyik a kiküldendő verzió'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r5: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
+done
+# known limits imperative-one-letter-stem-assimilated and or-alternatives-abbreviated (msg_gate.py header, Viktor 50848,
+# Klodel's decision on the card: a ceiling per class, no new round), then -ssz in the first, participle-hato-heto,
+# or-alternatives-enumeration, or-alternatives-english-or (Viktor 50862): pass as requests; pinned, one row each
+for pair in '18159|Hova üss a képen' '18160|Melyik a jó: kék v a piros' \
+            '18161|Hány részre osszuk el a keretet' '18162|Melyik a kiküldhető verzió' \
+            '18163|Melyik szín: kék, piros, zöld' '18164|Melyik branch, main or develop'; do
+  tg="${pair%%|*}"; q="${pair#*|}"
+  text "$WO
+KERES-SZO-SZERINT: \"$q\" (TG $tg)"
+  run klodel dave
+  ok "keres r5: known limit, \"$q\" (TG $tg) without IGEN: sent" "$(sent)" "rc=$RC posts=$POSTS"
 done
 # Viktor 41430 INFO 1: a ledger path with ? # % keeps mode=ro and opens the right file; the connection is read-only
 mkdir -p "$SANDBOX/a?b#c%d" && cp "$SANDBOX/ledger.db" "$SANDBOX/a?b#c%d/ledger.db"
