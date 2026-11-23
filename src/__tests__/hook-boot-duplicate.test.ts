@@ -97,6 +97,13 @@ describe('the passes keep their own jobs (47468cc1)', () => {
     const gated = { PreToolUse: [JSON.parse(JSON.stringify(TELEGRAM))] } as Record<string, unknown>
     expect(upgradeLegacyHookCommands(gated, tpl)).toBe(false)
     expect((gated.PreToolUse as Entry[])[0].hooks[0].command).toBe(pythonHookCommand(SCRIPT))
+    // Viktor 50546 B1: only the EXACT fail-closed form of the template's own path is left alone; the probe head
+    // followed by another path, or the real path with a trailing `|| true`, is still rewritten to the template.
+    for (const command of [pythonHookCommand('/tmp/x/time-claim-gate.py'), `${pythonHookCommand(SCRIPT)} || true`]) {
+      const tampered = { PreToolUse: [{ matcher: TELEGRAM_COPY_GATE_MATCHER, hooks: [{ command }] }] } as Record<string, unknown>
+      expect(upgradeLegacyHookCommands(tampered, tpl)).toBe(true)
+      expect((tampered.PreToolUse as Entry[])[0].hooks[0].command).toBe(WRAPPED)
+    }
   })
 
   it('syncHookMatchers re-matches a stale group, but not when the template matcher already carries its commands', () => {

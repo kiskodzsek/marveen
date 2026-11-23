@@ -102,11 +102,9 @@ export function hookCommand(scriptPath: string): string {
 // is the 127 exit, because Claude Code treats 127 as NON-blocking and lets the
 // tool call through -- a gate that silently stops enforcing. So the interpreter
 // is probed first and a miss exits 2, which blocks.
-// The fixed head of every pythonHookCommand: upgradeLegacyHookCommands recognises the fail-closed form by it.
-export const PYTHON_HOOK_PROBE = 'command -v python3 >/dev/null 2>&1 || {'
 export function pythonHookCommand(scriptPath: string): string {
   const miss = 'governance-kapu: a hook interpretere nem talalhato (python3 nincs a PATH-on). A kapu ezert BLOKKOL. Javitas: telepitsd a python3-at, vagy inditsd ujra a dashboardot.'
-  return `${PYTHON_HOOK_PROBE} echo "${miss}" >&2; exit 2; }; python3 "${scriptPath}"`
+  return `command -v python3 >/dev/null 2>&1 || { echo "${miss}" >&2; exit 2; }; python3 "${scriptPath}"`
 }
 
 // Wired-already predicate for the ensure* migrations: is `command` present in
@@ -274,6 +272,7 @@ export function upgradeLegacyHookCommands(
         if (!tplHook.command || isUnsafeHookCommand(tplHook.command)) continue
         const tplBn = _hookScriptBasename(tplHook.command)
         if (!tplBn) continue
+        const tplPath = tplHook.command.match(/\/[^\s'"]+\.(?:py|mjs|js|sh)\b/)?.[0]
         for (const existEntry of existEntries as HookEntry[]) {
           for (const existHook of existEntry.hooks ?? []) {
             if (!existHook.command) continue
@@ -284,7 +283,9 @@ export function upgradeLegacyHookCommands(
             // template matcher, so its inject re-added it on the next boot (card 47468cc1: the time-claim
             // gate's Telegram entry became one more "Write|Edit|MultiEdit|Bash" copy per dashboard boot, 47
             // in every sub-agent by 2026-11-23).
-            if (existBn === tplBn && existHook.command.startsWith(PYTHON_HOOK_PROBE)) continue
+            // Only the EXACT fail-closed form of the template's own script path is left alone (Viktor 50546 B1): a
+            // probe head followed by another path, or by a trailing `|| true`, is still rewritten to the template.
+            if (existBn === tplBn && tplPath && existHook.command === pythonHookCommand(tplPath)) continue
             if (existBn === tplBn && existHook.command !== tplHook.command) {
               existHook.command = tplHook.command
               if (tplHook.timeout != null) existHook.timeout = tplHook.timeout
