@@ -31,6 +31,10 @@ a name find computes, so x.sh keeps the main rules; dash-c-argument (an over-blo
 view reads the next word as a command word, so `bash -c '...' f` judges f by them; a python heredoc body naming a
 file may also judge it (the body is code, a file name in it can be exec'd: fail-closed); pipe-into-shell-with-script
 (an over-block): what a pipe prints into a shell is read as its code even when the shell runs a script file.
+subst-file and backtick-file (round 6b, Viktor r7, main too): a shell's script word made by a command
+substitution or backticks (`bash $(echo f)`, bash `echo f`) is read as printing nothing, like python's;
+heredoc-python-runpath (round 6b, main too): a python heredoc body that runs a file by a quoted path
+(runpy.run_path("f")) does not hand f the git rules.
 Known limits (card deede5e4, Viktor r2 point 4 and 49151; the full list is "Not seen" under Script files below):
 a relative script word whose directory or name comes from a value the gate does not bind passes unread: a
 `while read` loop (piped or from a file), `select`, an arithmetic `for ((..))` loop, cdable_vars, find -execdir
