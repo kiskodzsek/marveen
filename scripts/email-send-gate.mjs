@@ -356,6 +356,8 @@ const WRAPPERS = new Map([
   ['repeat', ['', [], 1]],
   ['noglob', ['', [], 0]],
   ['-', ['', [], 0]],
+  // card 64d10325 round 7 (Viktor 50414 B1): builtin eval runs eval -- see the python twin
+  ['builtin', ['', [], 0]],
 ])
 const HEAD_DEPTH = 8
 // SENDREDIR1122: a redirect before the command word is stepped over (an operator token alone takes its target);

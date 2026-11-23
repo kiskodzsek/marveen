@@ -57,7 +57,7 @@ send-invocation-cases.json, which the conformance test binds to this list):
 Known limits of the eval / -c recursion (Viktor 50403 L1-L3, old: main and the round 4 head miss them too; pinned
 the same way):
   ev-depth4, ev-c-mix4, ev-c-mix4b: a fourth level of eval / bash -c is past the shared depth bound (3) and not read;
-  builtin-eval: `builtin eval` is not unwrapped; eval-ansic: an eval argument in $'...' is not decoded.
+  eval-ansic: an eval argument in $'...' is not decoded. (The builtin eval case is closed: builtin is a wrapper, round 7.)
 Past the SENDFANOUT1123 read budget a harmless deeply nested command counts as a send (an overblock, the safe side;
 e.g. 1 MB of three-level eval with a # and a (( per line in the JS twin).
 
@@ -622,6 +622,8 @@ _WRAPPERS = {
     "repeat": ("", (), 1),
     "noglob": ("", (), 0),
     "-": ("", (), 0),
+    # card 64d10325 round 7 (Viktor 50414 B1, the Known limits ceiling): `builtin eval ...` runs eval
+    "builtin": ("", (), 0),
 }
 _HEAD_DEPTH = 8
 # SENDREDIR1122 (card 64d10325): a redirect may stand before the command word -- `>/dev/null sendmail x`,

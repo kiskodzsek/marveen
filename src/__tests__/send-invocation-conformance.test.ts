@@ -98,7 +98,7 @@ describe('send-invocation conformance: both gates agree with the shared contract
   it('every KNOWN-LIMIT row of the shared list is named in the first 80 lines of the python module', () => {
     const head = readFileSync(GATE_PY, 'utf-8').split('\n').slice(0, 80).join('\n')
     const labels = CASES.cases.filter((c) => c.name.startsWith('KNOWN-LIMIT ')).map((c) => c.name.split(': ').pop()!)
-    expect(labels.length).toBe(15)
+    expect(labels.length).toBe(14)
     for (const l of labels) expect(head, `docstring names ${l}`).toContain(l)
   })
 

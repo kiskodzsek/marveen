@@ -1273,8 +1273,13 @@
       "expected": false
     },
     {
-      "name": "KNOWN-LIMIT (Viktor 50403 L1-L3, old: main and the round 4 head miss it too): builtin-eval",
+      "name": "builtin wrapper (Viktor 50414 B1): builtin eval runs its arguments",
       "cmd": "builtin eval sendmail a@b.hu",
+      "expected": true
+    },
+    {
+      "name": "builtin wrapper (Viktor 50414 B1), control: builtin echo only prints",
+      "cmd": "builtin echo sendmail a@b.hu",
       "expected": false
     },
     {
