@@ -504,6 +504,50 @@ def prefix_round3_split_escapes_prefix_paths_sudo_chroot_and_ambig_clusters(_):
 
 
 @case
+def prefix_round4_ansi_c_backslash_env_separators_equals_glob_and_arch(_):
+    # e6a0f476 round 4 (Viktor 50541). R1b was a round-2 regression (main blocked it): a backslash written in a $'..'
+    # word (doubled, x5c, 134, u005c) is the backslash env reads, so backslash-c cuts the value there. L-a..L-d are
+    # old (main lets them through as well): env -S separates on a real CR, FF and VT too; the backslash-underscore of
+    # L1 inside $'..'; zsh EQUALS (=env) and a glob in the last path segment name the prefix word; macOS arch runs its
+    # program. zsh -f with an rm stub first on PATH runs rm in every BLOCK row and in no ALLOW row
+    # (agents/kernel/work/ztf-r4-1123/oracle_r4.txt).
+    rm = 'RM-VALTOZO-KAPU'
+    r = ' rm -rf $S'
+    return (
+        # R1b
+        blocks("env -S $'\\\\c'" + r, rm) and blocks("env -S $'\\x5cc'" + r, rm)
+        and blocks("env -S $'\\134c'" + r, rm) and blocks("env -S $'\\u005cc'" + r, rm)
+        and passes("env -S 'echo a\\c'" + r) and passes("env -S $'echo a\\x5cc b'")
+        and passes("env -S $'\\\\\\\\c'" + r)  # four backslashes: zsh leaves two, env reads a literal one
+        # L-a: a real CR, FF or VT separates words in the split value
+        and blocks("env -S 'rm\x0c-rf\x0c${S}'", rm) and blocks("env -S 'rm\x0b-rf\x0b${S}'", rm)
+        and blocks("env -S 'rm\r-rf\r${S}'", rm)
+        # L-b: backslash-underscore written inside $'..'
+        and blocks("env -S $'rm\\\\_-rf\\\\_${S}'", rm) and blocks("env -S $'rm\\x5c_-rf\\x5c_${S}'", rm)
+        # L-c: =env and a glob in the last path segment
+        and blocks('=env' + r, rm) and blocks('/usr/bin/[e]nv' + r, rm) and blocks('/usr/bin/en?' + r, rm)
+        and passes('=env ls -la $S') and passes('/usr/bin/l? -la $S') and passes("'=env' ls $S")
+        # L-d: arch and its value options
+        and blocks('arch -arm64' + r, rm) and blocks('arch -arch arm64' + r, rm)
+        and blocks('arch -arm64 -e A=b' + r, rm) and blocks('arch -arm64 -d HOME' + r, rm)
+        and passes('arch') and passes('arch -arm64 ls -la $S'))
+
+
+@case
+def ansi_decode_is_linear(_):
+    # e6a0f476 round 4: ansi_decode is one regex substitution with bounded escapes (Viktor's prop2)
+    import time
+    for unit in ('\\x5c', '\\\\', '\\U0010FFFF', '\\777', 'a\\'):
+        t0 = time.monotonic()
+        gate.ansi_decode(unit * (300 * 1024 // len(unit)))
+        dt = time.monotonic() - t0
+        if dt > 2.0:
+            print(f'  ansi_decode {unit!r} x 300 KB: {dt:.2f} s')
+            return False
+    return gate.ansi_decode('\\U00110000') == '\\U00110000' and gate.ansi_decode('\\#\\$') == '\\#\\$'
+
+
+@case
 def ambig_option_search_is_linear(_):
     # e6a0f476 round 3 (Viktor 50471 L4): has_ambig_opt walks the words once (no window, no slice per prefix word)
     import time

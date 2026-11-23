@@ -74,8 +74,15 @@ ends it, backslash-underscore / -t / -n, a tab and a newline separate words; the
 a prefix word written with a path, quotes or a backslash (/usr/bin/env, "/usr/bin/env", \\env, 'nohup', '-',
 /usr/bin/xargs) is the same prefix word (keywords stay unquoted-only); sudo -R / --chroot take a directory; the
 ambiguous -h is found anywhere after its prefix word (no window) and also as the last letter of a cluster (-Eh).
+Round 4 (Viktor 50541 R1b, L-a..L-d): the split value is also read after zsh's $'..' decoding (ansi_decode: a doubled
+backslash, x5c, 134, u005c is the backslash env reads, so backslash-c cuts and backslash-underscore separates); a
+real CR, FF and VT separate like a tab; an unquoted =name (zsh EQUALS) and a glob in the last path segment
+(/usr/bin/[e]nv, /usr/bin/en?) name the prefix word; macOS arch is a prefix word (-arch, -d, -e take a value).
+Overblocks (the safe side): ansi_decode runs on every value, so a single-quoted doubled backslash + c is cut too;
+env's own backslash-t puts a tab INTO the word, but the model separates on it.
 Tests: python3 -I scripts/hooks/zsh-trap-gate_test.py
 """
+import fnmatch
 import json
 import os
 import re
@@ -116,7 +123,9 @@ PRECMD_VALUE_OPTS = {'sudo': {'-u', '-g', '-h', '-p', '-C', '-D', '-U', '-T', '-
                      'env': {'-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-P'},
                      'caffeinate': {'-t', '-w'},
                      # e6a0f476 (Viktor 50227 LOW 1): exec -a NAME runs the command under another argv[0]
-                     'exec': {'-a'}}
+                     'exec': {'-a'},
+                     # e6a0f476 round 4 (Viktor 50541 L-d): man arch; -arch is one single-dash option word
+                     'arch': {'-arch', '-d', '-e'}}
 # e6a0f476 (Viktor 50227 INFO 2): sudo's -h is --help and -h HOST (the man page lists both and does not say whether a
 # separate next word is the host). Not modeled: the head is looked for both ways, and a finding in either counts.
 AMBIG_VALUE_OPTS = {'sudo': {'-h'}}
@@ -124,7 +133,11 @@ AMBIG_VALUE_OPTS = {'sudo': {'-h'}}
 ENV_SPLIT_OPTS = ('-S', '--split-string')
 MAX_SPLIT_DEPTH = 3
 # e6a0f476 round 2 (Viktor 50424 L5): zsh's `- cmd` runs cmd with a dash before argv[0] (a precommand modifier)
-PRECMD = {'sudo', 'command', 'builtin', 'exec', 'nocorrect', 'noglob', 'nohup', 'env', 'nice', 'caffeinate', '-'}
+# e6a0f476 round 4 (Viktor 50541 L-d): macOS arch runs its program (arch -arm64 rm ... runs rm)
+PRECMD = {'sudo', 'command', 'builtin', 'exec', 'nocorrect', 'noglob', 'nohup', 'env', 'nice', 'caffeinate', '-',
+          'arch'}
+PREFIX_NAMES = PRECMD | {'xargs'}
+GLOB_CHAR_RX = re.compile(r'[*?\[]')
 DECLARERS = {'typeset', 'local', 'declare', 'export', 'readonly', 'integer', 'float'}
 OPERATORS = [';;', ';&', ';|', '&&', '||', '|&', '&!', '&|', ';', '|', '&']
 REDIRECTS = ['&>>', '&>', '>>', '>|', '>!', '>&', '<&', '<>', '>', '<']
@@ -663,11 +676,20 @@ def prefix_name(word):
     plain() for KEYWORDS)."""
     p = word.plain()
     if p is not None and '/' not in p:
-        return p
+        # e6a0f476 round 4 (Viktor 50541 L-c): zsh EQUALS expands an unquoted =name to the command's path
+        return p[1:] if p.startswith('=') and p[1:] in PREFIX_NAMES else p
     if not word.parts or not all(k in ('lit', 'sq', 'dq', 'esc') for k, _ in word.parts):
         return p
     b = shell_text(word).rsplit('/', 1)[-1]
-    return b if b in PRECMD or b == 'xargs' else p
+    if b in PREFIX_NAMES:
+        return b
+    # e6a0f476 round 4 (Viktor 50541 L-c): an unquoted glob in the last path segment matches the file it names
+    # (/usr/bin/[e]nv, /usr/bin/en? run /usr/bin/env); a prefix name it matches counts (at worst an overblock)
+    if p is not None and len(b) <= 64 and GLOB_CHAR_RX.search(b):
+        for n in sorted(PREFIX_NAMES):
+            if fnmatch.fnmatchcase(n, b):
+                return n
+    return p
 
 
 def skip_prefix_args(words, j, ambig_value=True):
@@ -705,7 +727,7 @@ def cluster_value_opt(t, vo):
     as a whole; a short cluster (-cla, -vu, -iu) is read as getopt reads it (e6a0f476 round 2, Viktor 50424 L2): the
     first letter that takes a value ends the cluster, and it takes the next word only when it is the last letter
     (-aNAME, -uFOO carry it glued)."""
-    if t.startswith('--'):
+    if t.startswith('--') or t in vo:  # a whole option word first (arch's single-dash -arch)
         return t if t in vo else None
     for k in range(1, len(t)):
         o = '-' + t[k]
@@ -812,7 +834,7 @@ def env_split_texts(words, j, s):
             # never instead of the first text): a backslash-c ends the value (measured: /usr/bin/env -S 'echo A\c B'
             # x y prints A x y), and backslash-underscore, a tab or a newline (real, or the backslash-t / -n escape
             # that $'..' leaves raw here) separate words like a space (measured by Viktor: env -S 'echo\_U1').
-            for val in (v, env_split_model(v)):
+            for val in dict.fromkeys((v, env_split_model(v), env_split_model(ansi_decode(v)))):
                 for t in (val, cut_split_comment(val)):
                     t = 'env ' + t + ' ' + rest
                     if t not in texts:
@@ -823,7 +845,28 @@ def env_split_texts(words, j, s):
 
 
 SPLIT_COMMENT_RX = re.compile(r'(?:^|(?<=\s))#')
-SPLIT_ESC_RX = re.compile(r'\\(.)|[\t\n]', re.S)
+SPLIT_ESC_RX = re.compile(r'\\(.)|[\t\n\r\f\v]', re.S)
+ANSI_RX = re.compile(r'\\(?:x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|([0-7]{1,3})|(.))', re.S)
+ANSI_SIMPLE = {'a': '\a', 'b': '\b', 'e': '\x1b', 'E': '\x1b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t', 'v': '\v'}
+
+
+def ansi_decode(v):
+    """e6a0f476 round 4 (Viktor 50541 R1b, L-b; his prop2 copy): the value as zsh decodes a $'..' word (the lexer keeps
+    its body raw as 'sq'), so a backslash written as a doubled backslash, x5c, 134 or u005c reaches the split model as
+    the backslash env reads. Only the escapes that can make a backslash or a separator are decoded; a backslash-# and
+    a backslash-$ stay for env to read. Applied to every value (an added text: at worst an overblock). Linear."""
+    def rep(m):
+        h = m.group(1) or m.group(2) or m.group(3)
+        if h:
+            try:
+                return chr(int(h, 16))
+            except (ValueError, OverflowError):
+                return m.group(0)
+        if m.group(4):
+            return chr(int(m.group(4), 8))
+        e = m.group(5)
+        return '\\' if e == '\\' else ANSI_SIMPLE.get(e, m.group(0))
+    return ANSI_RX.sub(rep, v)
 
 
 def cut_split_comment(v):
