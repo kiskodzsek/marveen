@@ -126,15 +126,42 @@ export function bgReleaseWindowOpen(
   return !!state?.bgReleased && !state.bgRestopSent && !state.bgRefreshSent
 }
 
+// Card 0365c84e (Klodel 51628, measured 2026-11-24): the hold serves a restart
+// that is due at the phase's deadline. Past it, a busy pane defers the restart
+// with no upper bound (decideGuard: "handoff timeout but agent mid-turn --
+// deferring restart"; a background agent counts as busy and has no cap), and the
+// per-row cap restarted for every NEW row, so the hold became a blackout: Dave
+// sat in await-handoff from 07:42 (the 88 % request, 51231) past 15:00, a
+// background agent "waiting on 2 shells since 5:08 AM", and every row to him
+// (8 between 14:01 and 14:42) waited until Klodel typed it into the pane by
+// hand. So the await-handoff hold ends where the designed path ends: the
+// deadline, one full sweep and the slack (the same terms as guardHoldCapMs).
+// A refresh request (bgRefreshSent) moves the deadline, and with it the hold.
+// Fails closed (keeps the hold) on anything but two finite numbers and a
+// positive deadline, and compares a difference, so a string deadline cannot
+// concatenate and a huge one cannot absorb the margin (Viktor 51637 L1).
+export function holdPastPhaseDeadline(
+  state: Partial<Pick<GuardState, 'deadlineMs'>> | null | undefined, nowMs: number | undefined,
+): boolean {
+  const deadlineMs: unknown = state?.deadlineMs
+  if (typeof nowMs !== 'number' || typeof deadlineMs !== 'number') return false
+  if (!Number.isFinite(nowMs) || !Number.isFinite(deadlineMs) || !(deadlineMs > 0)) return false
+  return nowMs - deadlineMs >= INTERVAL_MS + GUARD_HOLD_SLACK_MS
+}
+
 /** Which hold a guard phase puts on the router, with its cap. Pure, for the test.
  *  `state` (ROUTERHOLD1028): the guard state of that phase, for the background
- *  release window; absent = no release, the phase alone decides. */
+ *  release window; absent = no release, the phase alone decides. `nowMs` (card
+ *  0365c84e): with it, an await-handoff past its deadline holds nothing; absent =
+ *  no deadline check. */
 export function deliveryHoldForPhase(
   phase: string, cfg: Pick<ContextGuardConfig, 'handoffTimeoutMinutes'>,
-  state?: Pick<GuardState, 'bgReleased' | 'bgRestopSent' | 'bgRefreshSent'> | null,
+  state?: (Pick<GuardState, 'bgReleased' | 'bgRestopSent' | 'bgRefreshSent'> & Partial<Pick<GuardState, 'deadlineMs'>>) | null,
+  nowMs?: number,
 ): DeliveryHold | null {
   if (phase === 'await-handoff') {
     if (bgReleaseWindowOpen(state)) return null
+    if (holdPastPhaseDeadline(state, nowMs)) return null
     // ROUTERHOLD1028: the router's [delivery-held] alert says which STOP the
     // hold is serving, so the reader does not have to open the guard log.
     const detail = state?.bgRestopSent
@@ -156,7 +183,7 @@ export function guardDeliveryHold(name: string): DeliveryHold | null {
   const state = guardStates.get(name)
   const phase = state?.phase ?? 'idle'
   if (phase !== 'await-handoff' && phase !== 'await-ready') return null
-  return deliveryHoldForPhase(phase, readContextGuardConfig(name), state)
+  return deliveryHoldForPhase(phase, readContextGuardConfig(name), state, Date.now())
 }
 
 // How long the dispatch gate honours one sweep's "this banner is not
