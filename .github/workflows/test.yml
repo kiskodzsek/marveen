@@ -74,6 +74,9 @@ jobs:
       # error path that said SKIP would silence the alert. Hermetic: KHP_*
       # paths point at throwaway files, the guard state is never written.
       - run: python3 scripts/__tests__/kernel-heartbeat-precheck.test.py
+      # patrik-csend-or preCheck (Klodel 52701/52712): the wrapper says SKIP only on the guard's 0 and 10, never
+      # on a Python crash (1) or an ERROR (2), or the owner-silence alert would go quiet. Hermetic: a fake guard.
+      - run: python3 -I scripts/__tests__/patrik-csend-or-precheck.test.py
       # MEMLINKAUDIT915: the audit's own footer calls UNRESOLVED the repair
       # queue, so an over-report sends someone to rewrite working links. The
       # over-report GROWS with every consolidation round, which is why this
