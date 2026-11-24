@@ -53,6 +53,7 @@ vi.mock('../web/agent-process.js', () => ({
 const {
   guardPaneSignals, fastRoundBgActs, bgDeferredContinuePrompt, bgDeferredRefreshPrompt,
   deliveryHoldForPhase, bgReleaseWindowOpen, guardHoldCapMs, guardReadyHoldCapMs,
+  holdPastPhaseDeadline, INTERVAL_MS, GUARD_HOLD_SLACK_MS,
 } = await import('../web/context-guard-runner.js')
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -351,7 +352,74 @@ describe('the main thread is released while its background agents defer the rest
     })
 
     it('the runner hands the guard state to the hold, not the phase alone', () => {
-      expect(runner).toContain('deliveryHoldForPhase(phase, readContextGuardConfig(name), state)')
+      expect(runner).toContain('deliveryHoldForPhase(phase, readContextGuardConfig(name), state, Date.now())')
     })
+  })
+})
+
+// Card 0365c84e (Klodel 51628, measured 2026-11-24): Dave in await-handoff from
+// the 07:42 request (88 %) past 15:00, a background agent "waiting on 2 shells
+// since 5:08 AM" deferring the restart with no upper bound, and the router
+// holding every new row for its own 27 minutes. The hold now ends where the
+// designed path ends: the phase deadline, one full sweep, the slack.
+describe('0365c84e: the await-handoff hold ends at the phase deadline', () => {
+  const CFG: ContextGuardConfig = { ...DEFAULT_CONTEXT_GUARD, enabled: true, actPct: 0.7, hardPct: 0.97 }
+  const NOW = 2_000_000_000
+  const inputs = (o: Partial<GuardInputs> = {}): GuardInputs => ({
+    nowMs: NOW, pct: 0.88, running: true,
+    paneIdle: false, paneBusy: true, backgroundAgents: 1, mainIdle: false,
+    sessionReady: false, handoffMtime: null, paneSaturated: false, dailyHandoffDue: false,
+    contextTokens: null, idleMs: null, ...o,
+  })
+  const requested = (): GuardState => {
+    const d = decideGuard(INITIAL_GUARD_STATE, inputs(), CFG)
+    expect(d.action).toBe('request-handoff')
+    expect(d.nextState.phase).toBe('await-handoff')
+    return d.nextState
+  }
+  const END = (s: GuardState) => s.deadlineMs + INTERVAL_MS + GUARD_HOLD_SLACK_MS
+
+  it('the measured shape: past the deadline the guard still defers (a background agent counts as busy)', () => {
+    const s = requested()
+    const d = decideGuard(s, inputs({ nowMs: s.deadlineMs + 7 * 3_600_000 }), CFG)
+    expect(d.action).toBe('none')
+    expect(d.nextState.phase).toBe('await-handoff')
+  })
+
+  it('inside the designed path the hold is unchanged', () => {
+    const s = requested()
+    const want = { reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(CFG) }
+    expect(deliveryHoldForPhase(s.phase, CFG, s, NOW)).toEqual(want)
+    expect(deliveryHoldForPhase(s.phase, CFG, s, s.deadlineMs + 1)).toEqual(want)
+    expect(deliveryHoldForPhase(s.phase, CFG, s, END(s) - 1)).toEqual(want)
+  })
+
+  it('past the deadline, a sweep and the slack: no hold, so a new row is not held for another 27 minutes', () => {
+    const s = requested()
+    expect(holdPastPhaseDeadline(s, END(s))).toBe(true)
+    expect(deliveryHoldForPhase(s.phase, CFG, s, END(s))).toBeNull()
+    expect(deliveryHoldForPhase(s.phase, CFG, s, s.deadlineMs + 7 * 3_600_000)).toBeNull()
+  })
+
+  it('a refresh request moves the deadline, and the hold comes back with it', () => {
+    const s = requested()
+    const later = END(s) + 60_000
+    const refreshed: GuardState = { ...s, bgReleased: true, bgRefreshSent: true, deadlineMs: later + CFG.handoffTimeoutMinutes * 60_000 }
+    expect(deliveryHoldForPhase(refreshed.phase, CFG, refreshed, later)).toMatchObject({ reason: 'context-guard await-handoff' })
+  })
+
+  it('await-ready keeps its own hold past the await-handoff end (CGHOLDREADY1021 unchanged)', () => {
+    const s = requested()
+    expect(deliveryHoldForPhase('await-ready', CFG, s, END(s) + 60_000)).toEqual({
+      reason: 'context-guard await-ready', maxMs: guardReadyHoldCapMs(CFG),
+    })
+  })
+
+  it('no clock or no deadline: the old behavior (the phase alone decides)', () => {
+    const s = requested()
+    expect(holdPastPhaseDeadline(s, undefined)).toBe(false)
+    expect(holdPastPhaseDeadline({ deadlineMs: 0 }, NOW)).toBe(false)
+    expect(holdPastPhaseDeadline(null, NOW)).toBe(false)
+    expect(deliveryHoldForPhase(s.phase, CFG, s)).toEqual({ reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(CFG) })
   })
 })
