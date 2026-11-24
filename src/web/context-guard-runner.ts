@@ -137,12 +137,16 @@ export function bgReleaseWindowOpen(
 // hand. So the await-handoff hold ends where the designed path ends: the
 // deadline, one full sweep and the slack (the same terms as guardHoldCapMs).
 // A refresh request (bgRefreshSent) moves the deadline, and with it the hold.
+// Fails closed (keeps the hold) on anything but two finite numbers and a
+// positive deadline, and compares a difference, so a string deadline cannot
+// concatenate and a huge one cannot absorb the margin (Viktor 51637 L1).
 export function holdPastPhaseDeadline(
   state: Partial<Pick<GuardState, 'deadlineMs'>> | null | undefined, nowMs: number | undefined,
 ): boolean {
-  const deadlineMs = state?.deadlineMs
-  if (nowMs === undefined || deadlineMs === undefined || !(deadlineMs > 0)) return false
-  return nowMs >= deadlineMs + INTERVAL_MS + GUARD_HOLD_SLACK_MS
+  const deadlineMs: unknown = state?.deadlineMs
+  if (typeof nowMs !== 'number' || typeof deadlineMs !== 'number') return false
+  if (!Number.isFinite(nowMs) || !Number.isFinite(deadlineMs) || !(deadlineMs > 0)) return false
+  return nowMs - deadlineMs >= INTERVAL_MS + GUARD_HOLD_SLACK_MS
 }
 
 /** Which hold a guard phase puts on the router, with its cap. Pure, for the test.

@@ -422,4 +422,25 @@ describe('0365c84e: the await-handoff hold ends at the phase deadline', () => {
     expect(holdPastPhaseDeadline(null, NOW)).toBe(false)
     expect(deliveryHoldForPhase(s.phase, CFG, s)).toEqual({ reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(CFG) })
   })
+
+  it('a non-finite or non-number clock or deadline keeps the hold (Viktor 51637 L1)', () => {
+    const s = requested()
+    const past = END(s) + 60_000
+    const bad = (d: unknown) => ({ deadlineMs: d as number })
+    expect(holdPastPhaseDeadline(bad(Infinity), Infinity)).toBe(false)
+    expect(holdPastPhaseDeadline(bad(NaN), past)).toBe(false)
+    expect(holdPastPhaseDeadline(s, NaN)).toBe(false)
+    expect(holdPastPhaseDeadline(s, Infinity)).toBe(false)
+    expect(holdPastPhaseDeadline(bad('1'), past)).toBe(false)
+    expect(holdPastPhaseDeadline(bad('1'), Number.MAX_VALUE)).toBe(false)
+    expect(holdPastPhaseDeadline(s, String(past) as unknown as number)).toBe(false)
+    expect(holdPastPhaseDeadline(bad(Number.MAX_VALUE), Number.MAX_VALUE)).toBe(false)
+    expect(holdPastPhaseDeadline(bad(-Infinity), past)).toBe(false)
+    expect(deliveryHoldForPhase(s.phase, CFG, bad(Infinity), Infinity)).toEqual({
+      reason: 'context-guard await-handoff', maxMs: guardHoldCapMs(CFG),
+    })
+    // the valid boundary is unchanged
+    expect(holdPastPhaseDeadline(s, END(s))).toBe(true)
+    expect(holdPastPhaseDeadline(s, END(s) - 1)).toBe(false)
+  })
 })
