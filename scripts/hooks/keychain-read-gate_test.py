@@ -1165,6 +1165,221 @@ def _eval_nest(cmd, k):
     return cmd
 
 
+def script_git_cases():
+    """Card 8d8298c7 (Viktor 50515 MEDIUM, 50542): a script FILE's text is judged by git's helper rules too, and the
+    one exemption, this tree's scripts/gh-pr.mjs named by an absolute literal path, opens nothing else. The scripts
+    are written to a temp dir from fragments (the subcommand pair never stands whole in this file); nothing runs."""
+    import shutil
+    import tempfile
+    CR, FL, OK = 'cred' + 'ential', 'fi' + 'll', 'osx' + 'keychain'
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(HOOK)))
+    prod = os.path.realpath(os.path.join(repo, 'scripts', 'gh-pr.mjs'))
+    fails, n = [], 0
+    with tempfile.TemporaryDirectory() as d0:
+        d = os.path.realpath(d0)
+
+        def w(name, body, mode=0o644):
+            path = os.path.join(d, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(body)
+            os.chmod(path, mode)
+            return path
+        w('h.sh', f'#!/bin/sh\nprintf "protocol=https\\nhost=github.com\\n\\n" | git {CR} {FL}\n', 0o755)
+        w('h2.sh', f'#!/bin/sh\ngit -C . {CR} approve < x\n', 0o755)
+        w('h.py', f"import subprocess\nsubprocess.run(['git', '{CR}', '{FL}'], input=b'')\n")
+        w('hs.py', f"import subprocess\nsubprocess.run('git {CR} {FL}', shell=True)\n")
+        w('hk.py', f"import subprocess\nsubprocess.run(['git', '{CR}-{OK}', 'get'])\n")
+        w('hc.sh', f'#!/bin/sh\ngit -c {CR}.helper={OK} fetch\n', 0o755)
+        w('ok.sh', '#!/bin/sh\ngit fetch origin\nHOME=/tmp/x git status\n', 0o755)
+        w('okword.py', f"print('the {CR} file is read elsewhere; {FL} the form')\n")
+        w('helper.cjs', f"require('child_process').execFileSync('git', ['{CR}', '{FL}'])\n")
+        w('helper.mjs', f"import {{ execFileSync }} from 'node:child_process'; execFileSync('git', ['{CR}', '{FL}'])\n")
+        w('ok.js', "console.log(1)\n")
+        w('pre.env', 'NODE_OPTIONS=--require ./helper.cjs\n')  # round 6 KNOWN-LIMIT env-file-preload
+        w('bunfig.toml', 'preload = ["./helper.cjs"]\n')
+        w('HANDOFF.md', f'# handoff\n- the shapes that ran the helper:\n```\ngit -C . {CR} approve < x\n'
+                        f'git -c {CR}.helper={OK} fetch\n```\n')
+        w('x.txt', 'data\n')
+        w('runner.sh', '#!/bin/sh\nbash "$1"\n', 0o755)
+        w(os.path.join('scripts', 'gh-pr.mjs'), f"import {{ execFileSync }} from 'node:child_process'; "
+                                                f"execFileSync('git', ['{CR}', '{FL}'])\n")
+        with open(prod, encoding='utf-8') as f:
+            real_body = f.read()
+        w('gh-pr.mjs.bak', real_body)
+        w(os.path.join('x', 'marveen', 'scripts', 'gh-pr.mjs'), real_body)
+        os.symlink(prod, os.path.join(d, 'gh-link.mjs'))
+        os.symlink(os.path.join(d, 'scripts', 'gh-pr.mjs'), os.path.join(d, 'other-link.mjs'))
+        S = d + '/h.sh'
+        H = d + '/hc.sh'
+        rows = [
+            # Viktor 50515: the shapes that ran git's keychain helper unseen (a script file's text)
+            (f'bash {S}', 2), (f'bash {S} | tee {d}/o', 2), (f'bash {S} > {d}/o', 2), (f'bash {S} | cat', 2),
+            (f'bash {S}; echo done', 2), (f'cd {d} && ./h.sh', 2), (f'sh {S} | tee {d}/o', 2),
+            (f'bash {d}/h2.sh', 2), (f'python3 {d}/h.py', 2), (f'python3 {d}/hs.py', 2), (f'python3 {d}/hk.py', 2),
+            (f'sh {d}/hc.sh', 2),
+            # controls: a plain git run, a HOME change, the words in prose
+            (f'bash {d}/ok.sh', 0), (f'python3 {d}/okword.py', 0),
+            # the exemption: an absolute literal path to this tree's gh-pr.mjs, or a symlink to it
+            (f'node {prod} pr view 1', 0), (f'node {d}/gh-link.mjs pr view 1', 0),
+            (f'cd {d} && node {prod} pr view 1', 0),
+            # Viktor 50542 1: a relative name stays under the rule (the gate's cwd reckoning is the weak spot)
+            (f'cd {d} && node scripts/gh-pr.mjs pr view 1', 2), ('node scripts/gh-pr.mjs pr view 1', 2),
+            (f'echo {prod}; node scripts/gh-pr.mjs pr view 1', 2),
+            # Viktor 50542 3: an exact realpath, no prefix or suffix match, no copy
+            (f'node {d}/gh-pr.mjs.bak pr view 1', 2), (f'node {d}/x/marveen/scripts/gh-pr.mjs pr view 1', 2),
+            (f'node {prod} pr view 1; node {d}/other-link.mjs', 2),  # another scripts/gh-pr.mjs behind a symlink
+            # Viktor 50542 2: the rest of the command is judged as before
+            (f'node {prod} pr view 1 && bash {S}', 2), (f'bash {S}; node {prod} pr view 1', 2),
+            (f'node {prod} pr view 1 && python3 {d}/h.py', 2),
+            # Viktor 50542 2: node's preload options are read as files of their own, the exemption does not cover them
+            (f'cd {d} && node -r ./helper.cjs {prod} pr view 1', 2), (f'cd {d} && node --import ./helper.mjs {prod} x', 2),
+            (f'cd {d} && NODE_OPTIONS=--require ./helper.cjs node {prod} x', 2),
+            (f'cd {d} && node --loader ./helper.mjs {prod} x', 2),
+            # KNOWN-LIMIT node-options-quoted (main too, not opened by the exemption): a quoted or `=` NODE_OPTIONS
+            # value's preload file is not read, with any script
+            (f'cd {d} && NODE_OPTIONS="--import ./helper.mjs" node {prod} x', 0),
+            (f'cd {d} && NODE_OPTIONS="--import ./helper.mjs" node ./ok.js', 0),
+            # round 2 (Viktor 50625): git's rules for a file the command runs or feeds to code. hc.sh: only git's
+            # rules see it (h.sh holds the literal pair main blocks anyway). Run: source, dot, stdin redirect,
+            # process substitution
+            (f'source {H}', 2), (f'. {H}', 2), (f'bash < {H}', 2), (f'bash <(cat {H})', 2), (f'source <(cat {H})', 2),
+            # fed: piped straight into an interpreter, or read by eval / -c through a substitution
+            (f'cat {H} | sh', 2), (f'cat {H} | bash -s', 2), (f'head -50 {H} | bash', 2),
+            (f'cat {d}/hk.py | python3', 2), (f'cat {d}/hk.py | python3 -', 2),
+            (f'eval "$(cat {H})"', 2), (f'eval "`cat {H}`"', 2), (f'bash -c "$(cat {H})"', 2),
+            (f'sh -c "$(cat {H})"', 2), (f'zsh -c "$(cat {H})"', 2), (f'python3 -c "$(cat {d}/hk.py)"', 2),
+            (f'C=$(cat {H}); bash -c "$C"', 2),
+            # a data file read next to an interpreter elsewhere keeps the main rules (the fleet's HANDOFF.md read)
+            (f'cat {d}/HANDOFF.md; bash {d}/ok.sh', 0), (f'head -40 {d}/HANDOFF.md && python3 {d}/okword.py', 0),
+            (f'cat {d}/HANDOFF.md | grep -n x; echo a | python3 -c "import sys"', 0),
+            (f'cat {d}/HANDOFF.md {d}/x.txt; node {d}/ok.js', 0),
+            # ...but a run of the same text is judged by them
+            (f'cat {d}/HANDOFF.md; bash {d}/HANDOFF.md', 2),
+            # through a filter into a shell: the pipeline-into-a-shell reading (card 74586987) gives its words to the
+            # git walk too (main allows it: no git rules on a file there)
+            (f'cat {H} | grep -v x | bash', 2),
+            # KNOWN-LIMIT cat-fed-indirect (Viktor 50625): a cat text run through a file the command writes first (it
+            # does not exist when the gate reads the command) keeps the main rules (as on main)
+            (f'cat {H} > {d}/g.sh; bash {d}/g.sh', 0),
+            # round 3 (Viktor 50674): git's rules for a RUN position only. (1) the script is the first operand after
+            # the interpreter's options; an option's argument is no operand; a file after it is the script's argument
+            (f'bash {d}/ok.sh {d}/HANDOFF.md', 0), (f'bash {d}/ok.sh {H}', 0),
+            (f'cd {d} && bash ok.sh "HANDOFF.md megirva; x" 1', 0), (f'cd {d} && bash ok.sh HANDOFF.md 2>&1 | tail -3', 0),
+            (f'python3 {d}/okword.py {H}', 0), (f'python3 -W error {d}/okword.py {H}', 0),
+            (f'python3 -W error {d}/hk.py', 2), (f'bash -o pipefail {H}', 2), (f'bash -o pipefail {d}/ok.sh {H}', 0),
+            (f'bash -x {H}', 2), (f'bash -- {H}', 2), (f'cd {d} && node ./ok.js ./helper.cjs', 0),
+            # inline code: no script file (node -e / --eval / -p)
+            (f'node -e 1 {d}/helper.cjs', 0), (f'node --eval 1 {d}/helper.cjs', 0), (f'node -p 1 {d}/helper.cjs', 0),
+            # an option the gate does not know: the next two operands are run (either may be the script)
+            (f'node --stack-size 99 {d}/helper.cjs', 2), (f'node --frob {d}/helper.cjs', 2),
+            (f'node --frob x {d}/helper.cjs', 2), (f'node --frob x y {d}/helper.cjs', 0),
+            # a word that may vanish or split before the script: every word is run
+            (f'cd {d} && bash $X ok.sh {H}', 2),
+            # (2) a preload or rc file runs, separate and with `=`; a stdin redirect; source / dot
+            (f'cd {d} && node --require=./helper.cjs ./ok.js', 2), (f'cd {d} && node --import=./helper.mjs ./ok.js', 2),
+            (f'cd {d} && node --loader=./helper.mjs ./ok.js', 2), (f'cd {d} && node -r ./helper.cjs ./ok.js', 2),
+            (f'cd {d} && node --experimental-loader ./helper.mjs ./ok.js', 2),
+            (f'bash --rcfile {H} {d}/ok.sh', 2), (f'bash --init-file {H} {d}/ok.sh', 2),
+            (f'bash {d}/ok.sh < {H}', 2), (f'source {H} x', 2),
+            # KNOWN-LIMIT env-prefix-run-file: BASH_ENV / ENV in the prefix are not read (main too, any rules)
+            (f'BASH_ENV={H} bash {d}/ok.sh', 0), (f'ENV={H} sh {d}/ok.sh', 0),
+            # (3) KNOWN-LIMIT git-rules-on-argument-files: a script that runs its own argument file (runner.sh runs
+            # "$1"); the argument gets the main rules only
+            (f'bash {d}/runner.sh {H}', 0), (f'source {d}/runner.sh {H}', 0), (f'. {d}/runner.sh {H}', 0),
+            # KNOWN-LIMIT dash-c-argument (an over-block, the safe side): after a -c payload the gate's payload view
+            # reads the next word as a command word, so `bash -c '...' f` judges f by git's rules (main: its rules)
+            (f"bash -c 'echo 1' {H}", 2),
+            # KNOWN-LIMIT pipe-into-shell-with-script (an over-block, the safe side): the pipeline-into-a-shell reading
+            # takes what a pipe prints as the shell's code even when the shell runs a script file
+            (f"cd {d} && printf '%s\\n' 'HANDOFF.md x' | bash {d}/ok.sh", 2),
+            # round 4 (Viktor 50741 A): a subcommand word in the first operand position is no script; the next
+            # operand is (bun run / x / exec / test, deno run / test, tsx watch, node inspect)
+            (f'bun run {d}/helper.cjs', 2), (f'bun run --silent {d}/helper.cjs', 2), (f'bun run --hot {d}/helper.cjs', 2),
+            (f'bun x {d}/helper.cjs', 2), (f'bun test {d}/helper.cjs', 2), (f'bun exec {d}/helper.cjs', 2),
+            (f'deno run {d}/helper.cjs', 2), (f'deno run -A {d}/helper.cjs', 2), (f'tsx watch {d}/helper.cjs', 2),
+            (f'node inspect {d}/helper.cjs', 2), (f'cd {d} && bun run ./helper.cjs', 2),
+            # controls: the file after the script is its argument; a second subcommand word is an operand
+            (f'bun run {d}/ok.js {d}/helper.cjs', 0), (f'tsx watch {d}/ok.js {d}/helper.cjs', 0),
+            (f'node inspect {d}/ok.js {d}/helper.cjs', 0),
+            # after an option the gate does not know, a subcommand word may still be the first operand (--frob may take
+            # x): the file after it is run (round-4 mutation: a first-operand-only skip passed it)
+            (f'node --frob x inspect {d}/helper.cjs', 2), (f'bun --frob x run {d}/helper.cjs', 2),
+            # round 4 (Viktor 50741 B): a shell's +option is an option (+o / +O take a value)
+            (f'bash +x {H}', 2), (f'bash +e {H}', 2), (f'sh +e {H}', 2), (f'bash +o posix {H}', 2),
+            (f'zsh +o nomatch {H}', 2), (f'bash +O extglob {H}', 2), (f'bash +o posix {d}/ok.sh {H}', 0),
+            # round 4 (Viktor 50741, old): a shell's lone `-` is its `--` (bash(1)): the next word is the script
+            (f'bash - {H}', 2), (f'sh - {H}', 2), (f'bash -x - {H}', 2), (f'bash - {d}/ok.sh {H}', 0),
+            # round 5 (Viktor 50854, measured with the real binaries): a preload after the code switch runs too
+            (f'cd {d} && node -e 1 -r ./helper.cjs', 2), (f'cd {d} && node -p 1 --require ./helper.cjs', 2),
+            (f'cd {d} && node -e 1 --import ./helper.mjs', 2), (f'cd {d} && bun -e 1 --preload ./helper.mjs', 2),
+            (f'cd {d} && node --eval 1 --import=./helper.mjs', 2), (f'cd {d} && node --print 1 --loader=./helper.mjs', 2),
+            (f'cd {d} && node -pe 1 -r ./helper.cjs', 2), (f'cd {d} && node -e 1 x -- -r ./helper.cjs', 2),
+            (f'bun --preload {d}/helper.mjs {d}/ok.js', 2), (f'cd {d} && bun --preload=./helper.mjs ./ok.js', 2),
+            (f'cd {d} && node -e 1 -r ./ok.js -r ./helper.cjs', 2), (f'cd {d} && node -p 1 -r ./ok.js --import=./helper.mjs', 2),
+            # round 5 (Kernel, old: f93dd6bc and main too): a preload file with a glob is globbed off the first operand
+            # too (only a group's lead was globbed); a quoted glob is no glob (bash keeps the *)
+            (f'cd {d} && node -e 1 -r ./help*.cjs', 2), (f'cd {d} && node -r ./ok.js -r ./help*.cjs ./ok.js', 2),
+            (f'cd {d} && node --require=./help*.cjs ./ok.js', 2), (f'cd {d} && node -r ./help*.cjs ./ok.js', 2),
+            (f"cd {d} && node -e 1 -r './help*.cjs'", 0),
+            # controls: a clean preload file; after the code a plain file is an argument (above); a dangling -r
+            (f'cd {d} && node -e 1 -r ./ok.js', 0), (f'cd {d} && node -p 1 --require ./ok.js', 0),
+            (f'cd {d} && node -e 1 x -r', 0), (f'cd {d} && node -e 1 ./helper.cjs', 0),
+            # round 6 (Viktor 50908, measured: main, f93dd6bc and 4875fc95 all passed the -e forms, -p blocked): a variable
+            # before or in the preload after -e; the -e branch skipped the preloads once run_all was set (an expanded
+            # text starts with it set), and its later words never joined the group
+            (f'cd {d} && F=./helper.cjs; node -e 1 -r $F', 2), (f'cd {d} && F=./helper.cjs; node -e 1 -r "$F"', 2),
+            (f'cd {d} && node -e 1 -r $UNSET_ZZ ./helper.cjs', 2), (f'cd {d} && node $NOPE_ZZ -e 1 -r ./helper.cjs', 2),
+            (f'cd {d} && F=./helper.cjs; node -p 1 -r $F', 2),
+            # ... and a variable before -e with no preload after it: every later word joins the group, the variable
+            # may be a preload of its own (mutation r6 "-e: run_all overwritten")
+            (f'cd {d} && node $NOPE_ZZ -e 1 ./helper.cjs', 2),
+            # round 6 (Viktor 50908 b, old): a command substitution as a run file word cannot be read: it blocks (as
+            # python -m with a substituted module name); in the code text it is no file word
+            (f'cd {d} && node -e 1 -r $(echo ./helper.cjs)', 2), (f'cd {d} && node -p 1 -r $(echo ./helper.cjs)', 2),
+            (f'cd {d} && node $(echo ./helper.cjs)', 2), (f'cd {d} && node -r $(echo ./helper.cjs) ./ok.js', 2),
+            (f'cd {d} && node `echo ./helper.cjs`', 2), (f'cd {d} && node --require=$(echo ./helper.cjs) ./ok.js', 2),
+            # after -p the walk goes on with no script to find; an unread preload set run_all, so a later substituted
+            # word may be the preload file (an empty $NOPE_ZZ: -r takes it; mutation r6 "walk: only while need")
+            (f'cd {d} && node -p 1 -r $NOPE_ZZ $(echo ./helper.cjs)', 2),
+            # a dash-led redirect target is a file bash opens, and node runs its stdin (measured: `node < -$(echo
+            # h).cjs` ran -h.cjs; node -r / --import refuse a dash-led value; mutation r6 "subst: valrun value off")
+            (f'cd {d} && node < -$(echo h).cjs', 2),
+            # controls: a clean file through a variable; a substitution in the code text or as the script's argument
+            (f'cd {d} && F=./ok.js; node -e 1 -r $F', 0), (f'cd {d} && node -e "$(echo 1)"', 0),
+            (f'cd {d} && node ./ok.js $(echo x)', 0),
+            # the value of an option that takes a plain value is no run file (mutation r6 "subst: any operand")
+            (f'cd {d} && node --title $(echo x) ./ok.js', 0),
+            # KNOWN-LIMIT python-subst-script-word (old: main too): python's script word is read as the substitution
+            # printing nothing (cards 4bdf7309, 946937b7 pin `python3 $(true)stat.py` as allowed), so a substitution
+            # that prints the script's name is not read; the block stays on node (Viktor 50908 b)
+            (f'cd {d} && python3 $(echo ./h.py)', 0), (f'cd {d} && python3 -I `echo ./h.py`', 0),
+            (f'cd {d} && python3 -c "$(echo 1)"', 0), (f'cd {d} && python3 ./okword.py $(echo x)', 0),
+            # KNOWN-LIMIT node-brace-option-word: bash brace-expands {-r,F} into two words; the gate reads one
+            (f'cd {d} && node -e 1 {{-r,./helper.cjs}}', 0),
+            # KNOWN-LIMIT env-file-preload: node --env-file=F reads NODE_OPTIONS (a --require) from F, bun reads a
+            # preload from bunfig.toml; the gate does not read these files (Viktor 50908 d, real binaries)
+            (f'cd {d} && node --env-file=pre.env -e 1', 0), (f'cd {d} && node -e 1 --env-file pre.env', 0),
+            (f'cd {d} && bun -e 1', 0),
+            # KNOWN-LIMIT launcher-eval-preload: npx / bunx start tsx with -e and a preload; the gate reads no launcher
+            (f'cd {d} && npx -y tsx -e 1 -r ./helper.cjs', 0), (f'cd {d} && npx --yes tsx --eval 1 --require ./helper.cjs', 0),
+            (f'cd {d} && bunx tsx -e 1 -r ./helper.cjs', 0),
+            # KNOWN-LIMIT git-rules-on-argument-files: runpy runs a module named by its argument (`cd D && python3 -m
+            # runpy evil` runs D/evil.py; with a path it does not run, Viktor 50854); the gate reads no module argument
+            (f'python3 -m runpy {H}', 0),
+            # KNOWN-LIMIT find-exec-computed-name: find computes the name it runs; the file keeps the main rules
+            (f'find {d} -name hc.sh -exec bash {{}} \\;', 0),
+        ]
+        for cmd, want in rows:
+            n += 1
+            cwd = repo if 'scripts/gh-pr.mjs' in cmd and 'cd ' not in cmd else d
+            code, err = bash_in(cmd, cwd)
+            if code != want:
+                fails.append(f'script-git: want {want}, got {code}: {cmd.replace(d, "<tmp>")[:110]!r} {err[:80]}')
+        shutil.rmtree(os.path.join(d, 'x'), ignore_errors=True)
+    return fails, n
+
+
 def script_cases():
     """Card bc009036 (Kernel 41497, Viktor 41502): the file a command runs is judged too. Every script is written to
     a temp dir at run time from fragments; nothing is executed, the gate only reads the files."""
@@ -4657,15 +4872,18 @@ def main():
                 fails.append(f'wrapper timing case: want {want}, got {p.returncode}: {cmd[:40]!r}...')
         except subprocess.TimeoutExpired:
             fails.append(f'wrapper timing case timed out (5 s): {cmd[:40]!r}...')
-    # card 04d67b39: the GIT_RULES read the command, not a script file: the fleet's GitHub path, which runs
-    # `git credential fill` with the helper list reset (and names it in a comment and a string), passes
+    # card 04d67b39: the fleet's GitHub path, which runs git's helper fill with the helper list reset (and names it in a
+    # comment and a string), passes. Card 8d8298c7 (Viktor 50542 1, 5): named by its absolute path; the relative form
+    # is judged by the script rules (script_git_cases)
     repo = os.path.dirname(os.path.dirname(os.path.dirname(HOOK)))
     if not os.path.isfile(os.path.join(repo, 'scripts', 'gh-pr.mjs')):
         fails.append('gh-pr.mjs not found next to the gate: the regression case did not run')
     else:
-        code, err = bash_in('node scripts/gh-pr.mjs pr view 1', repo)
+        code, err = bash_in('node ' + os.path.join(repo, 'scripts', 'gh-pr.mjs') + ' pr view 1', repo)
         if code != 0:
             fails.append(f'gh-pr.mjs should pass (got {code}): {err[:160]}')
+    sg_fails, sg_n = script_git_cases()
+    fails += sg_fails
     script_fails, script_n = script_cases()
     fails += script_fails
     pre_fails, pre_n = prefilter_cases()
@@ -4683,7 +4901,7 @@ def main():
             compile(hook_src, HOOK, 'exec')
         except SyntaxError as e:
             fails.append(f'the gate does not compile with warnings as errors: line {e.lineno}: {e.msg}')
-    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n + pre_n + 1
+    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n + pre_n + 1 + sg_n
     for f in fails:
         print('FAIL', f)
     print(f'{total - len(fails)}/{total} passed')
