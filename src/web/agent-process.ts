@@ -38,7 +38,7 @@ import { buildExtraChannelLaunch, enableExtraPlugins } from './agent-extra-chann
 import { probeExtraPluginsInTree, combineLiveness } from './extra-channel-liveness.js'
 import { loadCustomProvider, type CustomProviderDef } from './custom-providers.js'
 import { decideOwnOauthToken, ownOauthTokenExport, ownOauthLaunchVerdict } from './agent-oauth-token-file.js'
-import { provisionAgentKey, retireAgentKey } from './agent-key-provision.js'
+import { provisionAgentKey, retireAgentKey, revokeAgentKeyOnly } from './agent-key-provision.js'
 import { worksourceRootFor } from './worksource-queue.js'
 import { resolveAgentConfigDir, readClaudePlans, getClaudePlan } from './claude-plans.js'
 import { readClaudePlansState } from './claude-plans-state.js'
@@ -1892,6 +1892,10 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
   const ownTokenFile = ownOauth.kind === 'ok' ? ownOauth.path : null
 
   if (remote.host && remote.workdir) {
+    // Card 45dea12e slice 2 (review 53437 L2): a key left from an earlier LOCAL run of this agent does not outlive the
+    // switch to remote. Database only; a remote agent gets no key.
+    const revoked = revokeAgentKeyOnly(name)
+    if (revoked > 0) logger.info({ name, revoked }, 'agent key: revoked at a remote start')
     return startRemoteAgentProcess(name, remote.host, remote.workdir, opts)
   }
 
@@ -1914,12 +1918,6 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
 
 
   if (isAgentRunning(name)) return { ok: false, error: 'Agent is already running' }
-
-  // Card 45dea12e slice 2: a fresh narrow dashboard key for this run (the earlier one revoked). Never blocks the start;
-  // see agent-key-provision.ts. Remote agents returned above, so only the main agent and runAsUser are skipped here.
-  const agentKey = provisionAgentKey(name, dir, { isMainAgent: name === MAIN_AGENT_ID, isRemote: false, runAsUser: agentTmuxTarget(name).runAsUser })
-  if (agentKey.state === 'failed') logger.error({ name, reason: agentKey.reason }, 'agent key: not issued (the agent has no live narrow key)')
-  else logger.info({ name, state: agentKey.state, ...(agentKey.state === 'issued' ? { id: agentKey.id } : { reason: agentKey.reason }) }, 'agent key')
 
   const agentProvider = resolveAgentProvider(name)
   const provider = getProvider(agentProvider)
@@ -1955,6 +1953,7 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
   }
 
   const session = agentSessionName(name)
+  let keyIssued = false // card 45dea12e slice 2: set right before the session starts, read by the catch
 
   try {
     try {
@@ -2654,6 +2653,10 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
     // reported ok, no session existed under the agent's user, and the first
     // capture-pane failed against the router's empty tmux server.
     const startTarget = agentTmuxTarget(name)
+    // Card 45dea12e slice 2: a fresh narrow dashboard key for this run (the earlier one revoked), issued here, right
+    // before the session, so no earlier refusal of this start leaves a live key without a session (review 53437 L1);
+    // a throw from here on retires it in the catch below. Never blocks the start; see agent-key-provision.ts.
+    keyIssued = issueKeyForStart(name, dir, startTarget.runAsUser)
     runTmux(startTarget, ['new-session', '-d', ...AGENT_PANE_SIZE_ARGS, '-s', session, buildLaunchCmd(dir)], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir, runAsUser: startTarget.runAsUser ?? null }, 'Agent tmux session started')
@@ -2807,8 +2810,20 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
     return { ok: true }
   } catch (err) {
     logger.error({ err, name }, 'Failed to start agent tmux session')
+    if (keyIssued) {
+      const retired = retireAgentKey(name, dir)
+      logger.info({ name, ...retired }, 'agent key retired: the start failed')
+    }
     return { ok: false, error: 'Failed to start tmux session' }
   }
+}
+
+// Card 45dea12e slice 2: issue the run's key and log the outcome; true when a key was issued.
+function issueKeyForStart(name: string, dir: string, runAsUser: string | null | undefined): boolean {
+  const agentKey = provisionAgentKey(name, dir, { isMainAgent: name === MAIN_AGENT_ID, isRemote: false, runAsUser })
+  if (agentKey.state === 'failed') logger.error({ name, reason: agentKey.reason }, 'agent key: not issued (the agent has no live narrow key)')
+  else logger.info({ name, state: agentKey.state, ...(agentKey.state === 'issued' ? { id: agentKey.id } : { reason: agentKey.reason }) }, 'agent key')
+  return agentKey.state === 'issued'
 }
 
 export async function stopAgentProcess(name: string): Promise<{ ok: boolean; error?: string }> {
@@ -2836,10 +2851,14 @@ export async function stopAgentProcess(name: string): Promise<{ ok: boolean; err
     // A LAUNCH-TITKOK NEM ELIK TUL A LEALLITAST. Enelkul egy rotalt kulcs REGI erteke a lemezen
     // maradna a kovetkezo inditasig, egy leallitott agense pedig hataridotlenul.
     clearLaunchSecrets(name)
-    // Card 45dea12e slice 2: the narrow key does not outlive the session either (local agents; a remote one has none).
+    // Card 45dea12e slice 2: the narrow key does not outlive the session either. A local agent: revoked and its file
+    // removed; a remote one: revoked only, database side (review 53437 L2).
     if (!host) {
       const retired = retireAgentKey(name, agentDir(name))
-      if (retired.revoked > 0 || retired.fileRemoved) logger.info({ name, ...retired }, 'agent key retired at stop')
+      if (retired.revoked > 0 || retired.fileRemoved || retired.reason) logger.info({ name, ...retired }, 'agent key retired at stop')
+    } else {
+      const revoked = revokeAgentKeyOnly(name)
+      if (revoked > 0) logger.info({ name, revoked }, 'agent key revoked at a remote stop')
     }
     await delay(2000)
     // Reap any orphaned plugin grandchild that tmux did not tear down. This is

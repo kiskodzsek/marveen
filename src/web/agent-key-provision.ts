@@ -71,18 +71,36 @@ export function provisionAgentKey(name: string, agentDirPath: string, target: Ag
   }
 }
 
-/** At stop: every live key of the agent revoked, the key file removed (a link there is removed, not followed). */
-export function retireAgentKey(name: string, agentDirPath: string, now: number = Date.now()): { revoked: number; fileRemoved: boolean } {
+/**
+ * At stop: every live key of the agent revoked, the key file removed (a link there is removed, not followed). The
+ * file is removed only through a real .claude-config directory (review 53437 M1): lstat/unlink do not follow the LAST
+ * path element, but they do follow a linked .claude-config, so through a link the dashboard would delete ANOTHER
+ * agent's key file. A link or a non-directory there: the key is revoked, the file is left, and the reason is returned.
+ */
+export function retireAgentKey(
+  name: string,
+  agentDirPath: string,
+  now: number = Date.now(),
+): { revoked: number; fileRemoved: boolean; reason?: 'config-dir-is-a-link' | 'config-dir-not-a-directory' } {
   const revoked = safeRevoke(name, now)
-  let fileRemoved = false
   try {
-    const path = agentKeyPath(agentDirPath)
-    if (lstatSync(path, { throwIfNoEntry: false }) !== undefined) {
-      unlinkSync(path)
-      fileRemoved = true
-    }
-  } catch { /* a leftover file holds a revoked key only */ }
-  return { revoked, fileRemoved }
+    const dir = join(agentDirPath, AGENT_KEY_DIRNAME)
+    const st = lstatSync(dir, { throwIfNoEntry: false })
+    if (st === undefined) return { revoked, fileRemoved: false }
+    if (st.isSymbolicLink()) return { revoked, fileRemoved: false, reason: 'config-dir-is-a-link' }
+    if (!st.isDirectory()) return { revoked, fileRemoved: false, reason: 'config-dir-not-a-directory' }
+    const path = join(dir, AGENT_KEY_FILENAME)
+    if (lstatSync(path, { throwIfNoEntry: false }) === undefined) return { revoked, fileRemoved: false }
+    unlinkSync(path)
+    return { revoked, fileRemoved: true }
+  } catch {
+    return { revoked, fileRemoved: false } // a leftover file holds a revoked key only
+  }
+}
+
+/** A remote agent (review 53437 L2): its files are on another host, so only the database side -- every live key revoked. */
+export function revokeAgentKeyOnly(name: string, now: number = Date.now()): number {
+  return safeRevoke(name, now)
 }
 
 function safeRevoke(name: string, now: number): number {
