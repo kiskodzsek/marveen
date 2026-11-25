@@ -38,6 +38,7 @@ import { buildExtraChannelLaunch, enableExtraPlugins } from './agent-extra-chann
 import { probeExtraPluginsInTree, combineLiveness } from './extra-channel-liveness.js'
 import { loadCustomProvider, type CustomProviderDef } from './custom-providers.js'
 import { decideOwnOauthToken, ownOauthTokenExport, ownOauthLaunchVerdict } from './agent-oauth-token-file.js'
+import { provisionAgentKey, retireAgentKey } from './agent-key-provision.js'
 import { worksourceRootFor } from './worksource-queue.js'
 import { resolveAgentConfigDir, readClaudePlans, getClaudePlan } from './claude-plans.js'
 import { readClaudePlansState } from './claude-plans-state.js'
@@ -1914,6 +1915,12 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
 
   if (isAgentRunning(name)) return { ok: false, error: 'Agent is already running' }
 
+  // Card 45dea12e slice 2: a fresh narrow dashboard key for this run (the earlier one revoked). Never blocks the start;
+  // see agent-key-provision.ts. Remote agents returned above, so only the main agent and runAsUser are skipped here.
+  const agentKey = provisionAgentKey(name, dir, { isMainAgent: name === MAIN_AGENT_ID, isRemote: false, runAsUser: agentTmuxTarget(name).runAsUser })
+  if (agentKey.state === 'failed') logger.error({ name, reason: agentKey.reason }, 'agent key: not issued (the agent has no live narrow key)')
+  else logger.info({ name, state: agentKey.state, ...(agentKey.state === 'issued' ? { id: agentKey.id } : { reason: agentKey.reason }) }, 'agent key')
+
   const agentProvider = resolveAgentProvider(name)
   const provider = getProvider(agentProvider)
   const agentChannelDir = channelStateDir(agentProvider, dir)
@@ -2829,6 +2836,11 @@ export async function stopAgentProcess(name: string): Promise<{ ok: boolean; err
     // A LAUNCH-TITKOK NEM ELIK TUL A LEALLITAST. Enelkul egy rotalt kulcs REGI erteke a lemezen
     // maradna a kovetkezo inditasig, egy leallitott agense pedig hataridotlenul.
     clearLaunchSecrets(name)
+    // Card 45dea12e slice 2: the narrow key does not outlive the session either (local agents; a remote one has none).
+    if (!host) {
+      const retired = retireAgentKey(name, agentDir(name))
+      if (retired.revoked > 0 || retired.fileRemoved) logger.info({ name, ...retired }, 'agent key retired at stop')
+    }
     await delay(2000)
     // Reap any orphaned plugin grandchild that tmux did not tear down. This is
     // a LOCAL pkill against this host's process table, so it only makes sense
