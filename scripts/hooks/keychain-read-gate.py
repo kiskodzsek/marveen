@@ -6396,6 +6396,43 @@ def on_watchdog(signum, frame):
     os._exit(2)
 
 
+# One-time exemption (card 6aa0a853, Klodel 53248 decision (a), Viktor 53229 / 53241). The OS-level keychain profile
+# (agents/kernel/work/kc-sandbox-1125) has to be measured against the real find-*-password call, which this gate
+# rightly stops. Exactly one text passes: a zsh run of a quoted heredoc whose body has KC_PROBE_SHA256, and only until
+# KC_PROBE_UNTIL. The body is in the command itself, so there is no file to swap between the check and the run. The
+# body names one throwaway keychain (KC_PROBE_DUMMY), runs every other security call under an inline profile that
+# keeps the login and the system keychain out of reach, and stops when a lookup of a non-existent item in the login
+# keychain is answered. After the deadline, with any other body, any other wrapping or anything before or after it,
+# the command is judged as every other one. Remove the block once the card is closed.
+KC_PROBE_DELIM = 'KCPROBE_6AA0A853'
+KC_PROBE_SHA256 = '7a27081ab3b0478ba6f97a93766d1e68bc322ee0967126bf370f50fe0c7c43b5'
+KC_PROBE_DUMMY = '/private/tmp/kc-sbx-kc-6aa0a853/dummy-probe.keychain-db'
+# how the body spells that path: both lines, exactly (DIR is made fresh with mkdir, KC is the last argument of each call)
+KC_PROBE_DUMMY_LINES = ('\nDIR=/private/tmp/kc-sbx-kc-6aa0a853\n', '\nKC=$DIR/dummy-probe.keychain-db\n')
+KC_PROBE_UNTIL = 1795647599  # 2026-11-25 23:59:59 Europe/Budapest (22:59:59Z)
+
+
+def kc_probe_exempt(cmd, now):
+    """True only for the pinned probe text before the deadline (see above); anything else is False."""
+    if not isinstance(cmd, str) or not isinstance(now, (int, float)) or not now <= KC_PROBE_UNTIL:
+        return False
+    head = f"/bin/zsh -s <<'{KC_PROBE_DELIM}'\n"
+    if not cmd.startswith(head):
+        return False
+    rest = cmd[len(head):]
+    if rest.endswith('\n'):
+        rest = rest[:-1]
+    if not rest.endswith('\n' + KC_PROBE_DELIM):
+        return False
+    body = rest[:-len(KC_PROBE_DELIM)]
+    # the delimiter alone on a line inside the body would end the heredoc early: what follows would run as commands
+    # (zsh ends a <<'D' heredoc only at a line that is exactly D; the word elsewhere in a line is text)
+    if any(line == KC_PROBE_DELIM for line in body.split('\n')):
+        return False
+    import hashlib
+    return hashlib.sha256(body.encode('utf-8')).hexdigest() == KC_PROBE_SHA256 and all(x in body for x in KC_PROBE_DUMMY_LINES)
+
+
 def arm_watchdog():
     import signal
     signal.signal(signal.SIGALRM, on_watchdog)
@@ -6415,6 +6452,11 @@ def main():
     if not isinstance(cmd, str) or not cmd:
         return 0
     cwd = data.get('cwd') if isinstance(data, dict) else None
+    try:
+        if kc_probe_exempt(cmd, time.time()):  # card 6aa0a853, until 2026-11-25 23:59 (see kc_probe_exempt)
+            return 0
+    except Exception:
+        pass  # an error here takes the normal judgement below
     try:
         found = hits(cmd)
         found += [h for h in script_hits(cmd, cwd) if h not in found]

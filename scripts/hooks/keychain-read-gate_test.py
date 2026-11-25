@@ -4657,8 +4657,95 @@ def prefilter_cases():
     return fails, n
 
 
+KC_PROBE_FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'keychain-read-gate_kcprobe.fixture')
+
+
+def kc_probe_body_problems(body):
+    """The structural rules of the card 6aa0a853 probe body (Klodel 53248): every security call runs under an inline
+    sandbox profile (dsec = DUMMY_ONLY, or sandbox-exec -p DENY_V2 / MACH_ONLY), and the login keychain is named only
+    in the guard lookup of a non-existent item, under DUMMY_ONLY. Returns the offending lines."""
+    bad = []
+    for ln in body.split('\n'):
+        s = ln.strip()
+        if s.startswith('#') or s.startswith('SEC=') or s.startswith('dsec()') or 'list-keychains' in s:
+            continue
+        calls_sec = '$SEC ' in s or s.startswith('dsec ') or '$(dsec ' in s
+        if '$LK' in s and not s.startswith('mt0=') and not s.startswith('mt1=') and \
+                not s.startswith('dsec find-generic-password -s $GN -a none $LK '):
+            bad.append('login keychain outside the guard: ' + s[:80])
+        if not calls_sec:
+            continue
+        sandboxed = s.startswith('dsec ') or '$(dsec ' in s or \
+            s.startswith('/usr/bin/sandbox-exec -p "$DENY_V2" $SEC ') or s.startswith('/usr/bin/sandbox-exec -p "$MACH_ONLY" $SEC ')
+        if not sandboxed:
+            bad.append('security call without an inline profile: ' + s[:80])
+        elif '$KC' not in s and '$LK' not in s:
+            bad.append('security call without the dummy keychain: ' + s[:80])
+    return bad
+
+
+def kc_probe_cases():
+    """Card 6aa0a853 one-time exemption (Klodel 53248 (a), Viktor 53241): only the pinned body passes, only before the
+    deadline; any other hash, wrapping or an early delimiter is judged as usual; the body keeps the login keychain out
+    of reach (structure checked here, the run itself proves the guard)."""
+    import importlib.util
+    fails, n = [], 0
+    spec = importlib.util.spec_from_file_location('kc_gate_under_test', HOOK)
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    with open(KC_PROBE_FIXTURE, encoding='utf-8') as f:
+        body = fix(f.read())
+    import hashlib
+    d = gate.KC_PROBE_DELIM
+    pinned = f"/bin/zsh -s <<'{d}'\n{body}{d}"
+    checks = [
+        ('the fixture is the pinned body', hashlib.sha256(body.encode()).hexdigest() == gate.KC_PROBE_SHA256),
+        ('the body names the dummy keychain', all(x in body for x in gate.KC_PROBE_DUMMY_LINES)
+         and gate.KC_PROBE_DUMMY == '/private/tmp/kc-sbx-kc-6aa0a853/dummy-probe.keychain-db'),
+        ('pinned text at the deadline passes', gate.kc_probe_exempt(pinned, gate.KC_PROBE_UNTIL) is True),
+        ('pinned text with a trailing newline passes', gate.kc_probe_exempt(pinned + '\n', gate.KC_PROBE_UNTIL - 60) is True),
+        ('one second after the deadline: no exemption', gate.kc_probe_exempt(pinned, gate.KC_PROBE_UNTIL + 1) is False),
+        ('a day after: no exemption', gate.kc_probe_exempt(pinned, gate.KC_PROBE_UNTIL + 86400) is False),
+        ('the deadline is 2026-11-25 23:59:59 Budapest', gate.KC_PROBE_UNTIL == 1795647599),
+        ('one byte changed: no exemption', gate.kc_probe_exempt(pinned.replace('kernel-sbx-probe', 'kernel-sbx-prob3', 1), 0) is False),
+        ('the login keychain as the target: no exemption',
+         gate.kc_probe_exempt(pinned.replace('KC=$DIR/dummy-probe.keychain-db', 'KC=$LK', 1), 0) is False),
+        ('a command before it: no exemption', gate.kc_probe_exempt('cd /tmp && ' + pinned, 0) is False),
+        ('a command after it: no exemption', gate.kc_probe_exempt(pinned + '\n' + fix('s3curity dump-keychain'), 0) is False),
+        ('an unquoted delimiter: no exemption', gate.kc_probe_exempt(pinned.replace(f"<<'{d}'", f'<<{d}', 1), 0) is False),
+        ('bash instead of zsh: no exemption', gate.kc_probe_exempt(pinned.replace('/bin/zsh', '/bin/bash', 1), 0) is False),
+        ('an early delimiter line: no exemption',
+         gate.kc_probe_exempt(f"/bin/zsh -s <<'{d}'\n{d}\n{fix('s3curity dump-keychain')}\n{body}{d}", 0) is False),
+        ('not a string: no exemption', gate.kc_probe_exempt(None, 0) is False and gate.kc_probe_exempt(pinned, None) is False),
+        ('the body keeps every security call in an inline profile', kc_probe_body_problems(body) == []),
+        # the structure check itself catches the two ways a body could reach the login keychain (red check)
+        ('structure check: an unsandboxed call is caught',
+         kc_probe_body_problems(body.replace('dsec find-generic-password -s kernel-sbx-probe -a probe $KC',
+                                             '$SEC find-generic-password -s kernel-sbx-probe -a probe $LK', 1)) != []),
+        ('structure check: a login lookup outside the guard is caught',
+         kc_probe_body_problems(body + 'dsec find-generic-password -s x $LK\n') != []),
+    ]
+    for name, ok in checks:
+        n += 1
+        if not ok:
+            fails.append(f'kc-probe exemption: {name}')
+    # through the hook as Claude Code runs it: the pinned text passes until the deadline, then blocks; a changed body
+    # and a wrapped one block now (the usual rules)
+    import time
+    want = 0 if time.time() <= gate.KC_PROBE_UNTIL else 2
+    for name, cmd, w in [('pinned', pinned, want), ('changed', pinned.replace('kernel-sbx-probe', 'kernel-sbx-prob3', 1), 2),
+                         ('wrapped', 'cd /tmp && ' + pinned, 2), ('unquoted', pinned.replace(f"<<'{d}'", f'<<{d}', 1), 2)]:
+        n += 1
+        code, err = bash(cmd)
+        if code != w:
+            fails.append(f'kc-probe exemption via the hook ({name}): want {w}, got {code} {err[:80]}')
+    return fails, n
+
+
 def main():
     fails = []
+    kp_fails, kp_n = kc_probe_cases()
+    fails += kp_fails
     for cmd in map(fix, BLOCK):
         code, err = bash(cmd)
         if code != 2 or 'KULCSKARIKA-KAPU' not in err:
@@ -4901,7 +4988,7 @@ def main():
             compile(hook_src, HOOK, 'exec')
         except SyntaxError as e:
             fails.append(f'the gate does not compile with warnings as errors: line {e.lineno}: {e.msg}')
-    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n + pre_n + 1 + sg_n
+    total = len(BLOCK) + len(ALLOW) + 1 + 6 + 11 + len(hn_timed) + len(wrap_timed) + 1 + script_n + pre_n + 1 + sg_n + kp_n
     for f in fails:
         print('FAIL', f)
     print(f'{total - len(fails)}/{total} passed')

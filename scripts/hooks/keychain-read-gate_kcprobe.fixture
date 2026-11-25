@@ -1,0 +1,51 @@
+# kc-probe 6aa0a853 v3 (Klodel 53248 (a), Viktor 53229/53241): the real find-*-password under the OS-level profile, on a
+# THROWAWAY keychain only. Run ONLY as the body of: /bin/zsh -s <<'KCPROBE_6AA0A853' ... KCPROBE_6AA0A853 (the keychain
+# gate allows exactly this body by its sha256 until 2026-11-25 23:59 Europe/Budapest; there is no file to swap).
+# - The dummy keychain has one fixed absolute path, made fresh (the run stops if the folder exists), named as the LAST
+#   argument of every s3curity call.
+# - Every s3curity call that is not the measurement itself runs under DUMMY_ONLY (inline -p: no profile file to swap):
+#   the login and the system keychain files and the data-protection keychain service are out of reach, so this body
+#   cannot reach the real login keychain. Proven in the run: a lookup of a NON-EXISTENT item in the login keychain under
+#   DUMMY_ONLY must not answer "not found" (44). No real item is ever asked for.
+# - Inside: kc-deny-v2 (and the mach rule alone) inline. Only found yes/no and exit codes are printed, never a value.
+set -u
+unset TMUX TMUX_PANE
+S3C=/usr/bin/s3curity
+DIR=/private/tmp/kc-sbx-kc-6aa0a853
+KC=$DIR/dummy-probe.keychain-db
+LK=/Users/klodel/Library/Keychains/login.keychain-db
+DUMMY_ONLY='(version 1)(allow default)(deny file-read* file-write* (subpath "/Users/klodel/Library/Keychains") (subpath "/Library/Keychains"))(deny mach-lookup (global-name "com.apple.s3cd") (global-name "com.apple.s3curityd.xpc"))'
+MACH_ONLY='(version 1)(allow default)(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.s3curityd") (global-name "com.apple.s3curityd.xpc") (global-name "com.apple.s3cd"))'
+DENY_V2='(version 1)(allow default)(deny file-read* file-write* (subpath "/Users/klodel/Library/Keychains") (subpath "/Library/Keychains") (regex #"\.keychain(-db)?$"))(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.s3curityd") (global-name "com.apple.s3curityd.xpc") (global-name "com.apple.s3cd"))(deny network-outbound (remote unix-socket (path-regex #"/tmux-[0-9]+/")))(deny file-read* file-write* (regex #"/tmux-[0-9]+/"))(deny appleevent-send)'
+ds3c() { /usr/bin/sandbox-exec -p "$DUMMY_ONLY" $S3C "$@"; }
+/bin/mkdir -m 700 $DIR || { print -r -- "STOP: $DIR exists or cannot be made"; exit 2; }
+mt0=$(/usr/bin/stat -f %m $LK)
+sl0=$(ds3c list-keychains -d user 2>&1)
+# the guard first: the login keychain is out of reach under DUMMY_ONLY (rc 44 would mean it answered). The asked
+# name is random per run, so no real item can match it (Viktor 53265). It is never asked outside a profile: Klodel
+# 53248 keeps the real login keychain out of this body's reach, so there is no outside rc-44 control; any rc but 44
+# reads "no answer", never "reachable".
+GN="kernel-sbx-nonexistent-$(/usr/bin/openssl rand -hex 8)"
+ds3c find-generic-password -s $GN -a none $LK >/dev/null 2>&1; grc=$?
+print -r -- "guard login keychain under DUMMY_ONLY rc=$grc (44 = reachable: FAIL)"
+[[ $grc == 44 ]] && { print -r -- "STOP: the login keychain is reachable"; /bin/rmdir $DIR; exit 3; }
+ds3c create-keychain -p kernel-sbx-dummy-pass $KC; crc=$?
+print -r -- "create-keychain rc=$crc"
+[[ $crc == 0 ]] || { /bin/rm -rf $DIR; exit 2; }
+ds3c unlock-keychain -p kernel-sbx-dummy-pass $KC; print -r -- "unlock rc=$?"
+DUMMY="dummy-$(/usr/bin/openssl rand -hex 8)"
+ds3c add-generic-password -s kernel-sbx-probe -a probe -w "$DUMMY" $KC; print -r -- "add rc=$?"
+unset DUMMY
+ds3c find-generic-password -s kernel-sbx-probe -a probe $KC >/dev/null 2>&1; orc=$?
+print -r -- "find-generic control (DUMMY_ONLY) found=$([[ $orc == 0 ]] && print yes || print no) rc=$orc"
+/usr/bin/sandbox-exec -p "$DENY_V2" $S3C find-generic-password -s kernel-sbx-probe -a probe $KC >/dev/null 2>&1; irc=$?
+print -r -- "find-generic inside kc-deny-v2 found=$([[ $irc == 0 ]] && print yes || print no) rc=$irc"
+/usr/bin/sandbox-exec -p "$MACH_ONLY" $S3C find-generic-password -s kernel-sbx-probe -a probe $KC >/dev/null 2>&1; mrc=$?
+print -r -- "find-generic inside mach-only found=$([[ $mrc == 0 ]] && print yes || print no) rc=$mrc"
+ds3c find-internet-password -s kernel-sbx-probe.invalid $KC >/dev/null 2>&1; print -r -- "find-internet control (no such item) rc=$?"
+/usr/bin/sandbox-exec -p "$DENY_V2" $S3C find-internet-password -s kernel-sbx-probe.invalid $KC >/dev/null 2>&1; print -r -- "find-internet inside kc-deny-v2 rc=$?"
+/usr/bin/sandbox-exec -p "$DENY_V2" /usr/bin/python3 -I -c 'import sys; open(sys.argv[1],"rb").read(16)' $KC >/dev/null 2>&1; print -r -- "dummy file read inside kc-deny-v2 rc=$?"
+ds3c delete-keychain $KC; print -r -- "delete-keychain rc=$?"
+/bin/rm -rf $DIR
+mt1=$(/usr/bin/stat -f %m $LK); sl1=$(ds3c list-keychains -d user 2>&1)
+print -r -- "login mtime same=$([[ $mt0 == $mt1 ]] && print yes || print NO) search list same=$([[ $sl0 == $sl1 ]] && print yes || print NO)"
