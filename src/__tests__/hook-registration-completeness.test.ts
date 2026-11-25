@@ -64,6 +64,8 @@ const EXEMPT: Record<string, string> = {
     'builds and re-checks the shared attack corpus (shell-attack-corpus.json) the command-gate tests read, with a real bash/zsh oracle (run: python3 -I scripts/hooks/shell-attack-corpus-build.py [--check]); not itself a hook (card fae0712e, Viktor 42697)',
   'keychain-read-gate_test.py':
     'the unit test of keychain-read-gate.py (run: python3 -I scripts/hooks/keychain-read-gate_test.py); not itself a hook (c1921b55)',
+  'keychain-read-gate_p3a6_test.py':
+    'the unit test of the card bcadf02a one-time exemption in keychain-read-gate.py (run: python3 -I scripts/hooks/keychain-read-gate_p3a6_test.py); not itself a hook (bcadf02a)',
   'hex-id-source-gate_test.py':
     'the unit test of hex-id-source-gate.py (run: python3 -I scripts/hooks/hex-id-source-gate_test.py); not itself a hook (7b2f784f)',
   'commit-chain-guard_test.py':
