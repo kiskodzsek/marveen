@@ -1549,6 +1549,19 @@ export function initDatabase(dbPathOverride?: string): void {
   // DASHOPERATOR1005: what a key may reach. 'full' = every existing key and the
   // default, so this column changes nothing until an 'operator' key is minted.
   try { db.exec(`ALTER TABLE device_keys ADD COLUMN scope TEXT NOT NULL DEFAULT 'full'`) } catch { /* column already exists */ }
+  // Card 45dea12e: a narrow per-agent dashboard key (src/web/auth-agent-keys.ts). Only sha256(key) is stored; a key
+  // reaches the allowlisted endpoints of src/web/agent-key-gate.ts and nothing else, as its agent. Zero rows = feature
+  // off: the auth gate falls through exactly as before.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_keys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key_hash TEXT NOT NULL UNIQUE,
+      agent_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_used_at INTEGER,
+      revoked_at INTEGER
+    )
+  `)
 
   // --- OTel Distributed Tracing (card def5a189) ---
   // SQLite-native span store. No external OTel SDK: spans are written via

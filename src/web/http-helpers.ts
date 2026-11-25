@@ -32,11 +32,28 @@ export class RequestBodyTooLargeError extends Error {
   }
 }
 
+// Card 45dea12e: the agent-key gate (src/web/agent-key-gate.ts) reads a body before the handler runs; the handler's
+// readBody then gets those very bytes, so the two cannot parse different text. Keyed by the request object.
+const preReadBodies = new WeakMap<http.IncomingMessage, Buffer>()
+
+/** Reads the body once for a gate that runs before the handler; the handler's readBody returns the same bytes. */
+export async function preReadBody(req: http.IncomingMessage, opts: { maxBytes?: number } = {}): Promise<Buffer> {
+  const known = preReadBodies.get(req)
+  if (known !== undefined) return known
+  const body = await readBody(req, opts)
+  preReadBodies.set(req, body)
+  return body
+}
+
 export function readBody(
   req: http.IncomingMessage,
   opts: { maxBytes?: number } = {},
 ): Promise<Buffer> {
   const maxBytes = opts.maxBytes ?? DEFAULT_READ_BODY_MAX_BYTES
+  const known = preReadBodies.get(req)
+  if (known !== undefined) {
+    return known.length > maxBytes ? Promise.reject(new RequestBodyTooLargeError(maxBytes)) : Promise.resolve(known)
+  }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let total = 0

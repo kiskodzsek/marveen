@@ -9,7 +9,8 @@
 //
 // Precedence (first match wins):
 //   1. Authorization: Bearer <dashboard token>   -> { kind: 'token', agent? }
-//   2. Authorization: Bearer <device key>        -> { kind: 'device', device, deviceId }
+//   2. Authorization: Bearer <agent key, mvag_>  -> { kind: 'agent', agent, keyId }  (card 45dea12e)
+//   2b. Authorization: Bearer <device key>       -> { kind: 'device', device, deviceId }
 //   3. SSE pane-stream ?token=<dashboard token>   -> { kind: 'token' }  (path-scoped)
 //   4. SSE pane-stream ?token=<device key>        -> { kind: 'device' } (path-scoped)
 //   5. Federation inbound token, endpoint-scoped  -> { kind: 'federation', peer }
@@ -25,6 +26,7 @@ import { checkBearerToken } from './dashboard-auth.js'
 import { identifyFederationCaller } from './federation/config.js'
 import { resolveSession } from './auth-sessions.js'
 import { resolveDeviceKey, type DeviceKeyScope } from './auth-device-keys.js'
+import { AGENT_KEY_PREFIX, resolveAgentKey } from './auth-agent-keys.js'
 import { OPERATOR_COOKIE_NAME, resolveOperatorSession } from './operator-sessions.js'
 import { sanitizeAgentIdent } from '../prompt-safety.js'
 import { isKnownAgent } from './agent-config.js'
@@ -32,6 +34,7 @@ import { isKnownAgent } from './agent-config.js'
 export type AuthResult =
   | { kind: 'token'; agent?: string }
   | { kind: 'device'; device: string; deviceId: number; scope: DeviceKeyScope }
+  | { kind: 'agent'; agent: string; keyId: number }
   | { kind: 'federation'; peer: string }
   | { kind: 'session'; user: string }
   | { kind: 'none' }
@@ -140,6 +143,13 @@ export function resolveAuth(
   //    makes this a no-op for every non-key bearer (and with zero device_keys
   //    rows the whole step never resolves -- fresh installs unaffected).
   const bearerMatch = /^Bearer\s+(.+)$/.exec(req.headers.authorization ?? '')
+  // 2. A narrow per-agent key (card 45dea12e): its agent comes from the key, never from X-Agent-Id, and the agent-key
+  //    gate in web.ts decides every request it makes. Only the Bearer header carries one: an SSE ?token= never does.
+  //    A key with the prefix that does not resolve is no principal at all (401), never a device key.
+  if (bearerMatch && bearerMatch[1]!.trim().startsWith(AGENT_KEY_PREFIX)) {
+    const ak = resolveAgentKey(bearerMatch[1]!.trim())
+    return ak ? { kind: 'agent', agent: ak.agent, keyId: ak.id } : { kind: 'none' }
+  }
   if (bearerMatch) {
     const dk = resolveDeviceKey(bearerMatch[1]!.trim())
     if (dk) return { kind: 'device', device: dk.name, deviceId: dk.id, scope: dk.scope }

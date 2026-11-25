@@ -9,6 +9,7 @@ import { watchEgressAllowlistBaseline, queueAllowlistReport } from './web/egress
 import { loadOrCreateDashboardToken } from './web/dashboard-auth.js'
 import { resolveAuth, requiresAuth, isFederationWireEndpoint, type AuthResult } from './web/auth-gate.js'
 import { operatorGateDecision } from './web/operator-gate.js'
+import { enforceAgentKey } from './web/agent-key-enforce.js'
 import { readOperatorAccess } from './web/operator-access.js'
 import { tryHandleOperatorAccess } from './web/routes/operator-access.js'
 import { tryHandleOperator } from './web/routes/operator.js'
@@ -192,10 +193,17 @@ export function startWebServer(port = 3420): http.Server {
         return
       }
     }
+    // Card 45dea12e: a narrow per-agent key reaches the allowlisted endpoints of agent-key-gate.ts only, decided here on
+    // the same path and method the handlers below match, before any of them runs. The body, when a rule reads it, is
+    // read once here and handed to the handler's readBody unchanged.
+    // Every path, gated or public: an agent key reaches nothing else (deny by default, also for a static file).
+    if (auth.kind === 'agent' && await enforceAgentKey(auth.agent, auth.keyId, req, res, method, path, url)) return
     const fedPeerForCtx: string | null = auth.kind === 'federation' ? auth.peer : null
     const ctxAuth =
       auth.kind === 'token' ? { kind: 'token' as const, agent: auth.agent }
       : auth.kind === 'device' ? { kind: 'device' as const, device: auth.device, deviceId: auth.deviceId, scope: auth.scope }
+      // the key's agent, authenticated (unlike the token's self-asserted X-Agent-Id)
+      : auth.kind === 'agent' ? { kind: 'agent' as const, agent: auth.agent }
       : auth.kind === 'session' ? { kind: 'session' as const, user: auth.user }
       : auth.kind === 'federation' ? { kind: 'federation' as const, peer: auth.peer }
       : undefined
