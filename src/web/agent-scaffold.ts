@@ -17,6 +17,7 @@ import { domainToASCII } from 'node:url'
 import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, HEARTBEAT_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, WEB_PORT, OWNER_DRIVE_FOLDER, APP_TZ, DASHBOARD_PUBLIC_URL, AGENT_API_ORIGIN, STORE_DIR } from '../config.js'
+import { readEnvFile } from '../env.js'
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
@@ -798,6 +799,27 @@ export function absolutizeFileRule(rule: string): string {
   return rule
 }
 
+// Card 05836cea (Klodel 53700, Viktor 53686 and 53693, after card 8af6dc10): the root-owned front
+// /usr/local/bubek/bin/bubekrun-client runs the BubekAI runner as _bubekrun (`killall` stops every run, `gate` runs any
+// absolute program in the runner's zone). Every agent shares one uid, so the sudoers file alone lets any of them call
+// it. This rule keeps it to the agents on the owner's .env key BUBEKRUN_CLIENT_AGENTS (comma- or space-separated agent
+// ids, read at every settings write; no key = every sub-agent is denied). NOT an agent capability: the capabilities
+// endpoint takes the shared token, and an agent writes its own persona frontmatter. The main agent's settings are not
+// written here (they live in the shared ~/.claude), so it is never granted by this list and never denied by it either.
+// The rule reads the command text like the sudo pair below, with the same blind spot (a name built at run time); the
+// boundary stays the sudoers file and the runner.
+export const BUBEKRUN_CLIENT_DENY_RULES = ['Bash(*bubekrun-client*)'] as const
+
+export function bubekrunClientGrantedAgents(raw: string | undefined): string[] {
+  return (raw ?? '').split(/[\s,]+/).map((x) => x.trim()).filter((x) => x !== '')
+}
+
+export function agentMayRunBubekrunClient(name: string, grantRaw?: string): boolean {
+  if (name === MAIN_AGENT_ID) return false
+  const raw = grantRaw ?? readEnvFile(['BUBEKRUN_CLIENT_AGENTS'])['BUBEKRUN_CLIENT_AGENTS']
+  return bubekrunClientGrantedAgents(raw).includes(name)
+}
+
 export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemplate): void {
   const agentRoot = agentDir(name)
   const settingsDir = join(agentRoot, '.claude')
@@ -842,6 +864,12 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   // handle for a sub-agent that never needs Artifact/Workflow/etc.
   for (const tool of readAgentToolDeny(name)) {
     if (!denyList.includes(tool)) denyList.push(tool)
+  }
+  // Card 05836cea: the bubekrun-client rule for every sub-agent not on the owner's grant list (see above).
+  if (!agentMayRunBubekrunClient(name)) {
+    for (const rule of BUBEKRUN_CLIENT_DENY_RULES) {
+      if (!denyList.includes(rule)) denyList.push(rule)
+    }
   }
 
   // additionalDirectories: scope OUTSIDE the agent's own cwd. Without it an
