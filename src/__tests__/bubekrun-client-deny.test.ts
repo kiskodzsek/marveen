@@ -58,6 +58,25 @@ describe('bubekrun-client grant list', () => {
     expect(bubekrunClientGrantedAgents(undefined)).toEqual([])
   })
 
+  it('Viktor 53724 B1: a trailing # comment grants nobody it names', () => {
+    expect(bubekrunClientGrantedAgents('dave # not kernel yet')).toEqual(['dave'])
+    expect(agentMayRunBubekrunClient('kernel', 'dave # not kernel yet')).toBe(false)
+    expect(agentMayRunBubekrunClient('not', 'dave # not kernel yet')).toBe(false)
+    expect(bubekrunClientGrantedAgents('dave#kernel')).toEqual(['dave'])
+    // the .env reader leaves the quotes when a comment follows: a quoted word is not an id, so nobody is granted
+    expect(bubekrunClientGrantedAgents('"dave" # kernel later')).toEqual([])
+    expect(agentMayRunBubekrunClient('kernel', '"dave" # kernel later')).toBe(false)
+  })
+
+  it('one word that is not an agent id empties the whole list (fail closed)', () => {
+    expect(bubekrunClientGrantedAgents('dave,Kernel')).toEqual([])
+    expect(bubekrunClientGrantedAgents('dave ker​nel')).toEqual([])
+    expect(bubekrunClientGrantedAgents('dave,-x')).toEqual([])
+    expect(bubekrunClientGrantedAgents('dave,../x')).toEqual([])
+    expect(bubekrunClientGrantedAgents(`dave,${'a'.repeat(42)}`)).toEqual([])
+    expect(agentMayRunBubekrunClient('dave', 'dave,Kernel')).toBe(false)
+  })
+
   it('an exact id only: no prefix, substring or case match', () => {
     expect(agentMayRunBubekrunClient('dave', 'dave')).toBe(true)
     expect(agentMayRunBubekrunClient('dave2', 'dave')).toBe(false)

@@ -810,8 +810,14 @@ export function absolutizeFileRule(rule: string): string {
 // boundary stays the sudoers file and the runner.
 export const BUBEKRUN_CLIENT_DENY_RULES = ['Bash(*bubekrun-client*)'] as const
 
+// Viktor 53724 B1: readEnvFile keeps a trailing "# ..." comment in the value, and its words would have read as ids
+// ("dave # not kernel yet" granted kernel). So the value ends at the first '#', and every word must be an agent id;
+// one word that is not makes the whole list empty (fail closed: nobody is granted, every sub-agent keeps the rule).
+const BUBEKRUN_GRANT_ID = /^[a-z0-9][a-z0-9-]{0,40}$/
+
 export function bubekrunClientGrantedAgents(raw: string | undefined): string[] {
-  return (raw ?? '').split(/[\s,]+/).map((x) => x.trim()).filter((x) => x !== '')
+  const words = (raw ?? '').split('#')[0].split(/[\s,]+/).filter((x) => x !== '')
+  return words.every((w) => BUBEKRUN_GRANT_ID.test(w)) ? words : []
 }
 
 export function agentMayRunBubekrunClient(name: string, grantRaw?: string): boolean {
@@ -1756,11 +1762,11 @@ export function ensureImageQuarantineGate(name: string): boolean {
 }
 
 // Card c1921b55 (Viktor 29950/30071): the keychain-read gate. An agent shell does not read secrets out of the
-// macOS keychain with `security` (find-generic-password, find-internet-password, dump-keychain, export, -i).
+// macOS keychain with the keychain command-line tool (its password lookups, dump and export forms, its shell mode).
 // Defense in depth only, NOT the fix: every agent runs as the same macOS user, so per-agent isolation (H1) is
 // the fix; the script header lists what it does not see. Every sub-agent; the main agent carries the same hook
 // in the repo-shipped project settings. Measured 2026-11-06 18:12 (Pulzus 30137): the hook was in the project
-// settings only, and a sub-agent's `security find-generic-password` ran (rc=44, the item was looked up).
+// settings only, and a sub-agent's generic-password lookup with that tool ran (rc=44, the item was looked up).
 export function agentGetsKeychainReadGate(name: string): boolean {
   return name !== MAIN_AGENT_ID
 }
