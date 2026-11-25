@@ -6433,6 +6433,55 @@ def kc_probe_exempt(cmd, now):
     return hashlib.sha256(body.encode('utf-8')).hexdigest() == KC_PROBE_SHA256 and all(x in body for x in KC_PROBE_DUMMY_LINES)
 
 
+# One-time exemption (card bcadf02a, Viktor 53872, Klodel 53876 decision (a)). Viktor's independent probe of the
+# engine's sandbox profile (BubekAI critical path) names the module under test as an argument; the gate reads every
+# existing file argument, and the module's DENY list names the keychain tool, so the run is stopped although the probe
+# only reads. Exactly the pinned command text passes (P3A6_CMDS), only while each file it runs or reads is a regular file (no
+# link, no linked directory on its path) with its pinned sha256 (P3A6_FILES), and only until P3A6_UNTIL. Any other
+# text, any other file content, a link, or a run after the deadline gets the usual judgement; an error in the check
+# falls through to it as well. Known limit: a file swapped between this check and the run (only Viktor writes that
+# directory; the runner's first output line records the hashes it ran). Remove the block once the card is closed.
+P3A6_DIR = '/Users/klodel/marveen/agents/viktor/work/p3a6-1125'
+P3A6_FILES = (
+    (P3A6_DIR + '/run-p3a6.sh', '7e9c2a0e5fc602b122c88951f3b5b49082e3fc221576977cdf375cee212be516'),
+    (P3A6_DIR + '/indep/probe_e.mts', 'a946fe7089e7d6dfef0aec5501f4378943a5dc8b48b6de97d00cc89ac50145d0'),
+    (P3A6_DIR + '/head8/src/engine/test-sandbox.ts', '353ecd11550265b9da392c71e62c71fbdc2b01e42117457c3c96c881f9deabbd'),
+)
+# The exact command text, byte for byte (Viktor 53888, line 1 of agents/viktor/work/p3a6-1125/keychain-exempt-cmds.txt):
+# the probe on the head module. Line 2, the same probe on the parent module (its control), is not here: the gate does
+# not stop it (measured through the hook), so it needs no exemption.
+P3A6_CMDS = (
+    'bash ' + P3A6_DIR + '/run-p3a6.sh ' + P3A6_DIR + '/indep/probe_e.mts ' + P3A6_DIR + '/head8/src/engine/test-sandbox.ts '
+    + P3A6_DIR + '/indep/indep-e-head.txt',
+)
+P3A6_CMDS_SHA256 = ('5fb38b35170b645f89fb698ad73bb628c6130115aafdd102b611385939c0aa8d',)
+P3A6_UNTIL = 1795647599  # 2026-11-25 23:59:59 Europe/Budapest (22:59:59Z)
+
+
+def p3a6_file_ok(path, want):
+    """A regular file at exactly this path (no link, no linked directory on the way) whose sha256 is want."""
+    import hashlib
+    if os.path.realpath(path) != path:
+        return False
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        return False
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 16), b''):
+            h.update(chunk)
+    return h.hexdigest() == want
+
+
+def p3a6_exempt(cmd, now, files=None):
+    """True only for the pinned command text before the deadline while its files are the pinned ones."""
+    if not isinstance(cmd, str) or not isinstance(now, (int, float)) or not now <= P3A6_UNTIL:
+        return False
+    text = cmd[:-1] if cmd.endswith('\n') else cmd
+    if text not in P3A6_CMDS:
+        return False
+    return all(p3a6_file_ok(p, h) for p, h in (P3A6_FILES if files is None else files))
+
+
 def arm_watchdog():
     import signal
     signal.signal(signal.SIGALRM, on_watchdog)
@@ -6454,6 +6503,11 @@ def main():
     cwd = data.get('cwd') if isinstance(data, dict) else None
     try:
         if kc_probe_exempt(cmd, time.time()):  # card 6aa0a853, until 2026-11-25 23:59 (see kc_probe_exempt)
+            return 0
+    except Exception:
+        pass  # an error here takes the normal judgement below
+    try:
+        if p3a6_exempt(cmd, time.time()):  # card bcadf02a, until 2026-11-25 23:59 (see p3a6_exempt)
             return 0
     except Exception:
         pass  # an error here takes the normal judgement below
