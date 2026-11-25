@@ -15,7 +15,7 @@ export interface AgentGateDeps {
   message(id: number): { from_agent: string; to_agent: string } | undefined
   memory(id: number): { agent_id: string; category: string } | undefined
   card(id: string): { assignee: string | null } | undefined
-  /** The owner's names, any case (the JELZÉS cards are the owner's: no agent key moves one or assigns one). */
+  /** The owner's names, any case (an owner's card is not an agent's to move; an agent opens one only as a JELZÉS card). */
   ownerNames: readonly string[]
 }
 
@@ -45,6 +45,8 @@ function filterIsSelf(url: URL, agent: string, aliases: readonly string[]): bool
 
 const isSelf = (v: unknown, agent: string): boolean => typeof v === 'string' && v.trim() === agent
 const absentOrSelf = (v: unknown, agent: string): boolean => v === undefined || v === null || isSelf(v, agent)
+/** A signal card for the owner: "JELZÉS (<name>): ..." (the fleet rule's title shape). */
+const isJelzesTitle = (v: unknown): boolean => typeof v === 'string' && v.trimStart().startsWith('JELZÉS (')
 const isOwner = (v: unknown, deps: AgentGateDeps): boolean =>
   typeof v === 'string' && deps.ownerNames.some((o) => o.trim().toLowerCase() === v.trim().toLowerCase() && o.trim() !== '')
 
@@ -84,8 +86,13 @@ const RULES: readonly Rule[] = [
   {
     method: 'POST', path: /^\/api\/kanban$/, body: true,
     check: (_a, _m, _u, b, d) => {
+      // The id is the server's to choose (review 53362 MEDIUM): a caller-chosen id is written into the dispatch line
+      // the main agent and the system send ("[Kanban feladat #<id>]"), so it would put the key holder's words there.
+      if (b!.id !== undefined) return deny('agent key: the card id is the server\'s to choose')
       const assignee = b!.assignee === undefined ? b!.agent : b!.assignee
-      return isOwner(assignee, d) ? deny('agent key: a card for the owner is not an agent\'s to open') : OK
+      // A JELZÉS card is any agent's to open for the owner (Patrik's rule, no approval needed; review 53362).
+      if (isOwner(assignee, d) && !isJelzesTitle(b!.title)) return deny('agent key: a card for the owner is only a JELZÉS card')
+      return OK
     },
   },
   {
