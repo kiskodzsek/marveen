@@ -46,6 +46,7 @@ import { provisionMemoryBoundaryDir } from './memory-boundary.js'
 import { renameSharedCredentialsIfSafe } from './claude-credentials-guard.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { readRegularFileSync, CLAUDE_JSON_MAX_BYTES } from './safe-read.js'
+import { decideAgentSandbox, sandboxLaunchPrefix, recordSandboxStart, DEFAULT_SANDBOX_PATHS } from './agent-sandbox.js'
 import { resolveOwnClaudeJsonPath, takeClaudeJsonSnapshot, restoreClaudeJsonAfterStop, waitForPidExit, describeShape, type ClaudeJsonSnapshot } from './claude-json-guard.js'
 import { paneOneLine } from './pane-text.js'
 import { withSessionSendLock, tryAcquireSessionSendLane, type SendLockMode } from './session-send-lock.js'
@@ -131,6 +132,29 @@ const LAUNCHER_SEAL_DEPS: SealDeps = {
     createKanbanCard({ id, title, description, assignee: MAIN_AGENT_ID, priority: 'high' })
     return id
   },
+}
+
+// Card 6aa0a853 (review 54110 M1): an agent that ran sandboxed at its last start and is no longer opted in starts
+// without the sandbox; that is a logger.error and one kanban card per agent and profile per dashboard process (a
+// restart forgets it: at most one more card). A failed filing retries at the next start.
+const sandboxDowngradeAlerts = new Set<string>()
+function alertSandboxDowngrade(name: string, from: string): void {
+  logger.error({ name, from }, 'agent-sandbox: the agent ran sandboxed at its last start and now starts WITHOUT the sandbox')
+  const key = `${name}\0${from}`
+  if (sandboxDowngradeAlerts.has(key)) return
+  try {
+    const id = LAUNCHER_SEAL_DEPS.fileCard(
+      `Homokozó leminősítés: ${name} (${from} -> nincs)`,
+      [
+        `A(z) ${name} ágens az előző indításkor a(z) ${from} homokozó-profillal futott, most nélküle indult,`,
+        'mert a store/agent-sandbox.json már nem sorolja fel. Ha ez szándékos (Klodel vagy a gazda vette ki), zárd le a',
+        'kártyát. Ha nem, állítsd vissza az opt-int, indítsd újra az ágenst, és jelezd Viktornak (kártya 6aa0a853).',
+      ].join('\n'),
+    )
+    if (id) sandboxDowngradeAlerts.add(key)
+  } catch (err) {
+    logger.error({ name, err }, 'agent-sandbox: filing the downgrade card failed')
+  }
 }
 
 // Pure: compute the enabledPlugins map for a sub-agent so that exactly its own
@@ -1862,6 +1886,19 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
   // start guard), before any local already-running check / scaffolding.
   const remote = readAgentRemoteConfig(name)
 
+  // Card 6aa0a853 (security review 54105, 54110): the OS sandbox opt-in, from the dashboard's store, decided before any
+  // launch step, remote agents included (a remote or the main agent cannot be sandboxed: refused). Fail closed; see
+  // agent-sandbox.ts. The refusal is a config state for the scheduler (isConfigStartRefusal).
+  const sandbox = decideAgentSandbox(name, DEFAULT_SANDBOX_PATHS, {
+    root: PROJECT_ROOT, home: homedir(), isMain: name === MAIN_AGENT_ID, isRemote: !!(remote.host && remote.workdir),
+  })
+  if (sandbox.kind === 'refused') {
+    logger.error({ name, reason: sandbox.reason }, 'agent-sandbox: agent NOT started (fail-closed)')
+    return { ok: false, error: `agent-sandbox: refused (${sandbox.reason})` }
+  }
+  if (sandbox.kind === 'off' && sandbox.warning !== null) logger.error({ name, warning: sandbox.warning }, 'agent-sandbox: the opt-in file is unreadable; this agent was not sandboxed before and starts without it')
+  if (sandbox.kind === 'off' && sandbox.downgradedFrom !== null) alertSandboxDowngrade(name, sandbox.downgradedFrom)
+
   // Per-agent setup-token file (agent-config.json "oauthTokenFile", 2fb86ef2).
   // Decided before ANY launch step, remote agents included: a present but
   // unusable field refuses the start, loudly, and never falls back to the fleet
@@ -2646,7 +2683,11 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
     // FLEETVENV923: the fleet venv's bin/ goes FIRST so its python3 beats the
     // Homebrew one that carries no packages.
     const venvPathPrefix = fleetVenvPathPrefix()
-    const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${channelFlag}${worksourceFlags}`.trimEnd()
+    // Card 6aa0a853: the sandbox wraps the claude process only, right before it, after every export and the cd: the
+    // fleet token is read by the shell ($(cat ...)) from a path the profile refuses, and everything before this point
+    // is a constant or a value the dashboard decided (review 54110). Empty for an agent that is not opted in.
+    const sandboxPrefix = sandboxLaunchPrefix(sandbox, shSingleQuote)
+    const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${sandboxPrefix}${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${channelFlag}${worksourceFlags}`.trimEnd()
     // The agent's own target: for a per-user agent this is what makes the whole
     // session (and every process inside it) belong to that uid. Passing null here
     // silently started it as the router's user -- measured 2026-08-19: the start
@@ -2657,6 +2698,10 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
     // before the session, so no earlier refusal of this start leaves a live key without a session (review 53437 L1);
     // a throw from here on retires it in the catch below. Never blocks the start; see agent-key-provision.ts.
     keyIssued = issueKeyForStart(name, dir, startTarget.runAsUser)
+    // The mode of this start, for the next start's fail-closed check (agent-sandbox.ts).
+    if (!recordSandboxStart(name, sandbox.kind === 'on' ? sandbox.profile : null, DEFAULT_SANDBOX_PATHS)) {
+      logger.error({ name }, 'agent-sandbox: the start mode could not be recorded')
+    }
     runTmux(startTarget, ['new-session', '-d', ...AGENT_PANE_SIZE_ARGS, '-s', session, buildLaunchCmd(dir)], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir, runAsUser: startTarget.runAsUser ?? null }, 'Agent tmux session started')

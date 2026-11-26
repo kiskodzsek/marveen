@@ -1415,6 +1415,8 @@ export function isConfigStartRefusal(error: string | undefined): boolean {
   // Card e32fdc02: startAgentProcess refuses an agent whose agent-config.json is a FIFO, a device or over the cap
   // (fail closed). That is a config state too: retrying every tick would rebuild the 97379849 loop.
   if (/^agent-config\.json: unsafe-file\b/.test(error ?? '')) return true
+  // Card 6aa0a853: a sandbox refusal (agent-sandbox.ts, fail closed) is a config state as well.
+  if (/^agent-sandbox: refused \(/.test(error ?? '')) return true
   const m = /^oauthTokenFile: (.+?)(?: \(.*\))?$/s.exec(error ?? '')
   return !!m && CONFIG_START_REFUSAL_REASONS.has(m[1])
 }
