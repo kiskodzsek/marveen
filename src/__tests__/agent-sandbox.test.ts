@@ -133,6 +133,28 @@ describe('decideAgentSandbox (fail closed, review 54110 M1)', () => {
     symlinkSync(tmp, join(tmp, 'rootlink'))
     expect(decideAgentSandbox('kernel', paths, env({ root: join(tmp, 'rootlink') }))).toMatchObject({ kind: 'refused', reason: 'path is not canonical' })
   })
+  it.each([['Kernel'], ['KERNEL'], ['kerneL'], ['kernel '], ['kernel/'], ['']])('a name that is not the canonical agent id (%j) is refused, opted in or not (review 54118 B1)', (n) => {
+    writeOptIn({ kernel: 'kc-v4' })
+    expect(decideAgentSandbox(n, paths, env())).toEqual({ kind: 'refused', reason: 'not a canonical agent id' })
+    writeOptIn({})
+    expect(decideAgentSandbox(n, paths, env())).toEqual({ kind: 'refused', reason: 'not a canonical agent id' })
+  })
+  it('a present state entry that is not {profile: string|null} counts as sandboxed (review 54118 B2 (b))', () => {
+    for (const bad of [{ profile: 1 }, { profile: {} }, 'kc-v4', null, [], {}]) {
+      writeState({ kernel: bad })
+      expect(decideAgentSandbox('kernel', paths, env())).toMatchObject({ kind: 'refused' })
+      writeOptIn({})
+      expect(decideAgentSandbox('kernel', paths, env())).toMatchObject({ kind: 'off', downgradedFrom: '(unreadable state entry)' })
+      rmSync(paths.optinPath)
+    }
+  })
+  it('an inherited member is no entry: "constructor" finds nothing in the state or the opt-in (review 54118 B3)', () => {
+    expect(decideAgentSandbox('constructor', paths, env())).toEqual({ kind: 'off', downgradedFrom: null, warning: null })
+    writeOptIn({})
+    expect(decideAgentSandbox('constructor', paths, env())).toEqual({ kind: 'off', downgradedFrom: null, warning: null })
+    expect(readSandboxState(paths.statePath)).toEqual({})
+    expect(Object.getPrototypeOf(readSandboxState(paths.statePath))).toBeNull()
+  })
   it('opted in: on, the rendered profile of this agent', () => {
     writeOptIn({ kernel: 'kc-v4' })
     const d = decideAgentSandbox('kernel', paths, env())
@@ -196,6 +218,9 @@ describe('the wiring', () => {
     const rec = fn.indexOf('recordSandboxStart(')
     expect(rec).toBeGreaterThan(0)
     expect(rec).toBeLessThan(fn.indexOf("runTmux(startTarget, ['new-session'"))
+    // review 54118 B2 (a): a sandboxed start whose mode is not recorded returns before the key and the session
+    expect(rec).toBeLessThan(fn.indexOf('keyIssued = issueKeyForStart('))
+    expect(fn.slice(rec, rec + 400)).toMatch(/if \(sandbox\.kind === 'on'\) return \{ ok: false, error: 'agent-sandbox: refused \(the start mode could not be recorded\)' \}/)
   })
   it('a sandbox refusal is a config refusal for the scheduler (not retried every tick)', () => {
     expect(isConfigStartRefusal('agent-sandbox: refused (unknown profile)')).toBe(true)

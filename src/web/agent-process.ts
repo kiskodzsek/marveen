@@ -2688,6 +2688,13 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
     // is a constant or a value the dashboard decided (review 54110). Empty for an agent that is not opted in.
     const sandboxPrefix = sandboxLaunchPrefix(sandbox, shSingleQuote)
     const buildLaunchCmd = (launchCwd: string) => `${umaskPrefix}export PATH="${venvPathPrefix}/opt/homebrew/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && ${unsetTokens} && ${stateFence}${autoUpdaterEnv}${byoUnsetEnv}${promptSuggestionEnv}${mcpEnv}${channelSetup}${apiKeyEnv}${claudeConfigEnv}${oauthTokenEnv}${providerEnv}${stateObserverEnv}cd "${launchCwd}" && ${sandboxPrefix}${claudeBin()} ${continueFlag}${skipFlag}--model ${shSingleQuote(model)} ${channelFlag}${worksourceFlags}`.trimEnd()
+    // The mode of this start, for the next start's fail-closed check (agent-sandbox.ts), before the key is issued. A
+    // sandboxed start whose mode cannot be recorded does not start (review 54118 B2 (a)): without the record a later
+    // removal of the opt-in would start the agent without the sandbox, silently.
+    if (!recordSandboxStart(name, sandbox.kind === 'on' ? sandbox.profile : null, DEFAULT_SANDBOX_PATHS)) {
+      logger.error({ name }, 'agent-sandbox: the start mode could not be recorded')
+      if (sandbox.kind === 'on') return { ok: false, error: 'agent-sandbox: refused (the start mode could not be recorded)' }
+    }
     // The agent's own target: for a per-user agent this is what makes the whole
     // session (and every process inside it) belong to that uid. Passing null here
     // silently started it as the router's user -- measured 2026-08-19: the start
@@ -2698,10 +2705,6 @@ export async function startAgentProcess(name: string, opts: { fresh?: boolean; b
     // before the session, so no earlier refusal of this start leaves a live key without a session (review 53437 L1);
     // a throw from here on retires it in the catch below. Never blocks the start; see agent-key-provision.ts.
     keyIssued = issueKeyForStart(name, dir, startTarget.runAsUser)
-    // The mode of this start, for the next start's fail-closed check (agent-sandbox.ts).
-    if (!recordSandboxStart(name, sandbox.kind === 'on' ? sandbox.profile : null, DEFAULT_SANDBOX_PATHS)) {
-      logger.error({ name }, 'agent-sandbox: the start mode could not be recorded')
-    }
     runTmux(startTarget, ['new-session', '-d', ...AGENT_PANE_SIZE_ARGS, '-s', session, buildLaunchCmd(dir)], { timeout: 10000 })
 
     logger.info({ name, session, channelDir: agentChannelDir, runAsUser: startTarget.runAsUser ?? null }, 'Agent tmux session started')

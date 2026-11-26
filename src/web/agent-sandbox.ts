@@ -108,7 +108,7 @@ export function readSandboxOptIn(path: string): OptIn {
   }
   if (!isPlainObject(v) || v.version !== 1 || !isPlainObject(v.agents)) return { kind: 'bad', reason: 'bad shape' }
   if (Object.keys(v).some((k) => k !== 'version' && k !== 'agents')) return { kind: 'bad', reason: 'unknown key' }
-  const agents: Record<string, string> = {}
+  const agents: Record<string, string> = Object.create(null) // no prototype (review 54118 B3)
   for (const [name, prof] of Object.entries(v.agents)) {
     if (!AGENT_ID_RX.test(name) || typeof prof !== 'string') return { kind: 'bad', reason: 'bad entry' }
     agents[name] = prof
@@ -117,17 +117,22 @@ export function readSandboxOptIn(path: string): OptIn {
 }
 
 // The last start's profile per agent (null = not sandboxed). A missing or unreadable state is {}: nothing is known.
-export function readSandboxState(path: string): Record<string, string | null> {
+// An entry that is present but cannot be read as {profile: string|null} counts as sandboxed (review 54118 B2 (b)):
+// fail closed, the next start without an opt-in is refused instead of silently off.
+export const UNREADABLE_STATE_PROFILE = '(unreadable state entry)'
+
+// A dictionary without a prototype (review 54118 B3): an agent id such as "constructor" finds nothing inherited.
+export function readSandboxState(path: string): Readonly<Record<string, string | null>> {
+  const out: Record<string, string | null> = Object.create(null)
   try {
     const v: unknown = JSON.parse(readRegularFileSync(path, SANDBOX_OPTIN_MAX_BYTES))
-    if (!isPlainObject(v) || !isPlainObject(v.agents)) return {}
-    const out: Record<string, string | null> = {}
+    if (!isPlainObject(v) || !isPlainObject(v.agents)) return out
     for (const [name, e] of Object.entries(v.agents)) {
-      if (isPlainObject(e) && (typeof e.profile === 'string' || e.profile === null)) out[name] = e.profile as string | null
+      out[name] = isPlainObject(e) && (typeof e.profile === 'string' || e.profile === null) ? (e.profile as string | null) : UNREADABLE_STATE_PROFILE
     }
     return out
   } catch {
-    return {}
+    return out
   }
 }
 
@@ -136,8 +141,13 @@ export function decideAgentSandbox(
   paths: SandboxPaths,
   env: { root: string; home: string; isMain: boolean; isRemote: boolean },
 ): SandboxDecision {
+  // Review 54118 B1: the start route passes the name as the caller wrote it, and a case-insensitive volume finds the
+  // agent's folder for "Kernel" as well; the opt-in keys are exact. A name that is not the canonical agent id (lower
+  // case, the roster shape) is refused for every agent, opted in or not.
+  if (!AGENT_ID_RX.test(name)) return { kind: 'refused', reason: 'not a canonical agent id' }
   const optin = readSandboxOptIn(paths.optinPath)
-  const last = readSandboxState(paths.statePath)[name] ?? null
+  const state = readSandboxState(paths.statePath)
+  const last = Object.hasOwn(state, name) ? state[name] : null
   if (optin.kind !== 'ok') {
     if (last !== null) return { kind: 'refused', reason: `opt-in file ${optin.kind === 'missing' ? 'missing' : optin.reason} after a sandboxed start` }
     return { kind: 'off', downgradedFrom: null, warning: optin.kind === 'bad' ? `opt-in file ${optin.reason}` : null }
